@@ -167,8 +167,8 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
         let destination = source.transformed_multiplicity_free(&operation()).unwrap();
         crate::cache::clear();
         let before = admissions();
-        // Standalone contexts on Rayon's global pool: no Runtime pool, no
-        // coefficient store, recoupling regions on the ambient pool.
+        // Standalone contexts on Rayon's global pool: no Runtime pool,
+        // recoupling regions on the ambient pool.
         let built = (0..TASKS)
             .into_par_iter()
             .map(|_| {

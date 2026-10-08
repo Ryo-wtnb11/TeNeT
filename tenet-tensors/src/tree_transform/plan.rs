@@ -23,7 +23,7 @@ use tenet_core::{
 
 use crate::OperationError;
 
-use super::cache::{GroupSlot, GroupSpecReuse, OrientedBasisOrder, SourceGroup};
+use super::cache::{CoefficientGroupReuse, GroupSlot, OrientedBasisOrder, SourceGroup};
 use super::operation::{
     TreeTransformOperation, TreeTransformOperationKind, ValidateBraidingSupport,
 };
@@ -677,12 +677,18 @@ pub(crate) fn build_multiplicity_free_tree_pair_plan_after_capability_with_threa
     dst_structure: &BlockStructure,
     src_structure: &BlockStructure,
     threads: usize,
-    reuse: Option<&GroupSpecReuse<'_, R::Scalar>>,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar:
-        Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
 {
     let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
         rule,
@@ -703,10 +709,12 @@ pub(crate) fn build_all_codomain_tree_transform_group_plan_validated_with_thread
     source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
         build_unique_all_codomain_tree_transform_group_plan_validated(source_proof, operation)
@@ -715,6 +723,7 @@ where
             source_proof,
             operation,
             threads,
+            reuse,
         )
     }
 }
@@ -727,7 +736,8 @@ pub(crate) fn build_tree_pair_transform_group_plan_validated_with_threads<R>(
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     build_tree_pair_transform_group_plan_validated_reusing(source_proof, operation, threads, None)
 }
@@ -736,16 +746,17 @@ where
 /// cached source groups for non-Unique fusion. Why not for Unique fusion: one
 /// group is one tree with one scalar, so a per-group lookup costs as much as
 /// the rebuild it saves; TensorKit's `fsbraid`/`fstranspose` use `NoCache`
-/// there, and the whole-structure plan tier already covers repeats.
+/// there, and QSpace's `contractDegQ` skips abelian symmetries.
 fn build_tree_pair_transform_group_plan_validated_reusing<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-    reuse: Option<&GroupSpecReuse<'_, R::Scalar>>,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
         build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
@@ -795,14 +806,15 @@ fn split_source_groups<'a>(
 
 /// Assembles a plan from its source groups in order. With `reuse`, only the
 /// groups it misses are passed to `build_missing` (by index, ascending), and
-/// the built groups are admitted; without it every group is built.
+/// the built groups are staged on it, all or none; without it every group
+/// is built.
 fn build_groups_reusing<T, E>(
-    reuse: Option<(&GroupSpecReuse<'_, T>, &[SourceGroup<'_>])>,
+    reuse: Option<(&CoefficientGroupReuse<T>, &[SourceGroup<'_>])>,
     group_count: usize,
     build_missing: impl FnOnce(Vec<usize>) -> Result<Vec<Vec<TreeTransformGroupBlockSpec<T>>>, E>,
 ) -> Result<TreeTransformGroupPlan<T>, E>
 where
-    T: Clone,
+    T: 'static + Clone + Send + Sync,
 {
     let Some((reuse, groups)) = reuse else {
         let built = build_missing((0..group_count).collect())?;
@@ -818,23 +830,20 @@ where
         .collect();
     let mut built = build_missing(missing)?.into_iter();
     let mut specs = Vec::new();
-    let mut admitted = Vec::new();
-    for (&(group_key, src_keys), slot) in groups.iter().zip(slots) {
-        let group_specs: Arc<[TreeTransformGroupBlockSpec<T>]> = match slot {
-            GroupSlot::Hit(group_specs) => group_specs,
-            GroupSlot::Miss(hash) => {
-                let group_specs: Arc<[_]> =
-                    built.next().expect("every missing group was built").into();
-                admitted.push((hash, (group_key, src_keys), Arc::clone(&group_specs)));
-                group_specs
-            }
+    for (&group, slot) in groups.iter().zip(slots) {
+        let entry = match slot {
+            GroupSlot::Hit(entry) => entry,
+            GroupSlot::Miss(hash) => reuse.stage(
+                hash,
+                group,
+                built.next().expect("every missing group was built"),
+            ),
         };
         // Why cloning is cheap: a plan owns its spec array, but a `Multi`
         // spec shares its keys and recoupling matrix, so a clone only bumps
         // reference counts; a `Single` spec clones one key pair.
-        specs.extend(group_specs.iter().cloned());
+        specs.extend(entry.specs().iter().cloned());
     }
-    reuse.admit(admitted);
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
@@ -1058,31 +1067,43 @@ fn build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with
     source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     let src_structure = source_proof.structure();
-    let source_axes = operation_source_axes(&operation);
-    let groups = src_structure
-        .fusion_tree_group_slice()
-        .iter()
-        .collect::<Vec<_>>();
-    let completed = execute_staged_groups(groups, threads, |group| {
-        build_one_multiplicity_free_all_codomain_group(
-            source_proof,
-            &operation,
-            &source_axes,
-            group,
+    let all_groups = src_structure.fusion_tree_group_slice();
+    // Why the full source pairs key a group: a destination key carries the
+    // source's domain tree, not only the recoupled codomain tree.
+    let flat_keys = reuse
+        .map(|_| source_group_key_refs(src_structure))
+        .transpose()?;
+    let groups = flat_keys.as_deref().map(|keys| {
+        split_source_groups(
+            all_groups
+                .iter()
+                .map(|group| (group.group_key(), group.block_indices().len())),
+            keys,
         )
-    })?;
-
-    let mut specs = Vec::new();
-    for group_specs in completed {
-        specs.extend(group_specs);
-    }
-    Ok(TreeTransformGroupPlan::new(specs))
+    });
+    let source_axes = operation_source_axes(&operation);
+    build_groups_reusing(reuse.zip(groups.as_deref()), all_groups.len(), |missing| {
+        let groups = missing
+            .into_iter()
+            .map(|index| &all_groups[index])
+            .collect::<Vec<_>>();
+        execute_staged_groups(groups, threads, |group| {
+            build_one_multiplicity_free_all_codomain_group(
+                source_proof,
+                &operation,
+                &source_axes,
+                group,
+            )
+        })
+    })
 }
 
 type TransformRows<K, T> = Vec<(K, T)>;
@@ -1598,11 +1619,12 @@ fn build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-    reuse: Option<&GroupSpecReuse<'_, R::Scalar>>,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     let src_structure = source_proof.structure();
     let all_groups = src_structure.fusion_tree_group_slice();
@@ -1691,11 +1713,12 @@ pub(crate) fn build_oriented_tree_pair_transform_group_plan_capability_validated
     logical_rank: usize,
     storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
     threads: usize,
-    reuse: Option<&GroupSpecReuse<'_, R::Scalar>>,
+    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar:
+        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     // The sole cache caller admits capability before lookup, for both hits
     // and misses; do not query mutable provider capability a second time here.
@@ -2059,8 +2082,8 @@ where
 /// Compile a checked Generic permute, braid, or planar transpose plan.
 ///
 /// The complete source structure is admitted before the first rigidity or F/R
-/// lookup. A failure returns no plan, and this standalone entry does not access
-/// the Runtime transform store.
+/// lookup. A failure returns no plan. This standalone entry is uncached: it
+/// neither reads nor publishes the composed-coefficient cache.
 ///
 /// Each source group is composed as one whole block, step by step (TensorKit
 /// `GenericTreeTransformer`, `treetransformers.jl:53-114` at `cfaa073e`). The
@@ -2070,6 +2093,7 @@ where
 /// by first appearance; the order among one source's destinations follows
 /// the block composer and is not the per-pair term order, so consumers
 /// resolve destinations by key.
+#[cfg(test)]
 pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
     provider: &P,
     operation: TreeTransformOperation,
@@ -2081,48 +2105,71 @@ where
 {
     let source_proof =
         validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
-    build_checked_generic_tree_pair_transform_group_plan_validated(operation, &source_proof, None)
+    let group_count = source_proof.structure().fusion_tree_group_slice().len();
+    let groups = build_checked_generic_tree_pair_groups(
+        &operation,
+        &source_proof,
+        (0..group_count).collect(),
+    )?;
+    Ok(TreeTransformGroupPlan::from_specs(
+        groups.into_iter().flatten(),
+    ))
 }
 
+/// The cached checked producer: the source groups the composed-coefficient
+/// cache misses are built, in index order, and staged on `reuse`. Why not
+/// the standalone entry above: erased entries need `'static + Send + Sync`
+/// coefficients, which that public API does not require.
 pub(crate) fn build_checked_generic_tree_pair_transform_group_plan_validated<P>(
     operation: TreeTransformOperation,
     source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
-    reuse: Option<&GroupSpecReuse<'_, P::Scalar>>,
+    reuse: &CoefficientGroupReuse<P::Scalar>,
 ) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: CategoricalScalar + Zero,
+    P::Scalar: 'static + CategoricalScalar + Zero + Send + Sync,
 {
     // The preflight admitted a fusion style with multiplicity, so the Unique
     // exclusion of `build_tree_pair_transform_group_plan_validated_reusing`
     // never applies here.
     let structure = source_proof.structure();
     let all_groups = structure.fusion_tree_group_slice();
-    let flat_keys = reuse
-        .map(|_| source_group_key_refs(structure))
-        .transpose()?;
-    let groups = flat_keys.as_deref().map(|keys| {
-        split_source_groups(
-            all_groups
-                .iter()
-                .map(|group| (group.group_key(), group.block_indices().len())),
-            keys,
-        )
-    });
-    let source_axes = operation_source_axes(&operation);
-    build_groups_reusing(reuse.zip(groups.as_deref()), all_groups.len(), |missing| {
-        missing
-            .into_iter()
-            .map(|index| {
-                build_one_checked_generic_tree_pair_group(
-                    &operation,
-                    &source_axes,
-                    source_proof,
-                    &all_groups[index],
-                )
-            })
-            .collect()
+    let flat_keys = source_group_key_refs(structure)?;
+    let groups = split_source_groups(
+        all_groups
+            .iter()
+            .map(|group| (group.group_key(), group.block_indices().len())),
+        &flat_keys,
+    );
+    build_groups_reusing(Some((reuse, &groups)), all_groups.len(), |missing| {
+        build_checked_generic_tree_pair_groups(&operation, source_proof, missing)
     })
+}
+
+/// Builds the listed source groups, in order: the first provider error is
+/// that of the lowest failing listed group.
+fn build_checked_generic_tree_pair_groups<P>(
+    operation: &TreeTransformOperation,
+    source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
+    group_indices: Vec<usize>,
+) -> Result<Vec<Vec<TreeTransformGroupBlockSpec<P::Scalar>>>, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: CategoricalScalar + Zero,
+{
+    let all_groups = source_proof.structure().fusion_tree_group_slice();
+    let source_axes = operation_source_axes(operation);
+    group_indices
+        .into_iter()
+        .map(|index| {
+            build_one_checked_generic_tree_pair_group(
+                operation,
+                &source_axes,
+                source_proof,
+                &all_groups[index],
+            )
+        })
+        .collect()
 }
 
 fn build_one_checked_generic_tree_pair_group<P>(

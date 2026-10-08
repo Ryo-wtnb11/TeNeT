@@ -10,7 +10,7 @@ use tenet_operations::DenseTreeTransformOperations;
 use tenet_operations::{TensorContractSpec, TreeTransformBackend};
 
 use crate::mode::{PlanningAlgebra, TreeStructureSource};
-use crate::tree_transform::CheckedGenericPlanError;
+use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use crate::{
     zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
     RecouplingCoefficientAction, ZeroBytes,
@@ -150,6 +150,7 @@ where
 }
 
 fn staged_transform<'a, P>(
+    coefficients: &mut CheckedPendingCoefficients,
     authority: &BoundDynamicFusionMapSpace<P>,
     provider: &P,
     source: &'a BoundDynamicFusionMapSpace<P>,
@@ -174,7 +175,7 @@ where
     })?;
     let destination = Arc::new(prepared.structure().clone());
     let replay = <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
-        &mut (),
+        coefficients,
         provider,
         operation,
         &destination,
@@ -670,8 +671,23 @@ where
         orientation,
     );
 
-    let lhs_prepared = staged_transform(lhs_space, provider, lhs_space, plan.lhs_transform())?;
-    let rhs_prepared = staged_transform(lhs_space, provider, rhs_space, plan.rhs_transform())?;
+    // Call-owned: the staged and output transforms' composed coefficients
+    // publish only after this call's commit.
+    let mut coefficients = CheckedPendingCoefficients::new();
+    let lhs_prepared = staged_transform(
+        &mut coefficients,
+        lhs_space,
+        provider,
+        lhs_space,
+        plan.lhs_transform(),
+    )?;
+    let rhs_prepared = staged_transform(
+        &mut coefficients,
+        lhs_space,
+        provider,
+        rhs_space,
+        plan.rhs_transform(),
+    )?;
 
     let (core_left, core_right, core_left_structure, core_right_structure) = match orientation {
         FusionContractOrientation::LhsRhs => (
@@ -724,7 +740,7 @@ where
     } else {
         Some(
             <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
-                &mut (),
+                &mut coefficients,
                 provider,
                 plan.output_transform(),
                 &destination_structure,
@@ -798,6 +814,7 @@ where
         )?;
     }
     let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
+    coefficients.flush();
     Ok((destination, data))
 }
 

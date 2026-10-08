@@ -1,5 +1,6 @@
-//! The process-global completed-transformer cache (cache 3 of #2014) and
-//! the multiplicity-free resolution paths that consult it.
+//! The process-global completed-transformer cache (cache 3 of #2014), the
+//! composed-coefficient cache (cache 4, [`coefficients`]) a cache-3 miss
+//! consults per source group, and the multiplicity-free resolution paths.
 //!
 //! Reference: TensorKit `cfaa073e` `treetransformers.jl:treetransposer` /
 //! `treebraider` (`@cached`, `:156-180`) memoize one completed transformer
@@ -41,16 +42,13 @@ use std::sync::{Arc, OnceLock};
 use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, BlockStructureContent, ErasedStructureCacheControl, FusionTreeGroupKey,
-    FusionTreePairKey, FusionTreePairOrientation, HomSpaceId,
-    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    BlockStructure, ErasedStructureCacheControl, FusionTreePairKey, FusionTreePairOrientation,
+    HomSpaceId, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, RuleIdentity, StructureCache, StructureCacheInfo,
     StructureCacheKind, WeakHomSpaceId,
 };
 
-use crate::{
-    OperationError, TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformStructure,
-};
+use crate::{OperationError, TreeTransformStructure};
 use tenet_operations::{TreeTransformOperationKind, TreeTransformReplay};
 
 use super::operation::TreeTransformOperation;
@@ -64,12 +62,84 @@ use super::plan::{
     validate_tree_pair_namespace_before_cache,
 };
 
+mod coefficients;
+#[cfg(test)]
+mod coefficients_tests;
 #[cfg(test)]
 mod owner_tests;
-mod runtime_store;
 #[cfg(test)]
-mod runtime_store_tests;
-pub use runtime_store::*;
+pub(crate) use coefficients::take_coefficient_group_activity;
+pub(crate) use coefficients::{
+    CheckedPendingCoefficients, CoefficientGroupReuse, GroupSlot, SourceGroup,
+};
+
+/// Snapshot of one process-global tree-transform cache in the shape of the
+/// deprecated `Runtime::tree_transform_cache_info`; removed with it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeTreeTransformCacheInfo {
+    entries: usize,
+    entry_capacity: usize,
+    charged_payload_bytes: usize,
+    byte_budget: usize,
+    hits: usize,
+    misses: usize,
+    evictions: usize,
+    admission_bypasses: usize,
+}
+
+impl RuntimeTreeTransformCacheInfo {
+    pub fn entries(self) -> usize {
+        self.entries
+    }
+
+    pub fn entry_capacity(self) -> usize {
+        self.entry_capacity
+    }
+
+    /// Conservative cache-owned payload charge, not resident-memory usage.
+    pub fn charged_payload_bytes(self) -> usize {
+        self.charged_payload_bytes
+    }
+
+    pub fn byte_budget(self) -> usize {
+        self.byte_budget
+    }
+
+    pub fn hits(self) -> usize {
+        self.hits
+    }
+
+    pub fn misses(self) -> usize {
+        self.misses
+    }
+
+    pub fn evictions(self) -> usize {
+        self.evictions
+    }
+
+    pub fn admission_bypasses(self) -> usize {
+        self.admission_bypasses
+    }
+
+    /// The deprecated per-Runtime view of a process-global structure cache:
+    /// `entry_capacity` is `usize::MAX` (byte-bounded only), `misses` counts
+    /// builds offered for admission and `admission_bypasses` oversize
+    /// rejections.
+    #[doc(hidden)]
+    pub fn from_structure_cache(info: tenet_core::StructureCacheInfo) -> Self {
+        let saturate = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+        Self {
+            entries: info.entries(),
+            entry_capacity: usize::MAX,
+            charged_payload_bytes: saturate(info.charged_bytes()),
+            byte_budget: saturate(info.byte_budget()),
+            hits: saturate(info.hits()),
+            misses: saturate(info.misses()),
+            evictions: saturate(info.evictions()),
+            admission_bypasses: saturate(info.rejections()),
+        }
+    }
+}
 
 fn oriented_source_projection<'a>(
     logical_keys: &'a [FusionTreePairKey],
@@ -111,49 +181,38 @@ fn compile_oriented_tree_pair_structure<R, FAxis>(
     projection: &FxHashMap<&FusionTreePairKey, usize>,
     logical_to_storage_axis: FAxis,
     threads: usize,
-    plans: Option<&RuntimeCoefficientStore<R::Scalar>>,
+    epoch: usize,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar:
-        Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     FAxis: Fn(usize) -> Result<usize, OperationError>,
 {
     #[cfg(test)]
     ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
-    let build = |reuse: Option<&GroupSpecReuse<'_, R::Scalar>>| {
-        build_oriented_tree_pair_transform_group_plan_capability_validated(
-            rule,
-            operation.clone(),
-            logical_keys,
-            storage_src_structure,
-            orientation,
-            basis_order,
-            logical_rank,
-            projection,
-            threads,
-            reuse,
-        )
-    };
-    // Why the storage source's sectors suffice: the logical keys, projection,
-    // rank and axis map all derive from the parent structure's keys and split
-    // (see `resolve_tree_pair_oriented`).
-    let plan = match plans {
-        Some(store) => store.get_or_build_plan(
-            CategoricalTransformKey::new(
-                rule.rule_identity(),
-                operation,
-                orientation,
-                basis_order,
-                orientation == FusionTreePairOrientation::Adjoint,
-                dst_structure,
-                storage_src_structure,
-                None,
-            ),
-            |reuse| build(Some(reuse)),
-        )?,
-        None => Arc::new(build(None)?),
-    };
+    // Why the logical keys key a group: the orientation maps each logical
+    // tree pair to exactly one storage tree pair, the one the builder reads.
+    let reuse = multiplicity_free_reuse(rule, TreeTransformScope::TreePair, operation, orientation);
+    let plan = build_oriented_tree_pair_transform_group_plan_capability_validated(
+        rule,
+        operation.clone(),
+        logical_keys,
+        storage_src_structure,
+        orientation,
+        basis_order,
+        logical_rank,
+        projection,
+        threads,
+        reuse.as_ref(),
+    )?;
+    publish_reuse(reuse, epoch);
     let source_index = |key: &FusionTreePairKey| {
         projection
             .get(key)
@@ -731,71 +790,67 @@ where
     true
 }
 
+/// The composed-coefficient reuse of one multiplicity-free plan build:
+/// none for Unique fusion, which TensorKit leaves uncached (`NoCache`).
+fn multiplicity_free_reuse<R, T>(
+    rule: &R,
+    scope: TreeTransformScope,
+    operation: &TreeTransformOperation,
+    orientation: FusionTreePairOrientation,
+) -> Option<CoefficientGroupReuse<T>>
+where
+    R: tenet_core::FusionRule,
+    T: 'static + Send + Sync,
+{
+    (rule.fusion_style() != tenet_core::FusionStyleKind::Unique).then(|| {
+        CoefficientGroupReuse::new(
+            rule.rule_identity(),
+            TransformerMode::MultiplicityFree,
+            scope,
+            operation,
+            orientation,
+        )
+    })
+}
+
+/// Publishes the groups a successful multiplicity-free plan build staged.
+fn publish_reuse<T>(reuse: Option<CoefficientGroupReuse<T>>, epoch: usize)
+where
+    T: 'static + Send + Sync,
+{
+    if let Some(reuse) = reuse {
+        reuse.into_pending().publish(epoch);
+    }
+}
+
 /// What a context's multiplicity-free resolution needs besides the global
-/// owner: the recoupling worker count and, under a Runtime, that Runtime's
-/// categorical-coefficient store (cache 4, per Runtime until #2014-4).
-pub(crate) struct TreeTransformPlanning<T> {
-    coefficients: Option<std::sync::Weak<RuntimeCoefficientStore<T>>>,
+/// owners (caches 3 and 4): the recoupling worker count.
+#[derive(Clone, Debug)]
+pub(crate) struct TreeTransformPlanning {
     recoupling_threads: NonZeroUsize,
 }
 
-impl<T> Default for TreeTransformPlanning<T> {
+impl Default for TreeTransformPlanning {
     fn default() -> Self {
         Self {
-            coefficients: None,
             recoupling_threads: NonZeroUsize::MIN,
         }
     }
 }
 
-impl<T> Clone for TreeTransformPlanning<T> {
-    fn clone(&self) -> Self {
-        Self {
-            coefficients: self.coefficients.clone(),
-            recoupling_threads: self.recoupling_threads,
-        }
-    }
-}
-
-impl<T> std::fmt::Debug for TreeTransformPlanning<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TreeTransformPlanning")
-            .field("runtime_bound", &self.coefficients.is_some())
-            .field("recoupling_threads", &self.recoupling_threads)
-            .finish()
-    }
-}
-
-impl<T> TreeTransformPlanning<T> {
+impl TreeTransformPlanning {
     pub(crate) fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
         self.recoupling_threads = threads;
     }
-
-    pub(crate) fn bind_coefficient_store(
-        &mut self,
-        store: std::sync::Weak<RuntimeCoefficientStore<T>>,
-    ) {
-        self.coefficients = Some(store);
-    }
-
-    pub(crate) fn coefficient_store(&self) -> Option<Arc<RuntimeCoefficientStore<T>>> {
-        self.coefficients
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-    }
 }
 
-impl<T> TreeTransformPlanning<T>
-where
-    T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
-{
+impl TreeTransformPlanning {
     /// The ordinary multiplicity-free tree-pair transformer.
     ///
     /// Fusion-tree block keys in `dst` and `src` follow
     /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
     /// precondition.
-    pub(crate) fn resolve_tree_pair<R>(
+    pub(crate) fn resolve_tree_pair<R, T>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -805,6 +860,7 @@ where
     ) -> Result<TreeTransformStructure<T>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
     {
         let epoch = tenet_core::core_reset_epoch();
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
@@ -825,40 +881,23 @@ where
             dst_structure,
             src_structure,
             || {
-                let plan = match self.coefficient_store() {
-                    Some(store) => store.get_or_build_plan(
-                        CategoricalTransformKey::new(
-                            rule.rule_identity(),
-                            operation,
-                            FusionTreePairOrientation::Direct,
-                            OrientedBasisOrder::Canonical,
-                            storage_conjugate,
-                            dst_structure,
-                            src_structure,
-                            None,
-                        ),
-                        |reuse| {
-                            build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
-                                rule,
-                                operation,
-                                dst_structure,
-                                src_structure,
-                                threads,
-                                Some(reuse),
-                            )
-                        },
-                    )?,
-                    None => Arc::new(
-                        build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
-                            rule,
-                            operation,
-                            dst_structure,
-                            src_structure,
-                            threads,
-                            None,
-                        )?,
-                    ),
-                };
+                let reuse = multiplicity_free_reuse(
+                    rule,
+                    TreeTransformScope::TreePair,
+                    operation,
+                    FusionTreePairOrientation::Direct,
+                );
+                // The preflight and destination proof run before any group
+                // lookup.
+                let plan = build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
+                    rule,
+                    operation,
+                    dst_structure,
+                    src_structure,
+                    threads,
+                    reuse.as_ref(),
+                )?;
+                publish_reuse(reuse, epoch);
                 plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
                     Arc::clone(src_structure),
@@ -873,7 +912,7 @@ where
     /// never a per-call adjoint view, so it is publishable whenever the
     /// parent is canonical.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_tree_pair_oriented<'p, R, FIndices, FAxis>(
+    pub(crate) fn resolve_tree_pair_oriented<'p, R, T, FIndices, FAxis>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -888,6 +927,7 @@ where
     ) -> Result<TreeTransformStructure<T>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
@@ -898,7 +938,7 @@ where
         let threads = self.recoupling_threads.get();
         // Why lazy: only a miss reads the storage map, so a warm call derives
         // no per-block projection.
-        let build = |store: Option<&RuntimeCoefficientStore<T>>| {
+        let build = || {
             let storage_indices = storage_indices()?;
             if logical_keys.len() != storage_indices.len() {
                 return Err(OperationError::StructureMismatch {
@@ -919,15 +959,14 @@ where
                 &projection,
                 logical_to_storage_axis,
                 threads,
-                store,
+                epoch,
             )
         };
-        let store = self.coefficient_store();
         // Why only the adjoint orientation: a direct oriented key would equal
         // the ordinary tree-pair key while its plan follows the caller's
         // logical key order, and no production caller compiles it.
         if !storage_conjugate {
-            return build(store.as_deref());
+            return build();
         }
         // Why not key the logical keys, projection, rank, or axis map: the two
         // operand preparations derive them from the parent structure and the
@@ -953,7 +992,7 @@ where
             epoch,
             dst_structure,
             storage_src_structure,
-            || build(store.as_deref()),
+            build,
         )
     }
 
@@ -962,7 +1001,7 @@ where
     /// Fusion-tree block keys in `dst` and `src` follow
     /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
     /// precondition.
-    pub(crate) fn resolve_all_codomain<R>(
+    pub(crate) fn resolve_all_codomain<R, T>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -971,6 +1010,7 @@ where
     ) -> Result<TreeTransformStructure<T>, OperationError>
     where
         R: MultiplicityFreeFusionSymbols<Scalar = T> + Sync,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
     {
         let epoch = tenet_core::core_reset_epoch();
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
@@ -1004,12 +1044,20 @@ where
                     )?;
                 LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
                     .map_err(OperationError::from_core_preserving_context)?;
-                build_all_codomain_tree_transform_group_plan_validated_with_threads(
+                let reuse = multiplicity_free_reuse(
+                    rule,
+                    TreeTransformScope::AllCodomain,
+                    operation,
+                    FusionTreePairOrientation::Direct,
+                );
+                let plan = build_all_codomain_tree_transform_group_plan_validated_with_threads(
                     &source_proof,
                     operation.clone(),
                     threads,
-                )?
-                .compile_shared_structures_with_storage_conjugation(
+                    reuse.as_ref(),
+                )?;
+                publish_reuse(reuse, epoch);
+                plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
                     Arc::clone(src_structure),
                     false,
@@ -1020,14 +1068,11 @@ where
 }
 
 #[cfg(test)]
-impl<T> TreeTransformPlanning<T>
-where
-    T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
-{
+impl TreeTransformPlanning {
     /// Eager prelowered compile: a test oracle for storage-mapped sources,
     /// never cached.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_compile_tree_pair_prelowered<R, FBlock, FAxis>(
+    pub(crate) fn get_or_compile_tree_pair_prelowered<R, T, FBlock, FAxis>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -1040,6 +1085,7 @@ where
     ) -> Result<TreeTransformStructure<T>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         FBlock: Fn(usize) -> Result<usize, OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {

@@ -3,23 +3,26 @@ mod operation;
 mod plan;
 
 pub use cache::{
-    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeCoefficientLedger,
-    RuntimeCoefficientStore, RuntimeTreeTransformCacheInfo, TreeTransformOperationView,
+    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeTreeTransformCacheInfo,
+    TreeTransformOperationView,
 };
 pub(crate) use cache::{
-    lookup_bound, publish_committed, publishable, resolve, CompletedTransformerKey, GroupSpecReuse,
-    OrientedBasisOrder, TransformerMode, TreeTransformPlanning, TreeTransformScope,
+    lookup_bound, publish_committed, publishable, resolve, CheckedPendingCoefficients,
+    CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
+    TreeTransformPlanning, TreeTransformScope,
 };
 #[cfg(test)]
 pub(crate) use cache::{
-    take_completed_transformer_activity, take_oriented_tree_pair_compiles, CompletedActivity,
+    take_coefficient_group_activity, take_completed_transformer_activity,
+    take_oriented_tree_pair_compiles, CompletedActivity,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
+#[cfg(test)]
+pub(crate) use plan::build_checked_generic_tree_pair_transform_group_plan;
 pub use plan::{
-    build_all_codomain_tree_transform_group_plan,
-    build_checked_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
     CheckedGenericPlanError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
     TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
 };

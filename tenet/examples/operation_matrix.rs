@@ -234,9 +234,11 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
     };
     let builder = Runtime::builder().dense_threads(1).gemm_backend(backend);
     if std::env::var("OP_MATRIX_CACHE").as_deref() == Ok("disabled") {
-        // Process-global: every build is offered and rejected. The Runtime's
-        // categorical-coefficient tiers stay active until #2014-4.
-        tenet::cache::configure_budgets([(StructureCacheKind::CompletedTreeTransformer, 0)]);
+        // Process-global: every build is offered and rejected.
+        tenet::cache::configure_budgets([
+            (StructureCacheKind::CompletedTreeTransformer, 0),
+            (StructureCacheKind::TreeTransformCoefficients, 0),
+        ]);
     }
     builder.build()
 }

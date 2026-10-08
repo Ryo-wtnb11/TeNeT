@@ -19,14 +19,16 @@ pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 pub struct TreeTransformCacheInfo {
     /// The process-global completed-transformer cache.
     pub structures: RuntimeTreeTransformCacheInfo,
-    /// Categorical plans keyed on sector structures.
+    /// Always empty: the categorical-plan tier was removed in #2014-4
+    /// (plans are assembled from the composed-coefficient cache).
     pub plans: RuntimeTreeTransformCacheInfo,
-    /// Per fusion-tree group recoupling (non-unique fusion only).
+    /// The process-global composed-coefficient cache (per fusion-tree group,
+    /// non-unique fusion only), shared by every Runtime since #2014-4.
     pub groups: RuntimeTreeTransformCacheInfo,
 }
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, RuntimeCoefficientLedger,
-    RuntimeCoefficientStore, TensorContractFusionExecutionContext, TreeTransformOperation,
+    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, TensorContractFusionExecutionContext,
+    TreeTransformOperation,
 };
 
 use crate::error::Error;
@@ -87,7 +89,6 @@ struct LaneConfig {
     shared: Option<(
         tenet_dense::SharedCpuContext,
         Option<tenet_dense::CpuBackendKind>,
-        Weak<RuntimeCoefficientStore<f64>>,
     )>,
     recoupling_threads: Option<NonZeroUsize>,
 }
@@ -126,9 +127,8 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     pub(crate) fn with_config(
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
-        real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
     ) -> Result<Self, Error> {
-        let mut ctxs = Self {
+        Ok(Self {
             f64:
                 Ctx::with_parts(
                     tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
@@ -153,29 +153,18 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             f32: None,
             c32: None,
             lane_config: LaneConfig {
-                shared: Some((
-                    ctx.clone(),
-                    gemm_kind,
-                    Weak::clone(&real_tree_transform_store),
-                )),
+                shared: Some((ctx.clone(), gemm_kind)),
                 recoupling_threads: None,
             },
-        };
-        ctxs.f64
-            .tree_context_mut()
-            .bind_runtime_coefficient_store(real_tree_transform_store.clone());
-        ctxs.c64
-            .tree_context_mut()
-            .bind_runtime_coefficient_store(real_tree_transform_store);
-        Ok(ctxs)
+        })
     }
 
     /// Builds one deferred lane the way [`Self::with_config`] built the eager
     /// ones, then replays the settings applied since.
     fn make_lane<D: ScalarOps>(config: &LaneConfig) -> Result<Box<Ctx<D, Key>>, Error> {
-        let mut lane = match &config.shared {
-            Some((ctx, gemm_kind, store)) => {
-                let mut lane = Ctx::with_parts(
+        let mut lane =
+            match &config.shared {
+                Some((ctx, gemm_kind)) => Ctx::with_parts(
                     tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
                         ctx, *gemm_kind,
                     )?),
@@ -184,13 +173,9 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                         D,
                         f64,
                     >>::Workspace::default(),
-                );
-                lane.tree_context_mut()
-                    .bind_runtime_coefficient_store(Weak::clone(store));
-                lane
-            }
-            None => Ctx::default(),
-        };
+                ),
+                None => Ctx::default(),
+            };
         if let Some(threads) = config.recoupling_threads {
             lane.tree_context_mut()
                 .backend_mut()
@@ -320,20 +305,15 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
 fn make_complex_multiplicity_free_ctx(
     ctx: &tenet_dense::SharedCpuContext,
     gemm_kind: Option<tenet_dense::CpuBackendKind>,
-    tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
 ) -> Result<CoefficientCtx<Complex64, RuleIdentity, Complex64>, Error> {
-    let mut context = CoefficientCtx::with_parts(
+    Ok(CoefficientCtx::with_parts(
         tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(ctx, gemm_kind)?),
         make_transform_ops(ctx, gemm_kind)?,
         <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
             Complex64,
             Complex64,
         >>::Workspace::default(),
-    );
-    context
-        .tree_context_mut()
-        .bind_runtime_coefficient_store(tree_transform_store);
-    Ok(context)
+    ))
 }
 
 macro_rules! rule_lanes {
@@ -360,15 +340,10 @@ macro_rules! define_tensor_execution_context {
             // Runtime, so the back-reference would form an Arc cycle.
             pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
                 let mut context = Self {
-                    $($field: Ctxs::with_config(
-                        &config.shared_ctx,
-                        config.gemm_kind,
-                        config.real_tree_transform_store.clone(),
-                    )?,)+
+                    $($field: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,)+
                     mf_c64_coeff_c64: make_complex_multiplicity_free_ctx(
                         &config.shared_ctx,
                         config.gemm_kind,
-                        config.complex_tree_transform_store.clone(),
                     )?,
                     #[cfg(all(test, feature = "racah-generated"))]
                     generic_lane_uses: 0,
@@ -498,20 +473,10 @@ macro_rules! define_runtime_state {
                 dense: Box<dyn tenet_dense::DenseExecutor + Send>,
                 ctx: &tenet_dense::SharedCpuContext,
                 gemm_kind: Option<tenet_dense::CpuBackendKind>,
-                real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
-                complex_tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
             ) -> Result<Self, Error> {
                 Ok(Self {
-                    $($field: Ctxs::with_config(
-                        ctx,
-                        gemm_kind,
-                        real_tree_transform_store.clone(),
-                    )?,)+
-                    mf_c64_coeff_c64: make_complex_multiplicity_free_ctx(
-                        ctx,
-                        gemm_kind,
-                        complex_tree_transform_store,
-                    )?,
+                    $($field: Ctxs::with_config(ctx, gemm_kind)?,)+
+                    mf_c64_coeff_c64: make_complex_multiplicity_free_ctx(ctx, gemm_kind)?,
                     dense,
                 })
             }
@@ -616,46 +581,6 @@ impl ExtensionSlot {
     }
 }
 
-/// This Runtime's categorical-coefficient tiers (plans and per-group specs),
-/// each at a fixed [`RuntimeCoefficientStore::DEFAULT_BYTE_BUDGET`] until
-/// #2014-4 moves them into `tenet::cache`. Completed transformers are
-/// process-global.
-struct RuntimeTreeTransformStores {
-    ledger: Arc<RuntimeCoefficientLedger>,
-    real: Arc<RuntimeCoefficientStore<f64>>,
-    complex: Arc<RuntimeCoefficientStore<Complex64>>,
-}
-
-impl RuntimeTreeTransformStores {
-    fn new() -> Self {
-        let ledger = Arc::new(RuntimeCoefficientLedger::new(
-            RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
-        ));
-        Self {
-            real: Arc::new(RuntimeCoefficientStore::with_runtime_ledger(Arc::clone(
-                &ledger,
-            ))),
-            complex: Arc::new(RuntimeCoefficientStore::with_runtime_ledger(Arc::clone(
-                &ledger,
-            ))),
-            ledger,
-        }
-    }
-
-    fn plan_info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.ledger.plan_pair_info(&self.real, &self.complex)
-    }
-
-    fn group_info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.ledger.group_pair_info(&self.real, &self.complex)
-    }
-
-    fn clear(&self) {
-        self.real.clear();
-        self.complex.clear();
-    }
-}
-
 struct RuntimeInner {
     // Standalone CPU ops normally lease from `context_pool`/`executor_pool`,
     // while network execution uses per-plan workspace pools. Pool checkout,
@@ -664,7 +589,6 @@ struct RuntimeInner {
     // serialize on the device-local `cuda` mutex below instead.
     state: Mutex<RuntimeState>,
     execution_config: RuntimeExecutionConfig,
-    tree_transform_stores: RuntimeTreeTransformStores,
     /// Standalone operations lease an execution context and, for factorization,
     /// a dense executor. Both pools mint on empty, bound their idle count, and
     /// quarantine a resource that unwinds while leased.
@@ -1006,8 +930,6 @@ pub(crate) struct RuntimeExecutionConfig {
     /// `RuntimeBuilder::build` created (issue #155). `None` uses Tenferro's
     /// resolved compiled provider default.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
-    pub(crate) real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
-    pub(crate) complex_tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
     /// Runtime CPU context shared by built-in executors that use the compiled
     /// default kind: the state, mintable executor pool, and transform backends.
     /// An explicitly requested nondefault kind uses its own provider context;
@@ -1149,31 +1071,30 @@ impl Runtime {
     /// Deprecated (one release): use [`crate::cache::stats`].
     ///
     /// `structures` reports the process-global completed-transformer cache
+    /// and `groups` the process-global composed-coefficient cache, both
     /// shared by every Runtime: `entry_capacity` = `usize::MAX` (byte-bounded
     /// only), `misses` = builds offered for admission, `admission_bypasses` =
-    /// oversize rejections. `plans` and `groups` report this Runtime's
-    /// categorical-coefficient tiers, each bounded at a fixed 64 MiB (256
-    /// plans, 10⁴ groups) until #2014-4 moves them into `tenet::cache`. The
-    /// tiers are sampled one after another, not atomically.
+    /// oversize rejections. `plans` is always empty: that tier was removed
+    /// in #2014-4. The caches are sampled one after another, not atomically.
     #[deprecated(note = "use `tenet::cache::stats`; see the method documentation")]
     pub fn tree_transform_cache_info(&self) -> TreeTransformCacheInfo {
-        let stores = &self.inner.tree_transform_stores;
+        let global = |kind| {
+            RuntimeTreeTransformCacheInfo::from_structure_cache(tenet_core::structure_cache_info(
+                kind,
+            ))
+        };
         TreeTransformCacheInfo {
-            structures: RuntimeTreeTransformCacheInfo::from_structure_cache(
-                tenet_core::structure_cache_info(
-                    tenet_core::StructureCacheKind::CompletedTreeTransformer,
-                ),
-            ),
-            plans: stores.plan_info(),
-            groups: stores.group_info(),
+            structures: global(tenet_core::StructureCacheKind::CompletedTreeTransformer),
+            plans: RuntimeTreeTransformCacheInfo::default(),
+            groups: global(tenet_core::StructureCacheKind::TreeTransformCoefficients),
         }
     }
 
-    /// Deprecated (one release): clears the process-global structure caches
-    /// for **every** Runtime ([`crate::cache::clear`]), then this Runtime's
-    /// categorical-coefficient tiers and its prepared device transform state
-    /// and contraction scratch. The steps run one after another, never
-    /// nested.
+    /// Deprecated (one release): clears the process-global structure caches,
+    /// composed coefficients included, for **every** Runtime
+    /// ([`crate::cache::clear`]), then this Runtime's prepared device
+    /// transform state and contraction scratch. The steps run one after
+    /// another, never nested.
     ///
     /// The device state is dropped under the maintenance lease, after the
     /// host clears have returned, so this never inverts a lock order; on a
@@ -1185,7 +1106,6 @@ impl Runtime {
     )]
     pub fn clear_tree_transform_cache(&self) {
         crate::cache::clear();
-        self.inner.tree_transform_stores.clear();
         #[cfg(feature = "cuda")]
         if let Some(mut lease) = self.lease_cuda_for_maintenance() {
             let (dense, executor, scratch) = lease.split_contract();
@@ -1754,16 +1674,7 @@ impl RuntimeBuilder {
             ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let tree_transform_stores = RuntimeTreeTransformStores::new();
-        let real_tree_transform_store = Arc::downgrade(&tree_transform_stores.real);
-        let complex_tree_transform_store = Arc::downgrade(&tree_transform_stores.complex);
-        let mut state = RuntimeState::with_config(
-            dense,
-            &shared_ctx,
-            gemm_kind,
-            real_tree_transform_store.clone(),
-            complex_tree_transform_store.clone(),
-        )?;
+        let mut state = RuntimeState::with_config(dense, &shared_ctx, gemm_kind)?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
             slot: ExtensionSlot::default(),
@@ -1821,11 +1732,8 @@ impl RuntimeBuilder {
                     gemm_kind,
                     recoupling_threads,
                     linalg_kind,
-                    real_tree_transform_store,
-                    complex_tree_transform_store,
                     shared_ctx,
                 },
-                tree_transform_stores,
                 context_pool: Mutex::new(Vec::new()),
                 executor_pool: Mutex::new(Vec::new()),
                 executor_mintable,
@@ -2493,10 +2401,6 @@ mod tests {
         );
 
         let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
-        let store = runtime_b
-            .execution_config()
-            .real_tree_transform_store
-            .clone();
         let source_space = source_b.test_bound_space();
         let destination_space = expected_b.test_bound_space();
         let rule = Arc::clone(source_space.provider_arc());
@@ -2511,7 +2415,6 @@ mod tests {
         drop(expected_b);
         drop(runtime_a);
         drop(runtime_b);
-        assert!(store.upgrade().is_none());
 
         let mut actual = vec![f64::NAN; expected_data.len()];
         context

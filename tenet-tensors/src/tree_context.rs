@@ -1,7 +1,7 @@
 use core::ops::{Add, Mul};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
@@ -19,10 +19,10 @@ use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
     publish_committed, publishable, validate_checked_generic_tree_pair_plan_preflight,
-    CheckedGenericPlanError, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
-    TreeTransformOperation, TreeTransformPlanning, TreeTransformRuleCacheKey, TreeTransformScope,
+    CheckedGenericPlanError, CheckedPendingCoefficients, CoefficientGroupReuse,
+    CompletedTransformerKey, OrientedBasisOrder, TransformerMode, TreeTransformOperation,
+    TreeTransformPlanning, TreeTransformRuleCacheKey, TreeTransformScope,
 };
-use crate::RuntimeCoefficientStore;
 use crate::{
     validate_oriented_fusion_layout, RecouplingCoefficientAction, ReportsPlacement,
     TreeTransformReplayProfile, TreeTransformStructure,
@@ -192,7 +192,8 @@ where
         .into());
     }
     // Before admission: a clear during this request leaves its transformer
-    // unpublished.
+    // and composed coefficients unpublished.
+    let mut coefficients = CheckedPendingCoefficients::new();
     let epoch = tenet_core::core_reset_epoch();
     let identity = std::cell::OnceCell::new();
     let destination = std::cell::OnceCell::new();
@@ -300,25 +301,21 @@ where
     let replay = match cached {
         Some(replay) => replay,
         None => {
-            let build = |reuse: Option<&crate::tree_transform::GroupSpecReuse<'_, _>>| {
-                build_checked_generic_tree_pair_transform_group_plan_validated(
-                    operation.clone(),
-                    &source_proof,
-                    reuse,
-                )
-            };
-            let plan = match context.planning.coefficient_store() {
-                Some(store) => store.get_or_build_checked_generic_plan(
-                    identity.clone(),
-                    &operation,
-                    prepared.structure(),
-                    storage_source.structure(),
-                    logical_source_key,
-                    operand.storage_conjugate(),
-                    |reuse| build(Some(reuse)),
-                )?,
-                None => Arc::new(build(None)?),
-            };
+            // Why the logical source's groups key the coefficients: the plan
+            // is built on it; storage conjugation applies at binding.
+            let reuse = CoefficientGroupReuse::<P::Scalar>::new(
+                identity.clone(),
+                TransformerMode::CheckedGeneric,
+                TreeTransformScope::TreePair,
+                &operation,
+                FusionTreePairOrientation::Direct,
+            );
+            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
+                operation.clone(),
+                &source_proof,
+                &reuse,
+            )?;
+            coefficients.stage(reuse.into_pending());
             if operand.storage_conjugate() {
                 let logical_to_storage_block = |logical_index| {
                     let logical_block = source.structure().block(logical_index)?;
@@ -359,6 +356,7 @@ where
         D::zero(),
     )?;
     let dst_space = logical_space.commit_final_homspace_generic_bound_checked(prepared)?;
+    coefficients.flush();
     // Publication follows commit: only now are the destination's ids
     // committed, and only a resident (canonical) destination is keyed.
     let committed = dst_space.space().structure();
@@ -425,7 +423,7 @@ where
 {
     backend: B,
     workspace: B::Workspace,
-    planning: TreeTransformPlanning<C>,
+    planning: TreeTransformPlanning,
     rule_key: PhantomData<fn() -> RuleKey>,
 }
 
@@ -444,12 +442,6 @@ where
             planning: TreeTransformPlanning::default(),
             rule_key: PhantomData,
         }
-    }
-
-    /// Binds this context to one Runtime's categorical-coefficient store.
-    #[doc(hidden)]
-    pub fn bind_runtime_coefficient_store(&mut self, store: Weak<RuntimeCoefficientStore<C>>) {
-        self.planning.bind_coefficient_store(store);
     }
 
     #[inline]

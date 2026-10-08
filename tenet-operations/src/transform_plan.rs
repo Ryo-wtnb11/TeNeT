@@ -16,9 +16,7 @@ use crate::transform_helpers::{
     duplicate_fusion_tree_pair_indices, fusion_tree_group_block_keys,
     fusion_tree_pair_matches_group, fusion_tree_pairs_share_group,
 };
-use crate::transform_structure::{
-    charged_shared_coefficient_bytes, TreeTransformCoefficients, TreeTransformStructure,
-};
+use crate::transform_structure::{TreeTransformCoefficients, TreeTransformStructure};
 use crate::OperationError;
 
 /// Why shared slices: a Runtime reuses one group's specs across the plans of
@@ -669,8 +667,8 @@ impl<T> TreeTransformGroupBlockSpec<T> {
 /// shares by an `Arc` bump. It references each group's recoupling matrix
 /// through the spec's shared `Arc<[T]>`, as TensorKit's transformer references
 /// the cached per-`FusionTreeBlock` `U`, and copies only Single scalars. Why
-/// not one flattened payload per plan: a plan miss after a sector change
-/// reuses most groups' specs, and flattening would copy every reused matrix.
+/// not one flattened payload per plan: plans are assembled from cached group
+/// specs (#2014-4), and flattening would copy every reused matrix.
 #[derive(Clone)]
 pub struct TreeTransformGroupPlan<T> {
     specs: Vec<TreeTransformGroupBlockSpec<T>>,
@@ -700,14 +698,6 @@ impl<T> TreeTransformGroupPlan<T> {
         }
     }
 
-    /// Upper bound of the shared coefficient payload's own heap bytes, which
-    /// a retaining cache charges before the first binding builds it. The
-    /// matrices belong to the specs and are excluded.
-    #[doc(hidden)]
-    pub fn charged_coefficient_payload_bytes(&self) -> usize {
-        charged_shared_coefficient_bytes::<T>(self.specs.len())
-    }
-
     pub fn from_specs<I>(specs: I) -> Self
     where
         I: IntoIterator<Item = TreeTransformGroupBlockSpec<T>>,
@@ -718,14 +708,6 @@ impl<T> TreeTransformGroupPlan<T> {
     #[inline]
     pub fn specs(&self) -> &[TreeTransformGroupBlockSpec<T>] {
         &self.specs
-    }
-
-    /// Allocated spec slots, which a retaining cache charges: builders grow
-    /// the spec vector by extension, so it can exceed [`Self::specs`]'s length.
-    #[doc(hidden)]
-    #[inline]
-    pub fn spec_capacity(&self) -> usize {
-        self.specs.capacity()
     }
 
     pub fn into_specs(self) -> Vec<TreeTransformGroupBlockSpec<T>> {
