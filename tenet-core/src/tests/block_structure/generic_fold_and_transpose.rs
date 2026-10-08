@@ -324,6 +324,14 @@ fn pad_f_mu_axis(f: GenericFArray<f64>) -> GenericFArray<f64> {
     GenericFArray::new(data, (mu + 1, nu, kappa, lambda))
 }
 
+// Last μ row dropped: the incoming vector is longer than the μ axis.
+fn shrink_f_mu_axis(f: GenericFArray<f64>) -> GenericFArray<f64> {
+    let (mu, nu, kappa, lambda) = f.shape();
+    let mut data = f.data().to_vec();
+    data.truncate((mu - 1) * nu * kappa * lambda);
+    GenericFArray::new(data, (mu - 1, nu, kappa, lambda))
+}
+
 fn assert_malformed_f_shape<T>(
     result: Result<T, CheckedGenericSymbolError<std::convert::Infallible>>,
 ) {
@@ -364,7 +372,7 @@ fn raw_generic_associator_rejects_f_label_outside_returned_shape() {
     ));
 }
 
-// What: at k > 2 the incoming coefficient vector must span the whole μ axis;
+// What: at k > 2 the incoming coefficient vector must match the μ axis exactly;
 // TensorKit's `transpose(view(F, :, ν, κ, :)) * coeff` throws on the same
 // length mismatch.
 #[test]
@@ -388,12 +396,14 @@ fn raw_generic_associator_rejects_coefficient_length_mismatch() {
     );
     assert_eq!(valid.f_calls.get(), 2);
 
-    let probe = MalformedA4FProbe::new(2, pad_f_mu_axis);
-    assert_malformed_f_shape(generic_multi_associator_result(
-        &InfallibleGenericFR(&probe),
-        &long,
-        &tail,
-    ));
+    for malform in [pad_f_mu_axis, shrink_f_mu_axis] {
+        let probe = MalformedA4FProbe::new(2, malform);
+        assert_malformed_f_shape(generic_multi_associator_result(
+            &InfallibleGenericFR(&probe),
+            &long,
+            &tail,
+        ));
+    }
 }
 
 // What: the default A/B derivations on the raw infallible path validate the

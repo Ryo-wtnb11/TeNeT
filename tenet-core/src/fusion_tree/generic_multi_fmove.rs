@@ -257,7 +257,9 @@ where
 /// `view`/`*` in TensorKit throw on the same mismatch. Residual: on the raw
 /// infallible path (`InfallibleGenericFR`) a wrong-size final `λ` axis is not
 /// detected, because checking it needs the extra `N(a,e′,d)` query that #682
-/// keeps out of this path; an intermediate `λ` is caught as the next `μ`.
+/// keeps out of this path. An intermediate `λ` is compared only with the next
+/// F's reported `μ` axis, so a provider that misreports the same `N(a,e′,d)`
+/// consistently in both F blocks is not detected either (nor by TensorKit).
 pub(crate) fn generic_multi_associator_result<C, L, S>(
     rule: &C,
     long: &L,
