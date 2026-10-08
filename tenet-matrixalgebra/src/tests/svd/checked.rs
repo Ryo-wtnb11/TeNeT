@@ -1085,3 +1085,102 @@ fn elementwise_compact_admission_allocates_nothing_and_queries_no_provider() {
         assert_eq!((calls, bytes, queries), (0, 0, 0), "{name}");
     }
 }
+
+#[test]
+fn elementwise_compact_admission_takes_unsorted_spectra_through_the_region_admission() {
+    // What (#1994 review): compact QR/LQ/polar keep the input space and emit
+    // their spectra in region order. On an aligned expert layout whose
+    // blocks are not in sector order that order is not sector order, so the
+    // elementwise admission must accept an unsorted spectrum exactly as the
+    // region admission does, and still refuse misuse.
+    let mf = Arc::new(U1FusionRule);
+    let leg = SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let canonical = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::clone(&mf),
+        homspace.clone(),
+    )
+    .unwrap();
+    // The same blocks, contiguous and aligned, stored in reverse sector order.
+    let structure = canonical.space().structure();
+    let mut offset = 0usize;
+    let mut blocks = Vec::new();
+    for index in (0..structure.block_count()).rev() {
+        let block = structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>();
+    }
+    let reversed = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
+        DynamicFusionMapSpace::from_typed(
+            &FusionTensorMapSpace::new_unbound(
+                TensorMapSpace::<1, 1>::from_dims([5], [5]).unwrap(),
+                homspace,
+                BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
+            )
+            .unwrap()
+            .try_bind_rule(mf.as_ref())
+            .unwrap(),
+        ),
+        Arc::clone(&mf),
+    )
+    .unwrap();
+    let regions = reversed
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    assert!(regions.iter().all(|region| region.has_aligned_diagonal()));
+
+    let sorted = [
+        SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![1.0, -2.0],
+        },
+        SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![3.0, 4.0, -5.0],
+        },
+    ];
+    let unsorted = [sorted[1].clone(), sorted[0].clone()];
+    type Mf = tenet_core::MultiplicityFreeAdmissionMode;
+    for spectrum in [&sorted[..], &unsorted[..]] {
+        admit_compact_diagonal::<Mf, _, _>(&reversed, spectrum).unwrap();
+        admit_compact_diagonal::<Mf, _, _>(&canonical, spectrum).unwrap();
+    }
+    // Region order is what QR emits; on this layout it is the reverse of
+    // sector order, and that spectrum is admitted.
+    let Qr { q, .. } = qr_compact_from_source::<Mf, _, _, _, _>(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        FactorSource::Diagonal {
+            space: &reversed,
+            spectrum: &sorted,
+        },
+    )
+    .unwrap();
+    let FactorOutput::Diagonal { space, values } = q else {
+        panic!("compact QR of a diagonal stays compact");
+    };
+    let emitted: Vec<_> = values.iter().map(|entry| entry.sector).collect();
+    let region_order: Vec<_> = regions.iter().map(|region| region.coupled()).collect();
+    assert_eq!(emitted, region_order);
+    assert_eq!(emitted, [SectorId::new(1), SectorId::new(0)]);
+    admit_compact_diagonal::<Mf, _, _>(&space, &values).unwrap();
+
+    let mut short = unsorted.to_vec();
+    short[0].values.pop();
+    let mut duplicate = unsorted.to_vec();
+    duplicate[1].sector = duplicate[0].sector;
+    for malformed in [&short[..], &duplicate[..], &unsorted[..1]] {
+        assert!(matches!(
+            admit_compact_diagonal::<Mf, _, _>(&reversed, malformed),
+            Err(OperationError::InvalidArgument { .. })
+        ));
+    }
+}
