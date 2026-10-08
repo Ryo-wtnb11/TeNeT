@@ -59,6 +59,7 @@ mod pathopt;
 mod plan;
 mod plancache;
 mod slice;
+mod stepflow;
 mod tree;
 
 pub use cost::{DenseCostModel, DenseTensorInfo};

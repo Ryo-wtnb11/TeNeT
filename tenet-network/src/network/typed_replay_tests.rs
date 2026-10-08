@@ -9,6 +9,7 @@ use tenet::typed::Complex64;
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap, TensorScalar};
 
 use super::*;
+use crate::optimizer::ContractionStep;
 use crate::{plan_cache_stats, GreedyDenseOptimizer, Optimizer};
 
 fn label(name: &str) -> TemporaryLabel {

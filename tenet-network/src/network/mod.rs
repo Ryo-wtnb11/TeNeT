@@ -40,7 +40,7 @@ use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::error::{SliceError, SymmetricSliceExecutionError, SymmetricSliceLowerError};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
-use crate::optimizer::{next_use_axes, ContractionStep, DenseContractionOptimizer};
+use crate::optimizer::{next_use_axes, DenseContractionOptimizer};
 use crate::plan::ContractionPlan;
 use crate::slice::{
     lower_symmetric_sliced_plan, validate_contraction_plan_for_ir, SlicedPlan, SymmetricSlicePlan,

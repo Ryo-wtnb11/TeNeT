@@ -7,6 +7,7 @@ use crate::labels::{TemporaryLabel, TensorId};
 use crate::optimizer::{
     charge_dense_orientation_costs, dense_plan_cost_report, ContractionStep, DensePlanCostReport,
 };
+use crate::stepflow::{declared_step_labels, pair_result_labels};
 use crate::tree::ContractionTree;
 
 const PLAN_HEADER: &str = "tenet-contract-plan-v1";
@@ -341,9 +342,7 @@ impl ContractionPlan {
             // away; every other (open) leg survives, in lhs-then-rhs flat order.
             // This `expected` order is what the executor itself tracks for this
             // result, so it (not the declared order) feeds later steps.
-            let mut expected: Vec<TemporaryLabel> =
-                ll.iter().filter(|l| !rl.contains(l)).cloned().collect();
-            expected.extend(rl.iter().filter(|l| !ll.contains(l)).cloned());
+            let expected = pair_result_labels(ll, rl);
 
             // The declared `result_labels` must carry exactly the open legs (as a
             // multiset). The executor recomputes the leg ORDER from the operands
@@ -484,14 +483,10 @@ pub fn dense_steps_from_active_pair_path(
         let rhs = active[pair.rhs_position()].clone();
         remove_pair(&mut active, pair.lhs_position(), pair.rhs_position());
 
-        let remaining_labels = active
-            .iter()
-            .map(|tensor| tensor.labels.clone())
-            .collect::<Vec<_>>();
-        let result_labels = cost_model.contraction_result_labels_with_remaining(
+        let result_labels = declared_step_labels(
             &lhs.labels,
             &rhs.labels,
-            &remaining_labels,
+            active.is_empty(),
             ir.output_labels(),
         );
         let cost = cost_model.pair_cost(&lhs.labels, &rhs.labels);

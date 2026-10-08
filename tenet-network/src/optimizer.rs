@@ -4,6 +4,7 @@ use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
+use crate::stepflow::{consumers, declared_step_labels, pair_result_labels, planned_label_orders};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractionStep {
@@ -98,14 +99,10 @@ fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<Contr
         if rhs.first_input < lhs.first_input {
             std::mem::swap(&mut lhs, &mut rhs);
         }
-        let remaining_labels = active
-            .iter()
-            .map(|tensor| tensor.labels.clone())
-            .collect::<Vec<_>>();
-        let result_labels = cost_model.contraction_result_labels_with_remaining(
+        let result_labels = declared_step_labels(
             &lhs.labels,
             &rhs.labels,
-            &remaining_labels,
+            active.is_empty(),
             ir.output_labels(),
         );
         let result_id = TensorId::new(ir.tensors().len() + steps.len());
@@ -353,10 +350,10 @@ pub(crate) fn charge_dense_orientation_costs(
     cost_model: &DenseCostModel,
     steps: &mut [ContractionStep],
 ) -> Result<()> {
-    let planned_labels = planned_dense_label_orders(ir, steps)?;
+    let planned_labels = planned_label_orders(ir, steps)?;
     // Resolve each result's single later consumer once (O(steps)); the topology
     // (lhs/rhs/result) is fixed even though this loop mutates step costs.
-    let consumers = dense_consumers(steps);
+    let consumers = consumers(steps);
     let mut active = ir
         .tensors()
         .iter()
@@ -423,49 +420,7 @@ pub(crate) fn charge_dense_orientation_costs(
     Ok(())
 }
 
-fn planned_dense_label_orders(
-    ir: &NetworkIR,
-    steps: &[ContractionStep],
-) -> Result<HashMap<TensorId, Vec<TemporaryLabel>>> {
-    let mut labels_by_id = ir
-        .tensors()
-        .iter()
-        .map(|tensor| (tensor.id(), tensor.labels().to_vec()))
-        .collect::<HashMap<_, _>>();
-    let mut active = labels_by_id.clone();
-
-    for (step_index, step) in steps.iter().enumerate() {
-        active.remove(&step.lhs).ok_or_else(|| {
-            ContractError::InvalidContractionPlan(format!(
-                "step {step_index} lhs {} is not active while planning labels",
-                step.lhs.index()
-            ))
-        })?;
-        active.remove(&step.rhs).ok_or_else(|| {
-            ContractError::InvalidContractionPlan(format!(
-                "step {step_index} rhs {} is not active while planning labels",
-                step.rhs.index()
-            ))
-        })?;
-        let labels = step.result_labels.clone();
-        labels_by_id.insert(step.result, labels.clone());
-        active.insert(step.result, labels);
-    }
-
-    Ok(labels_by_id)
-}
-
-fn pair_result_labels(lhs: &[TemporaryLabel], rhs: &[TemporaryLabel]) -> Vec<TemporaryLabel> {
-    let mut labels = lhs
-        .iter()
-        .filter(|label| !rhs.contains(label))
-        .cloned()
-        .collect::<Vec<_>>();
-    labels.extend(rhs.iter().filter(|label| !lhs.contains(label)).cloned());
-    labels
-}
-
-fn dense_orientation_for_next_use(
+pub(crate) fn dense_orientation_for_next_use(
     labels: &[TemporaryLabel],
     raw_codomain_rank: usize,
     result_is_lhs: bool,
@@ -517,18 +472,6 @@ pub(crate) fn next_use_axes(
     }
 }
 
-/// Map each tensor id to its single later consuming step and whether it is that
-/// step's lhs — one forward pass, so `charge_dense_orientation_costs` drops from
-/// O(steps²) to O(steps). Mirrors `network::build_consumers`.
-fn dense_consumers(steps: &[ContractionStep]) -> HashMap<TensorId, (usize, bool)> {
-    let mut consumers = HashMap::with_capacity(steps.len() * 2);
-    for (index, step) in steps.iter().enumerate() {
-        consumers.insert(step.lhs, (index, true));
-        consumers.insert(step.rhs, (index, false));
-    }
-    consumers
-}
-
 fn push_dense_active_contraction_step(
     ir: &NetworkIR,
     cost_model: &DenseCostModel,
@@ -546,14 +489,10 @@ fn push_dense_active_contraction_step(
 
     let rhs = active.remove(rhs_index);
     let lhs = active.remove(lhs_index);
-    let remaining_labels = active
-        .iter()
-        .map(|tensor| tensor.labels.clone())
-        .collect::<Vec<_>>();
-    let result_labels = cost_model.contraction_result_labels_with_remaining(
+    let result_labels = declared_step_labels(
         &lhs.labels,
         &rhs.labels,
-        &remaining_labels,
+        active.is_empty(),
         ir.output_labels(),
     );
     let cost = cost_model.pair_cost(&lhs.labels, &rhs.labels);
