@@ -2384,42 +2384,7 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
-    let space = input.space().space();
-    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    #[cfg(test)]
-    if let InputMatricizations::Packed(matrices) = &matrices {
-        record_compact_svd_input_pack(matrices);
-    }
-    let mut pairs = Vec::with_capacity(matrices.len());
-    let mut singular_values = Vec::with_capacity(matrices.len());
-    #[cfg(test)]
-    let data = input.data();
-    in_linalg_scope(dense, |dense| {
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            #[cfg(test)]
-            record_checked_compact_input(CheckedCompactOperation::Svd, data, matrix.data, None);
-            let stage = compact_svd_numerical_stage(dense, matrix.data, matrix.rows, matrix.cols)?;
-            singular_values.push(SectorSpectrum {
-                sector: matrix.sector,
-                values: stage.singular_values,
-            });
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: stage.rank,
-                left: stage.u,
-                left_rows: stage.rows,
-                right: stage.vt,
-                right_leading: stage.rank,
-            });
-        }
-        Ok(())
-    })
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    let (u, vh) = build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)?;
-    Ok((u, vh, singular_values))
+    svd_compact_oriented_factors_dyn_checked_generic(dense, input, FactorPlacement::Direct)
 }
 
 /// Checked compact SVD factors of the logical adjoint of `parent`, read in
@@ -2435,16 +2400,41 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let provider = parent.space().provider_arc();
-    let space = parent.space().space();
-    let matrices = generic_input_matricizations(space.structure(), parent.data(), space.nout())
+    svd_compact_oriented_factors_dyn_checked_generic(dense, parent, FactorPlacement::Adjoint)
+}
+
+fn svd_compact_oriented_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    placement: FactorPlacement,
+) -> Result<CheckedCompactSvdFactorsWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
+    #[cfg(test)]
+    if let InputMatricizations::Packed(matrices) = &matrices {
+        record_compact_svd_input_pack(matrices);
+    }
+    let gauge = match placement {
+        FactorPlacement::Direct => CompactSvdGauge::Left,
+        FactorPlacement::Adjoint => CompactSvdGauge::AdjointLeft,
+    };
     let mut pairs = Vec::with_capacity(matrices.len());
     let mut ranks = BTreeMap::new();
     let mut singular_values = Vec::with_capacity(matrices.len());
+    #[cfg(test)]
+    let data = input.data();
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
+            #[cfg(test)]
+            record_checked_compact_input(CheckedCompactOperation::Svd, data, matrix.data, None);
             let CompactSvdNumericalStage {
                 rows,
                 cols,
@@ -2457,28 +2447,53 @@ where
                 matrix.data,
                 matrix.rows,
                 matrix.cols,
-                CompactSvdGauge::AdjointLeft,
-                |_, _| {},
+                gauge,
+                |_u, _vt| {
+                    #[cfg(test)]
+                    if matches!(gauge, CompactSvdGauge::Left) {
+                        record_checked_compact_svd_stage_gauge(_u, _vt);
+                    }
+                },
             )?;
-            adjoint_col_major_in_place(&mut vt, rank, cols);
-            adjoint_col_major_in_place(&mut u, rows, rank);
-            ranks.insert(matrix.sector, rank);
             singular_values.push(SectorSpectrum {
                 sector: matrix.sector,
                 values,
             });
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: rank,
-                left: vt,
-                left_rows: cols,
-                right: u,
-                right_leading: rank,
+            pairs.push(match placement {
+                FactorPlacement::Direct => FactorPair {
+                    sector: matrix.sector,
+                    kept: rank,
+                    left: u,
+                    left_rows: rows,
+                    right: vt,
+                    right_leading: rank,
+                },
+                // `A^H = V S U^H`: the adjoint's left factor is `vt^H`.
+                FactorPlacement::Adjoint => {
+                    ranks.insert(matrix.sector, rank);
+                    adjoint_col_major_in_place(&mut vt, rank, cols);
+                    adjoint_col_major_in_place(&mut u, rows, rank);
+                    FactorPair {
+                        sector: matrix.sector,
+                        kept: rank,
+                        left: vt,
+                        left_rows: cols,
+                        right: u,
+                        right_leading: rank,
+                    }
+                }
             });
         }
         Ok(())
     })
     .map_err(CheckedGenericFactorPlanError::from)?;
+    if matches!(placement, FactorPlacement::Direct) {
+        let (u, vh) = build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)?;
+        return Ok((u, vh, singular_values));
+    }
+    // Why not the direct pair builder: it orders and admits factor keys by
+    // the input's own sides, while the adjoint publishes on the swapped hom
+    // space with the parent's sides exchanged.
     let adjoint = FusionTreeHomSpace::new(
         space.homspace().domain().clone(),
         space.homspace().codomain().clone(),

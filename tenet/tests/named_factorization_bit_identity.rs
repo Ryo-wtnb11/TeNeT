@@ -285,8 +285,8 @@ fn named_results_match_the_tuple_results() {
     );
     #[cfg(feature = "racah-generated")]
     {
-        // Checked Generic rejects lazy-adjoint operands for most
-        // factorizations; those entries fingerprint the error.
+        // The lazy-adjoint rows were `Err` until checked Generic accepted
+        // lazy adjoints (#1755).
         use tenet::sector::SUNFusionRule;
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let v = GradedSpace::try_new(

@@ -290,3 +290,61 @@ fn checked_su3_multiplicity_lazy_adjoint_factorizations_match_the_materialized_a
     );
     assert_all_ops!("checked SU(3)", runtime, a, b);
 }
+
+/// The checked parent-reading seams (compact and full SVD, pinv) on
+/// non-self-dual SU(3) sectors `3`, `3̄` and on dual legs: the swapped hom
+/// space of the adjoint must keep each leg's sector and duality.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_su3_seams_keep_non_self_dual_sectors_and_dual_legs() {
+    use tenet::sector::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let three =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![1i64, 0], 2), (vec![0, 0], 1)]).unwrap();
+    let three_bar =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0i64, 1], 3), (vec![1, 0], 1)]).unwrap();
+    let dual = three.try_dual().unwrap();
+    assert!(dual.is_dual() && !three.is_dual());
+
+    macro_rules! seams {
+        ($d:ty, $seed:expr, [$($codomain:expr),+], [$($domain:expr),+]) => {{
+            let parent = TensorMap::<_, $d>::rand_with_seed(
+                &runtime,
+                [$(&$codomain),+],
+                [$(&$domain),+],
+                $seed,
+            )
+            .unwrap();
+            let label = format!("{} {}", stringify!($d), $seed);
+            let lazy = parent.adjoint().unwrap();
+            let eager = lazy.materialize().unwrap();
+            let rows: Vec<usize> = (0..lazy.codomain_rank()).collect();
+            let cols: Vec<usize> =
+                (lazy.codomain_rank()..lazy.codomain_rank() + lazy.domain_rank()).collect();
+            let (r, c) = (rows.as_slice(), cols.as_slice());
+            for (name, lazy_svd, eager_svd) in [
+                ("svd_compact", lazy.svd_compact(r, c), eager.svd_compact(r, c)),
+                ("svd_full", lazy.svd_full(r, c), eager.svd_full(r, c)),
+            ] {
+                let (Svd { u, s, vh }, Svd { u: eu, s: es, vh: evh }) =
+                    (lazy_svd.unwrap(), eager_svd.unwrap());
+                assert_factor_close!(format!("{label} {name} u"), u, eu);
+                assert_factor_close!(format!("{label} {name} s"), s, es);
+                assert_factor_close!(format!("{label} {name} vh"), vh, evh);
+            }
+            assert_factor_close!(
+                format!("{label} pinv"),
+                lazy.pinv(r, c, 1.0e-12).unwrap(),
+                eager.pinv(r, c, 1.0e-12).unwrap()
+            );
+        }};
+    }
+    seams!(f64, 31, [three, three_bar], [three]);
+    seams!(Complex64, 32, [three, three_bar], [three]);
+    seams!(f64, 33, [three_bar], [three, dual]);
+    seams!(Complex64, 34, [three_bar], [three, dual]);
+    seams!(f64, 35, [dual, three_bar], [dual]);
+    seams!(Complex64, 36, [dual, three_bar], [dual]);
+}

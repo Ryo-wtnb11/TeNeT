@@ -700,7 +700,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     }
 
     // A lazy adjoint of a dense dual tensor factors like its materialized
-    // adjoint (#1755): QR materializes it, LQ redirects to QR of the parent.
+    // adjoint (#1755): both QR and LQ materialize it for the call.
     let lazy = u1_real.materialize().unwrap().adjoint().unwrap();
     let eager = lazy.materialize().unwrap();
     let close = |a: &TensorMap<_, f64>, b: &TensorMap<_, f64>| {

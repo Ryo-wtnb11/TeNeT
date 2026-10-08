@@ -193,7 +193,8 @@ pub enum AdjointRule {
     /// An operation-local materialized adjoint.
     Materialize,
     /// The partner operation on the parent, whose results are adjointed
-    /// back and detached (LQ of `t^H` from QR of `t`).
+    /// back and detached (the left null space of `t^H` from the right null
+    /// space of `t`).
     Redirect,
     /// The dense parent through the factorization's adjoint-aware stage,
     /// which returns the factors of the adjoint without forming it.
