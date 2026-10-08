@@ -1,47 +1,5 @@
 use super::*;
 
-/// Phase and magnitude spectra of a compact diagonal: MAK's polar of a
-/// diagonal (`PolarViaSVD` over `svd_compact!(::DiagonalAlgorithm)`) is
-/// `W = sign_safe(a)` and `P = abs(a)`, both on the input bond, so the caller
-/// publishes them on the input space. The right polar factors are the same
-/// spectra (`Wh = W`).
-fn polar_diagonal_spectra<A, R, D>(
-    authority: &A,
-    space: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<LeftPolar<Vec<SectorSpectrum<D>>>, A::Error>
-where
-    A: FactorSpaceAuthority<R>,
-    A::Error: From<OperationError>,
-    D: FactorScalar,
-{
-    let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Polar)?;
-    let mut phase = Vec::with_capacity(bond.len());
-    let mut magnitude = Vec::with_capacity(bond.len());
-    for region in bond.iter() {
-        let entry = bond.entry(region);
-        let mut phases = Vec::with_capacity(entry.values.len());
-        let mut magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (phase, magnitude) = diagonal_phase_magnitude(value);
-            phases.push(phase);
-            magnitudes.push(magnitude);
-        }
-        phase.push(SectorSpectrum {
-            sector: region.coupled(),
-            values: phases,
-        });
-        magnitude.push(SectorSpectrum {
-            sector: region.coupled(),
-            values: magnitudes,
-        });
-    }
-    Ok(LeftPolar {
-        w: phase,
-        p: magnitude,
-    })
-}
-
 /// Left polar factors `W` (phase) and `P` (magnitude) of the compact diagonal
 /// `spectrum` on `space`, in fusion mode `M`; both stay compact on the input
 /// space.
@@ -54,7 +12,12 @@ where
     M: FactorMode<R>,
     D: FactorScalar,
 {
-    let LeftPolar { w, p } = polar_diagonal_spectra(&M::authority(space), space, spectrum)?;
+    let (w, p) = diagonal_phase_magnitude_spectra(
+        &M::authority(space),
+        space,
+        spectrum,
+        FactorFamily::Polar,
+    )?;
     let on_input = |values| FactorOutput::Diagonal {
         space: space.clone(),
         values,

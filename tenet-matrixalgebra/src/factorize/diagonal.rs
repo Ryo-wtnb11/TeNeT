@@ -5,6 +5,20 @@
 //! Every spectrum takes the direct route. A nonfinite value is refused by the
 //! shared finite-input stage, as TeNeT's dense routes refuse it (#1986). Why
 //! no dense fallback: `DiagonalAlgorithm` has none.
+//!
+//! Every family admits its input through [`diagonal_bond`] and then reads one
+//! value map per diagonal entry `a`:
+//!
+//! | Value map | Families | Where |
+//! |---|---|---|
+//! | magnitude `\|a\|` for `S`, phase for `Vh` | SVD | `compact_diagonal_svd_sector`, `svd_vals_diagonal` |
+//! | magnitude `\|a\|` | null | `compact_null_sector` |
+//! | phase and magnitude | QR/LQ, polar | [`diagonal_phase_magnitude_spectra`] |
+//! | real part, after the Hermiticity check | eigh | `hermitian_diagonal_bond` |
+//! | complex value, after the eigenvalue check | eig | `validate_diagonal_eigenvalues`, `eig_vals_diagonal` |
+//!
+//! The compact inverse, pseudo-inverse, solve and exponential maps are the
+//! facade's (`tenet` `FusionMode`), whose admission #1994 owns.
 
 use std::ops::Deref;
 
@@ -138,4 +152,45 @@ pub(super) fn diagonal_phase_magnitude<D: FactorScalar>(value: D) -> (D, D) {
         (normalized / norm, scale * norm)
     };
     (D::from_complex64(phase), D::from_real(magnitude))
+}
+
+/// Phase and magnitude spectra of a compact diagonal, `(sign_safe(a), abs(a))`
+/// per entry, both on the input bond `V <- V`, its dual orientation included
+/// (TensorKit keeps `W = V`, `diagonal.jl` `initialize_output(qr_full!, …)`).
+/// They are MAK `_diagonal_qr!` with `positive = true` (`q`, `r`; full and
+/// compact coincide, LQ exchanges the factors) and the polar of a diagonal
+/// (`PolarViaSVD` over `svd_compact!(::DiagonalAlgorithm)`: `W`, `P`, with
+/// `Wh = W`).
+#[expect(clippy::type_complexity)]
+pub(super) fn diagonal_phase_magnitude_spectra<A, R, D>(
+    authority: &A,
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    family: FactorFamily,
+) -> Result<(Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>), A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
+    D: FactorScalar,
+{
+    let bond = diagonal_bond(authority, space, spectrum, family)?;
+    let mut phase = Vec::with_capacity(bond.len());
+    let mut magnitude = Vec::with_capacity(bond.len());
+    for region in bond.iter() {
+        let (phases, magnitudes) = bond
+            .entry(region)
+            .values
+            .iter()
+            .map(|&value| diagonal_phase_magnitude(value))
+            .unzip();
+        phase.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: phases,
+        });
+        magnitude.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: magnitudes,
+        });
+    }
+    Ok((phase, magnitude))
 }
