@@ -156,7 +156,7 @@ The `blocks` column records the requested value.
 
 The device columns come from `tenet::expert::cuda_transfer_stats()`, an
 always-compiled, `Relaxed`, backend-local counter set in
-`tenet-dense/src/cuda_adapter.rs`. They are observability only: nothing in the
+`tenet-dense/src/cuda_adapter/mod.rs`. They are observability only: nothing in the
 library reads them back, so no execution decision depends on them.
 
 ## Oracles

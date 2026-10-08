@@ -1,7 +1,7 @@
 # Releasing TeNeT
 
 This is the checklist for a future registry release. The published facade is
-`tenet-rs` 0.1.1 and uses the published Tenferro 0.3.0 line. Its Rust library
+`tenet-rs` 0.1.1 and uses the published Tenferro 0.7.1 line. Its Rust library
 target remains `tenet`, so
 downstream code imports from `tenet::typed` and `tenet::sector`.
 
@@ -22,7 +22,7 @@ package is packaged and inspected before it is published.
 
 ## Checks for each package
 
-Run from a clean checkout with the intended lockfile and toolchain:
+Run from a clean checkout with the tracked `Cargo.lock` (CI also uses `--locked`) and the intended toolchain:
 
 ```sh
 cargo package -p <package> --locked
@@ -46,6 +46,8 @@ Tenferro source override, or Racah git override.
 
 ## External prerequisites
 
-Tenferro 0.3.0 and Racah 0.1.1 are the current published dependency lines.
+The workspace manifests pin the `tenferro-*` crates at 0.7.1 (`tenet-dense/Cargo.toml`),
+`t4a-cubecl-runtime` at `=0.10.1` (kept in lockstep with Tenferro), and `racah` at 0.2.4
+(`tenet-sectors/Cargo.toml`).
 The registry-only gate must still verify compatible resolved versions before a
 future release.

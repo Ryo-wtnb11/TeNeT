@@ -164,8 +164,9 @@ verbatim: `e` is the `(a,b)` channel, `f` is the `(b,c)` channel, `d` is the
 total. Return the additive zero for a disallowed configuration rather than
 panicking — the engine prunes on it.
 
-`MultiplicityFreeRigidSymbols` adds `dim`, `inv_dim`,
-`sqrt_dim`, `inv_sqrt_dim`, `twist`, and the Frobenius–Schur phase. `a_symbol`
+`MultiplicityFreeRigidSymbols` adds `dim_scalar`, `inv_dim_scalar`,
+`sqrt_dim_scalar`, `inv_sqrt_dim_scalar`, `twist_scalar`, and
+`frobenius_schur_phase_scalar`. `a_symbol`
 and `b_symbol` have correct default bodies derived from F; override only with a
 reference to justify it.
 

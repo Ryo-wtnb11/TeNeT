@@ -180,7 +180,7 @@ impl Network {
     /// Lowers planner-selected labels into a reconstructable coefficient-free plan.
     ///
     /// The result is unbound: it records self-consistent authority-leg snapshots
-    /// but does not prove tensor provenance. The future sliced executor must bind
+    /// but does not prove tensor provenance. [`Self::execute_symmetric_sliced`] binds
     /// it again against the actual typed tensors before execution.
     pub fn lower_symmetric_sliced_plan<R, D, S>(
         &self,
