@@ -167,6 +167,7 @@ pub trait HostKernelAdapter<T> {
     /// computes `buffer_dst = buffer_src * transpose(U)` after packing source
     /// trees as columns. This is the BLAS/GEMM replacement point for the
     /// recoupling matrix application.
+    #[cfg(any(test, feature = "testing"))]
     #[allow(clippy::too_many_arguments)]
     fn recoupling_src_times_u_transpose<C>(
         &mut self,
@@ -687,6 +688,7 @@ where
         scale_raw_strided_kernel_trusted(dst_data, shape, dst_strides, dst_offset, beta)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     fn recoupling_src_times_u_transpose<C>(
         &mut self,
         destination: &mut [T],
@@ -729,6 +731,7 @@ where
 ///
 /// All adapter implementations should validate against the same packed-column
 /// layout before touching data.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn validate_recoupling_lens(
     destination_len: usize,
     source_len: usize,

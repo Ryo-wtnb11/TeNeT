@@ -1096,6 +1096,52 @@ fn assert_tensoradd_permuted_general_dtype<T>(
     assert_eq!(dst.data(), expected.as_slice());
 }
 
+/// Runs the per-block strided reference driver (`tenet-operations/testing`).
+/// `HostTensorOperations` now delegates to the batched-GEMM path, which only
+/// admits dense float scalars; the integer-dtype replay cases stay on the
+/// reference driver.
+fn reference_tree_transform<
+    D,
+    C,
+    const DO: usize,
+    const DI: usize,
+    const SO: usize,
+    const SI: usize,
+>(
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DO, DI>,
+    src: &TensorMap<D, SO, SI>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    let src_structure = std::sync::Arc::clone(src.structure());
+    tenet_operations::tree_transform_structure_with_strided_kernel_raw(
+        &mut tenet_operations::StridedHostKernelAdapter::default(),
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
 fn assert_tree_single_dtype<T>(
     values: Vec<T>,
     fill: T,
@@ -1125,19 +1171,9 @@ fn assert_tree_single_dtype<T>(
         &[TreeTransformBlockSpec::single(0, 0, coefficient)],
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst,
-        &src,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    reference_tree_transform(&mut workspace, &structure, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
 }
@@ -1186,19 +1222,9 @@ where
         )],
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst,
-        &src,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    reference_tree_transform(&mut workspace, &structure, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
     assert_eq!(workspace.source_len(), 8);
@@ -1225,19 +1251,9 @@ fn assert_tree_single_mixed_dtype<D, C>(
         &[TreeTransformBlockSpec::single(0, 0, coefficient)],
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst,
-        &src,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    reference_tree_transform(&mut workspace, &structure, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
 }
@@ -1271,19 +1287,9 @@ fn assert_tree_multi_mixed_dtype<D, C>(
         )],
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst,
-        &src,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    reference_tree_transform(&mut workspace, &structure, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
     assert_eq!(workspace.source_len(), 8);
@@ -1330,19 +1336,9 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
         )],
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst,
-        &src,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    reference_tree_transform(&mut workspace, &structure, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
     assert_eq!(workspace.source_len(), 6);
@@ -1452,11 +1448,9 @@ fn assert_tree_multi_keyed_dtype<T>(
         false,
     )
     .unwrap();
-    let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
-        &mut backend,
+    reference_tree_transform(
         &mut workspace,
         &structure,
         &mut dst,

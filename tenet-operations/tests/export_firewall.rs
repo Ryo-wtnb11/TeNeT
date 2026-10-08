@@ -369,7 +369,6 @@ const CRATE_INTERNAL: &[&str] = &[
     "with_host_pool",
     // Unrouted replay entries.
     "tensoradd_structure_with_strided_kernel",
-    "tree_transform_structure_with_strided_kernel",
     "tree_transform_structure_with_structural_recoupling",
     "tree_transform_structure_overwrite_with_structural_recoupling",
     "tree_transform_structure_with_structural_recoupling_raw",

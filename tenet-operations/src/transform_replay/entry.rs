@@ -59,58 +59,9 @@ where
     Ok(())
 }
 
-pub(crate) fn tree_transform_structure_with_strided_kernel<
-    A,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    kernels: &mut A,
-    workspace: &mut TreeTransformWorkspace<D>,
-    structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
-    C: Copy,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    let src_structure = Arc::clone(src.structure());
-    tree_transform_structure_with_strided_kernel_raw(
-        kernels,
-        workspace,
-        structure,
-        &dst_structure,
-        &src_structure,
-        dst.data_mut(),
-        src.data(),
-        alpha,
-        beta,
-    )
-}
-
-/// Replays a prepared tree-transform structure on host slices.
+/// Reference oracle: per-block pack, scalar recoupling, scatter. Production
+/// replay is the batched-GEMM path in `tree_transform_structure_with_structural_recoupling_raw`.
+#[cfg(any(test, feature = "testing"))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the raw kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha/beta explicit"
@@ -152,6 +103,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the overwrite kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha explicit"
@@ -192,6 +144,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the shared replay helper preserves the raw kernel inputs and destination update mode explicitly"

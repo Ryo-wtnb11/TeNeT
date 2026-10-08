@@ -29,9 +29,13 @@ blas-accelerate = ["tenet-dense/blas-accelerate"]
 blas-openblas = ["tenet-dense/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject"]
+# Reference oracle for tree-transform replay (per-block strided driver and
+# scalar recoupling); production replay never uses it (#1767).
+testing = []
 cuda = ["tenet-dense/cuda"]
 
 [dev-dependencies]
+tenet-operations = { path = ".", default-features = false, features = ["testing"] }
 # Microbench for the #230 non-contiguous strided-combine regime. Informational,
 # not a pass/fail gate (shared CI runners are too noisy); the real gate is the
 # size_of canary in host_scalar_kernels.rs. Only pulled in for `cargo bench`.
