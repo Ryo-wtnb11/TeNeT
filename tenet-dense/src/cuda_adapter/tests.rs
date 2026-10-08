@@ -186,6 +186,21 @@ fn every_spectrum_consumer_rejects_a_foreign_spectrum_before_any_device_work() {
             cuda_copy_spectrum_into::<Complex64>(&mut ctx, spectrum, &mut dst, 0, 3).unwrap_err();
         assert_foreign_spectrum(err, "cuda_copy_spectrum", "spectrum");
         assert_eq!(cuda_transfer_stats(), before, "copy, len {len}");
+
+        // A local spectrum into a `dst` recorded on device 1: rejected before
+        // the complex cast and before the empty-spectrum early return.
+        let spectrum = if len == 0 {
+            spectrum_on(0, 0)
+        } else {
+            cuda_eigh_region::<f64>(&mut ctx, &src, 0, 2).unwrap().0
+        };
+        dst.device = 1;
+        let before = cuda_transfer_stats();
+        let err =
+            cuda_copy_spectrum_into::<Complex64>(&mut ctx, spectrum, &mut dst, 0, 3).unwrap_err();
+        dst.device = 0;
+        assert_foreign_spectrum(err, "cuda_copy_spectrum", "dst");
+        assert_eq!(cuda_transfer_stats(), before, "foreign dst, len {len}");
     }
     assert_eq!(
         dst.download::<Complex64>(&ctx).unwrap(),
@@ -232,6 +247,26 @@ fn a_spectrum_from_another_device_is_rejected_by_every_consumer() {
         "no consumer submits anything"
     );
     assert_eq!(dst.download::<f64>(&consumer).unwrap(), vec![7.0; 4]);
+
+    // A local spectrum, empty or not, into a `dst` living on device 1.
+    let local_src = CudaDenseStorage::upload::<f64>(&consumer, &[2.0, 0.5, 0.5, 1.0]).unwrap();
+    let local = cuda_eigh_region::<f64>(&mut consumer, &local_src, 0, 2)
+        .unwrap()
+        .0;
+    let mut foreign_dst =
+        CudaDenseStorage::upload::<Complex64>(&producer, &[Complex64::new(7.0, 0.0); 4]).unwrap();
+    for spectrum in [local, spectrum_on(0, 0)] {
+        let before = cuda_transfer_stats();
+        let err =
+            cuda_copy_spectrum_into::<Complex64>(&mut consumer, spectrum, &mut foreign_dst, 0, 3)
+                .unwrap_err();
+        assert_foreign_spectrum(err, "cuda_copy_spectrum", "dst");
+        assert_eq!(cuda_transfer_stats(), before, "foreign dst submits nothing");
+    }
+    assert_eq!(
+        foreign_dst.download::<Complex64>(&producer).unwrap(),
+        vec![Complex64::new(7.0, 0.0); 4]
+    );
 }
 
 #[test]

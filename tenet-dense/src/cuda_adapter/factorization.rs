@@ -17,7 +17,9 @@ fn with_cuda_linalg<R: Send>(
 ///
 /// It records the device of the context whose solver produced it, as
 /// [`CudaDenseStorage`] does, and every consumer rejects a context on another
-/// device before any submission (#1766).
+/// device before any submission (#1766). Reference provenance — TensorKit,
+/// TensorOperations and QSpace have no explicit device-admission path to
+/// port — is recorded in `docs/audit/issue-1766-cuda-spectrum-device.md`.
 pub struct CudaSpectrum {
     pub(super) tensor: Tensor,
     pub(super) device: usize,
@@ -40,16 +42,20 @@ pub(super) fn ensure_spectra_device(
     op: &'static str,
     spectra: &[CudaSpectrum],
 ) -> Result<(), DenseError> {
-    spectra
+    // The operand name is formatted only for the error: a matching download,
+    // one spectrum per coupled sector, allocates nothing on the host here.
+    match spectra
         .iter()
         .enumerate()
-        .try_for_each(|(index, spectrum)| {
-            ensure_cuda_device(
-                ctx_device,
-                op,
-                &[(&format!("spectra[{index}]"), spectrum.device)],
-            )
-        })
+        .find(|(_, spectrum)| spectrum.device != ctx_device)
+    {
+        Some((index, spectrum)) => ensure_cuda_device(
+            ctx_device,
+            op,
+            &[(&format!("spectra[{index}]"), spectrum.device)],
+        ),
+        None => Ok(()),
+    }
 }
 /// Downloads `spectra` (all from factorizations of payload `D`, so in its real
 /// lane) with at most one transfer: two or more nonempty spectra are first concatenated on
@@ -106,7 +112,8 @@ pub fn cuda_download_spectra<D: CudaScalar>(
 /// casts it to `D` (imaginary part `+0`): one device allocation of
 /// `len * size_of::<D>()` bytes. Then one [`cuda_copy_region_into`] of a
 /// `1 x len` region with leading dimension `dst_stride`, with its value
-/// contract. Nothing crosses the host boundary. An empty spectrum is a no-op.
+/// contract. Nothing crosses the host boundary. An empty spectrum is a no-op
+/// once `spectrum` and `dst` are proven to be on the context's device.
 pub fn cuda_copy_spectrum_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     spectrum: CudaSpectrum,
@@ -115,7 +122,11 @@ pub fn cuda_copy_spectrum_into<D: CudaScalar>(
     dst_stride: usize,
 ) -> Result<(), DenseError> {
     const OP: &str = "cuda_copy_spectrum";
-    ensure_cuda_device(ctx.device, OP, &[("spectrum", spectrum.device)])?;
+    ensure_cuda_device(
+        ctx.device,
+        OP,
+        &[("spectrum", spectrum.device), ("dst", dst.device)],
+    )?;
     let len = spectrum.len();
     if len == 0 {
         return Ok(());
