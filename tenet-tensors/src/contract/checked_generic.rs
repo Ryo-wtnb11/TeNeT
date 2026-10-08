@@ -1146,10 +1146,12 @@ mod tests {
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.algebra_calls() > 0);
         assert_eq!(data.len(), output.space().required_len().unwrap());
+        // The destination's one identity read and admission style, then the
+        // final guard's style: commit reuses the admitted identity (#2046).
         assert!(left
             .events
             .borrow()
-            .ends_with(&[Event::Identity, Event::Style]));
+            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
 
         left.reset();
         right.reset();
@@ -1168,10 +1170,12 @@ mod tests {
         assert!(!Arc::ptr_eq(warm_output.provider_arc(), &right));
         assert_eq!(right.algebra_calls(), 0);
         assert_eq!(warm_data, data);
+        // The destination's one identity read and admission style, then the
+        // final guard's style: commit reuses the admitted identity (#2046).
         assert!(left
             .events
             .borrow()
-            .ends_with(&[Event::Identity, Event::Style]));
+            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
     }
 
     #[test]
@@ -1411,10 +1415,12 @@ mod tests {
                 .entries(),
             1
         );
+        // The destination's one identity read and admission style, then the
+        // final guard's style: commit reuses the admitted identity (#2046).
         assert!(left
             .events
             .borrow()
-            .ends_with(&[Event::Identity, Event::Style]));
+            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
     }
 
     /// Rank-1 legs with the listed `(sector, degeneracy)` pairs on each side.

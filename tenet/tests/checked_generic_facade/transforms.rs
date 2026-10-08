@@ -803,10 +803,9 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
     }
     let output = lhs.otimes(&rhs).unwrap();
     assert!(std::ptr::eq(output.provider(), first.as_ref()));
-    // One identity query more than the walks themselves: the
-    // sector-structure cache key (#2030). The final commit guard reuses the
-    // admitted identity instead of querying again (#2046).
-    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 3);
+    // The sector-structure cache key (#2030) and the final commit guard
+    // reuse the identity the checked walk admitted (#2046).
+    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 2);
     assert_eq!(second.identity_queries.load(Ordering::Relaxed), 1);
     assert!(first.final_style_guard_ran_last());
     assert!(first.algebra_queries.load(Ordering::Relaxed) > 0);

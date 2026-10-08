@@ -275,6 +275,8 @@ impl CheckedOnlyToy {
     /// and nothing queried this provider afterwards. Why not detect the
     /// commit online: the guard reads only the style, which F-phase symbol
     /// queries also read, and it reuses the admitted identity (#2046).
+    /// It only detects the guard while an F query follows admission, so keep
+    /// exact query counts next to it.
     fn final_style_guard_ran_last(&self) -> bool {
         let style = self.last_style_query.load(Ordering::Relaxed);
         style > self.last_f_query.load(Ordering::Relaxed)

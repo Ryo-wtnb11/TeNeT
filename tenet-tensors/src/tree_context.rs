@@ -200,8 +200,8 @@ where
             _,
             CheckedGenericPlanError<P::Error>,
             _,
-        >(provider, || {
-            let actual = source.validate_transformed_generic_checked_identity(provider)?;
+        >(provider, |provider_identity| {
+            let actual = source.validate_transformed_generic_checked_identity(provider_identity)?;
             if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
                 return Err(tenet_core::CoreError::UnsupportedFusionStyle {
                     expected: tenet_core::FusionStyleKind::Generic,
@@ -216,7 +216,9 @@ where
                     }
                     .into());
                 }
-                if storage_source.validate_transformed_generic_checked_identity(provider)? != actual
+                if storage_source
+                    .validate_transformed_generic_checked_identity(provider_identity)?
+                    != actual
                 {
                     return Err(OperationError::StructureMismatch {
                         tensor: "checked adjoint identity",

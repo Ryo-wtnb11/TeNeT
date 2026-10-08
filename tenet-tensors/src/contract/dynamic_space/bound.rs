@@ -142,6 +142,19 @@ impl<R> BoundDynamicFusionMapSpace<R> {
 }
 
 impl<R> BoundDynamicFusionMapSpace<R> {
+    /// Identity this binding admitted from its provider.
+    ///
+    /// Why not `self.provider.rule_identity()`: `FusionRule::rule_identity`
+    /// (and `CheckedGenericFusion`'s, under the same contract) is stable, so
+    /// the recorded identity is the provider's; rebuilding a content identity
+    /// would only repeat its allocation (#2046).
+    fn held_rule_identity(&self) -> &RuleIdentity {
+        self.space
+            .admission()
+            .rule_identity()
+            .expect("every bound space carries a Complete admission")
+    }
+
     #[inline]
     /// Read-only access to the validated dynamic layout for expert planning
     /// and diagnostics. The provider remains attached to this binding.
@@ -200,17 +213,23 @@ where
     where
         E: From<CheckedGenericStructureError<R::Error>>,
     {
+        let root_identity = std::cell::OnceCell::new();
         let structure =
             FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
                 R,
                 E,
                 _,
-            >(provider.as_ref(), || {
+            >(provider.as_ref(), |identity| {
                 let homspace = build_homspace()?;
                 Self::validate_checked_generic_style(provider.as_ref())?;
+                root_identity
+                    .set(identity.clone())
+                    .expect("checked root builder runs once");
                 Ok(homspace)
             })?;
-        let identity = provider.rule_identity();
+        let identity = root_identity
+            .into_inner()
+            .expect("successful checked root builder records identity");
         let (homspace, subblock_structure) = structure.commit_with_complete_homspace();
         let homspace = homspace.expect("complete checked builder retains its HomSpace");
         let nout = homspace.codomain().len();
@@ -301,7 +320,7 @@ where
                 P,
                 E,
                 _,
-            >(provider, || {
+            >(provider, |provider_identity| {
                 let homspace = build_homspace()?;
                 if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
                     return Err(CheckedGenericStructureError::from(
@@ -312,21 +331,14 @@ where
                     )
                     .into());
                 }
-                let expected = self
-                    .space
-                    .admission()
-                    .rule_identity()
-                    .expect("checked Generic binding is complete")
-                    .clone();
-                let provider_identity = provider.rule_identity();
                 crate::admission::admit_checked_generic_providers(
-                    &expected,
-                    &provider_identity,
+                    self.held_rule_identity(),
+                    provider_identity,
                     [provider.fusion_style()],
                 )
                 .map_err(CheckedGenericStructureError::from)?;
                 actual
-                    .set(provider_identity)
+                    .set(provider_identity.clone())
                     .expect("checked admission runs exactly once");
                 destination
                     .set(homspace.clone())
@@ -358,18 +370,9 @@ where
                 tensor: "checked Generic provider binding",
             });
         }
-        // Why not `self.provider.rule_identity()`: `CheckedGenericFusion`
-        // requires an immutable identity, so the one this binding recorded
-        // from its provider is that provider's identity; rebuilding it would
-        // only repeat a content-identity allocation (#2046).
-        let held = self
-            .space
-            .admission()
-            .rule_identity()
-            .expect("checked Generic binding is complete");
         crate::admission::admit_checked_generic_providers(
             &prepared.identity,
-            held,
+            self.held_rule_identity(),
             [self.provider.fusion_style()],
         )
         .map_err(OperationError::from_core_preserving_context)?;
@@ -928,18 +931,20 @@ where
         let nin = homspace.domain().len();
         let structure = homspace
             .clone()
-            .prepare_complete_coupled_subblock_structure_generic_checked_after(provider, || {
-                let provider_identity = provider.rule_identity();
-                crate::admission::admit_checked_generic_providers(
-                    &self.provider.rule_identity(),
-                    &provider_identity,
-                    [self.provider.fusion_style(), provider.fusion_style()],
-                )?;
-                actual
-                    .set(provider_identity)
-                    .expect("checked admission runs exactly once");
-                Ok(())
-            })?;
+            .prepare_complete_coupled_subblock_structure_generic_checked_after(
+                provider,
+                |provider_identity| {
+                    crate::admission::admit_checked_generic_providers(
+                        self.held_rule_identity(),
+                        provider_identity,
+                        [self.provider.fusion_style(), provider.fusion_style()],
+                    )?;
+                    actual
+                        .set(provider_identity.clone())
+                        .expect("checked admission runs exactly once");
+                    Ok(())
+                },
+            )?;
         Ok(PreparedCheckedGenericDynamicSpace {
             nout,
             nin,
@@ -959,7 +964,7 @@ where
     ) -> Result<Self, OperationError> {
         crate::admission::admit_checked_generic_providers(
             &prepared.identity,
-            &self.provider.rule_identity(),
+            self.held_rule_identity(),
             [self.provider.fusion_style()],
         )
         .map_err(OperationError::from_core_preserving_context)?;

@@ -477,7 +477,7 @@ fn checked_homspace_factory_captures_reset_epoch_before_the_producer() {
     let prepared =
         FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with(
             &rule,
-            || {
+            |_| {
                 reset_core_intern_tables();
                 Ok::<_, CheckedGenericStructureError<Infallible>>(hom())
             },
@@ -769,7 +769,7 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
     assert_eq!(first_id, other_id);
     assert!(!first_id.downgrade().matches(&other_id));
     let prepare = |hom: FusionTreeHomSpace| {
-        hom.prepare_complete_coupled_subblock_structure_generic_checked_after(&rule, || Ok(()))
+        hom.prepare_complete_coupled_subblock_structure_generic_checked_after(&rule, |_| Ok(()))
             .unwrap()
     };
     let first = prepare(first_hom);

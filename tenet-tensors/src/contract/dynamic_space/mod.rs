@@ -1,9 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
-    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeRigidSymbols, PreparedBlockStructure, RuleIdentity,
+    BlockKey, BlockStructure, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols,
+    PreparedBlockStructure, RuleIdentity,
 };
 
 use crate::{OperationError, TreeTransformOperation};
@@ -11,6 +11,8 @@ use crate::{OperationError, TreeTransformOperation};
 use std::fmt;
 #[cfg(test)]
 use tenet_core::{CheckedFusionAlgebra, MultiplicityFreeFusionRule};
+#[cfg(test)]
+use tenet_core::{CheckedGenericFusion, CheckedGenericStructureError};
 #[cfg(test)]
 use tenet_operations::OutputAxisOrder;
 use tenet_operations::TensorContractSpec;
@@ -691,27 +693,25 @@ impl DynamicFusionMapSpace {
         Self::from_final_homspace_generic(rule, homspace)
     }
 
-    pub(crate) fn validate_transformed_generic_checked_identity<R>(
+    pub(crate) fn validate_transformed_generic_checked_identity(
         &self,
-        rule: &R,
-    ) -> Result<RuleIdentity, CheckedGenericStructureError<R::Error>>
-    where
-        R: CheckedGenericFusion,
-    {
+        actual: &RuleIdentity,
+    ) -> Result<RuleIdentity, CoreError> {
         let expected = match &self.admission {
             FusionSpaceAdmission::Complete(identity) => identity.clone(),
             _ => {
                 return Err(CoreError::MalformedFusionTree {
                     message: "checked Generic owned transform requires a Complete source layout",
-                }
-                .into())
+                })
             }
         };
-        let actual = rule.rule_identity();
-        if expected != actual {
-            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
+        if &expected != actual {
+            return Err(CoreError::FusionRuleMismatch {
+                expected,
+                actual: actual.clone(),
+            });
         }
-        Ok(actual)
+        Ok(expected)
     }
 
     #[cfg(all(test, feature = "racah-generated"))]
@@ -731,8 +731,9 @@ impl DynamicFusionMapSpace {
                 R,
                 CheckedGenericStructureError<R::Error>,
                 _,
-            >(rule, || {
-                let actual_identity = self.validate_transformed_generic_checked_identity(rule)?;
+            >(rule, |identity| {
+                let actual_identity =
+                    self.validate_transformed_generic_checked_identity(identity)?;
                 if rule.fusion_style() != FusionStyleKind::Generic {
                     return Err(CoreError::UnsupportedFusionStyle {
                         expected: FusionStyleKind::Generic,
