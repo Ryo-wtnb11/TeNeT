@@ -611,45 +611,44 @@ where
         } else {
             None
         };
-        let (core_storage, core_len, zero_core) = match (&mut temporary, temporary_len) {
-            (Some((fresh, storage)), Some(len)) => (storage, len, !*fresh),
-            _ => (&mut *dst, self.member_len, zero_inactive),
-        };
-        let mut core_destination =
-            StackedStorageViewMut::new::<D>(core_storage, core_len, lhs.members, core_len)?;
-        if zero_core {
-            for region in &workspace.device.zero_regions {
-                tenet_dense::cuda_region_zero::<D>(
-                    ctx,
-                    &mut core_destination.storage_mut().0,
-                    region,
-                )
-                .map_err(tenet_operations::OperationError::Dense)?;
+        let device = &workspace.device;
+        // The temporary goes back to the workspace on every exit, so a failed
+        // call never makes the next one upload it again.
+        let result = (|| {
+            let (core_storage, core_len, zero_core) = match (&mut temporary, temporary_len) {
+                (Some((fresh, storage)), Some(len)) => (storage, len, !*fresh),
+                _ => (&mut *dst, self.member_len, zero_inactive),
+            };
+            let mut core_destination =
+                StackedStorageViewMut::new::<D>(core_storage, core_len, lhs.members, core_len)?;
+            if zero_core {
+                for region in &device.zero_regions {
+                    tenet_dense::cuda_region_zero::<D>(
+                        ctx,
+                        &mut core_destination.storage_mut().0,
+                        region,
+                    )
+                    .map_err(tenet_operations::OperationError::Dense)?;
+                }
             }
-        }
-        plan.execute_direct_on_storage_prezeroed(
-            &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
-            &mut core_destination,
-            &left,
-            &right,
-        )?;
-        if let Some((_, storage)) = temporary {
-            let result: Result<(), Error> = (|| {
-                let regions = workspace.device.copy_regions.as_ref().ok_or_else(|| {
+            plan.execute_direct_on_storage_prezeroed(
+                &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
+                &mut core_destination,
+                &left,
+                &right,
+            )?;
+            if let Some((_, storage)) = &temporary {
+                let regions = device.copy_regions.as_ref().ok_or_else(|| {
                     Error::InvalidArgument("CopyC device regions are unprepared".into())
                 })?;
-                regions.execute_overwrite(
-                    ctx,
-                    &storage,
-                    workspace.device.copy_coefficients.as_ref(),
-                    dst,
-                )?;
-                Ok(())
-            })();
+                regions.execute_overwrite(ctx, storage, device.copy_coefficients.as_ref(), dst)?;
+            }
+            Ok(())
+        })();
+        if let Some((_, storage)) = temporary {
             workspace.copy_c_temporary = Some((storage, lhs.members));
-            result?;
         }
-        Ok(())
+        result
     }
 
     /// Overwrites workspace-owned device output; any error follows the
@@ -818,7 +817,21 @@ mod failure_tests {
                 .clone();
             let bytes = workspace.retained_bytes();
 
-            assert!(plan.execute(&corrupt, &rhs, &mut workspace).is_err());
+            // Only the replay compares the operand layout with its own.
+            let Err(crate::error::Error::Operation(error)) =
+                plan.execute(&corrupt, &rhs, &mut workspace).map(|_| ())
+            else {
+                panic!("the corrupted stack must fail as an operation error");
+            };
+            assert!(
+                matches!(
+                    *error,
+                    tenet_tensors::OperationError::InvalidArgument {
+                        message: "stacked operand does not match the replay's members or layout"
+                    }
+                ),
+                "{error:?}"
+            );
             assert!(
                 workspace.output.spare.is_some(),
                 "the error is after the take"
@@ -831,6 +844,76 @@ mod failure_tests {
             );
             assert!(workspace.take_output().is_some());
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_copy_c_failure_keeps_the_temporary_and_the_output() {
+        // What: on the CUDA CopyC route, a core error after the temporary
+        // and the output are taken (forced as on Host by a consistently
+        // short operand) returns both to the workspace, so the next call
+        // uploads neither and recovers.
+        let runtime = Runtime::builder().cuda(0).build().unwrap();
+        let rule = Arc::new(U1FusionRule);
+        let v = GradedSpace::try_new(
+            Arc::clone(&rule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 3),
+            ],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new(rule, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)]).unwrap();
+        let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w], 5).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w], [&v], 6).unwrap();
+        let lhs = StackedTensorMap::pack(&[&a, &a])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let rhs = StackedTensorMap::pack(&[&b, &b])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let mut host_corrupt = StackedTensorMap::pack(&[&a, &a]).unwrap();
+        host_corrupt.member_len -= 1;
+        host_corrupt
+            .storage
+            .truncate(host_corrupt.member_len * host_corrupt.members);
+        let mut corrupt = host_corrupt.to_cuda().unwrap();
+        corrupt.member_len = host_corrupt.member_len;
+        let spec = super::super::super::ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[1, 0],
+            domain: &[2],
+        };
+        let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+        assert!(plan.copy_c().is_some());
+        let mut workspace = plan.workspace().unwrap();
+        let expected = plan
+            .execute(&lhs, &rhs, &mut workspace)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .storage;
+        let bytes = workspace.retained_bytes();
+
+        let error = plan
+            .execute(&corrupt, &rhs, &mut workspace)
+            .map(|_| ())
+            .unwrap_err();
+        eprintln!("cuda CopyC core error: {error:?}");
+        assert!(
+            workspace.copy_c_temporary.is_some(),
+            "the temporary is restored"
+        );
+        assert!(workspace.output.spare.is_some(), "the output is kept");
+        assert!(workspace.take_output().is_none());
+        assert_eq!(workspace.retained_bytes(), bytes);
+        let output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        assert_eq!(output.to_host().unwrap().storage, expected);
     }
 }
 

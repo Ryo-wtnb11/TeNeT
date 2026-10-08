@@ -2522,7 +2522,20 @@ mod tests {
             .clone();
         let bytes = workspace.retained_bytes();
 
-        assert!(plan.execute(&corrupt, &rhs, &mut workspace).is_err());
+        // The stack view built inside the replay is the first reader of the
+        // short payload; every earlier check passes.
+        let Err(crate::error::Error::Operation(error)) =
+            plan.execute(&corrupt, &rhs, &mut workspace).map(|_| ())
+        else {
+            panic!("the corrupted stack must fail as an operation error");
+        };
+        assert!(
+            matches!(
+                *error,
+                tenet_tensors::OperationError::ElementCountMismatch { .. }
+            ),
+            "{error:?}"
+        );
         assert!(
             workspace.output.spare.is_some(),
             "the error is after the take"
