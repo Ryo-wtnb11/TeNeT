@@ -127,8 +127,6 @@ pub use physical::{expand_physical_host, project_physical_host, PhysicalConversi
 pub use tenet_operations::cuda;
 #[doc(hidden)]
 pub use tenet_operations::host_pool;
-#[cfg(test)]
-pub(crate) use tenet_operations::storage_scratch;
 pub use tenet_operations::ContractDestinationInit;
 #[cfg(test)]
 pub(crate) use tenet_operations::HostTreeTransformWorkspace;

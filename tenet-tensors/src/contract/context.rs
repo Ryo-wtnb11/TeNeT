@@ -6,15 +6,11 @@ use tenet_core::{
     BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap, TensorStorage,
 };
-#[cfg(test)]
-use tenet_core::{ScratchStorage, SimilarStorage};
 
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::mode::TreeStructureSource;
-#[cfg(test)]
-use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
@@ -23,8 +19,6 @@ use crate::{
 };
 use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned};
 
-#[cfg(test)]
-use super::backend::tensorcontract_structure_with_storage_workspace_dense_executor;
 use super::backend::TensorContractBackend;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
@@ -368,55 +362,6 @@ where
         } = self;
         let structure = cache.get_or_compile(dst, lhs, rhs, axes)?;
         backend.tensorcontract_structure_into(workspace, structure, dst, lhs, rhs, alpha, beta)
-    }
-}
-
-impl<D> TensorContractExecutionContext<D, DenseTreeTransformOperations>
-where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tensorcontract_into_storage_workspace<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        storage_workspace: &mut StorageTensorContractWorkspace<DDst::Similar>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let structure = self.cache.get_or_compile(dst, lhs, rhs, axes)?;
-        tensorcontract_structure_with_storage_workspace_dense_executor(
-            self.backend.dense_mut(),
-            storage_workspace,
-            structure,
-            dst,
-            lhs,
-            rhs,
-            alpha,
-            beta,
-        )
     }
 }
 

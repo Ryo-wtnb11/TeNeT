@@ -1,4 +1,4 @@
-use tenet_core::{ScratchStorage, SimilarStorage};
+use tenet_core::SimilarStorage;
 
 /// Crate-internal same-placement scratch allocator.
 ///
@@ -76,51 +76,6 @@ impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
     #[inline]
     pub fn source_and_destination_mut(&mut self) -> (&Source, &mut Destination) {
         (&self.source, &mut self.destination)
-    }
-}
-
-/// Storage-aware dense-contraction replay workspace.
-///
-/// The output scratch is allocated from destination storage, because it is the
-/// dense contraction result scattered into the destination tensor layout.
-#[derive(Clone, Debug)]
-pub struct StorageTensorContractWorkspace<OutputScratch> {
-    output: Option<OutputScratch>,
-    zero_strides: Vec<isize>,
-}
-
-impl<OutputScratch> Default for StorageTensorContractWorkspace<OutputScratch> {
-    fn default() -> Self {
-        Self {
-            output: None,
-            zero_strides: Vec::new(),
-        }
-    }
-}
-
-impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
-    pub fn prepare_from_dst_storage<T, DDst>(&mut self, dst_storage: &DDst, len: usize, zero: T)
-    where
-        T: Clone,
-        DDst: SimilarStorage<T, Similar = OutputScratch>,
-        OutputScratch: ScratchStorage<T>,
-    {
-        match &mut self.output {
-            Some(output) if output.placement() == dst_storage.placement() => {
-                output.reset_filled(len, zero)
-            }
-            _ => self.output = Some(dst_storage.similar_filled(len, zero)),
-        }
-    }
-
-    #[inline]
-    pub fn replay_parts_mut(&mut self) -> (&mut Vec<isize>, &mut OutputScratch) {
-        (
-            &mut self.zero_strides,
-            self.output
-                .as_mut()
-                .expect("storage tensor-contract output scratch prepared before replay"),
-        )
     }
 }
 
