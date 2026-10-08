@@ -32,8 +32,8 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{
-    ContractPlan, ContractSpec, CudaStorage, Direction, Error, GradedSpace, Runtime,
-    StackedTensorMap, TensorMap,
+    ContractPlan, ContractSpec, ContractWorkspace, CudaStorage, Direction, Error, GradedSpace,
+    Runtime, StackedTensorMap, TensorMap,
 };
 
 fn check_signed_core<R: DeviceRule, D: DevicePayload>(
@@ -216,6 +216,17 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
             assert_eq!(payload_snapshot(&wrong_dst), wrong_before);
             assert_eq!(payload_snapshot(&dst), before);
         }
+        let role = if swapped { TwistRole::A } else { TwistRole::B };
+        check_changed_input_reuse(
+            &plan,
+            &members,
+            &mut [&mut workspace, &mut other],
+            |member| {
+                fermionic_blas_contract_oracle_partitioned(member, role, 1, |tensor, legs| {
+                    tensor.twist(legs, Direction::Forward).unwrap()
+                })
+            },
+        );
     }
     drop(plan);
     drop(workspace);
@@ -405,6 +416,20 @@ fn signed_core_zeroes_inactive_blocks_after_poisoning() {
                 );
             }
         }
+        let members: Vec<_> = (0..count)
+            .map(|_| Case {
+                name: case.name,
+                lhs: case.lhs.clone(),
+                rhs: case.rhs.clone(),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: case.dense,
+            })
+            .collect();
+        check_changed_input_reuse(&plan, &members, &mut [&mut workspace], |member| {
+            member.host()
+        });
     }
 }
 
@@ -418,6 +443,68 @@ fn payload_snapshot<R: DeviceRule, D: DevicePayload>(
             .map(|i| host.member(i).unwrap().dense_data().unwrap().to_vec())
             .collect::<Vec<_>>()
     )
+}
+
+/// Changed-input workspace reuse (#1732). Every workspace in `workspaces` has
+/// already executed this member count with `members`. Each member is
+/// rescaled by its own negative factor, and both execution forms run again
+/// through those same workspaces; `execute_into` writes a NaN-poisoned
+/// destination. Each downloaded member must match `oracle` on the rescaled
+/// Host operands. A stale output or scratch value would still have the old
+/// value, which has the opposite sign.
+fn check_changed_input_reuse<R: DeviceRule, D: DevicePayload>(
+    plan: &ContractPlan<R, D, CudaStorage<D>>,
+    members: &[Case<R, D>],
+    workspaces: &mut [&mut ContractWorkspace<R, D, CudaStorage<D>>],
+    oracle: impl Fn(&Case<R, D>) -> TensorMap<R, D>,
+) {
+    let changed: Vec<_> = members
+        .iter()
+        .enumerate()
+        .map(|(i, member)| Case {
+            name: member.name,
+            lhs: member
+                .lhs
+                .scale(D::entry(-0.5 - i as f64 / 64.0, i as f64 / 32.0)),
+            rhs: member.rhs.scale(D::entry(1.25 + i as f64 / 16.0, 0.0)),
+            lhs_axes: member.lhs_axes.clone(),
+            rhs_axes: member.rhs_axes.clone(),
+            output_axes: member.output_axes.clone(),
+            dense: member.dense,
+        })
+        .collect();
+    let stack = |pick: fn(&Case<R, D>) -> &TensorMap<R, D>| {
+        StackedTensorMap::pack(&changed.iter().map(pick).collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap()
+    };
+    let (lhs, rhs) = (stack(|m| &m.lhs), stack(|m| &m.rhs));
+    let expected: Vec<_> = changed.iter().map(&oracle).collect();
+    let poison: Vec<_> = changed.iter().map(poisoned_destination).collect();
+    for workspace in workspaces.iter_mut() {
+        let returned = plan
+            .execute(&lhs, &rhs, workspace)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        let mut dst = StackedTensorMap::pack(&poison.iter().collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, workspace).unwrap();
+        let written = dst.to_host().unwrap();
+        for (i, (member, expected)) in changed.iter().zip(&expected).enumerate() {
+            for actual in [&returned, &written] {
+                numerics::assert_nonzero_slices_close(
+                    member.name,
+                    actual.member(i).unwrap().dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    member.terms(),
+                );
+            }
+        }
+    }
 }
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -596,6 +683,24 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
         ));
         assert_eq!(payload_snapshot(&wrong_dst), before);
         assert!(workspace.retained_bytes() > 0);
+        let member_cases: Vec<_> = members
+            .iter()
+            .map(|(lhs, rhs)| Case {
+                name: case.name,
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: case.dense,
+            })
+            .collect();
+        check_changed_input_reuse(
+            &plan,
+            &member_cases,
+            &mut [&mut workspace, &mut second],
+            blas_contract_oracle,
+        );
     }
     drop(plan);
     drop(workspace);
@@ -735,6 +840,18 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
                 case.terms(),
             );
         }
+        let members: Vec<_> = (0..count)
+            .map(|_| Case {
+                name: case.name,
+                lhs: case.lhs.clone(),
+                rhs: case.rhs.clone(),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: case.dense,
+            })
+            .collect();
+        check_changed_input_reuse(&plan, &members, &mut [&mut workspace], blas_contract_oracle);
     }
 }
 
@@ -1071,6 +1188,12 @@ fn copy_c_nonzero_single_public_admission() {
                     assert_eq!(metrics.cuda.copy_calls, 0);
                     assert_eq!(payload_snapshot(&invalid), before);
                 }
+                check_changed_input_reuse(
+                    &plan,
+                    &members,
+                    &mut [&mut workspace, &mut other],
+                    blas_contract_oracle,
+                );
             }
             let held_with_eager = runtime
                 .cuda_plan_cache_stats()
@@ -1259,6 +1382,7 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
             assert_eq!(submissions(&metrics), (0, 0));
             assert_eq!(payload_snapshot(&invalid), before);
         }
+        check_changed_input_reuse(&plan, &members, &mut [&mut workspace, &mut other], &oracle);
         let eager_inputs: Vec<_> = members
             .iter()
             .map(|m| (m.lhs.to_cuda().unwrap(), m.rhs.to_cuda().unwrap()))
