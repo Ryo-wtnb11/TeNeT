@@ -207,6 +207,7 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "CheckedFusionAlgebra",
         "CheckedFusionSpaceError",
         "CheckedGenericAdmissionMode",
+        "CheckedGenericAdmittedFusionTreeBlockStructure",
         "CheckedGenericFusion",
         "CheckedGenericPivotal",
         "CheckedGenericRigidSymbols",
@@ -364,12 +365,15 @@ fn tenet_core_exports_exactly_the_pinned_names() {
 #[test]
 fn infallible_generic_tier_is_exported_only_behind_testing() {
     let expected = [
+        // Measurement counters of the Generic block composer (#1962).
+        "GenericBlockStepCounts",
         "GenericFusionSymbols",
         "GenericRigidSymbols",
         "generic_braid_tree_pair_block_ordered",
         "generic_permute_tree_pair_block_ordered",
         "generic_transpose_tree_pair",
         "generic_transpose_tree_pair_block_ordered",
+        "take_generic_block_step_counts",
     ]
     .into_iter()
     .map(str::to_owned)

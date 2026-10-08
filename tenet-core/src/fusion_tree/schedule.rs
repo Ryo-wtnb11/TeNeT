@@ -366,7 +366,7 @@ pub(super) trait BlockDriver {
     type State;
     type Error;
     /// What one block braid needs besides the state: the prepared Artin
-    /// schedule (and, for Generic trees, the permutation).
+    /// schedule.
     type BraidSchedule<'s>;
     fn bend(&mut self, state: Self::State, bend: Bend) -> Result<Self::State, Self::Error>;
     fn braid_codomain(

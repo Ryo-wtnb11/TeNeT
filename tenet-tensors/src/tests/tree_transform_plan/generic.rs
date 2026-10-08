@@ -730,7 +730,7 @@ pub(super) fn b2c_toy_src_pair() -> FusionTreePairKey {
     })
 }
 
-fn dense_generic_source_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2] {
+pub(super) fn dense_generic_source_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2] {
     [MultiplicityIndex::ONE, MultiplicityIndex::new(2).unwrap()].map(|vertex| {
         FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(

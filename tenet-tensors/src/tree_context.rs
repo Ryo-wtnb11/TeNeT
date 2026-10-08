@@ -302,7 +302,6 @@ where
         None => {
             let build = |reuse: Option<&crate::tree_transform::GroupSpecReuse<'_, _>>| {
                 build_checked_generic_tree_pair_transform_group_plan_validated(
-                    provider,
                     operation.clone(),
                     &source_proof,
                     reuse,
