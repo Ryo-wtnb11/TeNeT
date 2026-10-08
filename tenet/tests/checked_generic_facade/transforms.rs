@@ -404,6 +404,118 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
 }
 
 #[test]
+fn checked_unit_insert_correspondence_failure_does_not_publish_destination() {
+    if run_isolated_or_return(
+        "TENET_CHECKED_UNIT_INSERT_CORRESPONDENCE_FAILURE_ISOLATED",
+        "transforms::checked_unit_insert_correspondence_failure_does_not_publish_destination",
+    ) {
+        return;
+    }
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(241));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&x], [&x, &x], |_, _| 3.0).unwrap();
+
+    // Negative fixture only: after the source exists, claim a second channel
+    // for 1 x X. Destination preparation succeeds, but the larger layout no
+    // longer corresponds to inserting an identity leg into `source`.
+    provider.unit_layout_fault.store(1, Ordering::Relaxed);
+    forget_cached_structures();
+    let before =
+        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    assert_eq!(before.entries(), 0);
+
+    let error = source
+        .insert_unit(0, Side::Codomain, tenet::typed::Duality::Plain)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        GenericTensorError::Structure(CheckedGenericStructureError::Core(
+            tenet::typed::CoreError::UnitLayoutCorrespondence
+        ))
+    ));
+    let after =
+        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    assert_eq!(after.admissions(), before.admissions());
+    assert_eq!(after.entries(), before.entries());
+    assert_eq!(after.charged_bytes(), before.charged_bytes());
+}
+
+#[test]
+fn checked_unit_remove_correspondence_failure_does_not_publish_destination() {
+    if run_isolated_or_return(
+        "TENET_CHECKED_UNIT_REMOVE_CORRESPONDENCE_FAILURE_ISOLATED",
+        "transforms::checked_unit_remove_correspondence_failure_does_not_publish_destination",
+    ) {
+        return;
+    }
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(242));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let vacuum = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)]).unwrap();
+    let base: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&x, &x], [&vacuum], |_, _| 5.0).unwrap();
+    let source = base
+        .insert_unit(0, Side::Codomain, tenet::typed::Duality::Plain)
+        .unwrap();
+
+    // Negative fixture only: rebuild the destination after suppressing the
+    // X x X -> 1 channel that the already-built source still contains.
+    provider.unit_layout_fault.store(2, Ordering::Relaxed);
+    forget_cached_structures();
+    let before =
+        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    assert_eq!(before.entries(), 0);
+
+    let error = source.remove_unit(0).unwrap_err();
+
+    assert!(matches!(
+        error,
+        GenericTensorError::Structure(CheckedGenericStructureError::Core(
+            tenet::typed::CoreError::UnitLayoutCorrespondence
+        ))
+    ));
+    let after =
+        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    assert_eq!(after.admissions(), before.admissions());
+    assert_eq!(after.entries(), before.entries());
+    assert_eq!(after.charged_bytes(), before.charged_bytes());
+}
+
+#[test]
+fn checked_unit_final_provider_guard_remains_structure_typed() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(243));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&x], [&x], |_, _| 7.0).unwrap();
+    let payload = source.dense_data().unwrap().as_ptr();
+
+    reset_provider_queries(&provider);
+    provider
+        .invalid_style_after_first_query
+        .store(true, Ordering::Relaxed);
+    let error = source
+        .insert_unit(0, Side::Codomain, tenet::typed::Duality::Plain)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        GenericTensorError::Structure(CheckedGenericStructureError::Core(
+            tenet::typed::CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            }
+        ))
+    ));
+    assert_eq!(provider.style_queries.load(Ordering::Relaxed), 2);
+    assert_eq!(source.dense_data().unwrap().as_ptr(), payload);
+    assert_eq!(source.dense_data().unwrap(), &[7.0]);
+}
+
+#[test]
 fn checked_only_contract_and_compose_keep_left_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(124));

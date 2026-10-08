@@ -1073,21 +1073,27 @@ where
             .insert_right_unit_checked(provider, position, dual)
             .map_err(|error| GenericTensorError::Facade(error.into()))?,
     };
-    let destination = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(tensor.logical_space().provider_arc()),
-        homspace,
-    )
-    .map_err(GenericTensorError::Structure)?;
+    // TensorKit cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91 derives the result
+    // space before sharing `t.data` in `insertleftunit` / `insertrightunit`:
+    // https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/indexmanipulations.jl#L103-L172
+    // Rust's checked provider can still reject the derived layout, so keep it
+    // staged until the exact source/destination correspondence is proved.
+    let validation_homspace = homspace.clone();
+    let prepared = tensor
+        .logical_space()
+        .prepare_final_homspace_generic_with_checked(provider, homspace)
+        .map_err(GenericTensorError::Structure)?;
     validate_unit_layout_correspondence_generic_checked(
         provider,
         (source_hom, tensor.logical_space().space().structure()),
-        (
-            destination.space().homspace(),
-            destination.space().structure(),
-        ),
+        (&validation_homspace, prepared.structure()),
         insertion,
     )
     .map_err(GenericTensorError::Structure)?;
+    let destination = tensor
+        .logical_space()
+        .commit_final_homspace_generic_bound_checked(prepared)
+        .map_err(map_checked_unit_commit_error)?;
     let data = tensor.shareable_dense_payload();
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
@@ -1137,26 +1143,41 @@ where
     let homspace = source_hom
         .remove_unit_checked(provider, axis)
         .map_err(|error| GenericTensorError::Facade(error.into()))?;
-    let destination = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(tensor.logical_space().provider_arc()),
-        homspace,
-    )
-    .map_err(GenericTensorError::Structure)?;
+    // TensorKit cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91 keeps the payload
+    // only after deriving the smaller space in `removeunit`:
+    // https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/indexmanipulations.jl#L174-L197
+    // The checked Rust path additionally delays publication until its layout
+    // correspondence with the already-admitted larger source is proved.
+    let validation_homspace = homspace.clone();
+    let prepared = tensor
+        .logical_space()
+        .prepare_final_homspace_generic_with_checked(provider, homspace)
+        .map_err(GenericTensorError::Structure)?;
     validate_unit_layout_correspondence_generic_checked(
         provider,
-        (
-            destination.space().homspace(),
-            destination.space().structure(),
-        ),
+        (&validation_homspace, prepared.structure()),
         (source_hom, tensor.logical_space().space().structure()),
         insertion,
     )
     .map_err(GenericTensorError::Structure)?;
+    let destination = tensor
+        .logical_space()
+        .commit_final_homspace_generic_bound_checked(prepared)
+        .map_err(map_checked_unit_commit_error)?;
     let data = tensor.shareable_dense_payload();
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
         repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
     })
+}
+
+fn map_checked_unit_commit_error<E>(error: OperationError) -> GenericTensorError<E> {
+    match error {
+        OperationError::Core(error) => {
+            GenericTensorError::Structure(CheckedGenericStructureError::Core(error))
+        }
+        error => GenericTensorError::from(error),
+    }
 }
 
 /// [`map_spectrum`]'s cross-dtype sibling: the same sector-and-length

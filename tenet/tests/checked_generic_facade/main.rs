@@ -29,6 +29,28 @@ use tenet::typed::{
 };
 use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
 
+/// Re-executes exactly one global-cache probe in a fresh process. This binary
+/// also contains ordinary tests that mutate the same caches without a shared
+/// lock, so test-thread serialization inside one probe is insufficient.
+fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+    if std::env::var_os(isolated_env).is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_path])
+        .env(isolated_env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    true
+}
+
 /// The receiver's own split as leg roles: `rows = 0..nout`.
 #[cfg(feature = "racah-generated")]
 fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
@@ -110,7 +132,9 @@ struct CheckedOnlyToy {
     r_queries: AtomicUsize,
     malformed_f: AtomicBool,
     invalid_style: AtomicBool,
+    invalid_style_after_first_query: AtomicBool,
     extra_vacuum_channel: AtomicBool,
+    unit_layout_fault: AtomicUsize,
     use_product_probe: bool,
     fractional_dim: bool,
     fail_f_on_query: AtomicUsize,
@@ -138,7 +162,9 @@ impl CheckedOnlyToy {
             r_queries: AtomicUsize::new(0),
             malformed_f: AtomicBool::new(false),
             invalid_style: AtomicBool::new(false),
+            invalid_style_after_first_query: AtomicBool::new(false),
             extra_vacuum_channel: AtomicBool::new(false),
+            unit_layout_fault: AtomicUsize::new(0),
             use_product_probe: false,
             fractional_dim: false,
             fail_f_on_query: AtomicUsize::new(0),
@@ -200,6 +226,13 @@ impl CheckedOnlyToy {
                 _ => SectorVec::new(),
             }
         };
+        match self.unit_layout_fault.load(Ordering::Relaxed) {
+            1 if left.id() == 0 && right == self.x() => channels.push(SectorId::new(0)),
+            2 if left == self.x() && right == self.x() => {
+                channels.retain(|channel| channel.id() != 0);
+            }
+            _ => {}
+        }
         if self.extra_vacuum_channel.load(Ordering::Relaxed) && left.id() == 0 && right == self.x()
         {
             channels.push(SectorId::new(0));
@@ -313,7 +346,7 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        self.style_queries.fetch_add(1, Ordering::Relaxed);
+        let style_query = self.style_queries.fetch_add(1, Ordering::Relaxed) + 1;
         self.record_query();
         if self.commit_after_queries.load(Ordering::Relaxed) == 0
             && self.commit_identity_seen.load(Ordering::Relaxed)
@@ -321,7 +354,9 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         {
             self.commit_count.fetch_add(1, Ordering::Relaxed);
         }
-        if self.invalid_style.load(Ordering::Relaxed) {
+        if self.invalid_style.load(Ordering::Relaxed)
+            || (self.invalid_style_after_first_query.load(Ordering::Relaxed) && style_query > 1)
+        {
             FusionStyleKind::Unique
         } else {
             FusionStyleKind::Generic
@@ -378,6 +413,10 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         Ok(self.nsymbol(left, right, coupled))
     }
 }
+
+// Deliberately malformed provider fixture for negative unit-path tests only:
+// this marker makes the rejection path reachable, not a supported capability.
+impl tenet::sector::CheckedCanonicalUnitFusionRule for CheckedOnlyToy {}
 
 impl CheckedGenericRigidSymbols for CheckedOnlyToy {
     type Scalar = f64;
