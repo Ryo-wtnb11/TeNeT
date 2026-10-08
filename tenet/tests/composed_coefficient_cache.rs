@@ -1,34 +1,38 @@
-//! The categorical tree-transform plan tier (#1554).
+//! The composed-coefficient cache (cache 4 of #2014; #1554 before it).
 //!
 //! A truncation changes block dimensions but usually not which sectors are
-//! present. Such a degeneracy-only change misses the completed-structure
-//! cache (its key holds the exact layout) but must not rebuild the
-//! categorical plan (recoupling coefficients and tree-pair maps), and the
-//! result must be bit-identical to a cold Runtime's. A sector change must
-//! still rebuild.
-//!
-//! The plan tier is per Runtime until #2014-4 and observable only through the
-//! deprecated `Runtime::tree_transform_cache_info`; completed transformers are
-//! process-global (`tenet::cache`).
+//! present. Such a degeneracy-only change misses the completed-transformer
+//! cache (its key holds the exact layout) but must not recompose any source
+//! group's recoupling coefficients, and the result must be bit-identical to
+//! a cold Runtime's. A sector change must still compose the new groups.
+//! Unique fusion never enters the cache (TensorKit `NoCache`).
 #![allow(deprecated)]
 
 use std::sync::Arc;
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
 use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
-fn completed() -> tenet::cache::StructureCacheInfo {
+fn cache(kind: StructureCacheKind) -> StructureCacheInfo {
     tenet::cache::stats()
         .into_iter()
-        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .find(|info| info.kind() == kind)
         .unwrap()
 }
 
-/// Completed transformers are process-global: a test that counts one
-/// Runtime's coefficient-tier activity clears them first and must not race
-/// another test publishing the same keys.
+fn completed() -> StructureCacheInfo {
+    cache(StructureCacheKind::CompletedTreeTransformer)
+}
+
+fn groups() -> StructureCacheInfo {
+    cache(StructureCacheKind::TreeTransformCoefficients)
+}
+
+/// The caches are process-global: a test that counts their activity clears
+/// them first and must not race another test publishing the same keys.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
@@ -52,11 +56,12 @@ macro_rules! tensor {
 }
 
 /// Runs permute, braid and transpose on three spaces over one rule: `a` warms
-/// the plan tier, `b` has the same sectors with other degeneracies, and `c`
+/// the caches, `b` has the same sectors with other degeneracies, and `c`
 /// adds a sector. The warm result must be bit-identical to a cold Runtime's.
+/// `$cached` says whether the rule's fusion enters the coefficient cache.
 macro_rules! check_rule {
-    ($label:literal, $a:expr, $b:expr, $c:expr $(,)?) => {{
-        let (a, b, c) = ($a, $b, $c);
+    ($label:literal, $cached:expr, $a:expr, $b:expr, $c:expr $(,)?) => {{
+        let (cached, a, b, c): (bool, _, _, _) = ($cached, $a, $b, $c);
         let operations: [(&str, &dyn Fn(&TensorMap<_, f64>) -> TensorMap<_, f64>); 4] = [
             ("permute", &|t| t.permute(&[2, 0], &[3, 1]).unwrap()),
             ("braid", &|t| {
@@ -74,51 +79,55 @@ macro_rules! check_rule {
             tenet::cache::clear();
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
-            let plans_before = warm.tree_transform_cache_info().plans;
+            let groups_before = groups();
             let structures_before = completed();
+            assert_eq!(groups_before.misses() > 0, cached, "{what}: cold groups");
 
             let degeneracy_only = operation(&tensor!(&warm, &b));
-            let plans = warm.tree_transform_cache_info().plans;
+            let after = groups();
             let structures = completed();
             assert!(
                 structures.misses() > structures_before.misses(),
-                "{what}: a new layout must miss the completed-structure tier"
+                "{what}: a new layout must miss the completed-transformer cache"
             );
             assert_eq!(
-                plans.misses(),
-                plans_before.misses(),
-                "{what}: a degeneracy-only change rebuilt a categorical plan"
+                after.misses(),
+                groups_before.misses(),
+                "{what}: a degeneracy-only change recomposed a coefficient group"
             );
-            assert!(plans.hits() > plans_before.hits(), "{what}: no plan hit");
+            assert_eq!(after.hits() > groups_before.hits(), cached, "{what}: hits");
 
-            // Completed transformers are process-global: clear them so the
-            // cold Runtime builds through its own plan tier.
+            // Clear every cache so the cold Runtime composes from scratch.
             tenet::cache::clear();
             let cold = Runtime::builder().dense_threads(1).build().unwrap();
             let expected = operation(&tensor!(&cold, &b));
-            assert!(
-                cold.tree_transform_cache_info().plans.misses() > 0,
-                "{what}: the cold path must build through the plan tier"
-            );
+            assert_eq!(groups().misses() > 0, cached, "{what}: cold rebuild");
             assert_eq!(degeneracy_only.codomain(), expected.codomain(), "{what}");
             assert_eq!(degeneracy_only.domain(), expected.domain(), "{what}");
             assert_eq!(
                 bits(degeneracy_only.materialize().unwrap().dense_data().unwrap()),
                 bits(expected.materialize().unwrap().dense_data().unwrap()),
-                "{what}: warm plan result differs from a cold Runtime"
+                "{what}: warm result differs from a cold Runtime"
             );
 
+            let before_sector_change = groups();
             let _ = operation(&tensor!(&warm, &c));
-            assert!(
-                warm.tree_transform_cache_info().plans.misses() > plans.misses(),
-                "{what}: a sector change must rebuild the plan"
+            assert_eq!(
+                groups().misses() > before_sector_change.misses(),
+                cached,
+                "{what}: a sector change must compose its new groups"
             );
+            if !cached {
+                // What: Unique fusion never touches the coefficient cache.
+                let unique = groups();
+                assert_eq!((unique.entries(), unique.hits()), (0, 0), "{what}");
+            }
         }
     }};
 }
 
 #[test]
-fn u1_degeneracy_change_reuses_the_categorical_plan() {
+fn u1_degeneracy_change_reuses_the_composed_coefficients() {
     let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
@@ -129,6 +138,7 @@ fn u1_degeneracy_change_reuses_the_categorical_plan() {
     };
     check_rule!(
         "U(1)",
+        false,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 3), (0, 2), (1, 1)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
@@ -136,7 +146,7 @@ fn u1_degeneracy_change_reuses_the_categorical_plan() {
 }
 
 #[test]
-fn su2_degeneracy_change_reuses_the_categorical_plan() {
+fn su2_degeneracy_change_reuses_the_composed_coefficients() {
     let _serial = serial();
     let leg = |sectors: &[(usize, usize)]| {
         GradedSpace::try_new(
@@ -149,6 +159,7 @@ fn su2_degeneracy_change_reuses_the_categorical_plan() {
     };
     check_rule!(
         "SU(2)",
+        true,
         leg(&[(0, 2), (1, 2), (2, 1)]),
         leg(&[(0, 1), (1, 3), (2, 2)]),
         leg(&[(0, 2), (1, 2), (2, 1), (3, 1)]),
@@ -156,7 +167,7 @@ fn su2_degeneracy_change_reuses_the_categorical_plan() {
 }
 
 #[test]
-fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
+fn fermion_u1_degeneracy_change_reuses_the_composed_coefficients() {
     let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         let rule = ProductFusionRule::<FermionParityFusionRule, U1FusionRule>::new(
@@ -178,6 +189,7 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
     };
     check_rule!(
         "fZ2xU(1)",
+        false,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 1), (0, 3), (1, 2)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
@@ -186,7 +198,7 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
+fn checked_generic_su3_degeneracy_change_reuses_the_composed_coefficients() {
     let _serial = serial();
     use tenet::sector::SUNFusionRule;
 
@@ -200,6 +212,7 @@ fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
     };
     check_rule!(
         "SU(3)",
+        true,
         leg(&[([1, 0], 2), ([1, 1], 1)]),
         leg(&[([1, 0], 1), ([1, 1], 2)]),
         leg(&[([0, 0], 1), ([1, 0], 2), ([1, 1], 1)]),
@@ -207,9 +220,11 @@ fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
 }
 
 #[test]
-fn clear_resets_the_plan_tier() {
+fn deprecated_runtime_wrappers_report_and_clear_the_global_coefficient_cache() {
     let _serial = serial();
+    tenet::cache::clear();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let other = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
@@ -219,13 +234,18 @@ fn clear_resets_the_plan_tier() {
     )
     .unwrap();
     let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
-    let before = runtime.tree_transform_cache_info().plans;
-    assert!(before.entries() > 0 && before.charged_payload_bytes() > 0);
-    assert!(before.entries() <= before.entry_capacity());
-    assert!(before.charged_payload_bytes() <= before.byte_budget());
+    let before = runtime.tree_transform_cache_info();
+    // What: `groups` is the one process-global cache, seen alike through
+    // every Runtime; the removed plan tier always reads empty.
+    assert_eq!(before.groups, other.tree_transform_cache_info().groups);
+    assert!(before.groups.entries() > 0 && before.groups.charged_payload_bytes() > 0);
+    assert_eq!(before.groups.entries(), groups().entries());
+    assert_eq!(before.groups.entry_capacity(), usize::MAX);
+    assert!(before.groups.charged_payload_bytes() <= before.groups.byte_budget());
+    assert_eq!(before.plans, Default::default());
 
-    runtime.clear_tree_transform_cache();
-    let after = runtime.tree_transform_cache_info().plans;
+    other.clear_tree_transform_cache();
+    let after = runtime.tree_transform_cache_info().groups;
     assert_eq!(after.entries(), 0);
     assert_eq!(after.charged_payload_bytes(), 0);
     assert_eq!(after.misses(), 0);

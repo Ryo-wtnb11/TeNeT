@@ -125,7 +125,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(direct_operation, miss_operation);
     assert_eq!(miss_operation, hit_operation);
     let group_count = src.structure().fusion_tree_groups().len();
-    let planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let planning = crate::tree_transform::TreeTransformPlanning::default();
 
     reset_tree_pair_lowering_calls();
     let direct = tree_transform_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
@@ -262,7 +262,7 @@ fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let planning = crate::tree_transform::TreeTransformPlanning::default();
     let resolve = |dst: &TensorMap<f64, 4, 0>, src: &TensorMap<f64, 4, 0>| {
         planning
             .resolve_all_codomain(&SU2FusionRule, &operation, dst.structure(), src.structure())

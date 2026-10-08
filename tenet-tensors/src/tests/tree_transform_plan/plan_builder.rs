@@ -652,6 +652,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
             &proof,
             operation.clone(),
             threads,
+            None,
         )
         .unwrap()
     };
@@ -1228,6 +1229,7 @@ fn all_codomain_canonical_empty_domain_row_is_thread_count_invariant() {
                 &proof,
                 operation.clone(),
                 threads,
+                None,
             )
             .unwrap()
         };

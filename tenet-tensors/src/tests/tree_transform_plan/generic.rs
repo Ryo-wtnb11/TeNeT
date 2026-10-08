@@ -1406,9 +1406,7 @@ fn measure_checked_generic_transform_case(
             .commit_final_homspace_generic_bound_checked(prepared)
             .unwrap()
     });
-    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
     crate::tree_transform::take_completed_transformer_activity();
     let (cold_space, cold_data) =
         measured_provider_phase(provider.as_ref(), case, "runtime_cold_seed", || {

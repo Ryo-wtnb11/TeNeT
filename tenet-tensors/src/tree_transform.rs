@@ -19,8 +19,6 @@ pub(crate) use cache::{
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
-#[cfg(test)]
-pub(crate) use plan::build_checked_generic_tree_pair_transform_group_plan;
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
     CheckedGenericPlanError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
@@ -39,6 +37,11 @@ pub(crate) use plan::{
     reset_tree_pair_operation_preparations, tree_pair_lowering_calls,
     tree_pair_operation_preparations, validate_multiplicity_free_all_codomain_preflight,
     validate_multiplicity_free_tree_pair_preflight,
+};
+#[cfg(test)]
+pub(crate) use plan::{
+    build_checked_generic_tree_pair_transform_group_plan,
+    build_oriented_tree_pair_transform_group_plan_capability_validated,
 };
 pub(crate) use plan::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
