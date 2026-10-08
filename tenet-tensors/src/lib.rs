@@ -177,8 +177,7 @@ pub use tree_context::{
 };
 #[doc(hidden)]
 pub use tree_transform::{
-    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeCoefficientLedger,
-    RuntimeCoefficientStore, TreeTransformOperationView,
+    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, TreeTransformOperationView,
 };
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,

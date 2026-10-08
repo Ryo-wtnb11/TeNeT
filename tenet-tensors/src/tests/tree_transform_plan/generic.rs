@@ -217,6 +217,9 @@ pub(super) struct CheckedPlanSpy<'a, R> {
     pub(super) braiding_style: std::cell::Cell<Option<BraidingStyleKind>>,
     pub(super) fail: std::cell::Cell<Option<(CheckedPlanCall, usize)>>,
     pub(super) malformed: std::cell::Cell<Option<MalformedCheckedSymbol>>,
+    /// Switches the reported fusion style at this call: a provider whose
+    /// capability changes after the group builds, before the commit.
+    pub(super) restyle_at: std::cell::Cell<Option<(CheckedPlanCall, FusionStyleKind)>>,
     pub(super) calls: std::cell::Cell<[usize; CheckedPlanCall::COUNT]>,
 }
 
@@ -229,6 +232,7 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
             braiding_style: std::cell::Cell::new(None),
             fail: std::cell::Cell::new(None),
             malformed: std::cell::Cell::new(None),
+            restyle_at: std::cell::Cell::new(None),
             calls: std::cell::Cell::new([0; CheckedPlanCall::COUNT]),
         }
     }
@@ -237,6 +241,11 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
         let mut calls = self.calls.get();
         calls[call.index()] += 1;
         self.calls.set(calls);
+        if let Some((at, style)) = self.restyle_at.get() {
+            if at == call {
+                self.fusion_style.set(Some(style));
+            }
+        }
         if self.fail.get() == Some((call, calls[call.index()])) {
             Err(CheckedPlanSpyError(call))
         } else {
@@ -249,14 +258,22 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
     }
 }
 
-impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
+/// The rule identity of a [`CheckedPlanSpy`] wrapping `R`.
+struct CheckedPlanSpyIdentity<R>(std::marker::PhantomData<R>);
+
+impl<R: FusionRule + 'static> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
     type Error = CheckedPlanSpyError;
 
+    // Why not the wrapped rule's identity: composed coefficients are cached
+    // per identity, and a sibling test's publication under the shared rule's
+    // identity would skip this spy's provider queries and failures. Why one
+    // identity per wrapped rule type: spies of different rules must not
+    // alias each other's entries either.
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
         self.identity
             .borrow()
             .clone()
-            .unwrap_or_else(|| self.rule.rule_identity())
+            .unwrap_or_else(tenet_core::RuleIdentity::of_type::<CheckedPlanSpyIdentity<R>>)
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
@@ -1406,9 +1423,7 @@ fn measure_checked_generic_transform_case(
             .commit_final_homspace_generic_bound_checked(prepared)
             .unwrap()
     });
-    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
     crate::tree_transform::take_completed_transformer_activity();
     let (cold_space, cold_data) =
         measured_provider_phase(provider.as_ref(), case, "runtime_cold_seed", || {

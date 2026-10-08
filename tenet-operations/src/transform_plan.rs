@@ -16,9 +16,7 @@ use crate::transform_helpers::{
     duplicate_fusion_tree_pair_indices, fusion_tree_group_block_keys,
     fusion_tree_pair_matches_group, fusion_tree_pairs_share_group,
 };
-use crate::transform_structure::{
-    charged_shared_coefficient_bytes, TreeTransformCoefficients, TreeTransformStructure,
-};
+use crate::transform_structure::{TreeTransformCoefficients, TreeTransformStructure};
 use crate::OperationError;
 
 /// Why shared slices: a Runtime reuses one group's specs across the plans of
@@ -669,8 +667,8 @@ impl<T> TreeTransformGroupBlockSpec<T> {
 /// shares by an `Arc` bump. It references each group's recoupling matrix
 /// through the spec's shared `Arc<[T]>`, as TensorKit's transformer references
 /// the cached per-`FusionTreeBlock` `U`, and copies only Single scalars. Why
-/// not one flattened payload per plan: a plan miss after a sector change
-/// reuses most groups' specs, and flattening would copy every reused matrix.
+/// not one flattened payload per plan: plans are assembled from cached group
+/// specs (#2014-4), and flattening would copy every reused matrix.
 #[derive(Clone)]
 pub struct TreeTransformGroupPlan<T> {
     specs: Vec<TreeTransformGroupBlockSpec<T>>,
@@ -700,14 +698,6 @@ impl<T> TreeTransformGroupPlan<T> {
         }
     }
 
-    /// Upper bound of the shared coefficient payload's own heap bytes, which
-    /// a retaining cache charges before the first binding builds it. The
-    /// matrices belong to the specs and are excluded.
-    #[doc(hidden)]
-    pub fn charged_coefficient_payload_bytes(&self) -> usize {
-        charged_shared_coefficient_bytes::<T>(self.specs.len())
-    }
-
     pub fn from_specs<I>(specs: I) -> Self
     where
         I: IntoIterator<Item = TreeTransformGroupBlockSpec<T>>,
@@ -720,17 +710,113 @@ impl<T> TreeTransformGroupPlan<T> {
         &self.specs
     }
 
-    /// Allocated spec slots, which a retaining cache charges: builders grow
-    /// the spec vector by extension, so it can exceed [`Self::specs`]'s length.
-    #[doc(hidden)]
-    #[inline]
-    pub fn spec_capacity(&self) -> usize {
-        self.specs.capacity()
-    }
-
     pub fn into_specs(self) -> Vec<TreeTransformGroupBlockSpec<T>> {
         self.specs
     }
+}
+
+/// The coefficient payload of `specs`: Single scalars copied, each Multi
+/// matrix referenced through its shared `Arc`.
+fn coefficients_of<'s, T: Copy + 's>(
+    specs: impl Iterator<Item = &'s TreeTransformGroupBlockSpec<T>> + Clone,
+) -> Result<TreeTransformCoefficients<T>, OperationError> {
+    TreeTransformCoefficients::from_specs(specs.map(|spec| {
+        (
+            spec.dst_keys().len(),
+            spec.src_keys().len(),
+            spec.recoupling_coefficients_dst_src(),
+            spec.shared_coefficients(),
+        )
+    }))
+}
+
+fn bind_with_storage_conjugation<'s, T: Copy + 's>(
+    specs: impl ExactSizeIterator<Item = &'s TreeTransformGroupBlockSpec<T>>,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+    storage_conjugate: bool,
+    coefficients: impl FnOnce() -> Result<Arc<TreeTransformCoefficients<T>>, OperationError>,
+) -> Result<TreeTransformStructure<T>, OperationError> {
+    let mut resolved = Vec::with_capacity(specs.len());
+    for spec in specs {
+        resolved.push(spec.resolve(&dst_structure, &src_structure)?);
+    }
+    TreeTransformStructure::compile_resolved_shared_structures(
+        dst_structure,
+        src_structure,
+        &resolved,
+        storage_conjugate,
+        coefficients()?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_with_storage_mapping<'s, T: Copy + 's, FBlock, FAxis>(
+    specs: impl ExactSizeIterator<Item = &'s TreeTransformGroupBlockSpec<T>>,
+    dst_structure: Arc<BlockStructure>,
+    logical_src_structure: &BlockStructure,
+    storage_src_structure: Arc<BlockStructure>,
+    logical_to_storage_block: FBlock,
+    logical_to_storage_axis: FAxis,
+    storage_conjugate: bool,
+    coefficients: impl FnOnce() -> Result<Arc<TreeTransformCoefficients<T>>, OperationError>,
+) -> Result<TreeTransformStructure<T>, OperationError>
+where
+    FBlock: Fn(usize) -> Result<usize, OperationError>,
+    FAxis: Fn(usize) -> Result<usize, OperationError>,
+{
+    let mut resolved = Vec::with_capacity(specs.len());
+    // Why not resolve every key first: fallible block/axis mapping completes
+    // per spec before the next key lookup, preserving callback error order.
+    for spec in specs {
+        resolved.push(
+            spec.resolve(&dst_structure, logical_src_structure)?
+                .map_storage(
+                    logical_src_structure.rank(),
+                    &logical_to_storage_block,
+                    &logical_to_storage_axis,
+                )?,
+        );
+    }
+    TreeTransformStructure::compile_resolved_shared_structures(
+        dst_structure,
+        storage_src_structure,
+        &resolved,
+        storage_conjugate,
+        coefficients()?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_with_source_projection<'s, T: Copy + 's, FSource, FAxis>(
+    specs: impl ExactSizeIterator<Item = &'s TreeTransformGroupBlockSpec<T>>,
+    dst_structure: Arc<BlockStructure>,
+    storage_src_structure: Arc<BlockStructure>,
+    logical_rank: usize,
+    source_index: FSource,
+    logical_to_storage_axis: FAxis,
+    storage_conjugate: bool,
+    coefficients: impl FnOnce() -> Result<Arc<TreeTransformCoefficients<T>>, OperationError>,
+) -> Result<TreeTransformStructure<T>, OperationError>
+where
+    FSource: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
+    FAxis: Fn(usize) -> Result<usize, OperationError>,
+{
+    let identity_block = |index| Ok(index);
+    let mut resolved = Vec::with_capacity(specs.len());
+    for spec in specs {
+        resolved.push(
+            spec.resolve_with_source_projection(&dst_structure, &source_index)?
+                .map_storage(logical_rank, &identity_block, &logical_to_storage_axis)?,
+        );
+    }
+    TreeTransformStructure::compile_resolved_shared_structures(
+        dst_structure,
+        storage_src_structure,
+        &resolved,
+        storage_conjugate,
+        coefficients()?,
+    )
 }
 
 impl<T: Copy> TreeTransformGroupPlan<T> {
@@ -738,14 +824,7 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         if let Some(coefficients) = self.coefficients.get() {
             return Ok(Arc::clone(coefficients));
         }
-        let built = TreeTransformCoefficients::from_specs(self.specs.iter().map(|spec| {
-            (
-                spec.dst_keys().len(),
-                spec.src_keys().len(),
-                spec.recoupling_coefficients_dst_src(),
-                spec.shared_coefficients(),
-            )
-        }))?;
+        let built = coefficients_of(self.specs.iter())?;
         Ok(Arc::clone(
             self.coefficients.get_or_init(|| Arc::new(built)),
         ))
@@ -757,19 +836,14 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         src_structure: Arc<BlockStructure>,
         storage_conjugate: bool,
     ) -> Result<TreeTransformStructure<T>, OperationError> {
-        let mut specs = Vec::with_capacity(self.specs.len());
-        for spec in &self.specs {
-            specs.push(spec.resolve(&dst_structure, &src_structure)?);
-        }
-        TreeTransformStructure::compile_resolved_shared_structures(
+        bind_with_storage_conjugation(
+            self.specs.iter(),
             dst_structure,
             src_structure,
-            &specs,
             storage_conjugate,
-            self.shared_coefficients()?,
+            || self.shared_coefficients(),
         )
     }
-
     pub fn compile<
         TDst,
         TSrc,
@@ -840,25 +914,15 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         FBlock: Fn(usize) -> Result<usize, OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
-        let mut specs = Vec::with_capacity(self.specs.len());
-        // Why not resolve every key first: fallible block/axis mapping completes
-        // per spec before the next key lookup, preserving callback error order.
-        for spec in &self.specs {
-            specs.push(
-                spec.resolve(&dst_structure, logical_src_structure)?
-                    .map_storage(
-                        logical_src_structure.rank(),
-                        &logical_to_storage_block,
-                        &logical_to_storage_axis,
-                    )?,
-            );
-        }
-        TreeTransformStructure::compile_resolved_shared_structures(
+        bind_with_storage_mapping(
+            self.specs.iter(),
             dst_structure,
+            logical_src_structure,
             storage_src_structure,
-            &specs,
+            logical_to_storage_block,
+            logical_to_storage_axis,
             storage_conjugate,
-            self.shared_coefficients()?,
+            || self.shared_coefficients(),
         )
     }
 
@@ -876,20 +940,151 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         FSource: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
-        let identity_block = |index| Ok(index);
-        let mut specs = Vec::with_capacity(self.specs.len());
-        for spec in &self.specs {
-            specs.push(
-                spec.resolve_with_source_projection(&dst_structure, &source_index)?
-                    .map_storage(logical_rank, &identity_block, &logical_to_storage_axis)?,
-            );
-        }
-        TreeTransformStructure::compile_resolved_shared_structures(
+        bind_with_source_projection(
+            self.specs.iter(),
             dst_structure,
             storage_src_structure,
-            &specs,
+            logical_rank,
+            source_index,
+            logical_to_storage_axis,
             storage_conjugate,
-            self.shared_coefficients()?,
+            || self.shared_coefficients(),
+        )
+    }
+}
+
+/// A categorical transform assembled from shared per-group spec slices (the
+/// composed-coefficient cache's entries, #2014-4), bound without copying
+/// any spec: a plan miss whose groups all hit allocates only the group list
+/// and its bindings' own payload. Each binding builds its own coefficient
+/// payload; the matrices stay shared.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SharedTreeTransformGroupPlan<T> {
+    groups: Vec<Arc<[TreeTransformGroupBlockSpec<T>]>>,
+    len: usize,
+}
+
+impl<T> SharedTreeTransformGroupPlan<T> {
+    pub fn new(groups: Vec<Arc<[TreeTransformGroupBlockSpec<T>]>>) -> Self {
+        let len = groups.iter().map(|group| group.len()).sum();
+        Self { groups, len }
+    }
+
+    /// Every spec, group by group.
+    pub fn specs(&self) -> impl ExactSizeIterator<Item = &TreeTransformGroupBlockSpec<T>> + Clone {
+        SpecsIter {
+            groups: self.groups.iter(),
+            current: [].iter(),
+            remaining: self.len,
+        }
+    }
+}
+
+struct SpecsIter<'a, T> {
+    groups: std::slice::Iter<'a, Arc<[TreeTransformGroupBlockSpec<T>]>>,
+    current: std::slice::Iter<'a, TreeTransformGroupBlockSpec<T>>,
+    remaining: usize,
+}
+
+// Why manual: a derive would bound `T: Clone`.
+impl<T> Clone for SpecsIter<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            groups: self.groups.clone(),
+            current: self.current.clone(),
+            remaining: self.remaining,
+        }
+    }
+}
+
+impl<'a, T> Iterator for SpecsIter<'a, T> {
+    type Item = &'a TreeTransformGroupBlockSpec<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(spec) = self.current.next() {
+                self.remaining -= 1;
+                return Some(spec);
+            }
+            self.current = self.groups.next()?.iter();
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for SpecsIter<'_, T> {}
+
+impl<T: Copy> SharedTreeTransformGroupPlan<T> {
+    fn coefficients(&self) -> Result<Arc<TreeTransformCoefficients<T>>, OperationError> {
+        coefficients_of(self.specs()).map(Arc::new)
+    }
+
+    pub fn compile_shared_structures_with_storage_conjugation(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError> {
+        bind_with_storage_conjugation(
+            self.specs(),
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+            || self.coefficients(),
+        )
+    }
+
+    pub fn compile_shared_structures_with_storage_mapping<FBlock, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        logical_src_structure: &BlockStructure,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_to_storage_block: FBlock,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        bind_with_storage_mapping(
+            self.specs(),
+            dst_structure,
+            logical_src_structure,
+            storage_src_structure,
+            logical_to_storage_block,
+            logical_to_storage_axis,
+            storage_conjugate,
+            || self.coefficients(),
+        )
+    }
+
+    pub fn compile_shared_structures_with_source_projection<FSource, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_rank: usize,
+        source_index: FSource,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        FSource: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        bind_with_source_projection(
+            self.specs(),
+            dst_structure,
+            storage_src_structure,
+            logical_rank,
+            source_index,
+            logical_to_storage_axis,
+            storage_conjugate,
+            || self.coefficients(),
         )
     }
 }

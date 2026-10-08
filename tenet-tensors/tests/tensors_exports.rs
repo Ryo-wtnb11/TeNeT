@@ -175,8 +175,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "OperationCachePolicy",
         // tree_transform: the process-global completed-transformer owner
         // (doc-hidden cross-crate seams, #2014-3)
-        "RuntimeCoefficientLedger",
-        "RuntimeCoefficientStore",
         "TreeTransformOperationView",
         "admit_exact_tree_pair_layout",
         "exact_layout_tree_pair_hit",
