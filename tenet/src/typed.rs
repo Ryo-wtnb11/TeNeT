@@ -366,7 +366,6 @@ mod checked_generic_contract;
 mod mode_dispatch;
 pub(crate) use checked_generic_contract::TypedFacadeError;
 use checked_generic_contract::{trace_source, write_identity_blocks_generic};
-use mode_dispatch::checked_compact_spectrum_layout;
 #[doc(hidden)]
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;
@@ -378,9 +377,9 @@ pub use space::{GradedSpace, LegSelection, TruncatedSelection};
 mod fusion_tree;
 use fusion_tree::{
     add_spectrum_into, decode_block_fusion_trees, diagonal_factor_on_bound, exp_spectrum,
-    full_svd_compact_bond, full_svd_compact_layout, inv_spectrum, is_diagonal_bond_space,
-    map_spectrum, prepare_product_operand, reject_singular_compact_divisor, scatter_spectrum,
-    spectra_disagree, wrap_factor_on, TypedData,
+    full_svd_compact_bond, inv_spectrum, is_diagonal_bond_space, map_spectrum,
+    prepare_product_operand, reject_singular_compact_divisor, scatter_spectrum, spectra_disagree,
+    wrap_factor_on, TypedData,
 };
 #[cfg(test)]
 use fusion_tree::{diagonal_factor_on, full_svd_spectrum_matches_bonds};

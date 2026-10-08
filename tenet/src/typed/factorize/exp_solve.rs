@@ -6,9 +6,8 @@ where
     R::Mode: FusionMode<R>,
     D: AdvancedLinalgScalar,
 {
-    /// The one body of the exponential: an admitted compact diagonal
-    /// exponentiates its entries, everything else takes the mode's dense
-    /// route.
+    /// The one body of the exponential: a compact diagonal exponentiates its
+    /// entries, everything else takes the mode's dense route.
     pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
         // A lazy adjoint is never compact; `exp_dense` materializes it.
         const {
@@ -23,9 +22,8 @@ where
             // algorithm (spectral or Padé), not a domain, and a diagonal is
             // already in its eigenbasis so neither answer would change what
             // happens here. TensorKit splits the same way (#576, #578).
-            if R::Mode::compact_spectrum_admitted(self.logical_space(), spectrum) {
-                return Ok(self.with_spectrum(exp_spectrum(spectrum)?));
-            }
+            self.admit_compact(spectrum)?;
+            return Ok(self.with_spectrum(exp_spectrum(spectrum)?));
         }
         R::Mode::exp_dense(self)
     }
@@ -34,20 +32,19 @@ where
     /// an inverse.
     ///
     /// The two codomains must be exactly equal and `self` must have isomorphic
-    /// codomain and domain. The result is `domain(self) <- domain(rhs)`. An
-    /// admitted, nonsingular compact divisor scales `rhs` by its reciprocal
-    /// spectrum; every other divisor is solved densely into the final output.
+    /// codomain and domain. The result is `domain(self) <- domain(rhs)`. A
+    /// nonsingular compact divisor scales `rhs` by its reciprocal spectrum;
+    /// every other divisor is solved densely into the final output.
     pub(super) fn factor_solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
         let admission = R::Mode::solve_preflight(self, rhs)?;
         if let Some(spectrum) = self.spectrum() {
-            if R::Mode::compact_spectrum_admitted(self.logical_space(), spectrum) {
-                reject_singular_compact_divisor(spectrum)?;
-                if let Some(solved) = R::Mode::solve_compact(self, rhs, spectrum, &admission)? {
-                    return Ok(solved);
-                }
+            self.admit_compact(spectrum)?;
+            reject_singular_compact_divisor(spectrum)?;
+            if let Some(solved) = R::Mode::solve_compact(self, rhs, spectrum, &admission)? {
+                return Ok(solved);
             }
         }
         R::Mode::solve_dense(self, rhs, admission)
@@ -57,9 +54,9 @@ where
 /// TensorKit `D \ t` on a `DiagonalTensorMap` divisor: `D \ D'` divides the
 /// spectra and stays compact, and `D \ t` scales each block's leading
 /// (bond) axis by the reciprocal spectrum, `O(Σ_c k_c m_c)` with no LU and no
-/// `Σ_c k_c²` divisor buffer. The divisor is admitted and nonsingular;
-/// `None` leaves every other `rhs` layout to the dense route, which owns its
-/// validation order.
+/// `Σ_c k_c²` divisor buffer. The divisor is admitted and nonsingular. A
+/// compact `rhs` is layout-free; `None` leaves a dense `rhs` that is not laid
+/// out as `output` to the dense route, which owns its validation order.
 pub(super) fn checked_compact_divisor_solve<R, D>(
     tensor: &TensorMap<R, D>,
     rhs: &TensorMap<R, D>,
@@ -77,12 +74,6 @@ where
         .as_ref()
         .and_then(TensorMap::owned_body)
         .unwrap_or_else(|| rhs.owned_body().expect("solve rhs is owned after refusal"));
-    // The destination `domain(D) <- domain(rhs)` is `rhs`'s own space,
-    // because `D` is a bond (`domain == codomain == codomain(rhs)`); the
-    // equality check proves it rather than trusting the provider `Arc`s.
-    if output.space() != rhs_body.space.space() {
-        return Ok(None);
-    }
     match rhs_body.data.as_ref() {
         TypedData::Diagonal(values) => {
             if values.len() != inverse.len()
@@ -108,6 +99,14 @@ where
             Ok(Some(tensor.with_spectrum_on(output.clone(), quotient)))
         }
         TypedData::Dense(values) => {
+            // The destination `domain(D) <- domain(rhs)` is `rhs`'s own
+            // space, because `D` is a bond (`domain == codomain ==
+            // codomain(rhs)`); the equality check proves it rather than
+            // trusting the provider `Arc`s, and it fixes the layout the
+            // scaled payload is read in.
+            if output.space() != rhs_body.space.space() {
+                return Ok(None);
+            }
             let mut data = values.clone();
             tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
                 output.space(),

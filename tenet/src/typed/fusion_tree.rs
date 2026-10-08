@@ -631,7 +631,7 @@ pub(super) fn spectra_disagree() -> Error {
 
 /// Test helper: a compact diagonal factor on a fresh multiplicity-free bond
 /// derived from `authority`, whose payload type may differ from the tensor it
-/// came from (the factorizations build theirs from `FactorMode::spectrum_bond`
+/// came from (the factorizations build theirs from `seam::spectrum_bond`
 /// and [`diagonal_factor_on_bound`]).
 ///
 /// Borrowed rather than consumed, and filled from a slice rather than by
@@ -714,44 +714,6 @@ pub(super) fn full_svd_spectrum_matches_bonds(
         return false;
     };
     row == col && row == &spectrum_leg && spectrum.len() == row.sectors().len()
-}
-
-/// A compact diagonal has exactly one square fusion-tree block per bond sector.
-pub(super) fn full_svd_compact_layout<R>(
-    space: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[tenet_matrixalgebra::SectorSpectrum],
-) -> bool {
-    let homspace = space.space().homspace();
-    if space.space().nout() != 1
-        || space.space().nin() != 1
-        || homspace.codomain().legs() != homspace.domain().legs()
-    {
-        return false;
-    }
-    let structure = space.space().structure();
-    if structure.block_count() != spectrum.len() {
-        return false;
-    }
-    let mut seen = std::collections::HashSet::with_capacity(spectrum.len());
-    for index in 0..structure.block_count() {
-        let Ok(block) = structure.block(index) else {
-            return false;
-        };
-        let BlockKey::FusionTree(tree) = block.key() else {
-            return false;
-        };
-        let sector = tree.codomain_tree().coupled();
-        if tree.domain_tree() != tree.codomain_tree() || !seen.insert(sector) {
-            return false;
-        }
-        let Some(dimension) = homspace.codomain().legs()[0].degeneracy(sector) else {
-            return false;
-        };
-        if block.shape() != [dimension, dimension] {
-            return false;
-        }
-    }
-    true
 }
 
 /// Wraps one factor the matrix-algebra seam produced into a typed tensor map

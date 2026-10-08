@@ -98,13 +98,15 @@ pub(crate) use authority::multiplicity_free_output_space;
 #[cfg(test)]
 pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
-pub use authority::{FactorMode, FactorSpaceAuthority};
+pub use authority::{spectrum_bond, FactorMode, FactorSpaceAuthority};
 pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
 // `dense_stage` items are consumed only by sibling factorization modules.
 use dense_stage::*;
+pub use diagonal::admit_compact_diagonal;
 use diagonal::*;
 pub(crate) use eig::*;
+pub use inverse::pinv_diagonal_spectrum;
 pub(crate) use inverse::*;
 use landing::*;
 pub(crate) use matricize::*;
@@ -122,7 +124,7 @@ pub(crate) use probes::*;
 use probes::*;
 pub(crate) use qr_lq::*;
 use source::factor_from_source;
-pub use source::{ExecutorLease, FactorOutput, FactorRoute, FactorSource, Routed};
+pub use source::{ExecutorLease, FactorOutput, FactorSource};
 #[cfg(test)]
 pub(crate) use svd::scale_axis_by_spectrum;
 pub(crate) use svd::*;
@@ -170,8 +172,7 @@ pub(crate) use scalar::{require_finite_factor_input, FactorFamily};
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     decide_bond_truncation, decide_bond_truncation_generic_checked,
-    diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like,
-    diagonal_bond_bound_space_on_source_checked_generic, diagonal_bond_data,
+    diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like, diagonal_bond_data,
     rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
     scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
     svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,

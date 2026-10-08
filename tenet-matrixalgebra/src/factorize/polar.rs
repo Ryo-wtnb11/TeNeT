@@ -222,7 +222,6 @@ where
             .map(|(w, p)| (FactorOutput::Dense(w), FactorOutput::Dense(p)))
         },
     )
-    .map(|(factors, _)| factors)
 }
 
 /// Left polar decomposition `W * P` of `source` in fusion mode `M`

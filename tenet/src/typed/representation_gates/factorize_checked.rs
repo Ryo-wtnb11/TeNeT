@@ -336,7 +336,8 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     let mut short = spectrum.clone();
     short[0].values.pop();
     // A spectrum that does not cover the bond is misuse: a typed error, not a
-    // dense fallback (MAK asserts the sizes).
+    // dense fallback (MAK asserts the sizes). Full SVD of a diagonal is this
+    // compact route (TensorKit `svd_compact!(::DiagonalAlgorithm)`).
     let diagonal = |spectrum| tenet_matrixalgebra::seam::FactorSource::Diagonal {
         space: source,
         spectrum,
@@ -353,17 +354,6 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
         assert!(misuse(
             &tenet_matrixalgebra::seam::svd_compact_from_source::<
-                CheckedGenericAdmissionMode,
-                _,
-                _,
-                _,
-                _,
-            >(&mut dense, diagonal(malformed))
-            .err()
-            .unwrap()
-        ));
-        assert!(misuse(
-            &tenet_matrixalgebra::seam::svd_full_from_source::<
                 CheckedGenericAdmissionMode,
                 _,
                 _,
@@ -722,49 +712,30 @@ fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
     let TypedData::Diagonal(spectrum) = owned(&input).data.as_ref() else {
         panic!("diagonal constructor must keep compact storage");
     };
-    let source = &owned(&input).space;
-    let destination = &owned(&output).space;
-    assert!(super::mode_dispatch::checked_compact_spectrum_layout(
-        source,
-        destination,
-        spectrum
-    ));
+    // A spectrum that does not cover its bond (missing, duplicate or short
+    // sector) is misuse, refused by the shared admission before any value
+    // is read (#1994).
+    let admit = |spectrum: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
+        tenet_matrixalgebra::seam::admit_compact_diagonal::<CheckedGenericAdmissionMode, _, _>(
+            &owned(&input).space,
+            spectrum,
+        )
+    };
+    admit(spectrum).unwrap();
     let mut missing = spectrum.clone();
     missing.pop();
-    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
-        source,
-        destination,
-        &missing
-    ));
     let mut duplicate = spectrum.clone();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
-        source,
-        destination,
-        &duplicate
-    ));
     let mut short = spectrum.clone();
     short[0].values.pop();
-    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
-        source,
-        destination,
-        &short
-    ));
-    let wrong_bond = GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2)]).unwrap();
-    let wrong: TensorMap<_, f64> = TensorMap::diagonal(
-        &runtime,
-        &wrong_bond,
-        [SectorSpectrum {
-            sector: vec![0, 0],
-            values: vec![1.0, 1.0],
-        }],
-    )
-    .unwrap();
-    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
-        source,
-        &owned(&wrong).space,
-        spectrum
-    ));
+    for malformed in [missing, duplicate, short] {
+        assert!(matches!(
+            admit(&malformed),
+            Err(CheckedGenericFactorPlanError::Operation(
+                OperationError::InvalidArgument { .. }
+            ))
+        ));
+    }
 }
 
 /// #1735: checked `inv`/`exp`/`solve` of a compact diagonal map the spectrum

@@ -11,18 +11,6 @@ pub enum FactorSource<'a, R, D> {
     },
 }
 
-/// The storage route that produced a factorization. A diagonal factor of a
-/// diagonal input lives on the input bond (`W = V`, TensorKit's diagonal
-/// convention), so callers building such a factor need to know the route.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FactorRoute {
-    Diagonal,
-    Dense,
-}
-
-/// A checked factorization result with the route that produced it.
-pub type Routed<T, E> = Result<(T, FactorRoute), CheckedGenericFactorPlanError<E>>;
-
 /// A factor in the storage its route produced: a compact diagonal on
 /// `space`, or dense storage.
 pub enum FactorOutput<R, D> {
@@ -76,7 +64,7 @@ pub(super) fn factor_from_source<L, E, R, D, T, X>(
     dense_finite: Option<FactorFamily>,
     diagonal: impl FnOnce(&BoundDynamicFusionMapSpace<R>, &[SectorSpectrum<D>]) -> Result<T, X>,
     dense: impl FnOnce(&mut E, &BoundDynamicTensorRef<'_, R, D>) -> Result<T, X>,
-) -> Result<(T, FactorRoute), X>
+) -> Result<T, X>
 where
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
@@ -88,13 +76,8 @@ where
             if let Some(family) = dense_finite {
                 require_finite_factor_input(input.data().iter().copied(), family)?;
             }
-            Ok((
-                lease.run(|executor| dense(executor, &input))?,
-                FactorRoute::Dense,
-            ))
+            lease.run(|executor| dense(executor, &input))
         }
-        FactorSource::Diagonal { space, spectrum } => {
-            Ok((diagonal(space, spectrum)?, FactorRoute::Diagonal))
-        }
+        FactorSource::Diagonal { space, spectrum } => diagonal(space, spectrum),
     }
 }

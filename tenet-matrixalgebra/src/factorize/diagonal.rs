@@ -17,8 +17,12 @@
 //! | real part, after the Hermiticity check | eigh | `hermitian_diagonal_bond` |
 //! | complex value, after the eigenvalue check | eig | `validate_diagonal_eigenvalues`, `eig_vals_diagonal` |
 //!
-//! The compact inverse, pseudo-inverse, solve and exponential maps are the
-//! facade's (`tenet` `FusionMode`), whose admission #1994 owns.
+//! The elementwise matrix functions of a compact diagonal (TensorKit
+//! `inv`/`pinv`/`exp`/`\\` on `DiagonalTensorMap`, `src/tensors/diagonal.jl`)
+//! admit it through [`admit_compact_diagonal`], the structural half of
+//! [`diagonal_bond`]: they map nonfinite values through (#1986 covers
+//! factorizations only), and the pseudo-inverse refuses them in its own
+//! cutoff ([`pinv_diagonal_spectrum`]).
 
 use std::ops::Deref;
 
@@ -69,23 +73,9 @@ fn aligned_one_tree_regions(regions: &[CoupledSectorRegion]) -> bool {
     })
 }
 
-/// Admits a compact diagonal `spectrum` on `space`.
-///
-/// # Errors
-///
-/// - `space` is not a one-leg endomorphism `V <- V`, or `spectrum` does not
-///   cover its coupled sectors with the bond degeneracies. Diagonal storage
-///   exists only in that form, so either is misuse; MAK asserts
-///   `m == n && isdiag(A)` and checks the output sizes at the same stage.
-/// - The coupled-sector region error of an inconsistent structure.
-/// - A nonfinite value, from the shared finite-input stage
-///   ([`require_finite_factor_input`]).
-///
-/// A layout whose regions are not aligned one-tree diagonals (an expert
-/// layout) is a representation TensorKit has no counterpart for; it is
-/// re-derived in canonical layout through `authority`. The spectrum does not
-/// depend on layout, so this is representation conversion, not a solver
-/// fallback.
+/// Admits a compact diagonal `spectrum` on `space` for a factorization of
+/// `family`: [`admit_diagonal_bond`], then the shared finite-input stage
+/// ([`require_finite_factor_input`]).
 pub(super) fn diagonal_bond<'a, A, R, D>(
     authority: &A,
     space: &'a BoundDynamicFusionMapSpace<R>,
@@ -96,6 +86,57 @@ where
     A: FactorSpaceAuthority<R>,
     A::Error: From<OperationError>,
     D: FactorScalar,
+{
+    let bond = admit_diagonal_bond(authority, space, spectrum)?;
+    require_finite_factor_input(
+        spectrum
+            .iter()
+            .flat_map(|entry| entry.values.iter().copied()),
+        family,
+    )?;
+    Ok(bond)
+}
+
+/// Admits a compact diagonal `spectrum` on `space` for an elementwise
+/// matrix function in fusion mode `M`: the structural admission every
+/// compact-diagonal operation shares ([`admit_diagonal_bond`]), with no
+/// value check. The result keeps `space`, as TensorKit's `inv`/`pinv`/`exp`
+/// keep `d.domain`; compact storage does not depend on its layout.
+#[doc(hidden)]
+pub fn admit_compact_diagonal<M, R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<(), M::Error>
+where
+    M: FactorMode<R>,
+    D: FactorScalar,
+{
+    admit_diagonal_bond(&M::authority(space), space, spectrum).map(drop)
+}
+
+/// The structural admission of a compact diagonal `spectrum` on `space`.
+///
+/// # Errors
+///
+/// - `space` is not a one-leg endomorphism `V <- V`, or `spectrum` does not
+///   cover its coupled sectors with the bond degeneracies. Diagonal storage
+///   exists only in that form, so either is misuse; MAK asserts
+///   `m == n && isdiag(A)` and checks the output sizes at the same stage.
+/// - The coupled-sector region error of an inconsistent structure.
+///
+/// A layout whose regions are not aligned one-tree diagonals (an expert
+/// layout) is a representation TensorKit has no counterpart for; it is
+/// re-derived in canonical layout through `authority`. The spectrum does not
+/// depend on layout, so this is representation conversion, not a solver
+/// fallback.
+fn admit_diagonal_bond<'a, A, R, D>(
+    authority: &A,
+    space: &'a BoundDynamicFusionMapSpace<R>,
+    spectrum: &'a [SectorSpectrum<D>],
+) -> Result<DiagonalBond<'a, R, D>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
 {
     let raw = space.space();
     let homspace = raw.homspace();
@@ -122,12 +163,6 @@ where
         OperationError::InvalidArgument {
             message: "compact diagonal spectrum does not match its bond sectors and degeneracies",
         },
-    )?;
-    require_finite_factor_input(
-        spectrum
-            .iter()
-            .flat_map(|entry| entry.values.iter().copied()),
-        family,
     )?;
     Ok(DiagonalBond {
         space,

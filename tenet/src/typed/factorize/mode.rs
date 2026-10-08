@@ -23,29 +23,13 @@ where
     /// produced.
     fn decode_label(provider: &R, sector: SectorId) -> Result<R::Sector, Self::FacadeError>;
 
-    // Inverse, pseudo-inverse, solve and exponential share their bodies and
-    // compact value maps. What stays per mode, until its leaf unifies it:
-    // - D7 (#1994): which compact diagonals take the compact arm; #1800: the
-    //   compact pseudo-inverse of a non-finite spectrum;
+    // Inverse, pseudo-inverse, solve and exponential share their bodies, and
+    // their compact arms share one admission and value maps in both modes
+    // (#1994, #1800). What stays per mode, until its leaf unifies it:
     // - D8 (#1995): where the categorical preflight runs, and its order;
     // - D5 (#1996): the dense lease and its timing.
     // The dense pseudo-inverse and exponential algorithms are the shared
     // per-sector kernels in both modes (#1752, #1799).
-
-    /// Whether a compact diagonal on `space` takes the compact arm of inv,
-    /// pinv, solve and exp (D7, #1994); otherwise it is densified.
-    fn compact_spectrum_admitted<D>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    ) -> bool;
-
-    /// The compact pseudo-inverse of an admitted spectrum, or `None` to take
-    /// the dense route (D7, #1800).
-    #[allow(clippy::type_complexity)]
-    fn pinv_spectrum<D: AdvancedLinalgScalar>(
-        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-        rcond: f64,
-    ) -> Result<Option<Vec<tenet_matrixalgebra::SectorSpectrum<D>>>, Self::FacadeError>;
 
     /// Inverse of an owned `tensor` on the dense route (D5, D8).
     fn inv_dense<D: AdvancedLinalgScalar>(
@@ -75,7 +59,8 @@ where
     ) -> Result<Self::SolveAdmission, Self::FacadeError>;
 
     /// `divisor \ rhs` for an admitted, nonsingular compact divisor, or
-    /// `None` to take the dense route (D7, #1994).
+    /// `None` to take the dense route for an `rhs` the mode does not scale
+    /// in place.
     fn solve_compact<D: AdvancedLinalgScalar>(
         divisor: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
@@ -192,43 +177,6 @@ where
         // `CheckedFusionAlgebra + SectorCodec` rule can have) decodes through
         // `SectorCodec::decode_sector`.
         Ok(provider.try_decode_label(sector)?)
-    }
-
-    fn compact_spectrum_admitted<D>(
-        _space: &BoundDynamicFusionMapSpace<R>,
-        _spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    ) -> bool {
-        true
-    }
-
-    fn pinv_spectrum<D: AdvancedLinalgScalar>(
-        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-        rcond: f64,
-    ) -> Result<Option<Vec<tenet_matrixalgebra::SectorSpectrum<D>>>, Error> {
-        // A non-finite entry is rejected rather than folded: `f64::max`
-        // would drop a NaN and `NaN > cutoff` would then zero it, a
-        // silent finite answer (the dense arm's `pinv_cutoff` contract).
-        let sigma_max = spectrum
-            .iter()
-            .flat_map(|entry| entry.values.iter())
-            .try_fold(0.0f64, |largest, &value| {
-                let magnitude = value.abs_value();
-                magnitude.is_finite().then(|| largest.max(magnitude))
-            })
-            .ok_or_else(|| {
-                Error::InvalidArgument("pinv singular values must be finite".to_string())
-            })?;
-        let cutoff = rcond * sigma_max;
-        // Strict `>`, matching the dense fold: a
-        // value exactly on the cutoff is cut. Changing it to `>=` is what
-        // `pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff` kills.
-        Ok(Some(map_spectrum(spectrum, |value| {
-            Ok(if value.abs_value() > cutoff {
-                value.recip_value()
-            } else {
-                D::from_real(0.0)
-            })
-        })?))
     }
 
     fn inv_dense<D: AdvancedLinalgScalar>(
@@ -396,55 +344,6 @@ where
         provider
             .try_decode_label(sector)
             .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))
-    }
-
-    fn compact_spectrum_admitted<D>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    ) -> bool {
-        // A proven bond is its own swapped space (TensorKit
-        // `inv`/`pinv(::DiagonalTensorMap)` keep `d.domain`, dual included),
-        // so the compact arm needs neither the isomorphism preflight nor a
-        // separately admitted output root, and it is an endomorphism.
-        checked_compact_spectrum_layout(space, space, spectrum)
-    }
-
-    fn pinv_spectrum<D: AdvancedLinalgScalar>(
-        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-        rcond: f64,
-    ) -> Result<Option<Vec<tenet_matrixalgebra::SectorSpectrum<D>>>, Self::FacadeError> {
-        let sigma_max =
-            spectrum
-                .iter()
-                .flat_map(|entry| &entry.values)
-                .try_fold(0.0_f64, |largest, &value| {
-                    let magnitude = value.abs_value();
-                    let rounded = D::from_real(magnitude).abs_value();
-                    (magnitude.is_finite() && rounded.is_finite()).then(|| largest.max(rounded))
-                });
-        let Some(sigma_max) = sigma_max else {
-            return Ok(None);
-        };
-        let cutoff = rcond * sigma_max;
-        // The dense SVD can flush a retained subnormal to zero.
-        if !spectrum
-            .iter()
-            .flat_map(|entry| &entry.values)
-            .all(|&value| {
-                D::from_real(value.abs_value()).abs_value() <= cutoff
-                    || (value.abs_value() >= D::safe_minimum()
-                        && value.recip_value().abs_value().is_finite())
-            })
-        {
-            return Ok(None);
-        }
-        Ok(Some(map_spectrum(spectrum, |value| {
-            Ok(if D::from_real(value.abs_value()).abs_value() > cutoff {
-                value.recip_value()
-            } else {
-                D::from_real(0.0)
-            })
-        })?))
     }
 
     fn inv_dense<D: AdvancedLinalgScalar>(

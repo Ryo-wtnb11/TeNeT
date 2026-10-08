@@ -204,26 +204,25 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
     assert_eq!(
         seam,
         names(
-            "coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
+            "admit_compact_diagonal coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
              decide_bond_truncation_generic_checked \
              diagonal_bond_bound_space_generic_checked diagonal_bond_bound_space_like \
-             diagonal_bond_bound_space_on_source_checked_generic \
              diagonal_bond_data eig_full_dyn eig_full_from_source \
              eig_vals_dyn eig_vals_from_source \
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \
              left_null_from_source \
              left_polar_adjoint_from_parent left_polar_from_source left_polar_of_diagonal \
-             lq_compact_from_source lq_full_from_source \
+             lq_compact_from_source lq_full_from_source pinv_diagonal_spectrum \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
              rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
              right_polar_adjoint_from_parent right_polar_from_source \
-             right_polar_of_diagonal scale_axis_by_spectrum_mapped \
+             right_polar_of_diagonal scale_axis_by_spectrum_mapped spectrum_bond \
              svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
              BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
-             EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSpaceAuthority FactorSource Routed \
+             EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
              exp_direct_into_dyn exp_dyn inv_direct_dyn inv_direct_into_dyn \

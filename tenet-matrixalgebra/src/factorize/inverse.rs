@@ -178,6 +178,54 @@ pub(crate) fn pinv_cutoff(
     Ok(rcond * sigma_max)
 }
 
+/// The compact pseudo-inverse of an admitted diagonal: every value whose
+/// magnitude exceeds the dense route's cutoff ([`pinv_cutoff`], one global
+/// `rcond * σ_max`, strict `>`) is inverted by `reciprocal`, the rest are
+/// zero. It is the one numeric admission of a compact pseudo-inverse in
+/// every fusion mode (#1800):
+///
+/// - magnitudes are compared unrounded, in `f64`, as the dense route
+///   compares its singular values;
+/// - a retained subnormal stays on this route and inverts to its IEEE
+///   reciprocal (`Inf`), as TensorKit `pinv(::DiagonalTensorMap)` and dense
+///   `LinearAlgebra.pinv` give;
+/// - a nonfinite value is refused by [`pinv_cutoff`]'s typed error, the
+///   dense route's.
+///
+/// TensorKit's own diagonal tolerance rule is not mirrored; see the facade
+/// `pinv` documentation for that divergence.
+#[doc(hidden)]
+pub fn pinv_diagonal_spectrum<D: FactorScalar>(
+    spectrum: &[SectorSpectrum<D>],
+    rcond: f64,
+    reciprocal: impl Fn(D) -> D,
+) -> Result<Vec<SectorSpectrum<D>>, OperationError> {
+    let magnitude = |value: D| value.widen_complex().norm();
+    let cutoff = pinv_cutoff(
+        spectrum
+            .iter()
+            .flat_map(|entry| entry.values.iter().map(|&value| magnitude(value))),
+        rcond,
+    )?;
+    Ok(spectrum
+        .iter()
+        .map(|entry| SectorSpectrum {
+            sector: entry.sector,
+            values: entry
+                .values
+                .iter()
+                .map(|&value| {
+                    if magnitude(value) > cutoff {
+                        reciprocal(value)
+                    } else {
+                        D::zero()
+                    }
+                })
+                .collect(),
+        })
+        .collect())
+}
+
 /// Coefficient-free pseudo-inverse into an already admitted swapped space.
 ///
 /// All layout checks happen before staging or dense work.  The local staging

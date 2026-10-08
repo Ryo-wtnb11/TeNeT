@@ -1620,7 +1620,6 @@ where
         |space, spectrum| eigh_vals_diagonal(&M::authority(space), space, spectrum, hermitian_tol),
         |dense, input| Ok(eigh_vals_dyn(dense, input, hermitian_tol)?),
     )
-    .map(|(values, _)| values)
 }
 
 /// General eigenvalues of `source` in fusion mode `M`, descending by
@@ -1644,17 +1643,16 @@ where
         |space, spectrum| eig_vals_diagonal(&M::authority(space), space, spectrum),
         |dense, input| Ok(eig_vals_dyn(dense, input)?),
     )
-    .map(|(values, _)| values)
 }
 
-/// Hermitian eigendecomposition of `source` in fusion mode `M`, with the route that produced it;
+/// Hermitian eigendecomposition of `source` in fusion mode `M`;
 /// only dense storage leases an executor.
 #[doc(hidden)]
 pub fn eigh_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
     hermitian_tol: HermitianTol,
-) -> Result<(EighFullDyn<R, D>, FactorRoute), M::Error>
+) -> Result<EighFullDyn<R, D>, M::Error>
 where
     M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
@@ -1670,13 +1668,13 @@ where
     )
 }
 
-/// General eigendecomposition of `source` in fusion mode `M`, with the route that produced it;
+/// General eigendecomposition of `source` in fusion mode `M`;
 /// only dense storage leases an executor.
 #[doc(hidden)]
 pub fn eig_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<(EigFullDyn<R, D>, FactorRoute), M::Error>
+) -> Result<EigFullDyn<R, D>, M::Error>
 where
     M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,

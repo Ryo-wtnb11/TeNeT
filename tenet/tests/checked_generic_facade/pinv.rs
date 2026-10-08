@@ -562,8 +562,10 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     assert_eq!(gemm_calls.total(), 0);
 }
 
+/// #1800: a nonfinite compact entry is refused by the dense cutoff's typed
+/// error, as in multiplicity-free mode, not sent to the dense SVD.
 #[test]
-fn checked_compact_diagonal_pinv_nonfinite_keeps_dense_error() {
+fn checked_compact_diagonal_pinv_refuses_nonfinite_like_multiplicity_free() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -579,14 +581,14 @@ fn checked_compact_diagonal_pinv_nonfinite_keeps_dense_error() {
         .unwrap();
         assert!(matches!(
             input.pinv(&[0], &[1], 0.5),
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error)))
-                if matches!(*error, tenet::typed::OperationError::Dense(_))
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message)))
+                if message == "pinv singular values must be finite"
         ));
     }
 }
 
 #[test]
-fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
+fn checked_compact_diagonal_pinv_precision_limits_follow_multiplicity_free_semantics() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond = GradedSpace::try_new(provider, [(Label::Vacuum, 2), (Label::X, 2)]).unwrap();
@@ -654,16 +656,18 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
         assert!((actual - expected).norm() <= 1e-6);
     }
 
+    // #1800 (multiplicity-free semantics, TensorKit
+    // `pinv(::DiagonalTensorMap)`): magnitudes are compared unrounded, so a
+    // finite entry whose f32 magnitude overflows is retained and inverted;
+    // a retained subnormal stays compact with its IEEE reciprocal.
+    let large_value = Complex32::new(f32::MAX * 0.75, f32::MAX * 0.75);
     let large: TensorMap<_, Complex32> = TensorMap::diagonal(
         &runtime,
         &bond,
         [
             SectorSpectrum {
                 sector: Label::Vacuum,
-                values: vec![
-                    Complex32::new(f32::MAX * 0.75, f32::MAX * 0.75),
-                    Complex32::new(0.0, 0.0),
-                ],
+                values: vec![large_value, Complex32::new(0.0, 0.0)],
             },
             SectorSpectrum {
                 sector: Label::X,
@@ -672,12 +676,16 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
         ],
     )
     .unwrap();
-    let direct = large.pinv(&[0], &[1], 0.0);
-    let dense = large.materialize().unwrap().pinv(&[0], &[1], 0.0);
-    assert_eq!(direct.is_err(), dense.is_err());
-    if let (Err(actual), Err(expected)) = (direct, dense) {
-        assert_eq!(actual.to_string(), expected.to_string());
-    }
+    let direct = large.pinv(&[0], &[1], 0.0).unwrap();
+    assert!(direct.dense_data().is_err());
+    let inverse = direct.diagview().unwrap()[0].values[0];
+    let expected = Complex64::new(1.0, 0.0)
+        / Complex64::new(f64::from(large_value.re), f64::from(large_value.im));
+    assert!(
+        (Complex64::new(f64::from(inverse.re), f64::from(inverse.im)) - expected).norm()
+            <= 1e-6 * expected.norm(),
+        "{inverse} != {expected}"
+    );
 
     for value in [f32::from_bits(1), f32::from_bits(1 << 22)] {
         let tiny: TensorMap<_, f32> = TensorMap::diagonal(
@@ -695,19 +703,9 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
             ],
         )
         .unwrap();
-        let direct = tiny.pinv(&[0], &[1], 0.0);
-        let dense = tiny.materialize().unwrap().pinv(&[0], &[1], 0.0);
-        assert_eq!(
-            direct.is_err(),
-            dense.is_err(),
-            "tiny f32 {value}: direct={direct:?}, dense={dense:?}"
-        );
-        if let (Ok(direct), Ok(dense)) = (direct, dense) {
-            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
-            if value == f32::from_bits(1) {
-                assert!(direct.dense_data().is_ok());
-            }
-        }
+        let direct = tiny.pinv(&[0], &[1], 0.0).unwrap();
+        assert!(direct.dense_data().is_err());
+        assert_eq!(direct.diagview().unwrap()[0].values, [1.0 / value, 0.0]);
     }
 
     for value in [f64::from_bits(1), 1e-308] {
@@ -726,31 +724,19 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
             ],
         )
         .unwrap();
-        let direct = tiny.pinv(&[0], &[1], 0.0);
-        let dense = tiny.materialize().unwrap().pinv(&[0], &[1], 0.0);
-        assert_eq!(
-            direct.is_err(),
-            dense.is_err(),
-            "tiny f64 {value}: direct={direct:?}, dense={dense:?}"
-        );
-        if let (Ok(direct), Ok(dense)) = (direct, dense) {
-            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
-            if value == f64::from_bits(1) {
-                assert!(direct.dense_data().is_ok());
-            }
-        }
+        let direct = tiny.pinv(&[0], &[1], 0.0).unwrap();
+        assert!(direct.dense_data().is_err());
+        assert_eq!(direct.diagview().unwrap()[0].values, [1.0 / value, 0.0]);
     }
 
+    let tiny = Complex32::new(f32::from_bits(1), 0.0);
     let tiny_complex: TensorMap<_, Complex32> = TensorMap::diagonal(
         &runtime,
         &bond,
         [
             SectorSpectrum {
                 sector: Label::Vacuum,
-                values: vec![
-                    Complex32::new(f32::from_bits(1), 0.0),
-                    Complex32::new(0.0, 0.0),
-                ],
+                values: vec![tiny, Complex32::new(0.0, 0.0)],
             },
             SectorSpectrum {
                 sector: Label::X,
@@ -760,13 +746,9 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
     )
     .unwrap();
     let direct = tiny_complex.pinv(&[0], &[1], 0.0).unwrap();
-    let dense = tiny_complex
-        .materialize()
-        .unwrap()
-        .pinv(&[0], &[1], 0.0)
-        .unwrap();
-    assert!(direct.dense_data().is_ok());
-    assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+    assert!(direct.dense_data().is_err());
+    let inverse = direct.diagview().unwrap()[0].values[0];
+    assert!(inverse.re.is_infinite() && inverse.re > 0.0, "{inverse}");
 }
 
 #[test]

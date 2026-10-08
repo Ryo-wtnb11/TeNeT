@@ -229,9 +229,9 @@ where
 /// The matrix of one dtype's spectra, `(two values, three values)`, on the
 /// canonical and the expert layout of U(1), SU(2) and SU(3) bonds; every
 /// layout and rule must agree row by row. Returns the agreed rows.
-fn agreed_matrix<D: AdvancedLinalgScalar>(two: [D; 2], three: [D; 3], rcond: f64) -> Rows
+fn agreed_matrix<D>(two: [D; 2], three: [D; 3], rcond: f64) -> Rows
 where
-    D: FactorizationScalar,
+    D: AdvancedLinalgScalar + FactorizationScalar,
     <D as FactorScalar>::Eig: TensorScalar,
 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
