@@ -2,7 +2,7 @@
 //!
 //! A `Runtime` owns one CPU context ([`SharedCpuContext`]); its Rayon pool
 //! runs the runtime's dense kernels. An eager operation enters that context on
-//! the calling thread with [`with_host_pool`]. Every parallel region below it
+//! the calling thread with `with_host_pool`. Every parallel region below it
 //! (tree-transform replay fan-out, plan compile, strided kernels) then runs
 //! inside the same pool through [`install_region`] or [`strided`], and every
 //! degree cap reads [`current_threads`].
