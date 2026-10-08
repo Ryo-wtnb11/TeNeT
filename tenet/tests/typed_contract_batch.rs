@@ -73,7 +73,7 @@ where
         let lhs = StackedTensorMap::pack(&left).unwrap();
         let rhs = StackedTensorMap::pack(&right).unwrap();
         let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
-        let mut workspace = plan.workspace();
+        let mut workspace = plan.workspace().unwrap();
         let result = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
         for (i, member_case) in members.iter().enumerate() {
             let member = result.member(i).unwrap();
@@ -214,7 +214,7 @@ fn swapped_core_uses_rhs_member_length_and_nondefault_output_split() {
         rhs.dense_data().unwrap().len()
     );
     let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-    let mut workspace = plan.workspace();
+    let mut workspace = plan.workspace().unwrap();
     let actual = plan.execute(&left, &right, &mut workspace).unwrap();
     for i in 0..2 {
         assert_eq!(actual.member(i).unwrap().codomain_rank(), 2);
@@ -259,9 +259,9 @@ fn binding_errors_case(runtime: &Runtime, case: Case<tenet::sector::U1FusionRule
     let rhs = StackedTensorMap::pack(&[&case.rhs, &case.rhs]).unwrap();
     let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
     let other_plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
-    let mut workspace = plan.workspace();
-    let mut second = plan.workspace();
-    let mut foreign = other_plan.workspace();
+    let mut workspace = plan.workspace().unwrap();
+    let mut second = plan.workspace().unwrap();
+    let mut foreign = other_plan.workspace().unwrap();
     let mut destination =
         StackedTensorMap::pack(&[poisoned_destination(&case), poisoned_destination(&case)])
             .unwrap();
@@ -350,7 +350,7 @@ fn public_copy_c_matches_eager() {
         let expected = a.contract(&b, &spec).unwrap();
         let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
         let result = plan
-            .execute(&lhs, &rhs, &mut plan.workspace())
+            .execute(&lhs, &rhs, &mut plan.workspace().unwrap())
             .unwrap()
             .member(0)
             .unwrap();
@@ -500,7 +500,7 @@ fn public_copy_c_batch_measurement() {
         });
         let (plan, plan_time, plan_calls, plan_bytes) =
             measure(|| ContractPlan::new(&lhs, &rhs, &spec).unwrap());
-        let (mut workspace, ws_time, ws_calls, ws_bytes) = measure(|| plan.workspace());
+        let (mut workspace, ws_time, ws_calls, ws_bytes) = measure(|| plan.workspace().unwrap());
         let (_, cold_time, cold_calls, cold_bytes) =
             measure(|| black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap()));
         let (_, warm_time, warm_calls, warm_bytes) =
@@ -596,8 +596,8 @@ fn check_twisted_members<R, D>(
     let first_lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
     let first_rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
     let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec()).unwrap();
-    let mut workspace = plan.workspace();
-    let mut independent = plan.workspace();
+    let mut workspace = plan.workspace().unwrap();
+    let mut independent = plan.workspace().unwrap();
     for count in [1, 2, 17] {
         let members: Vec<_> = (0..count)
             .map(|i| Case {
@@ -747,7 +747,7 @@ fn check_fermionic_unit_batch<R, D>(
             domain: &case.output_axes[split..],
         };
         let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
-        let mut workspace = plan.workspace();
+        let mut workspace = plan.workspace().unwrap();
         let result = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
         for (index, member) in members.iter().enumerate() {
             let actual = result.member(index).unwrap();
@@ -912,7 +912,7 @@ fn fermionic_uniform_negative_core_is_admitted() {
     let right = StackedTensorMap::pack(&[&case.rhs]).unwrap();
     let plan = ContractPlan::new(&left, &right, &case.spec()).unwrap();
     let actual = plan
-        .execute(&left, &right, &mut plan.workspace())
+        .execute(&left, &right, &mut plan.workspace().unwrap())
         .unwrap()
         .member(0)
         .unwrap();
@@ -961,7 +961,7 @@ fn mixed_signed_fermionic_core_is_admitted() {
     let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
     let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
     let actual = plan
-        .execute(&lhs, &rhs, &mut plan.workspace())
+        .execute(&lhs, &rhs, &mut plan.workspace().unwrap())
         .unwrap()
         .member(0)
         .unwrap();
@@ -1001,8 +1001,8 @@ fn check_mixed_signed_members<R, D>(
     let first_lhs = StackedTensorMap::pack(&[&base.lhs]).unwrap();
     let first_rhs = StackedTensorMap::pack(&[&base.rhs]).unwrap();
     let plan = ContractPlan::new(&first_lhs, &first_rhs, &base.spec()).unwrap();
-    let mut workspace = plan.workspace();
-    let mut other_workspace = plan.workspace();
+    let mut workspace = plan.workspace().unwrap();
+    let mut other_workspace = plan.workspace().unwrap();
     for count in [1, 2, 17] {
         let members: Vec<_> = (0..count)
             .map(|i| Case {
@@ -1186,7 +1186,7 @@ fn partitioned_output_uses_requested_codomain_rank() {
         };
         let expected = case.lhs.contract(&case.rhs, &spec).unwrap();
         let actual = plan
-            .execute(&lhs, &rhs, &mut plan.workspace())
+            .execute(&lhs, &rhs, &mut plan.workspace().unwrap())
             .unwrap()
             .member(0)
             .unwrap();
@@ -1240,7 +1240,7 @@ fn public_host_batch_cold_warm_measurement() {
         let rhs = StackedTensorMap::pack(&right).unwrap();
         let ((plan, mut workspace), cold_time, cold_calls, cold_bytes) = measure(|| {
             let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
-            let mut workspace = plan.workspace();
+            let mut workspace = plan.workspace().unwrap();
             black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
             (plan, workspace)
         });
@@ -1291,7 +1291,7 @@ fn public_host_swapped_core_release_measurement() {
         let (plan, plan_time, plan_calls, plan_bytes) =
             measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
         let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
-            measure(|| plan.workspace());
+            measure(|| plan.workspace().unwrap());
         let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
             black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
         });
@@ -1356,7 +1356,7 @@ fn public_signed_direct_release_measurement() {
         let (plan, plan_time, plan_calls, plan_bytes) =
             measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
         let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
-            measure(|| plan.workspace());
+            measure(|| plan.workspace().unwrap());
         let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
             black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
         });
@@ -1426,7 +1426,7 @@ fn public_dynamic_source_twist_release_measurement() {
         let (plan, plan_time, plan_calls, plan_bytes) =
             measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
         let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
-            measure(|| plan.workspace());
+            measure(|| plan.workspace().unwrap());
         let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
             black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
         });
