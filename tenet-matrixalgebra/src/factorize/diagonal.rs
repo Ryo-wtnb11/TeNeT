@@ -11,7 +11,8 @@
 //!
 //! | Value map | Families | Where |
 //! |---|---|---|
-//! | magnitude `\|a\|` | SVD, null | `compact_diagonal_svd_sector`, `svd_vals_diagonal`, `compact_null_sector` |
+//! | magnitude `\|a\|` for `S`, phase for `Vh` | SVD | `compact_diagonal_svd_sector`, `svd_vals_diagonal` |
+//! | magnitude `\|a\|` | null | `compact_null_sector` |
 //! | phase and magnitude | QR/LQ, polar | [`diagonal_phase_magnitude_spectra`] |
 //! | real part, after the Hermiticity check | eigh | `hermitian_diagonal_bond` |
 //! | complex value, after the eigenvalue check | eig | `validate_diagonal_eigenvalues`, `eig_vals_diagonal` |
