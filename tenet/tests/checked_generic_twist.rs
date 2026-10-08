@@ -1267,3 +1267,59 @@ fn checked_generic_trace_gates_non_symmetric_braiding_before_the_pair_list() {
         }
     }
 }
+
+#[test]
+fn checked_trace_pivotal_failure_does_not_publish_destination() {
+    const ISOLATED: &str = "TENET_CHECKED_TRACE_PUBLICATION_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checked_trace_pivotal_failure_does_not_publish_destination",
+                "--nocapture",
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated trace publication test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(51, BraidingStyleKind::Bosonic, 1.0));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let source = TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&x], [&x], |_, indices| {
+        Complex64::new((indices[0] + 2 * indices[1]) as f64, 0.5)
+    })
+    .unwrap();
+    let payload = source.dense_data().unwrap().as_ptr();
+    tenet_core::reset_core_intern_tables();
+    let owner = || {
+        let info =
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure);
+        (info.admissions(), info.entries(), info.charged_bytes())
+    };
+    let before = owner();
+    assert_eq!(before, (0, 0, 0));
+    provider.reset_ledger(0);
+    provider.fail_twist_on.store(1, Ordering::Relaxed);
+
+    let result = source.trace_pairs(&[(0, 1)]);
+    assert!(matches!(
+        result,
+        Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+            PivotalError::Twist
+        )))
+    ));
+    assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 1);
+    assert_eq!(source.dense_data().unwrap().as_ptr(), payload);
+    // The complete-layout owner admits nothing for the rejected destination.
+    assert_eq!(owner(), before);
+}
