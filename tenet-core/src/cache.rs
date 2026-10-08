@@ -685,6 +685,32 @@ mod tests {
         assert_eq!(cache.info().evictions(), 0);
     }
 
+    #[test]
+    fn every_kind_is_listed_once_and_the_tensor_owned_kinds_have_their_own_slots() {
+        assert_eq!(StructureCacheKind::ALL.len(), 4);
+        for kind in StructureCacheKind::ALL {
+            assert_eq!(
+                StructureCacheKind::ALL
+                    .iter()
+                    .filter(|listed| **listed == kind)
+                    .count(),
+                1
+            );
+        }
+        // What: the two `tenet-tensors` caches register in distinct slots;
+        // the core-owned kinds refuse registration.
+        let completed = external_slot(StructureCacheKind::CompletedTreeTransformer).unwrap();
+        let coefficients = external_slot(StructureCacheKind::TreeTransformCoefficients).unwrap();
+        assert!(!std::ptr::eq(completed, coefficients));
+        assert!(external_slot(StructureCacheKind::SectorStructure).is_none());
+        assert!(external_slot(StructureCacheKind::DegeneracyStructure).is_none());
+        let info = structure_cache_info(StructureCacheKind::TreeTransformCoefficients);
+        assert_eq!(
+            (info.kind(), info.entries()),
+            (StructureCacheKind::TreeTransformCoefficients, 0)
+        );
+    }
+
     /// A stand-in for the externally owned completed-transformer cache: the
     /// registry only sees its control.
     struct FakeOwner;
