@@ -285,7 +285,7 @@ fn mf_one_sided_pair_errors_precede_tree_traversal() {
     .unwrap_err();
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor sector absent from the source tensor"
         }
     ));
@@ -303,7 +303,7 @@ fn mf_one_sided_pair_errors_precede_tree_traversal() {
     .unwrap_err();
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor rank absent for a populated source sector"
         }
     ));
@@ -403,13 +403,13 @@ fn placement_index_distinguishes_dual_innerline_and_vertex_trees() {
     // A domain tree is never a codomain tree of this matrix and vice versa.
     assert!(matches!(
         index.placement(sector, FactorSide::Left, base.domain_tree()),
-        Err(OperationError::UnsupportedTensorContractScope {
+        Err(OperationError::SpaceMismatch {
             message: "factor codomain tree absent from the source matricization"
         })
     ));
     assert!(matches!(
         index.placement(sector, FactorSide::Right, base.codomain_tree()),
-        Err(OperationError::UnsupportedTensorContractScope {
+        Err(OperationError::SpaceMismatch {
             message: "factor domain tree absent from the source matricization"
         })
     ));
@@ -886,7 +886,7 @@ fn mf_one_sided_fallbacks_match_canonical_output_and_keep_buffers() {
     let (result, probe) = build(&matrices, &mut pairs[..1], &row_dimensions);
     assert!(matches!(
         result.unwrap_err(),
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor rank absent for a populated source sector"
         }
     ));
@@ -906,7 +906,7 @@ fn mf_one_sided_fallbacks_match_canonical_output_and_keep_buffers() {
     let (result, probe) = build(&matrices, &mut pairs, &row_dimensions);
     assert!(matches!(
         result.unwrap_err(),
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor sector absent from the source tensor"
         }
     ));

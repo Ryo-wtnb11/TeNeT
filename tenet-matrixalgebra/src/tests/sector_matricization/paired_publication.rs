@@ -403,7 +403,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
     .unwrap_err();
     assert!(matches!(
         missing_sector,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor tree references a coupled sector absent from the source tensor"
         }
     ));
@@ -419,7 +419,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
     let missing_row = publish_pair(&provider, &homspace, &[wrong_row], vec![pair()]).unwrap_err();
     assert!(matches!(
         missing_row,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor codomain tree absent from the source matricization"
         }
     ));
@@ -429,7 +429,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
     let missing_col = publish_pair(&provider, &homspace, &[wrong_col], vec![pair()]).unwrap_err();
     assert!(matches!(
         missing_col,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "factor domain tree absent from the source matricization"
         }
     ));
@@ -771,7 +771,7 @@ fn generic_pair_validation_reports_left_defect_before_right_across_sectors() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope { message }
+                OperationError::SpaceMismatch { message }
             ) if message == expected
         ));
     }
@@ -985,7 +985,7 @@ fn checked_paired_placement_error_precedes_bound_space() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope { message }
+                OperationError::SpaceMismatch { message }
             ) if message == expected_message
         ));
         assert_eq!(recorder.log().len(), expected_calls);

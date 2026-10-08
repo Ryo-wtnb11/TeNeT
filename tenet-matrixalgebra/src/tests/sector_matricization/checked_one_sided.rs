@@ -239,7 +239,7 @@ fn checked_one_sided_reports_missing_pairs_and_full_trees() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
+                OperationError::SpaceMismatch {
                     message: "factor rank absent for a populated source sector"
                 }
             )
@@ -279,7 +279,7 @@ fn checked_one_sided_reports_missing_pairs_and_full_trees() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope { message }
+                OperationError::SpaceMismatch { message }
             ) if message == expected
         ));
     }
@@ -385,7 +385,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
+                OperationError::SpaceMismatch {
                     message: "factor sector absent from the source tensor"
                 }
             )
@@ -601,7 +601,7 @@ fn checked_one_sided_placement_error_precedes_bound_space() {
         assert!(matches!(
             error,
             CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope { message }
+                OperationError::SpaceMismatch { message }
             ) if message == expected_message
         ));
         assert_eq!(recorder.log().len(), 3);

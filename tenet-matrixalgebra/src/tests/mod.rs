@@ -27,6 +27,7 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
+    arity_mismatch,
     DenseBackend, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor, DenseWrite,
 };
 

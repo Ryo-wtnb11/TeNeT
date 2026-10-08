@@ -443,7 +443,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     assert!(matches!(
         input.eigh_full(&[0, 1], &[], HermitianTol::DEFAULT),
         Err(Error::Operation(error))
-            if matches!(error.as_ref(), tenet_tensors::OperationError::UnsupportedTensorContractScope {
+            if matches!(error.as_ref(), tenet_tensors::OperationError::SpaceMismatch {
                 message: "eigh requires an endomorphism (codomain == domain)"
             })
     ));
@@ -985,7 +985,7 @@ fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
     assert!(matches!(
         input.eig_full(&[0, 1], &[]),
         Err(Error::Operation(error))
-            if matches!(error.as_ref(), tenet_tensors::OperationError::UnsupportedTensorContractScope {
+            if matches!(error.as_ref(), tenet_tensors::OperationError::SpaceMismatch {
                 message: "eig requires an endomorphism (codomain == domain)"
             })
     ));
@@ -1290,7 +1290,7 @@ fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
         Error::Operation(error)
             if matches!(
                 error.as_ref(),
-                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                tenet_tensors::OperationError::SpaceMismatch {
                     message: "eig requires an endomorphism (codomain == domain)"
                 }
             )
