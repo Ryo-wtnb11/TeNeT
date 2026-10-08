@@ -1113,8 +1113,12 @@ fn assert_defective_eigenpairs(
         .flat_map(|i| (0..n).map(move |j| (i, j)))
         .map(|(i, j)| a(i, j).norm())
         .fold(1.0_f64, f64::max);
+    // A size-n Jordan block's eigenvalue moves by about (eps |A|)^(1/n) under a
+    // backward-stable solver, so the spectrum bound follows that theory; the
+    // eigenpair residual below is the main oracle.
+    let spectrum_tol = 10.0 * (f64::EPSILON * scale).powf(1.0 / n as f64);
     for k in 0..n {
-        assert!((lambda(k) - exact).norm() < 1.0e-6);
+        assert!((lambda(k) - exact).norm() <= spectrum_tol);
         let norm = (0..n).map(|i| v(i, k).norm_sqr()).sum::<f64>().sqrt();
         assert!(norm > 0.5);
         for i in 0..n {
