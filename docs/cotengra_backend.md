@@ -60,7 +60,7 @@ use tenet::plancache::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
 use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("tools/cotengra-python")
+    CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python")
         .timeout(Duration::from_secs(120)),
 );
 let rt = Runtime::builder()
@@ -68,11 +68,11 @@ let rt = Runtime::builder()
     .build()?;
 ```
 
-The relative `tools/cotengra-python` path is resolved against the current
-working directory first, then against `tenet-network`'s `CARGO_MANIFEST_DIR`
-parent — so it works regardless of the caller's CWD (a downstream crate does
-**not** need an absolute path). The interpreter is a config field; TeNeT reads
-no environment variable to choose it:
+The project path is stored verbatim and resolved by `uv` against the process
+working directory at launch; TeNeT neither probes the CWD nor bakes in a
+source-tree location, so a downstream crate passes an absolute path (or one
+built from its own `CARGO_MANIFEST_DIR`). The interpreter is a config field;
+TeNeT reads no environment variable to choose it:
 
 - `CotengraPythonConfig::python(program)` — run a specific interpreter directly.
 - `CotengraPythonConfig::uv_project(path)` — use `uv run --project <path> python`.

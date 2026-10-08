@@ -27,7 +27,7 @@ Use it from Rust:
 use tenet::plancache::{CotengraPythonConfig, Optimizer};
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("tools/cotengra-python"),
+    CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python"),
 );
 ```
 
@@ -35,11 +35,9 @@ The opt-in integration test takes the project path from its own environment
 (the library itself reads none):
 
 ```sh
-TENET_COTENGRA_UV_PROJECT=tools/cotengra-python TENET_RUN_COTENGRA_PYTHON_TEST=1 \
+TENET_COTENGRA_UV_PROJECT=$PWD/tools/cotengra-python TENET_RUN_COTENGRA_PYTHON_TEST=1 \
   cargo test -p tenet-network --features cotengra-python -- --ignored
 ```
 
-Relative `tools/cotengra-python` paths are resolved against the current working
-directory first, then against the TeNeT workspace source tree. For long-running
-applications outside this workspace, an absolute path is still the clearest
-choice.
+The project path is passed to `uv` unchanged and resolved against the process
+working directory, so prefer an absolute path.
