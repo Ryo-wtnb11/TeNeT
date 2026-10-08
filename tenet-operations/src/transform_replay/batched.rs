@@ -336,10 +336,11 @@ pub(super) fn replay_single_blocks<A, D, C>(
     mut kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
+    blocks: &[TreeTransformBlock],
     layouts: &TreeTransformLayoutTable,
     coefficients: &[C],
     storage_conjugate: bool,
-    items: &[TreeTransformSingleReplay],
+    items: &[u32],
     dst_data: &mut [D],
     dst_start: isize,
     src_data: &[D],
@@ -358,27 +359,26 @@ where
     if threads <= 1 || items.len() == 1 {
         let mut zero_strides = Vec::new();
         let fused_index = &mut fused_indices[..max_fused_rank];
-        for item in items {
-            let dst_layout = layouts.entry(item.dst_layout);
-            let src_layout = layouts.entry(item.src_layout);
-            let baked = layouts.fused_baked(item.dst_layout);
-            let scale = TransformScale::new(alpha, coefficients[item.coefficient]);
+        for &item in items {
+            let (dst_layout, src_layout, coefficient) = scheduled_single(blocks, item)?;
+            let role = layouts.role(dst_layout)?;
+            let scale = TransformScale::new(alpha, coefficients[coefficient]);
             kernels.transform_strided_baked(
                 &mut zero_strides,
                 dst_data,
                 src_data,
-                layouts.shape(dst_layout),
-                layouts.strides(dst_layout),
-                layouts.strides(src_layout),
-                dst_layout.offset - dst_start,
-                src_layout.offset,
+                role.dims(),
+                role.dst_strides(),
+                role.src_strides(),
+                layouts.entry(dst_layout).offset - dst_start,
+                layouts.entry(src_layout).offset,
                 storage_conjugate,
                 scale,
                 match mode {
                     DestinationMode::Axpby(beta) => Some(beta),
                     DestinationMode::Overwrite => None,
                 },
-                baked,
+                Some(role),
                 Some(&mut *fused_index),
             )?;
         }
@@ -386,7 +386,7 @@ where
     }
 
     let middle = parallel_split(items.len(), threads);
-    let boundary = items[middle].dst_lo;
+    let boundary = layouts.destination_lo(scheduled_single(blocks, items[middle])?.0)?;
     let split =
         usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
     let (left_data, right_data) = dst_data.split_at_mut(split);
@@ -401,6 +401,7 @@ where
                 kernels,
                 left_indices,
                 max_fused_rank,
+                blocks,
                 layouts,
                 coefficients,
                 storage_conjugate,
@@ -418,6 +419,7 @@ where
                 right_kernels,
                 right_indices,
                 max_fused_rank,
+                blocks,
                 layouts,
                 coefficients,
                 storage_conjugate,
@@ -433,6 +435,25 @@ where
     );
     left?;
     right
+}
+
+/// The `(dst_layout, src_layout, coefficient)` of the Single block a
+/// parallel schedule entry names.
+#[inline]
+pub(super) fn scheduled_single(
+    blocks: &[TreeTransformBlock],
+    item: u32,
+) -> Result<(usize, usize, usize), OperationError> {
+    match blocks.get(item as usize) {
+        Some(&TreeTransformBlock::Single {
+            dst_layout,
+            src_layout,
+            coefficient,
+        }) => Ok((dst_layout, src_layout, coefficient)),
+        _ => Err(OperationError::InvalidArgument {
+            message: "tree transform single schedule names a non-Single block",
+        }),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -460,33 +481,33 @@ where
     if threads <= 1 || items.len() == 1 {
         let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
-            let layout = layouts.entry(item.dst_layout);
-            let baked = layouts.fused_baked(item.dst_layout);
+            let role = layouts.role(item.dst_layout)?;
+            let offset = layouts.entry(item.dst_layout).offset - dst_start;
             match mode {
                 DestinationMode::Axpby(beta) => kernels.axpby_strided_baked(
                     dst_data,
                     packed_destination,
-                    layouts.shape(layout),
-                    layouts.strides(layout),
-                    layouts.packed_strides(layout),
-                    layout.offset - dst_start,
+                    role.dims(),
+                    role.dst_strides(),
+                    role.src_strides(),
+                    offset,
                     offset_to_isize(item.packed_offset - packed_start)?,
                     alpha,
                     beta,
-                    baked,
+                    Some(role),
                     Some(&mut *fused_index),
                 )?,
                 DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
                     dst_data,
                     packed_destination,
-                    layouts.shape(layout),
-                    layouts.strides(layout),
-                    layouts.packed_strides(layout),
-                    layout.offset - dst_start,
+                    role.dims(),
+                    role.dst_strides(),
+                    role.src_strides(),
+                    offset,
                     offset_to_isize(item.packed_offset - packed_start)?,
                     false,
                     alpha,
-                    baked,
+                    Some(role),
                     Some(&mut *fused_index),
                 )?,
             }
@@ -857,6 +878,7 @@ where
                 kernels.clone(),
                 &mut workspace.fused_indices[..fused_index_len],
                 max_fused_rank,
+                task.blocks(),
                 layouts,
                 task.single_coefficients(),
                 storage_conjugate,
@@ -870,15 +892,16 @@ where
             )?;
         } else {
             let mut zero_strides = Vec::new();
-            for item in &schedule.singles {
+            for &item in &schedule.singles {
+                let (dst_layout, src_layout, coefficient) = scheduled_single(task.blocks(), item)?;
                 tree_transform_single_with_strided_kernel(
                     kernels,
                     &mut zero_strides,
                     Some(&mut workspace.fused_indices[..max_fused_rank]),
                     layouts,
-                    item.dst_layout,
-                    item.src_layout,
-                    task.single_coefficients()[item.coefficient],
+                    dst_layout,
+                    src_layout,
+                    task.single_coefficients()[coefficient],
                     storage_conjugate,
                     dst_data,
                     src_data,

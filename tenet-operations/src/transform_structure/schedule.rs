@@ -10,15 +10,6 @@ pub struct TreeTransformRecouplingPlan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TreeTransformSingleReplay {
-    pub dst_layout: usize,
-    pub src_layout: usize,
-    pub coefficient: usize,
-    pub dst_lo: isize,
-    pub dst_hi: isize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TreeTransformPackReplay {
     pub src_layout: usize,
     pub packed_offset: usize,
@@ -41,7 +32,13 @@ pub(crate) struct TreeTransformScatterGroupReplay {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TreeTransformParallelSchedule {
-    pub singles: Vec<TreeTransformSingleReplay>,
+    /// Indices of the non-empty Single blocks, ordered by destination start.
+    /// Why indices rather than copied descriptors: the layout entries,
+    /// coefficient and destination range are all read from the block and its
+    /// compiled role, so a per-Single copy would duplicate retained state;
+    /// threaded replay recomputes a destination start only at its split
+    /// points.
+    pub singles: Vec<u32>,
     pub pack_columns: Vec<TreeTransformPackReplay>,
     pub scatter_columns: Vec<TreeTransformScatterReplay>,
     pub scatter_groups: Vec<TreeTransformScatterGroupReplay>,
@@ -90,7 +87,7 @@ impl TreeTransformRecouplingPlan {
 
 pub(super) fn compile_parallel_schedule(
     blocks: &[TreeTransformBlock],
-    layouts: &TreeTransformLayoutTable,
+    layouts: &RawLayoutTable,
     recoupling_plan: &TreeTransformRecouplingPlan,
 ) -> Result<TreeTransformParallelSchedule, OperationError> {
     let single_block_count = blocks
@@ -99,28 +96,28 @@ pub(super) fn compile_parallel_schedule(
         .count();
     let mut packed_column_count = 0usize;
     let mut scattered_column_count = 0usize;
-    let mut singles = Vec::new();
-    for block in blocks {
-        let TreeTransformBlock::Single {
-            dst_layout,
-            src_layout,
-            coefficient,
-        } = *block
-        else {
+    // Destination ranges are needed only to order the schedule and prove it
+    // slice-disjoint, so they stay in this compile-time list.
+    let mut ranges = Vec::with_capacity(single_block_count);
+    for (block_index, block) in blocks.iter().enumerate() {
+        let TreeTransformBlock::Single { dst_layout, .. } = *block else {
             continue;
         };
         let Some((dst_lo, dst_hi)) = layout_index_range(layouts, dst_layout)? else {
             continue;
         };
-        singles.push(TreeTransformSingleReplay {
-            dst_layout,
-            src_layout,
-            coefficient,
-            dst_lo,
-            dst_hi,
-        });
+        let block_index =
+            u32::try_from(block_index).map_err(|_| OperationError::ElementCountOverflow)?;
+        ranges.push((dst_lo, dst_hi, block_index));
     }
-    singles.sort_unstable_by_key(|item| item.dst_lo);
+    // Why the order is the base order: compilation rejects aliased
+    // destinations and drops empty ones, so no two keys tie.
+    ranges.sort_unstable_by_key(|&(dst_lo, _, _)| dst_lo);
+    let singles_slice_disjoint =
+        destination_ranges_are_slice_disjoint(ranges.iter().map(|&(lo, hi, _)| (lo, hi)));
+    let mut singles = Vec::with_capacity(ranges.len());
+    singles.extend(ranges.iter().map(|&(_, _, block_index)| block_index));
+    drop(ranges);
 
     let mut pack_columns = Vec::new();
     let mut scatter_columns = Vec::new();
@@ -217,9 +214,7 @@ pub(super) fn compile_parallel_schedule(
     }
 
     Ok(TreeTransformParallelSchedule {
-        singles_slice_disjoint: destination_ranges_are_slice_disjoint(
-            singles.iter().map(|item| (item.dst_lo, item.dst_hi)),
-        ),
+        singles_slice_disjoint,
         single_block_count,
         packed_column_count,
         scattered_column_count,
@@ -242,7 +237,7 @@ fn destination_ranges_are_slice_disjoint(ranges: impl IntoIterator<Item = (isize
 }
 
 pub(super) fn layout_index_range(
-    layouts: &TreeTransformLayoutTable,
+    layouts: &RawLayoutTable,
     layout_index: usize,
 ) -> Result<Option<(isize, isize)>, OperationError> {
     let layout = layouts.entry(layout_index);
@@ -251,7 +246,11 @@ pub(super) fn layout_index_range(
     }
     let mut lo = layout.offset;
     let mut hi = layout.offset;
-    for (&extent, &stride) in layouts.shape(layout).iter().zip(layouts.strides(layout)) {
+    for (&extent, &stride) in layouts
+        .shape(layout_index)
+        .iter()
+        .zip(layouts.strides(layout_index))
+    {
         let extent = isize::try_from(extent.saturating_sub(1))
             .map_err(|_| OperationError::ElementCountOverflow)?;
         let span = extent
@@ -355,10 +354,10 @@ pub(super) fn compile_recoupling_plan(
 
 pub(super) fn tree_transform_block_weight(
     block: &TreeTransformBlock,
-    layouts: &TreeTransformLayoutTable,
+    layouts: &[TreeTransformLayout],
 ) -> usize {
     match *block {
-        TreeTransformBlock::Single { dst_layout, .. } => layouts.entry(dst_layout).element_count,
+        TreeTransformBlock::Single { dst_layout, .. } => layouts[dst_layout].element_count,
         TreeTransformBlock::Multi {
             dst_count,
             src_count,
@@ -373,7 +372,7 @@ pub(super) fn tree_transform_block_weight(
 pub(super) fn compile_physical_overwrite_coverage(
     blocks: &[TreeTransformBlock],
     inactive_dst_layouts: &[usize],
-    layouts: &TreeTransformLayoutTable,
+    layouts: &RawLayoutTable,
     recoupling_plan: &TreeTransformRecouplingPlan,
     destination_block_count: usize,
     required_len: usize,

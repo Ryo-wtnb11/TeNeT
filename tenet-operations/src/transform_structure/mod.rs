@@ -94,18 +94,6 @@ impl<T> TreeTransformStructure<T> {
                 core::mem::size_of::<TreeTransformLayout>(),
             ))
             .saturating_add(vector_bytes(
-                self.layouts.shapes.capacity(),
-                core::mem::size_of::<usize>(),
-            ))
-            .saturating_add(vector_bytes(
-                self.layouts.strides.capacity(),
-                core::mem::size_of::<isize>(),
-            ))
-            .saturating_add(vector_bytes(
-                self.layouts.packed_strides.capacity(),
-                core::mem::size_of::<isize>(),
-            ))
-            .saturating_add(vector_bytes(
                 self.layouts.fused_dims.capacity(),
                 core::mem::size_of::<usize>(),
             ))
@@ -116,10 +104,6 @@ impl<T> TreeTransformStructure<T> {
             .saturating_add(vector_bytes(
                 self.layouts.fused_src_strides.capacity(),
                 core::mem::size_of::<isize>(),
-            ))
-            .saturating_add(vector_bytes(
-                self.layouts.fused_slots.capacity(),
-                core::mem::size_of::<FusedSlot>(),
             ))
             .saturating_add(self.coefficients.charged_bytes())
             .saturating_add(vector_bytes(
@@ -136,7 +120,7 @@ impl<T> TreeTransformStructure<T> {
             ))
             .saturating_add(vector_bytes(
                 self.parallel_schedule.singles.capacity(),
-                core::mem::size_of::<TreeTransformSingleReplay>(),
+                core::mem::size_of::<u32>(),
             ))
             .saturating_add(vector_bytes(
                 self.parallel_schedule.pack_columns.capacity(),
@@ -170,18 +154,28 @@ impl<T: Copy> TreeTransformStructure<T> {
         &self.blocks
     }
 
-    /// Immutable compiled layout table.
+    /// Immutable compiled layout table: per entry its offset and element
+    /// count. Its geometry is read through [`Self::layout_diagnostics`].
     #[inline]
     pub fn layouts(&self) -> &TreeTransformLayoutTable {
         &self.layouts
     }
 
-    /// Differential self-check: every baked fused layout matches a fresh run of
-    /// the production normalizer for its (block, role) stride pair.
-    /// Test-only.
-    #[doc(hidden)]
-    pub fn baked_layouts_match_recomputed(&self) -> bool {
-        self.layouts.baked_matches_recomputed(&self.blocks)
+    /// Owned copy of every layout entry's role and compiled normalized
+    /// geometry, for diagnostics and tests.
+    ///
+    /// Cost: four allocations and O(entries + Σf) copies per call, where f is
+    /// an entry's normalized rank; replay never calls it. The raw
+    /// (source-permuted, unnormalized) shapes and strides are not available:
+    /// a completed transform retains only the geometry replay executes.
+    ///
+    /// Migration: `TreeTransformLayoutTable::{shape, strides, packed_strides}`
+    /// were removed. Their raw geometry is the destination and source
+    /// `BlockStructure` blocks with the spec's `source_axes` applied to the
+    /// source; [`Self::layouts`] still gives each entry's offset and element
+    /// count.
+    pub fn layout_diagnostics(&self) -> TreeTransformLayoutDiagnostics {
+        self.layouts.diagnostics(&self.blocks)
     }
 
     /// Block `block_index`'s `U[dst, src]` coefficients, read in place: a
@@ -308,7 +302,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     pub fn replay_weights(&self) -> Vec<usize> {
         self.blocks
             .iter()
-            .map(|block| tree_transform_block_weight(block, &self.layouts))
+            .map(|block| tree_transform_block_weight(block, &self.layouts.entries))
             .collect()
     }
 
@@ -397,10 +391,48 @@ mod tests {
     use super::*;
     use tenet_core::{BlockKey, BlockSpec};
 
+    /// Independent hand normalization of a two-sided role: drop extent-1
+    /// axes, order by destination stride, fuse runs contiguous on both sides.
+    /// Written here, not shared with the production normalizer.
+    fn expected_role(
+        shape: &[usize],
+        dst: &[isize],
+        src: &[isize],
+    ) -> (Vec<usize>, Vec<isize>, Vec<isize>) {
+        if shape.contains(&0) {
+            return (vec![0], vec![0], vec![0]);
+        }
+        let mut axes = (0..shape.len())
+            .filter(|&axis| shape[axis] != 1)
+            .map(|axis| (dst[axis], src[axis], shape[axis]))
+            .collect::<Vec<_>>();
+        axes.sort_by_key(|&(dst, _, _)| dst);
+        let mut fused: Vec<(isize, isize, usize)> = Vec::new();
+        for (dst, src, extent) in axes {
+            match fused.last_mut() {
+                Some(last)
+                    if last.0 * last.2 as isize == dst && last.1 * last.2 as isize == src =>
+                {
+                    last.2 *= extent
+                }
+                _ => fused.push((dst, src, extent)),
+            }
+        }
+        if fused.is_empty() {
+            return (vec![1], vec![0], vec![0]);
+        }
+        (
+            fused.iter().map(|axis| axis.2).collect(),
+            fused.iter().map(|axis| axis.0).collect(),
+            fused.iter().map(|axis| axis.1).collect(),
+        )
+    }
+
     #[test]
-    fn compiled_fused_layouts_match_the_production_normalizer() {
-        // What: a runtime-rank layout is admitted and bakes the same normalized
-        // layout that eager replay derives from its shapes and strides.
+    fn compiled_single_role_is_the_normalized_permuted_pair() {
+        // What: a runtime-rank Single block retains one normalized pair — the
+        // destination block's strides against the source block's strides
+        // after `source_axes` — and its source entry retains no geometry.
         let shape = vec![2; 9];
         let strides = (0..9).map(|axis| 1usize << axis).collect::<Vec<_>>();
         let block = BlockSpec::with_key(BlockKey::ordinal(0), shape, strides, 0).unwrap();
@@ -410,29 +442,94 @@ mod tests {
         let compiled =
             TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
         assert!(!compiled.has_pack_gemm_scatter_blocks());
-        assert!(compiled.layouts().fused_baked(0).is_some());
         assert_eq!(compiled.layouts().max_fused_rank(), 9);
-        assert!(compiled.baked_layouts_match_recomputed());
+
+        let dst = (0..9).map(|axis| 1isize << axis).collect::<Vec<_>>();
+        let src = (0..9).rev().map(|axis| 1isize << axis).collect::<Vec<_>>();
+        let (dims, dst, src) = expected_role(&[2; 9], &dst, &src);
+        let role = compiled.layouts().role(0).unwrap();
+        assert_eq!(
+            (role.dims(), role.dst_strides(), role.src_strides()),
+            (&dims[..], &dst[..], &src[..])
+        );
+        assert_eq!(
+            compiled.layouts().role(1).unwrap_err(),
+            missing_role_error()
+        );
+
+        let diagnostics = compiled.layout_diagnostics();
+        assert_eq!(diagnostics.len(), 2);
+        let destination = diagnostics.entry(0).unwrap();
+        assert_eq!(
+            destination.role,
+            TreeTransformLayoutRole::Single { source_entry: 1 }
+        );
+        assert_eq!(
+            (
+                destination.dims,
+                destination.block_strides,
+                destination.partner_strides
+            ),
+            (&dims[..], &dst[..], Some(&src[..]))
+        );
+        let source = diagnostics.entry(1).unwrap();
+        assert_eq!(
+            source.role,
+            TreeTransformLayoutRole::SingleSource {
+                destination_entry: 0
+            }
+        );
+        assert_eq!(
+            (source.dims, source.block_strides, source.partner_strides),
+            (&dims[..], &src[..], Some(&dst[..]))
+        );
+        assert_eq!((source.offset, source.element_count), (0, 512));
+    }
+
+    fn missing_role_error() -> OperationError {
+        OperationError::InvalidArgument {
+            message: "tree transform layout entry has no compiled role of this kind",
+        }
     }
 
     #[test]
-    fn retained_payload_charge_tracks_capacity_not_diagnostic_lengths() {
-        // What: admission accounting sees retained spare capacity that the
-        // existing len-based layout diagnostics intentionally omit.
-        let block = BlockSpec::with_key(BlockKey::ordinal(0), vec![2], vec![1], 0).unwrap();
-        let structure = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
+    fn retained_layout_arena_is_exact_and_charged_by_capacity() {
+        // What: every retained layout vector is sized exactly — the arena to
+        // the normalized ranks, not `rank` per role, and the Single schedule
+        // to its entries — and the admission charge follows capacity.
+        let blocks = vec![
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 2], vec![1, 2], 0).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(1), vec![2, 2], vec![1, 2], 4).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(2), vec![1, 4], vec![1, 1], 8).unwrap(),
+        ];
+        let structure = BlockStructure::from_blocks_with_rank(2, blocks).unwrap();
         let mut compiled = TreeTransformStructure::compile_structures(
             &structure,
             &structure,
-            &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+            &[
+                // Contiguous on both sides: one fused axis of 4.
+                TreeTransformBlockSpec::single(0, 1, 1.0_f64),
+                // Transposed: two axes.
+                TreeTransformBlockSpec::single(1, 0, 1.0_f64).with_source_axes([1, 0]),
+            ],
         )
         .unwrap();
-        let diagnostic = compiled.layouts().layout_table_bytes();
+        let layouts = compiled.layouts();
+        // Two-sided roles: 1 + 2 axes. Inactive block 2 (`[1, 4]`): 1 axis.
+        assert_eq!(layouts.fused_src_strides.capacity(), 3);
+        assert_eq!(layouts.fused_dims.capacity(), 4);
+        assert_eq!(layouts.fused_dst_strides.capacity(), 4);
+        assert_eq!(layouts.entries.capacity(), 5);
+        assert_eq!(compiled.parallel_schedule().singles.capacity(), 2);
+        assert_eq!(
+            compiled.layouts().inactive_role(4).unwrap(),
+            (&[4usize][..], &[1isize][..])
+        );
+        assert!(compiled.layouts().role(4).is_err());
+        assert!(compiled.layouts().inactive_role(0).is_err());
+
         let charged = compiled.charged_payload_bytes();
-
-        compiled.layouts.shapes.reserve_exact(128);
-
-        assert_eq!(compiled.layouts().layout_table_bytes(), diagnostic);
+        compiled.layouts.fused_dims.reserve_exact(128);
         assert!(compiled.charged_payload_bytes() > charged);
     }
 
@@ -456,43 +553,21 @@ mod tests {
 
     #[test]
     fn layout_range_covers_negative_stride_rank_zero_and_zero_extent() {
-        let layouts = TreeTransformLayoutTable {
-            entries: vec![
-                TreeTransformLayout {
-                    layout_start: 0,
-                    rank: 1,
-                    packed_start: 0,
-                    offset: 5,
-                    element_count: 3,
-                },
-                TreeTransformLayout {
-                    layout_start: 1,
-                    rank: 0,
-                    packed_start: 0,
-                    offset: 7,
-                    element_count: 1,
-                },
-                TreeTransformLayout {
-                    layout_start: 1,
-                    rank: 1,
-                    packed_start: 0,
-                    offset: 0,
-                    element_count: 0,
-                },
-            ],
-            shapes: vec![3],
-            strides: vec![-2],
-            packed_strides: vec![1],
-            fused_dims: Vec::new(),
-            fused_dst_strides: Vec::new(),
-            fused_src_strides: Vec::new(),
-            fused_slots: Vec::new(),
-            max_fused_rank: 0,
+        let entry = |offset, element_count| TreeTransformLayout {
+            role: RoleSlot::default(),
+            offset,
+            element_count,
         };
+        let mut layouts = RawLayoutTable::new(1);
+        layouts.table.entries = vec![entry(5, 3), entry(0, 0)];
+        layouts.shapes = vec![3, 0];
+        layouts.strides = vec![-2, 1];
+        let mut scalar = RawLayoutTable::new(0);
+        scalar.table.entries = vec![entry(7, 1)];
 
         assert_eq!(layout_index_range(&layouts, 0).unwrap(), Some((1, 5)));
-        assert_eq!(layout_index_range(&layouts, 1).unwrap(), Some((7, 7)));
-        assert_eq!(layout_index_range(&layouts, 2).unwrap(), None);
+        assert_eq!(layout_index_range(&scalar, 0).unwrap(), Some((7, 7)));
+        assert_eq!(layout_index_range(&layouts, 1).unwrap(), None);
     }
 
     #[test]
@@ -541,31 +616,56 @@ mod tests {
     }
 
     #[test]
-    fn mapped_layout_append_preserves_axis_order_and_column_major_metadata() {
-        let mut layouts = TreeTransformLayoutTable::default();
-
+    fn mapped_layout_append_preserves_axis_order_and_bakes_column_major_pack() {
+        let mut layouts = RawLayoutTable::new(3);
+        layouts.push_block(&[4, 2, 3], &[1, 4, 8], 0).unwrap();
         let count = layouts
-            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 7, Some(&[2, 0, 1]), true)
+            .push_block_with_axes(&[2, 3, 4], &[1, 2, 6], 7, Some(&[2, 0, 1]))
             .unwrap();
 
-        // What: source-axis permutation changes stored shape and source
-        // strides in the requested order while packed strides describe that
-        // same final shape.
-        let layout = layouts.entry(0);
+        // What: source-axis permutation changes the raw shape and source
+        // strides in the requested order.
         assert_eq!(count, 24);
-        assert_eq!(layouts.shape(layout), &[4, 2, 3]);
-        assert_eq!(layouts.strides(layout), &[6, 1, 2]);
-        assert_eq!(layouts.packed_strides(layout), &[1, 4, 8]);
-        assert_eq!(layout.offset, 7);
+        assert_eq!(layouts.shape(1), &[4, 2, 3]);
+        assert_eq!(layouts.strides(1), &[6, 1, 2]);
+        assert_eq!(layouts.entry(1).offset, 7);
+
+        // What: the pack role pairs those strides with the column-major
+        // strides `[1, 4, 8]` of the same permuted shape. By hand: ordered by
+        // packed stride, axes 1 and 2 are contiguous on both sides
+        // (4·2 = 8, 1·2 = 2), axes 0 and 1 are not (6·4 ≠ 1).
+        let table = layouts
+            .finish(
+                &[TreeTransformBlock::Multi {
+                    dst_layout_start: 0,
+                    dst_count: 1,
+                    src_layout_start: 1,
+                    src_count: 1,
+                    coefficient_start: 0,
+                    element_count: 24,
+                    matrix: 0,
+                }],
+                &[],
+            )
+            .unwrap();
+        let pack = table.role(1).unwrap();
+        assert_eq!(pack.dims(), &[4, 6]);
+        assert_eq!(pack.dst_strides(), &[1, 4]);
+        assert_eq!(pack.src_strides(), &[6, 1]);
+        // The scatter of the unpermuted destination fuses completely.
+        let scatter = table.role(0).unwrap();
+        assert_eq!(
+            (scatter.dims(), scatter.dst_strides(), scatter.src_strides()),
+            (&[24usize][..], &[1isize][..], &[1isize][..])
+        );
     }
 
     #[test]
     fn mapped_layout_validation_is_atomic_and_keeps_permuted_zero_extent_order() {
-        let mut layouts = TreeTransformLayoutTable::default();
-        let empty = layouts.clone();
+        let mut layouts = RawLayoutTable::new(3);
 
         let error = layouts
-            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 0, Some(&[0, 0, 2]), true)
+            .push_block_with_axes(&[2, 3, 4], &[1, 2, 6], 0, Some(&[0, 0, 2]))
             .unwrap_err();
         assert_eq!(
             error,
@@ -574,22 +674,16 @@ mod tests {
                 rank: 3,
             }
         );
-        assert_eq!(layouts, empty);
+        assert_eq!(layouts.entry_count(), 0);
+        assert!(layouts.shapes.is_empty() && layouts.strides.is_empty());
 
         let count = layouts
-            .push_block_with_axes(
-                3,
-                &[usize::MAX, 2, 0],
-                &[1, 1, 1],
-                0,
-                Some(&[2, 0, 1]),
-                true,
-            )
+            .push_block_with_axes(&[usize::MAX, 2, 0], &[1, 1, 1], 0, Some(&[2, 0, 1]))
             .unwrap();
         // What: validation follows the materialized permutation's order, so a
         // leading zero extent keeps the same non-overflowing element count.
         assert_eq!(count, 0);
-        assert_eq!(layouts.shape(layouts.entry(0)), &[0, usize::MAX, 2]);
+        assert_eq!(layouts.shape(0), &[0, usize::MAX, 2]);
     }
 
     #[test]

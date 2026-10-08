@@ -1,309 +1,163 @@
+use smallvec::SmallVec;
+
 use super::*;
 
-/// One prebaked fused layout's location in the arena (issue #232).
+/// One layout entry's compiled replay role in the fused arena.
 ///
-/// `rank == 0` is the "absent" sentinel: normalized layouts always have
-/// rank >= 1, so a zero-rank slot means the entry was never baked (a
-/// Single-block source layout, looked up only via its destination twin, or an
-/// inactive destination). The compact 32-bit fields match QSpace's runtime-rank
-/// metadata without making a small-rank execution split.
+/// `rank == 0` marks an entry without a role of its own: a Single block's
+/// source entry, which its destination twin's role already covers. Every
+/// other role has rank >= 1, because normalization maps rank 0 to one unit
+/// axis. The compact 32-bit fields match QSpace's runtime-rank metadata
+/// without making a small-rank execution split.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct FusedSlot {
+pub(super) struct RoleSlot {
     start: u32,
     rank: u32,
 }
 
+/// The retained layout authority of a completed tree transform: per entry its
+/// offset and element count, and per replayed `(entry, role)` the compiled
+/// normalized loop layout.
+///
+/// Provenance: TensorKit `cfaa073e`
+/// [`treetransformers.jl:AbelianTreeTransformer/GenericTreeTransformer`](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/treetransformers.jl#L10-L129)
+/// retains, per block, the coefficient plus the destination and source
+/// `StridedStructure` (size, strides, offset), and its replay
+/// ([`indexmanipulations.jl:add_transform_kernel!`](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/indexmanipulations.jl#L648-L715))
+/// re-normalizes them through `StridedView` + `tensoradd!(…, p, …)` on every
+/// call. QSpace `d2d3d7da`
+/// [`QSpace.hh:QSpace::Permute`](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.hh#lines-2837:2887) recomputes geometry per call and
+/// retains no completed transformer, so it has no corresponding payload.
+///
+/// Rust deviations: the permuted, normalized pair TensorKit derives on every
+/// replay is computed once here and is the *only* retained geometry. A Single
+/// block keeps one shared `dims` plus a destination and a source stride column
+/// (24f bytes for normalized rank f <= N, against TensorKit's two raw
+/// structures of 16N each); its source entry keeps no geometry. A Multi
+/// member keeps its pack or scatter role. An inactive destination keeps a
+/// one-sided role (`dims` and its own strides, 16f), stored after every
+/// two-sided role so the source stride column stops at the two-sided prefix.
+/// The raw (pre-normalization, source-permuted) table lives only during
+/// compilation, where every structural proof runs on it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TreeTransformLayoutTable {
     pub(super) entries: Vec<TreeTransformLayout>,
-    pub(super) shapes: Vec<usize>,
-    pub(super) strides: Vec<isize>,
-    pub(super) packed_strides: Vec<isize>,
-    // Baked fused loop layouts (issue #232): SoA arena mirroring shapes/strides
-    // above, indexed per (entry, role) through `fused_slots`. Populated once at
-    // compile time so replay skips layout normalization.
     pub(super) fused_dims: Vec<usize>,
     pub(super) fused_dst_strides: Vec<isize>,
+    /// Source strides of the two-sided roles only; a role starting at or past
+    /// its length is one-sided.
     pub(super) fused_src_strides: Vec<isize>,
-    pub(super) fused_slots: Vec<FusedSlot>,
+    /// Largest two-sided role rank: the traversal scratch compiled replay
+    /// hands each worker.
     pub(super) max_fused_rank: usize,
 }
 
 impl TreeTransformLayoutTable {
-    pub(super) fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Prebaked fused layout for `entry_index`, or `None` when the entry was
-    /// not baked (see [`FusedSlot`]) and the caller must recompute. Returned
-    /// slices are the exact normalized `(dims, dst_strides, src_strides)` that
-    /// the production normalizer produced for that entry's role.
-    pub(crate) fn fused_baked(&self, entry_index: usize) -> Option<BakedFusedLayout<'_>> {
-        let slot = self.fused_slots.get(entry_index).copied()?;
-        if slot.rank == 0 {
-            return None;
-        }
-        let start = slot.start as usize;
-        let end = start + slot.rank as usize;
-        Some(BakedFusedLayout::from_compiled_normalized_slices(
-            &self.fused_dims[start..end],
-            &self.fused_dst_strides[start..end],
-            &self.fused_src_strides[start..end],
-        ))
-    }
-
-    /// Heap bytes of the base layout metadata. Test/diagnostic API.
-    #[doc(hidden)]
-    pub fn layout_table_bytes(&self) -> usize {
-        self.entries.len() * core::mem::size_of::<TreeTransformLayout>()
-            + self.shapes.len() * core::mem::size_of::<usize>()
-            + (self.strides.len() + self.packed_strides.len()) * core::mem::size_of::<isize>()
-    }
-
-    /// Heap bytes of the compiled fused-layout arena. Test/diagnostic API.
-    #[doc(hidden)]
-    pub fn baked_arena_bytes(&self) -> usize {
-        self.fused_dims.len() * core::mem::size_of::<usize>()
-            + (self.fused_dst_strides.len() + self.fused_src_strides.len())
-                * core::mem::size_of::<isize>()
-            + self.fused_slots.len() * core::mem::size_of::<FusedSlot>()
+    pub fn entry(&self, index: usize) -> &TreeTransformLayout {
+        &self.entries[index]
     }
 
     pub(crate) fn max_fused_rank(&self) -> usize {
         self.max_fused_rank
     }
 
-    /// Bakes the fused layout of `entry_index` for the `dst_strides`/`src_strides`
-    /// pair of its role (single/pack/scatter).
-    fn bake_entry(
-        &mut self,
-        entry_index: usize,
-        dst_is_packed: bool,
-        src_is_packed: bool,
-        scratch: &mut FusedLayoutScratch,
-    ) -> Result<(), OperationError> {
-        let layout = &self.entries[entry_index];
-        let range = layout.range();
-        let dst_strides = if dst_is_packed {
-            self.packed_strides(layout)
-        } else {
-            &self.strides[range.clone()]
-        };
-        let src_strides = if src_is_packed {
-            self.packed_strides(layout)
-        } else {
-            &self.strides[range.clone()]
-        };
-        normalize_fused_layout(&self.shapes[range], dst_strides, src_strides, scratch)?;
-        self.push_baked(entry_index, scratch)
-    }
-
-    /// Bakes a Single block's fused layout at its destination entry, combining
-    /// the destination entry's strides with the source entry's strides (both
-    /// share the same shape, validated at compile). Looked up via the
-    /// destination index only.
-    fn bake_single(
-        &mut self,
-        dst_entry: usize,
-        src_entry: usize,
-        scratch: &mut FusedLayoutScratch,
-    ) -> Result<(), OperationError> {
-        let dst = &self.entries[dst_entry];
-        let (ds, dr) = (dst.layout_start, dst.rank as usize);
-        let ss = self.entries[src_entry].layout_start;
-        normalize_fused_layout(
-            &self.shapes[ds..ds + dr],
-            &self.strides[ds..ds + dr],
-            &self.strides[ss..ss + dr],
-            scratch,
-        )?;
-        self.push_baked(dst_entry, scratch)
-    }
-
-    fn push_baked(
-        &mut self,
-        entry_index: usize,
-        fused: &FusedLayoutScratch,
-    ) -> Result<(), OperationError> {
-        BakedFusedLayout::try_from_normalized_slices(
-            fused.dims(),
-            fused.dst_strides(),
-            fused.src_strides(),
-        )?;
-        let start = u32::try_from(self.fused_dims.len())
-            .map_err(|_| OperationError::ElementCountOverflow)?;
-        let rank =
-            u32::try_from(fused.dims().len()).map_err(|_| OperationError::ElementCountOverflow)?;
-        start
-            .checked_add(rank)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        self.max_fused_rank = self.max_fused_rank.max(rank as usize);
-        self.fused_dims.extend_from_slice(fused.dims());
-        self.fused_dst_strides
-            .extend_from_slice(fused.dst_strides());
-        self.fused_src_strides
-            .extend_from_slice(fused.src_strides());
-        if entry_index >= self.fused_slots.len() {
-            self.fused_slots
-                .resize(entry_index + 1, FusedSlot::default());
+    fn slot_range(&self, entry_index: usize) -> Option<Range<usize>> {
+        let slot = self.entries.get(entry_index)?.role;
+        if slot.rank == 0 {
+            return None;
         }
-        self.fused_slots[entry_index] = FusedSlot { start, rank };
-        Ok(())
+        let start = slot.start as usize;
+        Some(start..start + slot.rank as usize)
     }
 
-    /// Differential self-check: every baked role equals the single production
-    /// normalizer applied to that role's stride pair.
-    #[doc(hidden)]
-    pub fn baked_matches_recomputed(&self, blocks: &[TreeTransformBlock]) -> bool {
-        let matches = |entry_index: usize, shape: &[usize], dst: &[isize], src: &[isize]| {
-            let Some(baked) = self.fused_baked(entry_index) else {
-                return false;
-            };
-            let mut scratch = FusedLayoutScratch::default();
-            if normalize_fused_layout(shape, dst, src, &mut scratch).is_err() {
-                return false;
+    /// The compiled two-sided role of `entry_index`: a Single block's
+    /// destination entry (dst = block, src = its source block, permuted), a
+    /// Multi source entry's pack (dst = packed column, src = block) or a Multi
+    /// destination entry's scatter (dst = block, src = packed column). These
+    /// are exactly the normalized `(dims, dst_strides, src_strides)` the
+    /// production normalizer produced at compile.
+    #[inline]
+    pub(crate) fn role(&self, entry_index: usize) -> Result<BakedFusedLayout<'_>, OperationError> {
+        match self.slot_range(entry_index) {
+            Some(range) if range.end <= self.fused_src_strides.len() => {
+                Ok(BakedFusedLayout::from_compiled_normalized_slices(
+                    &self.fused_dims[range.clone()],
+                    &self.fused_dst_strides[range.clone()],
+                    &self.fused_src_strides[range],
+                ))
             }
-            baked.dims() == scratch.dims()
-                && baked.dst_strides() == scratch.dst_strides()
-                && baked.src_strides() == scratch.src_strides()
-        };
-        for block in blocks {
-            match *block {
-                TreeTransformBlock::Single {
-                    dst_layout,
-                    src_layout,
-                    ..
-                } => {
-                    let dst = self.entry(dst_layout);
-                    let src = self.entry(src_layout);
-                    if !matches(
-                        dst_layout,
-                        self.shape(dst),
-                        self.strides(dst),
-                        self.strides(src),
-                    ) {
-                        return false;
-                    }
-                }
-                TreeTransformBlock::Multi {
-                    dst_layout_start,
-                    dst_count,
-                    src_layout_start,
-                    src_count,
-                    ..
-                } => {
-                    for index in src_layout_start..src_layout_start + src_count {
-                        let entry = self.entry(index);
-                        if !matches(
-                            index,
-                            self.shape(entry),
-                            self.packed_strides(entry),
-                            self.strides(entry),
-                        ) {
-                            return false;
-                        }
-                    }
-                    for index in dst_layout_start..dst_layout_start + dst_count {
-                        let entry = self.entry(index);
-                        if !matches(
-                            index,
-                            self.shape(entry),
-                            self.strides(entry),
-                            self.packed_strides(entry),
-                        ) {
-                            return false;
-                        }
-                    }
-                }
+            _ => Err(missing_role()),
+        }
+    }
+
+    /// The compiled one-sided role of an inactive destination entry: the
+    /// normalized `(dims, strides)` addressing exactly the block's elements.
+    #[inline]
+    pub(crate) fn inactive_role(
+        &self,
+        entry_index: usize,
+    ) -> Result<(&[usize], &[isize]), OperationError> {
+        match self.slot_range(entry_index) {
+            Some(range) if range.start >= self.fused_src_strides.len() => Ok((
+                &self.fused_dims[range.clone()],
+                &self.fused_dst_strides[range],
+            )),
+            _ => Err(missing_role()),
+        }
+    }
+
+    /// Lowest physical index a Single block's or a scatter column's
+    /// destination writes, from its compiled role. Normalization only drops
+    /// extent-1 axes, reorders, and fuses same-sign spans, so this equals the
+    /// raw layout's `layout_index_range` low end, which compilation already
+    /// computed without overflow. O(f), read only at threaded split points.
+    pub(crate) fn destination_lo(&self, entry_index: usize) -> Result<isize, OperationError> {
+        let role = self.role(entry_index)?;
+        let mut lo = self.entries[entry_index].offset;
+        for (&extent, &stride) in role.dims().iter().zip(role.dst_strides()) {
+            if stride < 0 {
+                let span = isize::try_from(extent.saturating_sub(1))
+                    .ok()
+                    .and_then(|extent| extent.checked_mul(stride))
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                lo = lo
+                    .checked_add(span)
+                    .ok_or(OperationError::ElementCountOverflow)?;
             }
         }
-        true
+        Ok(lo)
     }
 
-    pub fn entry(&self, index: usize) -> &TreeTransformLayout {
-        &self.entries[index]
-    }
-
-    pub fn shape(&self, layout: &TreeTransformLayout) -> &[usize] {
-        &self.shapes[layout.range()]
-    }
-
-    pub fn strides(&self, layout: &TreeTransformLayout) -> &[isize] {
-        &self.strides[layout.range()]
-    }
-
-    /// Column-major strides of the packed column of a `Multi` block's entry.
-    ///
-    /// # Panics
-    ///
-    /// For an entry no `Multi` block packs or scatters (a `Single` block's or
-    /// an inactive destination's); no replay path reads those.
-    pub fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
-        let start = layout.packed_start as usize;
-        &self.packed_strides[start..start + layout.rank as usize]
-    }
-
-    /// Reserves exact capacity for `entries` layouts of `rank` axes, of which
-    /// `packed_entries` belong to `Multi` blocks. Why exact: a retaining cache
-    /// charges capacity, and amortized growth left up to half of it unused.
-    pub(super) fn reserve_exact(&mut self, entries: usize, rank: usize, packed_entries: usize) {
-        self.entries.reserve_exact(entries);
-        self.shapes.reserve_exact(entries.saturating_mul(rank));
-        self.strides.reserve_exact(entries.saturating_mul(rank));
-        self.packed_strides
-            .reserve_exact(packed_entries.saturating_mul(rank));
-    }
-
-    /// Populates the baked arena for every replayed (entry, role): each Single
-    /// block's fused single layout at its destination entry, each Multi source
-    /// entry's pack layout (dst = packed column, src = block strides), each Multi
-    /// destination entry's scatter layout (dst = block strides, src = packed
-    /// column). Inactive destinations and Single source entries are intentionally
-    /// unbaked — the former never fuse-copy from a source, the latter are only
-    /// reached through their destination twin. Block order after the replay sort
-    /// is irrelevant: baking is keyed by stable entry index.
-    pub(super) fn bake_fused_layouts(
-        &mut self,
+    pub(super) fn diagnostics(
+        &self,
         blocks: &[TreeTransformBlock],
-    ) -> Result<(), OperationError> {
-        // Reserve the arena once so baking adds a bounded, block-count-independent
-        // number of allocations rather than growing per push. Fused rank never
-        // exceeds an entry's rank, except that a rank-0 entry fuses to one unit
-        // axis, so the baked entries' ranks (at least 1) bound each arena;
-        // a Single block's source entry and an inactive destination are never
-        // baked, so they reserve nothing (#1998). One slot per entry covers
-        // `fused_slots`.
-        let baked_ranks = blocks.iter().fold(0usize, |total, block| {
-            total.saturating_add(match *block {
-                TreeTransformBlock::Single { dst_layout, .. } => {
-                    (self.entries[dst_layout].rank as usize).max(1)
-                }
-                TreeTransformBlock::Multi {
-                    dst_layout_start,
-                    dst_count,
-                    src_layout_start,
-                    src_count,
-                    ..
-                } => self.entries[src_layout_start..src_layout_start + src_count]
-                    .iter()
-                    .chain(&self.entries[dst_layout_start..dst_layout_start + dst_count])
-                    .map(|entry| (entry.rank as usize).max(1))
-                    .sum(),
+    ) -> TreeTransformLayoutDiagnostics {
+        let mut entries = self
+            .entries
+            .iter()
+            .map(|layout| TreeTransformLayoutDiagnosticEntry {
+                role: TreeTransformLayoutRole::InactiveDestination,
+                offset: layout.offset,
+                element_count: layout.element_count,
+                start: 0,
+                rank: 0,
+                partner_start: None,
             })
-        });
-        self.fused_slots
-            .resize(self.entries.len(), FusedSlot::default());
-        self.fused_dims.reserve_exact(baked_ranks);
-        self.fused_dst_strides.reserve_exact(baked_ranks);
-        self.fused_src_strides.reserve_exact(baked_ranks);
-        let mut scratch = FusedLayoutScratch::default();
+            .collect::<Vec<_>>();
         for block in blocks {
             match *block {
                 TreeTransformBlock::Single {
                     dst_layout,
                     src_layout,
                     ..
-                } => self.bake_single(dst_layout, src_layout, &mut scratch)?,
+                } => {
+                    entries[dst_layout].role = TreeTransformLayoutRole::Single {
+                        source_entry: src_layout,
+                    };
+                    entries[src_layout].role = TreeTransformLayoutRole::SingleSource {
+                        destination_entry: dst_layout,
+                    };
+                }
                 TreeTransformBlock::Multi {
                     dst_layout_start,
                     dst_count,
@@ -311,40 +165,264 @@ impl TreeTransformLayoutTable {
                     src_count,
                     ..
                 } => {
-                    for index in src_layout_start..src_layout_start + src_count {
-                        self.bake_entry(index, true, false, &mut scratch)?;
+                    for entry in &mut entries[src_layout_start..src_layout_start + src_count] {
+                        entry.role = TreeTransformLayoutRole::Pack;
                     }
-                    for index in dst_layout_start..dst_layout_start + dst_count {
-                        self.bake_entry(index, false, true, &mut scratch)?;
+                    for entry in &mut entries[dst_layout_start..dst_layout_start + dst_count] {
+                        entry.role = TreeTransformLayoutRole::Scatter;
                     }
                 }
             }
         }
-        Ok(())
+        // A Single source entry reports its destination twin's role seen
+        // from the source side.
+        let owner = |index: usize, role: TreeTransformLayoutRole| match role {
+            TreeTransformLayoutRole::SingleSource { destination_entry } => destination_entry,
+            _ => index,
+        };
+        let (mut total, mut paired) = (0usize, 0usize);
+        for (index, entry) in entries.iter().enumerate() {
+            let rank = self
+                .slot_range(owner(index, entry.role))
+                .map_or(0, |range| range.len());
+            total += rank;
+            if entry.role != TreeTransformLayoutRole::InactiveDestination {
+                paired += rank;
+            }
+        }
+        let mut dims = Vec::with_capacity(total);
+        let mut block_strides = Vec::with_capacity(total);
+        let mut partner_strides = Vec::with_capacity(paired);
+        for (index, entry) in entries.iter_mut().enumerate() {
+            let range = self.slot_range(owner(index, entry.role)).unwrap_or(0..0);
+            let (dst, src) = (
+                &self.fused_dst_strides[range.clone()],
+                self.fused_src_strides.get(range.clone()),
+            );
+            let (block_side, partner_side) = match entry.role {
+                TreeTransformLayoutRole::InactiveDestination => (dst, None),
+                TreeTransformLayoutRole::Pack | TreeTransformLayoutRole::SingleSource { .. } => {
+                    (src.unwrap_or_default(), Some(dst))
+                }
+                TreeTransformLayoutRole::Single { .. } | TreeTransformLayoutRole::Scatter => {
+                    (dst, Some(src.unwrap_or_default()))
+                }
+            };
+            entry.start = dims.len();
+            entry.rank = range.len();
+            dims.extend_from_slice(&self.fused_dims[range]);
+            block_strides.extend_from_slice(block_side);
+            entry.partner_start = partner_side.map(|partner| {
+                let start = partner_strides.len();
+                partner_strides.extend_from_slice(partner);
+                start
+            });
+        }
+        TreeTransformLayoutDiagnostics {
+            entries,
+            dims,
+            block_strides,
+            partner_strides,
+        }
+    }
+}
+
+fn missing_role() -> OperationError {
+    OperationError::InvalidArgument {
+        message: "tree transform layout entry has no compiled role of this kind",
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeTransformLayout {
+    pub(super) role: RoleSlot,
+    pub offset: isize,
+    pub element_count: usize,
+}
+
+/// What one layout entry does during replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TreeTransformLayoutRole {
+    /// A Single block's destination; `source_entry` is its source.
+    Single { source_entry: usize },
+    /// A Single block's source, replayed through its destination's role.
+    SingleSource { destination_entry: usize },
+    /// A Multi block's source member, packed into a workspace column.
+    Pack,
+    /// A Multi block's destination member, scattered from a workspace column.
+    Scatter,
+    /// A destination block no spec writes; only scaled or zeroed.
+    InactiveDestination,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TreeTransformLayoutDiagnosticEntry {
+    role: TreeTransformLayoutRole,
+    offset: isize,
+    element_count: usize,
+    start: usize,
+    rank: usize,
+    partner_start: Option<usize>,
+}
+
+/// Owned copy of a completed transform's compiled layouts, for diagnostics
+/// and tests.
+///
+/// Geometry is the *compiled normalized* form replay executes: extent-1 axes
+/// dropped, axes ordered by the role's destination stride, contiguous runs
+/// fused, a zero extent as `[0]` and rank 0 as `[1]`. It addresses exactly the
+/// raw block's element set but is not the raw (source-permuted) axis order,
+/// which no completed transform retains.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TreeTransformLayoutDiagnostics {
+    entries: Vec<TreeTransformLayoutDiagnosticEntry>,
+    dims: Vec<usize>,
+    block_strides: Vec<isize>,
+    partner_strides: Vec<isize>,
+}
+
+/// One entry of [`TreeTransformLayoutDiagnostics`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TreeTransformLayoutView<'a> {
+    pub role: TreeTransformLayoutRole,
+    pub offset: isize,
+    pub element_count: usize,
+    /// Normalized extents of the entry's role.
+    pub dims: &'a [usize],
+    /// The entry's own block strides along `dims`.
+    pub block_strides: &'a [isize],
+    /// The paired strides along `dims`: the other block of a Single (its
+    /// source, or for a source entry its destination), or the packed column
+    /// of a pack or scatter. `None` for an inactive destination.
+    pub partner_strides: Option<&'a [isize]>,
+}
+
+impl TreeTransformLayoutDiagnostics {
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
-    /// Appends one layout entry; `packed` gives it packed strides, for an entry
-    /// of a `Multi` block.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Entry `index`, in the same indexing as
+    /// [`TreeTransformLayoutTable::entry`] and the block descriptors.
+    pub fn entry(&self, index: usize) -> Option<TreeTransformLayoutView<'_>> {
+        let entry = self.entries.get(index)?;
+        let range = entry.start..entry.start + entry.rank;
+        Some(TreeTransformLayoutView {
+            role: entry.role,
+            offset: entry.offset,
+            element_count: entry.element_count,
+            dims: &self.dims[range.clone()],
+            block_strides: &self.block_strides[range],
+            partner_strides: entry
+                .partner_start
+                .map(|start| &self.partner_strides[start..start + entry.rank]),
+        })
+    }
+}
+
+/// Which normalized role compile bakes for one entry.
+#[derive(Clone, Copy)]
+enum RoleKind {
+    /// Single block: dst = destination entry, src = source entry.
+    Single { src_entry: usize },
+    /// Multi source member: dst = packed column, src = block.
+    Pack,
+    /// Multi destination member: dst = block, src = packed column.
+    Scatter,
+    /// Inactive destination: its own strides on both sides.
+    Inactive,
+}
+
+/// Compile-time layout table: the retained entries plus the raw
+/// (source-permuted) shapes and strides every structural proof reads. Every
+/// entry has the structure rank, so entry `i`'s raw geometry starts at
+/// `i * rank`. Dropped once [`Self::finish`] has baked the compiled roles.
+pub(super) struct RawLayoutTable {
+    pub(super) table: TreeTransformLayoutTable,
+    rank: usize,
+    pub(super) shapes: Vec<usize>,
+    pub(super) strides: Vec<isize>,
+}
+
+impl RawLayoutTable {
+    pub(super) fn new(rank: usize) -> Self {
+        Self {
+            table: TreeTransformLayoutTable::default(),
+            rank,
+            shapes: Vec::new(),
+            strides: Vec::new(),
+        }
+    }
+
+    /// Reserves exact capacity for `entries` layouts. Why exact: a retaining
+    /// cache charges the entry vector's capacity, and amortized growth left
+    /// up to half of it unused.
+    pub(super) fn reserve_exact(&mut self, entries: usize) {
+        self.table.entries.reserve_exact(entries);
+        self.shapes.reserve_exact(entries.saturating_mul(self.rank));
+        self.strides
+            .reserve_exact(entries.saturating_mul(self.rank));
+    }
+
+    pub(super) fn entries(&self) -> &[TreeTransformLayout] {
+        &self.table.entries
+    }
+
+    pub(super) fn entry(&self, index: usize) -> &TreeTransformLayout {
+        &self.table.entries[index]
+    }
+
+    pub(super) fn entry_count(&self) -> usize {
+        self.table.entries.len()
+    }
+
+    pub(super) fn shape(&self, index: usize) -> &[usize] {
+        &self.shapes[index * self.rank..(index + 1) * self.rank]
+    }
+
+    pub(super) fn strides(&self, index: usize) -> &[isize] {
+        &self.strides[index * self.rank..(index + 1) * self.rank]
+    }
+
+    /// Appends one layout entry.
     pub(super) fn push_block(
         &mut self,
-        rank: usize,
         shape: &[usize],
         strides: &[usize],
         offset: usize,
-        packed: bool,
     ) -> Result<usize, OperationError> {
-        self.push_block_mapped(rank, shape, strides, offset, None, packed)
+        self.push_block_mapped(shape, strides, offset, None)
     }
 
-    fn push_block_mapped(
+    pub(super) fn push_block_with_axes(
         &mut self,
-        rank: usize,
         shape: &[usize],
         strides: &[usize],
         offset: usize,
         axes: Option<&[usize]>,
-        packed: bool,
     ) -> Result<usize, OperationError> {
+        let Some(axes) = axes else {
+            return self.push_block(shape, strides, offset);
+        };
+        crate::axis::validate_permutation(axes, self.rank)?;
+        self.push_block_mapped(shape, strides, offset, Some(axes))
+    }
+
+    fn push_block_mapped(
+        &mut self,
+        shape: &[usize],
+        strides: &[usize],
+        offset: usize,
+        axes: Option<&[usize]>,
+    ) -> Result<usize, OperationError> {
+        let rank = self.rank;
         if shape.len() != rank {
             return Err(OperationError::RankMismatch {
                 expected: rank,
@@ -363,6 +441,9 @@ impl TreeTransformLayoutTable {
                 .checked_mul(shape[axis(index)])
                 .ok_or(OperationError::ElementCountOverflow)
         })?;
+        // The packed column strides a pack or scatter role reads are the
+        // column-major strides of this (permuted) shape; validate that they
+        // are representable here so baking them cannot overflow.
         let mut packed_stride = 1usize;
         for index in 0..rank {
             isize::try_from(packed_stride).map_err(|_| OperationError::StrideOverflow {
@@ -378,74 +459,152 @@ impl TreeTransformLayoutTable {
                 .map_err(|_| OperationError::StrideOverflow { value: stride })?;
         }
         let offset = offset_to_isize(offset)?;
-        let overflow = |_| OperationError::ElementCountOverflow;
-        let rank_u32 = u32::try_from(rank).map_err(overflow)?;
-        let packed_start = if packed {
-            let start = u32::try_from(self.packed_strides.len()).map_err(overflow)?;
-            if start == NOT_PACKED {
-                return Err(OperationError::ElementCountOverflow);
-            }
-            start
-        } else {
-            NOT_PACKED
-        };
-
-        let layout_start = self.shapes.len();
-        let mut packed_stride = 1usize;
         for index in 0..rank {
             let axis = axis(index);
             self.shapes.push(shape[axis]);
             self.strides.push(strides[axis] as isize);
-            if packed {
-                self.packed_strides.push(packed_stride as isize);
-            }
-            packed_stride *= shape[axis];
         }
-        self.entries.push(TreeTransformLayout {
-            layout_start,
-            rank: rank_u32,
-            packed_start,
+        self.table.entries.push(TreeTransformLayout {
+            role: RoleSlot::default(),
             offset,
             element_count,
         });
         Ok(element_count)
     }
 
-    pub(super) fn push_block_with_axes(
-        &mut self,
-        rank: usize,
-        shape: &[usize],
-        strides: &[usize],
-        offset: usize,
-        axes: Option<&[usize]>,
-        packed: bool,
-    ) -> Result<usize, OperationError> {
-        let Some(axes) = axes else {
-            return self.push_block(rank, shape, strides, offset, packed);
+    /// Runs the production normalizer once per replayed `(entry, role)`:
+    /// every Single block's role at its destination entry, every Multi source
+    /// entry's pack and destination entry's scatter, then every inactive
+    /// destination's one-sided role. Block order after the replay sort does
+    /// not matter: roles are keyed by stable entry index.
+    fn for_each_role(
+        &self,
+        blocks: &[TreeTransformBlock],
+        inactive: &[usize],
+        scratch: &mut FusedLayoutScratch,
+        mut visit: impl FnMut(usize, bool, &FusedLayoutScratch) -> Result<(), OperationError>,
+    ) -> Result<(), OperationError> {
+        let mut packed = SmallVec::<[isize; 8]>::new();
+        let mut normalize = |entry: usize,
+                             kind: RoleKind,
+                             scratch: &mut FusedLayoutScratch|
+         -> Result<(), OperationError> {
+            let shape = self.shape(entry);
+            let strides = self.strides(entry);
+            if matches!(kind, RoleKind::Pack | RoleKind::Scatter) {
+                packed.clear();
+                let mut stride = 1isize;
+                for &extent in shape {
+                    packed.push(stride);
+                    // Validated by `push_block_mapped`; a zero extent leaves
+                    // later strides unused because normalization maps it to [0].
+                    stride = stride.saturating_mul(extent as isize);
+                }
+            }
+            match kind {
+                RoleKind::Single { src_entry } => {
+                    normalize_fused_layout(shape, strides, self.strides(src_entry), scratch)?
+                }
+                RoleKind::Pack => normalize_fused_layout(shape, &packed, strides, scratch)?,
+                RoleKind::Scatter => normalize_fused_layout(shape, strides, &packed, scratch)?,
+                RoleKind::Inactive => normalize_fused_layout(shape, strides, strides, scratch)?,
+            }
+            visit(entry, !matches!(kind, RoleKind::Inactive), scratch)
         };
-        crate::axis::validate_permutation(axes, rank)?;
-        self.push_block_mapped(rank, shape, strides, offset, Some(axes), packed)
+        for block in blocks {
+            match *block {
+                TreeTransformBlock::Single {
+                    dst_layout,
+                    src_layout,
+                    ..
+                } => normalize(
+                    dst_layout,
+                    RoleKind::Single {
+                        src_entry: src_layout,
+                    },
+                    scratch,
+                )?,
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    ..
+                } => {
+                    for entry in src_layout_start..src_layout_start + src_count {
+                        normalize(entry, RoleKind::Pack, scratch)?;
+                    }
+                    for entry in dst_layout_start..dst_layout_start + dst_count {
+                        normalize(entry, RoleKind::Scatter, scratch)?;
+                    }
+                }
+            }
+        }
+        for &entry in inactive {
+            normalize(entry, RoleKind::Inactive, scratch)?;
+        }
+        Ok(())
     }
-}
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct TreeTransformLayout {
-    pub(super) layout_start: usize,
-    pub(super) rank: u32,
-    /// Start of this entry's packed strides, or [`NOT_PACKED`]. Why only
-    /// `Multi` entries carry them (#1998): only pack and scatter read packed
-    /// strides, and only a `Multi` block packs or scatters.
-    pub(super) packed_start: u32,
-    pub offset: isize,
-    pub element_count: usize,
-}
-
-/// [`TreeTransformLayout::packed_start`] of an entry no `Multi` block packs.
-pub(super) const NOT_PACKED: u32 = u32::MAX;
-
-impl TreeTransformLayout {
-    #[inline]
-    fn range(&self) -> Range<usize> {
-        self.layout_start..self.layout_start + self.rank as usize
+    /// Bakes every replayed role into an exactly sized arena and returns the
+    /// retained table; the raw geometry is dropped with `self`.
+    ///
+    /// Why two normalization passes: the arena is charged by capacity, and
+    /// reserving `max(rank, 1)` per role charged 24N bytes even when a role
+    /// fuses to f < N axes. Counting first reserves exactly Σf without a
+    /// growth reallocation; the extra pass costs O(N²) compares per role at
+    /// compile and allocates nothing.
+    pub(super) fn finish(
+        mut self,
+        blocks: &[TreeTransformBlock],
+        inactive: &[usize],
+    ) -> Result<TreeTransformLayoutTable, OperationError> {
+        let mut scratch = FusedLayoutScratch::default();
+        let (mut two_sided, mut one_sided) = (0usize, 0usize);
+        self.for_each_role(blocks, inactive, &mut scratch, |_, paired, fused| {
+            let total = if paired {
+                &mut two_sided
+            } else {
+                &mut one_sided
+            };
+            *total = total.saturating_add(fused.dims().len());
+            Ok(())
+        })?;
+        let all = two_sided.saturating_add(one_sided);
+        let mut table = core::mem::take(&mut self.table);
+        table.fused_dims.reserve_exact(all);
+        table.fused_dst_strides.reserve_exact(all);
+        table.fused_src_strides.reserve_exact(two_sided);
+        self.for_each_role(blocks, inactive, &mut scratch, |entry, paired, fused| {
+            if paired {
+                BakedFusedLayout::try_from_normalized_slices(
+                    fused.dims(),
+                    fused.dst_strides(),
+                    fused.src_strides(),
+                )?;
+            }
+            let start = u32::try_from(table.fused_dims.len())
+                .map_err(|_| OperationError::ElementCountOverflow)?;
+            let rank = u32::try_from(fused.dims().len())
+                .map_err(|_| OperationError::ElementCountOverflow)?;
+            start
+                .checked_add(rank)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            table.fused_dims.extend_from_slice(fused.dims());
+            table
+                .fused_dst_strides
+                .extend_from_slice(fused.dst_strides());
+            if paired {
+                table
+                    .fused_src_strides
+                    .extend_from_slice(fused.src_strides());
+                table.max_fused_rank = table.max_fused_rank.max(rank as usize);
+            }
+            table.entries[entry].role = RoleSlot { start, rank };
+            Ok(())
+        })?;
+        debug_assert_eq!(table.fused_src_strides.len(), two_sided);
+        debug_assert_eq!(table.fused_dims.len(), all);
+        Ok(table)
     }
 }

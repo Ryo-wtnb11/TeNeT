@@ -136,7 +136,7 @@ fn offset_to_usize(offset: isize) -> Result<usize, OperationError> {
 /// the structural minimum instead of one plan per raw block rank. The host
 /// bakes a Multi source entry with the packed column as its destination and a
 /// Multi destination entry with the packed column as its source
-/// (`bake_fused_layouts`), so pack and scatter read the same arena the host
+/// (`RawLayoutTable::finish`), so pack and scatter read the same arena the host
 /// kernels do rather than a device-local re-derivation.
 pub(crate) fn compile_device_plan<C: Copy>(
     task: TreeTransformTaskView<'_, C>,
@@ -152,7 +152,7 @@ pub(crate) fn compile_device_plan<C: Copy>(
         else {
             continue;
         };
-        let baked = layouts.fused_baked(dst_layout).ok_or_else(|| {
+        let baked = layouts.role(dst_layout).map_err(|_| {
             unsupported("device tree transform requires a baked fused layout per Single block")
         })?;
         if baked.dims.contains(&0) {
@@ -244,21 +244,25 @@ pub(crate) fn compile_device_plan<C: Copy>(
 
     let mut zeros = Vec::new();
     let mut max_zero_len = 0usize;
+    // Each zero region is the inactive entry's compiled one-sided role: the
+    // block's element set with extent-1 axes dropped and contiguous runs
+    // fused, so equivalent blocks share one zero-fill plan signature.
     for &layout_index in task.inactive_destination_layouts() {
-        let layout = layouts.entry(layout_index);
-        let dims = layouts.shape(layout).to_vec();
+        let (dims, strides) = layouts.inactive_role(layout_index).map_err(|_| {
+            unsupported("device tree transform requires a compiled role per inactive layout")
+        })?;
         if dims.contains(&0) {
             continue;
         }
-        let count = crate::strided::element_count(&dims)?;
+        let count = crate::strided::element_count(dims)?;
         max_zero_len = max_zero_len.max(count);
         zeros.push(DeviceRegionSpec {
-            dims,
+            dims: dims.to_vec(),
             strides: non_negative(
-                layouts.strides(layout),
+                strides,
                 "device replay requires non-negative destination strides",
             )?,
-            offset: offset_to_usize(layout.offset)?,
+            offset: offset_to_usize(layouts.entry(layout_index).offset)?,
         });
     }
 
@@ -296,7 +300,7 @@ fn column_move<C: Copy>(
     direction: PackDirection,
 ) -> Result<Option<DeviceMoveSpec>, OperationError> {
     let layouts = task.layouts();
-    let baked = layouts.fused_baked(entry).ok_or_else(|| {
+    let baked = layouts.role(entry).map_err(|_| {
         unsupported("device tree transform requires a baked fused layout per recoupling column")
     })?;
     if baked.dims.contains(&0) {
@@ -766,7 +770,11 @@ mod tests {
         let plan = compile_device_plan(compiled.task_view().unwrap()).unwrap();
         assert_eq!(plan.moves.len(), 1, "the zero-extent block is skipped");
         assert_eq!(plan.zeros.len(), 1, "block 1 is never written");
-        assert_eq!(plan.zeros[0].dims, vec![3, 2]);
+        // The zero region is the compiled one-sided role: the column-major
+        // `[3, 2]` block with strides `[1, 3]` addresses offsets 4..10, the
+        // same element set as one fused axis `[6]` of stride 1.
+        assert_eq!(plan.zeros[0].dims, vec![6]);
+        assert_eq!(plan.zeros[0].strides, vec![1]);
         assert_eq!(plan.zeros[0].offset, 4);
         assert_eq!(plan.max_zero_len, 6);
     }

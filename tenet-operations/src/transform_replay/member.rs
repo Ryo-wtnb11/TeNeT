@@ -109,14 +109,12 @@ where
             .ok_or(OperationError::ElementCountOverflow)?,
     )
     .map_err(|_| OperationError::ElementCountOverflow)?;
+    // Every view below is a compiled normalized role: it addresses exactly
+    // the raw block's element set, so its minimum and maximum, and hence
+    // these bounds, are the raw layout's.
     for &index in task.inactive_destination_layouts() {
-        let layout = layouts.entry(index);
-        checked_view(
-            layout.offset,
-            layouts.shape(layout),
-            layouts.strides(layout),
-            dst_member,
-        )?;
+        let (dims, strides) = layouts.inactive_role(index)?;
+        checked_view(layouts.entry(index).offset, dims, strides, dst_member)?;
     }
     for block in task.blocks() {
         if let TreeTransformBlock::Single {
@@ -125,18 +123,17 @@ where
             coefficient,
         } = *block
         {
-            let dst = layouts.entry(dst_layout);
-            let src = layouts.entry(src_layout);
+            let role = layouts.role(dst_layout)?;
             checked_view(
-                dst.offset,
-                layouts.shape(dst),
-                layouts.strides(dst),
+                layouts.entry(dst_layout).offset,
+                role.dims(),
+                role.dst_strides(),
                 dst_member,
             )?;
             checked_view(
-                src.offset,
-                layouts.shape(src),
-                layouts.strides(src),
+                layouts.entry(src_layout).offset,
+                role.dims(),
+                role.src_strides(),
                 src_member,
             )?;
             if coefficient >= task.single_coefficients().len() {
@@ -182,19 +179,15 @@ where
         checked_range(coefficient_start, coefficient_span, task.coefficient_len())?;
         destinations.push((job.dst_offset, job.dst_offset + dst_span));
         for column in 0..src_count {
-            let layout = layouts.entry(src_layout_start + column);
+            let entry = src_layout_start + column;
+            let role = layouts.role(entry)?;
             checked_view(
-                layout.offset,
-                layouts.shape(layout),
-                layouts.strides(layout),
+                layouts.entry(entry).offset,
+                role.dims(),
+                role.src_strides(),
                 src_member,
             )?;
-            checked_view(
-                0,
-                layouts.shape(layout),
-                layouts.packed_strides(layout),
-                element_count,
-            )?;
+            checked_view(0, role.dims(), role.dst_strides(), element_count)?;
             checked_range(
                 job.lhs_offset + column * element_count,
                 element_count,
@@ -202,19 +195,15 @@ where
             )?;
         }
         for column in 0..dst_count {
-            let layout = layouts.entry(dst_layout_start + column);
+            let entry = dst_layout_start + column;
+            let role = layouts.role(entry)?;
             checked_view(
-                layout.offset,
-                layouts.shape(layout),
-                layouts.strides(layout),
+                layouts.entry(entry).offset,
+                role.dims(),
+                role.dst_strides(),
                 dst_member,
             )?;
-            checked_view(
-                0,
-                layouts.shape(layout),
-                layouts.packed_strides(layout),
-                element_count,
-            )?;
+            checked_view(0, role.dims(), role.src_strides(), element_count)?;
             checked_range(
                 job.dst_offset + column * element_count,
                 element_count,
@@ -388,12 +377,10 @@ where
         &mut workspace.member_src_strides,
     );
     for &index in task.inactive_destination_layouts() {
-        let layout = layouts.entry(index);
+        let (dims, strides) = layouts.inactive_role(index)?;
         let zero = [D::zero()];
         workspace.zero_strides.clear();
-        workspace
-            .zero_strides
-            .resize(layouts.shape(layout).len(), 0);
+        workspace.zero_strides.resize(dims.len(), 0);
         move_members(
             kernels,
             shape,
@@ -401,12 +388,12 @@ where
             src_strides,
             dst_data,
             &zero,
-            layouts.shape(layout),
-            layouts.strides(layout),
+            dims,
+            strides,
             &workspace.zero_strides,
             dst_stride,
             0,
-            layout.offset,
+            layouts.entry(index).offset,
             0,
             members,
             false,
@@ -422,16 +409,17 @@ where
         else {
             continue;
         };
+        let role = layouts.role(dst_layout)?;
         let dst = layouts.entry(dst_layout);
         let src = layouts.entry(src_layout);
         shape.clear();
-        shape.extend_from_slice(layouts.shape(dst));
+        shape.extend_from_slice(role.dims());
         shape.push(members);
         dst_strides.clear();
-        dst_strides.extend_from_slice(layouts.strides(dst));
+        dst_strides.extend_from_slice(role.dst_strides());
         dst_strides.push(dst_stride);
         src_strides.clear();
-        src_strides.extend_from_slice(layouts.strides(src));
+        src_strides.extend_from_slice(role.src_strides());
         src_strides.push(src_stride);
         kernels.transform_strided_baked(
             &mut workspace.zero_strides,
@@ -460,7 +448,8 @@ where
             unreachable!()
         };
         for column in 0..src_count {
-            let layout = layouts.entry(src_layout_start + column);
+            let entry = src_layout_start + column;
+            let role = layouts.role(entry)?;
             move_members(
                 kernels,
                 shape,
@@ -468,13 +457,13 @@ where
                 src_strides,
                 workspace.packed.source_mut().as_mut_slice(),
                 src_data,
-                layouts.shape(layout),
-                layouts.packed_strides(layout),
-                layouts.strides(layout),
+                role.dims(),
+                role.dst_strides(),
+                role.src_strides(),
                 packed_src_stride,
                 src_stride,
                 offset_to_isize(job.lhs_offset + column * element_count)?,
-                layout.offset,
+                layouts.entry(entry).offset,
                 members,
                 task.storage_conjugate(),
                 D::one(),
@@ -503,7 +492,8 @@ where
             unreachable!()
         };
         for column in 0..dst_count {
-            let layout = layouts.entry(dst_layout_start + column);
+            let entry = dst_layout_start + column;
+            let role = layouts.role(entry)?;
             move_members(
                 kernels,
                 shape,
@@ -511,12 +501,12 @@ where
                 src_strides,
                 dst_data,
                 workspace.packed.destination().as_slice(),
-                layouts.shape(layout),
-                layouts.strides(layout),
-                layouts.packed_strides(layout),
+                role.dims(),
+                role.dst_strides(),
+                role.src_strides(),
                 dst_stride,
                 packed_dst_stride,
-                layout.offset,
+                layouts.entry(entry).offset,
                 offset_to_isize(job.dst_offset + column * element_count)?,
                 members,
                 false,

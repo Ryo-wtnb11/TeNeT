@@ -26,13 +26,13 @@ use crate::task_view::TreeTransformTaskView;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
     TreeTransformPackReplay, TreeTransformParallelSchedule, TreeTransformScatterGroupReplay,
-    TreeTransformScatterReplay, TreeTransformSingleReplay,
+    TreeTransformScatterReplay,
 };
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
     ConjugateValue, DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
     RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TransformScale,
-    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
+    TreeTransformBlock, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
 
