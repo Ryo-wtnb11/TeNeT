@@ -1,7 +1,7 @@
 use num_complex::{Complex32, Complex64};
 
 use crate::{
-    DenseBackend, DenseDotConfig, DenseError, DenseRead, DenseScalar, DenseTensor, DenseView,
+    DenseDType, DenseDotConfig, DenseError, DenseRead, DenseScalar, DenseTensor, DenseView,
     DenseViewMut, DenseWrite,
 };
 
@@ -161,11 +161,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     ) -> Result<(), DenseError> {
         let outputs = self.svd(input)?;
         if outputs.len() != 3 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "dense SVD must return exactly (U, S, Vt)".to_string(),
-            });
+            return Err(arity_mismatch("svd_into", 3, outputs.len()));
         }
         copy_dense_tensor_into(&outputs[0], u, "svd_into")?;
         copy_dense_tensor_into(&outputs[1], s, "svd_into")?;
@@ -180,11 +176,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     ) -> Result<(), DenseError> {
         let outputs = self.qr(input)?;
         if outputs.len() != 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "qr_into",
-                message: "dense QR must return exactly (Q, R)".to_string(),
-            });
+            return Err(arity_mismatch("qr_into", 2, outputs.len()));
         }
         copy_dense_tensor_into(&outputs[0], q, "qr_into")?;
         copy_dense_tensor_into(&outputs[1], r, "qr_into")
@@ -198,11 +190,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     ) -> Result<(), DenseError> {
         let outputs = self.eigh(input)?;
         if outputs.len() != 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eigh_into",
-                message: "dense EIGH must return exactly (values, vectors)".to_string(),
-            });
+            return Err(arity_mismatch("eigh_into", 2, outputs.len()));
         }
         copy_dense_tensor_into(&outputs[0], values, "eigh_into")?;
         copy_dense_tensor_into(&outputs[1], vectors, "eigh_into")
@@ -226,11 +214,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let mut outputs = self.svd(input)?;
         if outputs.len() != 3 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_vals",
-                message: "dense SVD must return exactly (U, S, Vt)".to_string(),
-            });
+            return Err(arity_mismatch("svd_vals", 3, outputs.len()));
         }
         Ok(outputs.swap_remove(1))
     }
@@ -241,11 +225,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let mut outputs = self.eigh(input)?;
         if outputs.len() != 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eigh_vals",
-                message: "dense EIGH must return exactly (values, vectors)".to_string(),
-            });
+            return Err(arity_mismatch("eigh_vals", 2, outputs.len()));
         }
         Ok(outputs.swap_remove(0))
     }
@@ -257,11 +237,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let mut outputs = self.eig(input)?;
         if outputs.len() != 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eig_vals",
-                message: "dense EIG must return exactly (values, vectors)".to_string(),
-            });
+            return Err(arity_mismatch("eig_vals", 2, outputs.len()));
         }
         Ok(outputs.swap_remove(0))
     }
@@ -333,6 +309,7 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
         beta: DenseScalar,
     ) -> Result<(), DenseError> {
         let _ = runs;
+        let (out_dtype, lhs_dtype, rhs_dtype) = (output.dtype(), lhs.dtype(), rhs.dtype());
         match (output, lhs, rhs) {
             (DenseWrite::F32(out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
                 matmul_batch_axpby_serial(
@@ -386,11 +363,12 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
                     |view: DenseView<'_, Complex64>| DenseRead::C64(view),
                 )
             }
-            _ => Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "matmul_batch_axpby_into",
-                message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
-            }),
+            _ => Err(batch_operand_error(
+                "matmul_batch_axpby_into",
+                out_dtype,
+                lhs_dtype,
+                rhs_dtype,
+            )),
         }
     }
 
@@ -412,11 +390,41 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
         if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
             return self.matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta);
         }
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        Err(DenseError::Unsupported {
             op: "matmul_batch_axpby_with_ops_into",
             message: "executor does not implement transpose/adjoint rank-2 batches".to_string(),
         })
+    }
+}
+
+/// Executor-returned output count disagrees with the decomposition's arity.
+pub(crate) fn arity_mismatch(op: &'static str, expected: usize, actual: usize) -> DenseError {
+    DenseError::ShapeMismatch {
+        op,
+        expected: vec![expected],
+        actual: vec![actual],
+    }
+}
+
+/// Batched matmul operands must share one scalar dtype; report the first
+/// operand that disagrees with the destination, or `Unsupported` when all
+/// agree on a dtype the batched route does not cover (integers, bool).
+pub(crate) fn batch_operand_error(
+    op: &'static str,
+    out: DenseDType,
+    lhs: DenseDType,
+    rhs: DenseDType,
+) -> DenseError {
+    match [lhs, rhs].into_iter().find(|&d| d != out) {
+        Some(actual) => DenseError::DTypeMismatch {
+            op,
+            expected: out,
+            actual,
+        },
+        None => DenseError::Unsupported {
+            op,
+            message: format!("batched matmul requires f32/f64/c32/c64 operands, got {out:?}"),
+        },
     }
 }
 
@@ -438,11 +446,13 @@ fn copy_dense_tensor_into(
         DenseWrite::C64(output) => {
             copy_contiguous_tensor_into_view(tensor.as_c64_slice()?, tensor.shape(), output, op)
         }
-        DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_) => Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op,
-            message: format!("{op} outputs require f32/f64/c32/c64 destination views"),
-        }),
+        output @ (DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_)) => {
+            Err(DenseError::DTypeMismatch {
+                op,
+                expected: tensor.dtype(),
+                actual: output.dtype(),
+            })
+        }
     }
 }
 
@@ -453,14 +463,10 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
     op: &'static str,
 ) -> Result<(), DenseError> {
     if source_shape != output.shape() {
-        return Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        return Err(DenseError::ShapeMismatch {
             op,
-            message: format!(
-                "{op} output shape mismatch: source {:?}, destination {:?}",
-                source_shape,
-                output.shape()
-            ),
+            expected: output.shape().to_vec(),
+            actual: source_shape.to_vec(),
         });
     }
     let expected =
@@ -471,14 +477,10 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
                 None => Err(DenseError::ElementCountOverflow),
             })?;
     if source.len() != expected {
-        return Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        return Err(DenseError::ShapeMismatch {
             op,
-            message: format!(
-                "{op} output storage length mismatch: source {}, expected {}",
-                source.len(),
-                expected
-            ),
+            expected: vec![expected],
+            actual: vec![source.len()],
         });
     }
     if expected == 0 {
