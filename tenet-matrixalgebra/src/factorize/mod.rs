@@ -61,6 +61,7 @@ mod dense_stage;
 mod diagonal;
 mod eig;
 mod inverse;
+mod landing;
 mod matricize;
 mod null_space;
 mod polar;
@@ -93,6 +94,7 @@ mod sector_matricization_tests;
 // already named there), so a blanket glob re-export of either would be
 // unused. `polar`'s direction helpers, also used by `svd`, are imported by
 // name below.
+pub(crate) use authority::multiplicity_free_output_space;
 #[cfg(test)]
 pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
@@ -104,6 +106,7 @@ use dense_stage::*;
 use diagonal::*;
 pub(crate) use eig::*;
 pub(crate) use inverse::*;
+use landing::*;
 pub(crate) use matricize::*;
 use publish_checked::*;
 // `publish_mf` exposes crate-visible items only to the unit tests.
@@ -120,6 +123,8 @@ use probes::*;
 pub(crate) use qr_lq::*;
 use source::factor_from_source;
 pub use source::{ExecutorLease, FactorOutput, FactorRoute, FactorSource, Routed};
+#[cfg(test)]
+pub(crate) use svd::scale_axis_by_spectrum;
 pub(crate) use svd::*;
 
 // Explicit overrides: an item re-exported through the blanket globs above
@@ -151,15 +156,13 @@ pub(crate) use null_space::{left_null_dyn, right_null_dyn};
 pub use null_space::{left_null_from_source, right_null_from_source};
 #[cfg(test)]
 pub(crate) use polar::{
-    left_polar, left_polar_dyn_checked_generic, right_polar, right_polar_dyn_checked_generic,
+    left_polar, left_polar_dyn, left_polar_dyn_checked_generic, right_polar, right_polar_dyn,
+    right_polar_dyn_checked_generic,
 };
 pub use polar::{
-    left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,
-    left_polar_checked_generic, left_polar_dyn, left_polar_of_diagonal,
-    right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
-    right_polar_checked_generic, right_polar_dyn, right_polar_of_diagonal,
+    left_polar_adjoint_from_parent, left_polar_from_source, left_polar_of_diagonal,
+    right_polar_adjoint_from_parent, right_polar_from_source, right_polar_of_diagonal,
 };
-use polar::{validate_polar_direction, PolarDirection};
 pub use qr_lq::{
     lq_compact_from_source, lq_full_from_source, qr_compact_from_source, qr_full_from_source,
 };
@@ -170,7 +173,7 @@ pub use svd::{
     diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like,
     diagonal_bond_bound_space_on_source_checked_generic, diagonal_bond_data,
     rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
-    scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
+    scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
     svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,
     svd_full_from_source, svd_vals_dyn, svd_vals_from_source, SvdFactorsDyn, SvdFullFactorsDyn,
 };

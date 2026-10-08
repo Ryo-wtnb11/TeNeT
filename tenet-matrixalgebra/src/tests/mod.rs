@@ -12,9 +12,8 @@ use tenet_core::{
     Z2FusionRule,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, DynamicFusionMapSpace,
-    OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
+    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
 };
 
 use crate::factorize::{

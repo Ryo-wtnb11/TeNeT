@@ -1,7 +1,9 @@
-//! Composition of factor maps with automatic destination allocation.
+//! Test oracle: composition of factor maps through the fusion contraction
+//! engine. No production path recomposes factors this way; pinv, exp and
+//! polar write each coupled sector by one dense GEMM (#1752), and their tests
+//! check them against this independent recomposition.
 
 use std::hash::Hash;
-#[cfg(test)]
 use std::sync::Arc;
 
 use tenet_core::MultiplicityFreeRigidSymbols;
@@ -12,8 +14,9 @@ use tenet_tensors::{
 
 use crate::factorize::{BoundDynFactor, FactorScalar};
 
-/// Recomposition of provider-bound factors. The destination is created from
-/// the operands' shared provider and remains bound to that exact allocation.
+/// `lhs * rhs` of provider-bound factors by fusion contraction. The
+/// destination is created from the operands' shared provider and remains
+/// bound to that exact allocation.
 pub(crate) fn compose_bound_dyn<RuleKey, BT, BC, R, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     lhs: &BoundDynFactor<R, D>,
@@ -62,9 +65,7 @@ where
     BoundDynFactor::from_bound(dst_space, dst_data, nout, nin)
 }
 
-/// Typed composition over the full interface (test-suite convenience; the
-/// production paths use [`compose_bound_dyn`] directly).
-#[cfg(test)]
+/// Typed [`compose_bound_dyn`] over the full interface.
 pub(crate) fn compose<RuleKey, BT, BC, R, D, const A: usize, const B: usize, const C: usize>(
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     rule: &R,

@@ -549,8 +549,14 @@ fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
 #[test]
 fn polar_redirect_late_failure_leaves_parent_and_receiver_unchanged() {
     for left in [true, false] {
+        // Sectors stream, so the first sector's W/P GEMMs run before the
+        // second SVD fails.
         let runtime = Runtime::builder()
-            .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
+            .with_dense_executor(Box::new(SpyExecutor::counting(&Arc::default()).failing(
+                POLAR_SVD,
+                Some(2),
+                "injected second-sector failure",
+            )))
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);

@@ -11,6 +11,9 @@
 //! materialized factor values are checked against the original exact hashes.
 //! The SU(3) lazy-adjoint SVD, QR and LQ rows were `Err` (checked Generic
 //! refused lazy adjoints) until #1755; they were recorded at that change.
+//! The multiplicity-free polar rows (direct and lazy adjoint) were re-recorded
+//! when polar moved to the shared per-sector MatrixAlgebraKit `PolarViaSVD`
+//! kernel (#1752): structure unchanged, values within rounding.
 
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -362,8 +365,8 @@ const U1_F64: [u64; 20] = [
     0x088764e125943a52,
     0xe0d6fe066fe182ad,
     0x370c9d660175bbe6,
-    0xbcbc446d43bf055d,
-    0x357c53d9413f5f1d,
+    0xdd7812350a3f4ec8,
+    0x82de2828bec8932a,
     0x0427b0cbce01b22b,
     0x9eacc20a6bb38f23,
     0x0ad00b9efda3ea23,
@@ -372,8 +375,8 @@ const U1_F64: [u64; 20] = [
     0x22549abc7bd67c18,
     0x1195baa19ea488ab,
     0xbf80b20bedb48200,
-    0xbb570a6121fe8c4f,
-    0x325451e43f927af5,
+    0x4193b71bd736fe42,
+    0xbeec4a45cde9b7e2,
     0x0427b0cbce01b22b,
     0x36177581ad8caa62,
 ];
@@ -406,8 +409,8 @@ const U1_C64: [u64; 20] = [
     0xee1f76ddd74b8532,
     0xa3a2255a0eab759e,
     0xfa0e10a816a652c2,
-    0x09149f63ca770168,
-    0xb865df90b89b55b9,
+    0xa665a8b3830d20b6,
+    0xa3d5718b1e79ddd7,
     0x64ff1514719c1a0b,
     0xda636e8c4f05356c,
     0x820e16417a86d790,
@@ -416,8 +419,8 @@ const U1_C64: [u64; 20] = [
     0xbe5cbd5d3fd12ca5,
     0xf1f84c7abdf96f5e,
     0xf375144f69a913fb,
-    0x78ae7ca5225adc4f,
-    0xe257ea167da90730,
+    0xe984b22617206a21,
+    0x2066150499b2ccc2,
     0x64ff1514719c1a0b,
     0x2c9c04927fe7eacf,
 ];
@@ -450,8 +453,8 @@ const SU2_F64: [u64; 20] = [
     0xd3d3339297a20af0,
     0xcda57eb3985bbc58,
     0xec6248a2f4a04da5,
-    0x7e99abd9853338bf,
-    0x36ae910f2d23b6bf,
+    0x2a906745aab0d71f,
+    0x7815f711e939d5e2,
     0x8d436d0f3f902d9f,
     0x9dc68ade90d0c1aa,
     0x7df281dbbdbeddcc,
@@ -460,8 +463,8 @@ const SU2_F64: [u64; 20] = [
     0x4400f2902da9b76d,
     0xdf7e90da5b1b6b5c,
     0x0b91da8b7f65cf46,
-    0x7ecdc6b883224f99,
-    0x6be9159b247b41d7,
+    0xa99ea8cda147243c,
+    0xa113f7c0313cec7b,
     0x8d436d0f3f902d9f,
     0xcf22370816fae1bc,
 ];
@@ -494,8 +497,8 @@ const SU2_C64: [u64; 20] = [
     0x2add883d2170dd50,
     0x465743ea98509911,
     0xc9ba0ed39a9500f3,
-    0xa3427a38a4f43d93,
-    0x39ff2248e18fd31b,
+    0x34380448a178cfe2,
+    0xf6bcec3540540d67,
     0x94e02e3ffbeefe7f,
     0x9e3d81568fb83814,
     0x2e96bbde6011518b,
@@ -504,8 +507,8 @@ const SU2_C64: [u64; 20] = [
     0x5299717ad9ada771,
     0x5e4c714d4be4874d,
     0xb18b974b92344566,
-    0xdef5e464d4e507b0,
-    0x87278118a3602fdc,
+    0xf2e6e64a0f7ea396,
+    0x4da6bacd4a723b67,
     0x94e02e3ffbeefe7f,
     0x81607c6f30ddb487,
 ];
@@ -538,8 +541,8 @@ const FZ2U1_F64: [u64; 20] = [
     0x8c2abb9739eb28f5,
     0x5cdd525ac34f4390,
     0xcb5c92645fbc3187,
-    0xadee5d70a7b31992,
-    0xc5002eb3db4cd4f8,
+    0xe39ad4999252dfd3,
+    0xc7912da1f5f89dfb,
     0x57ef2a6423428527,
     0xac60ab563f375af7,
     0xde7d102cdbc2a14f,
@@ -548,8 +551,8 @@ const FZ2U1_F64: [u64; 20] = [
     0xf6d4523afd2f09f7,
     0xe31b1faba2c73af2,
     0xa366fac7915221b9,
-    0xed4e94194de1464c,
-    0xcc4603772aa2b424,
+    0x3f9d0caa922dfdf1,
+    0x062129823edf7ccb,
     0x57ef2a6423428527,
     0x7edde4952a2d8c96,
 ];
@@ -582,8 +585,8 @@ const FZ2U1_C64: [u64; 20] = [
     0x68b0c48f92ae94a7,
     0x7e714b9c7e42f52b,
     0x597c31fbb4171f8d,
-    0x608f420aaa167cb9,
-    0xf5ce8f1ca2e4e03a,
+    0xb7f8b14620b066fb,
+    0x26eac1f7c791210c,
     0x57d059e9b7890eb1,
     0x923f618b3d8c920e,
     0x8d4987d64c522618,
@@ -592,8 +595,8 @@ const FZ2U1_C64: [u64; 20] = [
     0xdb92a7f694a66f0e,
     0xc549648841791991,
     0xc87f5382ec5a540a,
-    0x666d3bc521985036,
-    0x21f30966c011fa51,
+    0x7c887065cb081434,
+    0x39422fd9bbf40a9f,
     0x57d059e9b7890eb1,
     0xb86d7d84ea9dab2d,
 ];

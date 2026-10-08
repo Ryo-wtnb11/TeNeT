@@ -1630,11 +1630,9 @@ fn exp_of_a_general_endomorphism_runs_one_solve_per_sector_and_no_eigh() {
     // block that needs no squaring, and never an eigendecomposition.
     let tensor = exp_oracle_tensor::<f64>(1.0);
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = default_context();
 
     exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();

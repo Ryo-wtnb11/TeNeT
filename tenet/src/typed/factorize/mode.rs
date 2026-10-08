@@ -23,42 +23,14 @@ where
     /// produced.
     fn decode_label(provider: &R, sector: SectorId) -> Result<R::Sector, Self::FacadeError>;
 
-    // Polar (D5, #1752): the multiplicity-free dense stages recouple through
-    // the runtime's context lane, which only the facade can lease. These stay
-    // per-mode arms until that leaf gives polar one kernel. The lazy-adjoint
-    // arms return the parent's opposite factors and the facade adjoints the
-    // isometry in both modes (#1755).
-
-    /// Left polar of an owned dense `tensor`.
-    fn left_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError>;
-
-    /// Right polar of an owned dense `tensor`.
-    fn right_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
-
-    /// The right polar factors of the lazy adjoint `tensor`'s parent, whose
-    /// direction errors name the requested left polar.
-    fn left_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
-
-    /// The left polar factors of the lazy adjoint `tensor`'s parent, whose
-    /// direction errors name the requested right polar.
-    fn right_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError>;
-
     // Inverse, pseudo-inverse, solve and exponential share their bodies and
     // compact value maps. What stays per mode, until its leaf unifies it:
     // - D7 (#1994): which compact diagonals take the compact arm; #1800: the
     //   compact pseudo-inverse of a non-finite spectrum;
     // - D8 (#1995): where the categorical preflight runs, and its order;
-    // - D5 (#1996, #1752): the dense and context leases and their timing;
-    // - D6 (#1752, #1799): the dense pseudo-inverse and exponential
-    //   algorithms.
+    // - D5 (#1996): the dense lease and its timing.
+    // The dense pseudo-inverse and exponential algorithms are the shared
+    // per-sector kernels in both modes (#1752, #1799).
 
     /// Whether a compact diagonal on `space` takes the compact arm of inv,
     /// pinv, solve and exp (D7, #1994); otherwise it is densified.
@@ -81,14 +53,14 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
     /// Pseudo-inverse on the dense route; a lazy adjoint is read through
-    /// its parent's SVD (D5, D6).
+    /// its parent's SVD (D5).
     fn pinv_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
         rcond: f64,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
     /// Exponential on the dense route, including the endomorphism check and
-    /// the lazy-adjoint materialization (D5, D6, D8).
+    /// the lazy-adjoint materialization (D5, D8).
     fn exp_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
@@ -222,86 +194,6 @@ where
         Ok(provider.try_decode_label(sector)?)
     }
 
-    fn left_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Error> {
-        // Dense lease before the context lease — the polar seam recouples
-        // internally, so unlike QR/LQ/null it takes the context lane; the
-        // lease order matches every existing site that takes both lanes.
-        let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
-        let (bound_space, bound_payload) = tensor.bound_payload()?;
-        let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
-        )?;
-        Ok(LeftPolar {
-            w: wrap_factor_on(&tensor.runtime, w),
-            p: wrap_factor_on(&tensor.runtime, p),
-        })
-    }
-
-    fn right_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Error> {
-        // See `left_polar_dense` for the lease order rationale.
-        let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
-        let (bound_space, bound_payload) = tensor.bound_payload()?;
-        let RightPolar { p, wh } = tenet_matrixalgebra::seam::right_polar_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
-        )?;
-        Ok(RightPolar {
-            p: wrap_factor_on(&tensor.runtime, p),
-            wh: wrap_factor_on(&tensor.runtime, wh),
-        })
-    }
-
-    fn left_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Error> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Err(internal_layout_error(
-                "adjoint polar input must be a lazy adjoint",
-            ));
-        };
-        let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
-        let RightPolar { p, wh } = tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-        )?;
-        Ok(RightPolar {
-            p: wrap_factor_on(&tensor.runtime, p),
-            wh: wrap_factor_on(&tensor.runtime, wh),
-        })
-    }
-
-    fn right_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Error> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Err(internal_layout_error(
-                "adjoint polar input must be a lazy adjoint",
-            ));
-        };
-        let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
-        let LeftPolar { w, p } = tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-        )?;
-        Ok(LeftPolar {
-            w: wrap_factor_on(&tensor.runtime, w),
-            p: wrap_factor_on(&tensor.runtime, p),
-        })
-    }
-
     fn compact_spectrum_admitted<D>(
         _space: &BoundDynamicFusionMapSpace<R>,
         _spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
@@ -357,14 +249,12 @@ where
         tensor: &TensorMap<R, D>,
         rcond: f64,
     ) -> Result<TensorMap<R, D>, Error> {
-        // SVD and a recoupling contraction through the context lane (D5, D6,
-        // #1752); a lazy adjoint is read through its parent's SVD.
+        // The shared per-sector pseudo-inverse into the derived swapped
+        // layout; a lazy adjoint is read through its parent's SVD.
         let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
         let out = match &tensor.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::seam::pinv_adjoint_parent_dyn(
                 dense.dense(),
-                lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
                 rcond,
             )
@@ -373,7 +263,6 @@ where
                 let (bound_space, bound_payload) = tensor.bound_payload()?;
                 tenet_matrixalgebra::seam::pinv_dyn(
                     dense.dense(),
-                    lease.context().multiplicity_free_lane::<D>()?,
                     &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
                     rcond,
                 )
@@ -386,11 +275,10 @@ where
     fn exp_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Error> {
-        // The seam checks the endomorphism (D8) and picks the Hermitian
-        // spectral route or Padé (D6, #1799), recoupling through the context
-        // lane (D5, #1752); both leases precede the adjoint materialization.
+        // The seam checks the endomorphism (D8) and runs the shared
+        // per-sector exponential (#1799); the lease precedes the adjoint
+        // materialization (D5).
         let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
         let local = matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
             .then(|| tensor.materialized_tensor_uncached())
             .transpose()?;
@@ -400,7 +288,6 @@ where
             .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
         let out = tenet_matrixalgebra::seam::exp_dyn(
             dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
         )?;
         Ok(wrap_factor_on(&tensor.runtime, out))
@@ -511,78 +398,6 @@ where
             .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))
     }
 
-    fn left_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError> {
-        let body = tensor.owned_body().ok_or_else(|| {
-            internal_layout_error("dense polar input must be owned after adjoint dispatch")
-        })?;
-        let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_checked_generic(
-            RuntimeDense(&tensor.runtime),
-            owned_factor_source(body)?,
-        )?;
-        Ok(LeftPolar {
-            w: tensor.factor_output(w),
-            p: tensor.factor_output(p),
-        })
-    }
-
-    fn right_polar_dense<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError> {
-        let body = tensor.owned_body().ok_or_else(|| {
-            internal_layout_error("dense polar input must be owned after adjoint dispatch")
-        })?;
-        let RightPolar { p, wh } = tenet_matrixalgebra::seam::right_polar_checked_generic(
-            RuntimeDense(&tensor.runtime),
-            owned_factor_source(body)?,
-        )?;
-        Ok(RightPolar {
-            p: tensor.factor_output(p),
-            wh: tensor.factor_output(wh),
-        })
-    }
-
-    fn left_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Err(internal_layout_error("adjoint polar input must be a lazy adjoint").into());
-        };
-        let mut dense = tensor.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
-            .map_err(Error::from)?;
-        let RightPolar { p, wh } =
-            tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn_checked_generic(
-                dense.dense(),
-                &input,
-            )?;
-        Ok(RightPolar {
-            p: wrap_factor_on(&tensor.runtime, p),
-            wh: wrap_factor_on(&tensor.runtime, wh),
-        })
-    }
-
-    fn right_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Err(internal_layout_error("adjoint polar input must be a lazy adjoint").into());
-        };
-        let mut dense = tensor.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
-            .map_err(Error::from)?;
-        let LeftPolar { w, p } =
-            tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn_checked_generic(
-                dense.dense(),
-                &input,
-            )?;
-        Ok(LeftPolar {
-            w: wrap_factor_on(&tensor.runtime, w),
-            p: wrap_factor_on(&tensor.runtime, p),
-        })
-    }
-
     fn compact_spectrum_admitted<D>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
@@ -669,8 +484,8 @@ where
         tensor: &TensorMap<R, D>,
         rcond: f64,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        // A direct per-sector pseudo-inverse, with no context lane (D5, D6,
-        // #1752); a lazy adjoint is read through its parent's SVD.
+        // The shared per-sector pseudo-inverse into the admitted swapped
+        // space; a lazy adjoint is read through its parent's SVD.
         let source = tensor.logical_space();
         let output = <Self as tenet_matrixalgebra::seam::FactorMode<R>>::authority(source)
             .output_space(FusionTreeHomSpace::new(
@@ -706,8 +521,8 @@ where
     fn exp_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        // The endomorphism check runs here, before the materialization (D8),
-        // and every input takes Padé [13/13] (D6, #1799).
+        // The endomorphism check runs here, before the materialization (D8);
+        // the shared per-sector exponential writes the input's own layout.
         if tensor.logical_space().space().homspace().codomain()
             != tensor.logical_space().space().homspace().domain()
         {
@@ -727,10 +542,11 @@ where
             .and_then(TensorMap::owned_body)
             .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::seam::exp_pade13_direct_into_dyn(
+        let factor = tenet_matrixalgebra::seam::exp_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
+            body.space.clone(),
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))

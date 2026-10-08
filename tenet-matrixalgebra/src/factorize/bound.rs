@@ -182,12 +182,9 @@ impl<R, D> BoundDynFactor<R, D> {
         &self.data
     }
 
+    #[cfg(test)]
     pub(crate) fn data_mut(&mut self) -> &mut [D] {
         &mut self.data
-    }
-
-    pub(crate) fn raw_space_and_data_mut(&mut self) -> (&DynamicFusionMapSpace, &mut [D]) {
-        (self.space.space(), &mut self.data)
     }
 
     pub fn into_parts(self) -> (BoundDynamicFusionMapSpace<R>, Vec<D>) {
@@ -195,6 +192,7 @@ impl<R, D> BoundDynFactor<R, D> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn adjoint_bound_factor<R, D>(
     factor: &BoundDynFactor<R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>

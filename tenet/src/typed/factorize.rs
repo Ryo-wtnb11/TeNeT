@@ -228,38 +228,40 @@ where
     /// The one body of the left polar decomposition. Under
     /// [`AdjointRule::Redirect`] a lazy adjoint `A^H` is the adjoint-swapped
     /// right polar of its parent `A = p wh`: `A^H = wh^H p`, with `wh^H`
-    /// detached. The parent's factors and a dense input's come from the
-    /// mode's own stages (D5, #1752); a compact diagonal factors directly on
-    /// its bond.
+    /// detached. A compact diagonal factors directly on its bond.
     fn factor_left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>>
     where
         D: FactorizationScalar,
     {
-        match &self.repr {
-            TypedTensorRepr::Adjoint(_) => {
-                const { assert!(redirects(FactorOp::LeftPolar)) };
-                let RightPolar { p, wh } = R::Mode::left_polar_adjoint(self)?;
-                Ok(LeftPolar {
-                    w: wh.adjoint()?.materialized_tensor_uncached()?,
-                    p,
-                })
-            }
-            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Diagonal(spectrum) => {
-                    let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_of_diagonal::<
-                        R::Mode,
-                        R,
-                        D,
-                    >(&body.space, spectrum)
-                    .map_err(R::Mode::map_factor_error)?;
-                    Ok(LeftPolar {
-                        w: self.factor_output(w),
-                        p: self.factor_output(p),
-                    })
-                }
-                TypedData::Dense(_) => R::Mode::left_polar_dense(self),
-            },
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            const { assert!(redirects(FactorOp::LeftPolar)) };
+            let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                .map_err(Error::from)?;
+            let RightPolar { p, wh } =
+                tenet_matrixalgebra::seam::left_polar_adjoint_from_parent::<R::Mode, _, _, _, _>(
+                    RuntimeDense(&self.runtime),
+                    &parent,
+                )
+                .map_err(R::Mode::map_factor_error)?;
+            return Ok(LeftPolar {
+                w: wrap_factor_on(&self.runtime, wh)
+                    .adjoint()?
+                    .materialized_tensor_uncached()?,
+                p: wrap_factor_on(&self.runtime, p),
+            });
         }
+        let mut local = None;
+        let source = self.factor_input(FactorOp::LeftPolar, &mut local)?;
+        let LeftPolar { w, p } =
+            tenet_matrixalgebra::seam::left_polar_from_source::<R::Mode, _, _, _, _>(
+                RuntimeDense(&self.runtime),
+                source,
+            )
+            .map_err(R::Mode::map_factor_error)?;
+        Ok(LeftPolar {
+            w: self.factor_output(w),
+            p: self.factor_output(p),
+        })
     }
 
     /// The one body of the right polar decomposition; see
@@ -268,31 +270,35 @@ where
     where
         D: FactorizationScalar,
     {
-        match &self.repr {
-            TypedTensorRepr::Adjoint(_) => {
-                const { assert!(redirects(FactorOp::RightPolar)) };
-                let LeftPolar { w, p } = R::Mode::right_polar_adjoint(self)?;
-                Ok(RightPolar {
-                    p,
-                    wh: w.adjoint()?.materialized_tensor_uncached()?,
-                })
-            }
-            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Diagonal(spectrum) => {
-                    let RightPolar { p, wh } =
-                        tenet_matrixalgebra::seam::right_polar_of_diagonal::<R::Mode, R, D>(
-                            &body.space,
-                            spectrum,
-                        )
-                        .map_err(R::Mode::map_factor_error)?;
-                    Ok(RightPolar {
-                        p: self.factor_output(p),
-                        wh: self.factor_output(wh),
-                    })
-                }
-                TypedData::Dense(_) => R::Mode::right_polar_dense(self),
-            },
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            const { assert!(redirects(FactorOp::RightPolar)) };
+            let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                .map_err(Error::from)?;
+            let LeftPolar { w, p } =
+                tenet_matrixalgebra::seam::right_polar_adjoint_from_parent::<R::Mode, _, _, _, _>(
+                    RuntimeDense(&self.runtime),
+                    &parent,
+                )
+                .map_err(R::Mode::map_factor_error)?;
+            return Ok(RightPolar {
+                p: wrap_factor_on(&self.runtime, p),
+                wh: wrap_factor_on(&self.runtime, w)
+                    .adjoint()?
+                    .materialized_tensor_uncached()?,
+            });
         }
+        let mut local = None;
+        let source = self.factor_input(FactorOp::RightPolar, &mut local)?;
+        let RightPolar { p, wh } =
+            tenet_matrixalgebra::seam::right_polar_from_source::<R::Mode, _, _, _, _>(
+                RuntimeDense(&self.runtime),
+                source,
+            )
+            .map_err(R::Mode::map_factor_error)?;
+        Ok(RightPolar {
+            p: self.factor_output(p),
+            wh: self.factor_output(wh),
+        })
     }
 
     /// The one body of the Hermitian eigendecomposition: `d` is a compact
