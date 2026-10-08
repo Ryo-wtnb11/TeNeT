@@ -19,8 +19,7 @@ use tenet_tensors::{
 
 use crate::factorize::{
     dyn_space_of, map_square_sectors_dyn_into, pinv_cutoff, typed_from_bound_factor,
-    typed_from_dyn, validate_inverse_region_routes_for_test,
-    BoundTensorMap,
+    typed_from_dyn, validate_inverse_region_routes_for_test, BoundTensorMap,
 };
 use crate::test_numerics::numerics;
 use crate::*;
