@@ -14,8 +14,13 @@ fn with_cuda_linalg<R: Send>(
 /// block-sparse factorization pay one host sync per coupled sector (#1484).
 /// Callers collect the spectra of all their blocks and read them with one
 /// [`cuda_download_spectra`].
+///
+/// It records the device of the context whose solver produced it, as
+/// [`CudaDenseStorage`] does, and every consumer rejects a context on another
+/// device before any submission (#1766).
 pub struct CudaSpectrum {
     pub(super) tensor: Tensor,
+    pub(super) device: usize,
 }
 impl CudaSpectrum {
     /// Number of values.
@@ -28,6 +33,24 @@ impl CudaSpectrum {
         self.len() == 0
     }
 }
+/// Rejects a context on another device than any of `spectra`, empty ones
+/// included, before the caller submits or allocates anything.
+pub(super) fn ensure_spectra_device(
+    ctx_device: usize,
+    op: &'static str,
+    spectra: &[CudaSpectrum],
+) -> Result<(), DenseError> {
+    spectra
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, spectrum)| {
+            ensure_cuda_device(
+                ctx_device,
+                op,
+                &[(&format!("spectra[{index}]"), spectrum.device)],
+            )
+        })
+}
 /// Downloads `spectra` (all from factorizations of payload `D`, so in its real
 /// lane) with at most one transfer: two or more nonempty spectra are first concatenated on
 /// device. Returns each spectrum's values, widened to `f64`, in input order;
@@ -38,6 +61,7 @@ pub fn cuda_download_spectra<D: CudaScalar>(
 ) -> Result<Vec<Vec<f64>>, DenseError> {
     use tenferro_tensor::TensorIndexing;
     const OP: &str = "cuda_download_spectra";
+    ensure_spectra_device(ctx.device, OP, spectra)?;
     let parts: Vec<&Tensor> = spectra
         .iter()
         .filter(|spectrum| !spectrum.is_empty())
@@ -91,6 +115,7 @@ pub fn cuda_copy_spectrum_into<D: CudaScalar>(
     dst_stride: usize,
 ) -> Result<(), DenseError> {
     const OP: &str = "cuda_copy_spectrum";
+    ensure_cuda_device(ctx.device, OP, &[("spectrum", spectrum.device)])?;
     let len = spectrum.len();
     if len == 0 {
         return Ok(());
@@ -100,7 +125,7 @@ pub fn cuda_copy_spectrum_into<D: CudaScalar>(
             .backend
             .cast(&spectrum.tensor, D::dtype())
             .map_err(|err| cuda_error(OP, err))?;
-        CudaDenseStorage::from_tensor::<D>(OP, cast, ctx.device)?
+        CudaDenseStorage::from_tensor::<D>(OP, cast, spectrum.device)?
     } else {
         // The real lane is the payload itself: wrap the solver's buffer
         // without an allocation, so none is counted.
@@ -111,7 +136,7 @@ pub fn cuda_copy_spectrum_into<D: CudaScalar>(
             tensor: spectrum.tensor,
             dtype: D::DTYPE,
             len,
-            device: ctx.device,
+            device: spectrum.device,
         }
     };
     cuda_copy_region_into::<D>(ctx, dst, dst_offset, dst_stride, &src, 1, len)
@@ -135,7 +160,10 @@ pub fn cuda_svd_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
     let vt = CudaDenseStorage::from_tensor::<D>("cuda_svd", vt, ctx.device)?;
-    let s = CudaSpectrum { tensor: s };
+    let s = CudaSpectrum {
+        tensor: s,
+        device: ctx.device,
+    };
     let u = CudaDenseStorage::from_tensor::<D>("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
@@ -475,7 +503,10 @@ pub fn cuda_eigh_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
     let vectors = CudaDenseStorage::from_tensor::<D>("cuda_eigh", vectors, ctx.device)?;
-    let values = CudaSpectrum { tensor: values };
+    let values = CudaSpectrum {
+        tensor: values,
+        device: ctx.device,
+    };
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
 }
@@ -538,7 +569,13 @@ pub fn cuda_eigh_region_batched<D: CudaScalar>(
         ));
     }
     let vectors = CudaDenseStorage::from_tensor::<D>(OP, vectors, ctx.device)?;
-    Ok((CudaSpectrum { tensor: values }, vectors))
+    Ok((
+        CudaSpectrum {
+            tensor: values,
+            device: ctx.device,
+        },
+        vectors,
+    ))
 }
 /// Downloads the `[n_r, members]` spectra of [`cuda_eigh_region_batched`]
 /// with at most one transfer, as one column-major `[N, members]` table,
@@ -551,6 +588,7 @@ pub fn cuda_download_batched_spectra<D: CudaScalar>(
     members: usize,
 ) -> Result<Vec<f64>, DenseError> {
     const OP: &str = "cuda_download_spectra";
+    ensure_spectra_device(ctx.device, OP, spectra)?;
     let parts: Vec<&Tensor> = spectra
         .iter()
         .filter(|spectrum| !spectrum.is_empty())

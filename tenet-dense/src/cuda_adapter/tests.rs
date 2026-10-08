@@ -93,6 +93,147 @@ fn ensure_cuda_device_rejects_a_foreign_operand() {
     }
 }
 
+/// A spectrum produced on `device`, of `len` values (host data stands in for
+/// the device buffer: the guard reads only the recorded device).
+fn spectrum_on(device: usize, len: usize) -> CudaSpectrum {
+    CudaSpectrum {
+        tensor: Tensor::from_vec_col_major(vec![len], vec![1.0_f64; len]).unwrap(),
+        device,
+    }
+}
+
+fn assert_foreign_spectrum(err: DenseError, op: &str, operand: &str) {
+    match err {
+        DenseError::Backend {
+            backend: DenseBackend::Cuda,
+            op: got,
+            message,
+        } => {
+            assert_eq!(got, op);
+            assert!(message.contains(operand), "names the operand: {message}");
+            assert!(message.contains("device 1"), "names the device: {message}");
+        }
+        other => panic!("expected a CUDA device mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_spectrum_device_guard_rejects_any_foreign_spectrum_even_an_empty_one() {
+    assert!(ensure_spectra_device(0, "op", &[]).is_ok());
+    assert!(ensure_spectra_device(0, "op", &[spectrum_on(0, 3), spectrum_on(0, 0)]).is_ok());
+    let err = ensure_spectra_device(0, "op", &[spectrum_on(0, 3), spectrum_on(1, 0)])
+        .expect_err("an empty spectrum from device 1 must be rejected");
+    assert_foreign_spectrum(err, "op", "spectra[1]");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn every_spectrum_consumer_rejects_a_foreign_spectrum_before_any_device_work() {
+    // What: a spectrum recorded on device 1, read through a device-0 context,
+    // is rejected by each consumer before it submits or allocates anything —
+    // empty ones too, which otherwise skip all device work. One GPU suffices:
+    // the guard reads the recorded device, so relabelling stands in for a
+    // second producer (the two-device test below uses a real one).
+    let mut ctx = CudaDenseContext::new(0).unwrap();
+    let src = CudaDenseStorage::upload::<f64>(&ctx, &[2.0, 0.5, 0.5, 1.0]).unwrap();
+    let foreign = |ctx: &mut CudaDenseContext, n: usize| {
+        let (mut values, _) = cuda_eigh_region::<f64>(ctx, &src, 0, n).unwrap();
+        values.device = 1;
+        values
+    };
+    let batched_foreign = |ctx: &mut CudaDenseContext| {
+        let (mut values, _) = cuda_eigh_region_batched::<f64>(ctx, &src, 0, 2, 1, 4).unwrap();
+        values.device = 1;
+        values
+    };
+    let mut dst =
+        CudaDenseStorage::upload::<Complex64>(&ctx, &[Complex64::new(7.0, 0.0); 4]).unwrap();
+    for len in [2, 0] {
+        let local = || spectrum_on(0, 0);
+        let spectra = [
+            local(),
+            if len == 0 {
+                spectrum_on(1, 0)
+            } else {
+                foreign(&mut ctx, 2)
+            },
+        ];
+        let before = cuda_transfer_stats();
+        let err = cuda_download_spectra::<f64>(&mut ctx, &spectra).unwrap_err();
+        assert_foreign_spectrum(err, "cuda_download_spectra", "spectra[1]");
+        assert_eq!(cuda_transfer_stats(), before, "download, len {len}");
+
+        let spectra = [
+            local(),
+            if len == 0 {
+                spectrum_on(1, 0)
+            } else {
+                batched_foreign(&mut ctx)
+            },
+        ];
+        let before = cuda_transfer_stats();
+        let err = cuda_download_batched_spectra::<f64>(&mut ctx, &spectra, 1).unwrap_err();
+        assert_foreign_spectrum(err, "cuda_download_spectra", "spectra[1]");
+        assert_eq!(cuda_transfer_stats(), before, "batched download, len {len}");
+
+        let spectrum = if len == 0 {
+            spectrum_on(1, 0)
+        } else {
+            foreign(&mut ctx, 2)
+        };
+        let before = cuda_transfer_stats();
+        let err =
+            cuda_copy_spectrum_into::<Complex64>(&mut ctx, spectrum, &mut dst, 0, 3).unwrap_err();
+        assert_foreign_spectrum(err, "cuda_copy_spectrum", "spectrum");
+        assert_eq!(cuda_transfer_stats(), before, "copy, len {len}");
+    }
+    assert_eq!(
+        dst.download::<Complex64>(&ctx).unwrap(),
+        vec![Complex64::new(7.0, 0.0); 4],
+        "a rejected copy writes nothing"
+    );
+}
+
+#[test]
+#[ignore = "requires two idle CUDA devices"]
+fn a_spectrum_from_another_device_is_rejected_by_every_consumer() {
+    let mut producer = CudaDenseContext::new(1).unwrap();
+    let mut consumer = CudaDenseContext::new(0).unwrap();
+    let src = CudaDenseStorage::upload::<f64>(&producer, &[2.0, 0.5, 0.5, 1.0]).unwrap();
+    let mut eigh = || {
+        cuda_eigh_region::<f64>(&mut producer, &src, 0, 2)
+            .unwrap()
+            .0
+    };
+    let (values, copied) = (eigh(), eigh());
+    let (_, singular, _) = cuda_svd_region::<f64>(&mut producer, &src, 0, 2, 2).unwrap();
+    let (batched, _) = cuda_eigh_region_batched::<f64>(&mut producer, &src, 0, 2, 1, 4).unwrap();
+    assert_eq!(
+        (
+            values.device,
+            copied.device,
+            singular.device,
+            batched.device
+        ),
+        (1, 1, 1, 1)
+    );
+    let mut dst = CudaDenseStorage::upload::<f64>(&consumer, &[7.0; 4]).unwrap();
+
+    let before = cuda_transfer_stats();
+    let err = cuda_download_spectra::<f64>(&mut consumer, &[values, singular]).unwrap_err();
+    assert_foreign_spectrum(err, "cuda_download_spectra", "spectra[0]");
+    let err = cuda_download_batched_spectra::<f64>(&mut consumer, &[batched], 1).unwrap_err();
+    assert_foreign_spectrum(err, "cuda_download_spectra", "spectra[0]");
+    let err = cuda_copy_spectrum_into::<f64>(&mut consumer, copied, &mut dst, 0, 3).unwrap_err();
+    assert_foreign_spectrum(err, "cuda_copy_spectrum", "spectrum");
+    assert_eq!(
+        cuda_transfer_stats(),
+        before,
+        "no consumer submits anything"
+    );
+    assert_eq!(dst.download::<f64>(&consumer).unwrap(), vec![7.0; 4]);
+}
+
 #[test]
 fn svd_factor_shape_contract_covers_rectangular_and_bad_backend_results() {
     assert!(validate_svd_factor_shapes(&[4, 3], 3, &[3, 3], 4, 3).is_ok());
@@ -208,6 +349,7 @@ fn an_empty_spectrum_copy_touches_nothing_even_for_a_complex_payload() {
     let empty = CudaDenseStorage::upload_owned::<f64>(&ctx, Vec::new()).unwrap();
     let spectrum = CudaSpectrum {
         tensor: empty.tensor,
+        device: ctx.device,
     };
     let values = vec![Complex64::new(1.0, 2.0); 4];
     let mut dst = CudaDenseStorage::upload::<Complex64>(&ctx, &values).unwrap();
