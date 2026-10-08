@@ -38,9 +38,9 @@ fn canonical_coupled_storage_is_admitted_by_witness_across_symmetries() {
 
     type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     let rule = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-    let even0 = rule.encode_sector(z2_even(), u1(0));
-    let odd_p = rule.encode_sector(z2_odd(), u1(1));
-    let odd_m = rule.encode_sector(z2_odd(), u1(-1));
+    let even0 = rule.encode_component_ids(z2_even(), u1(0));
+    let odd_p = rule.encode_component_ids(z2_odd(), u1(1));
+    let odd_m = rule.encode_component_ids(z2_odd(), u1(-1));
     let leg = |dual| SectorLeg::new([(even0, 2), (odd_p, 1), (odd_m, 3)], dual);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(false), leg(true)]),

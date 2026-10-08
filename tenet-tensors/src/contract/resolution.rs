@@ -974,10 +974,10 @@ mod tests {
         }
 
         let fp_u1 = FermionParityFusionRule.product(U1FusionRule);
-        let odd_charge = fp_u1.encode_sector(odd, U1Irrep::new(0).sector_id());
+        let odd_charge = fp_u1.encode_component_ids(odd, U1Irrep::new(0).sector_id());
         let product = fp_u1.product(SU2FusionRule);
         let odd_product =
-            product.encode_sector(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
+            product.encode_component_ids(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
         let rhs = single_sector_matrix_space(&product, odd_product, true, false);
         // What: a bosonic U(1) x SU(2) component does not erase the odd fZ2
         // twist on an externally dual product-sector axis.

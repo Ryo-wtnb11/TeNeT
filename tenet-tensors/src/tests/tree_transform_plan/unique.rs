@@ -853,8 +853,8 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
     );
 
     let product = FpU1Rule::default();
-    let odd_charge = product.encode_sector(SectorId::new(1), U1Irrep::new(2).sector_id());
-    let even_charge = product.encode_sector(SectorId::new(0), U1Irrep::new(-1).sector_id());
+    let odd_charge = product.encode_component_ids(SectorId::new(1), U1Irrep::new(2).sector_id());
+    let even_charge = product.encode_component_ids(SectorId::new(0), U1Irrep::new(-1).sector_id());
     let coupled = product.fusion_channels(odd_charge, even_charge)[0];
     let product_source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(

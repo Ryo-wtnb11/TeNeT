@@ -945,8 +945,8 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
 fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
-    let sector = rule.encode_sector(
-        left_rule.encode_sector(SectorId::new(1), U1Irrep::new(0).sector_id()),
+    let sector = rule.encode_component_ids(
+        left_rule.encode_component_ids(SectorId::new(1), U1Irrep::new(0).sector_id()),
         SU2Irrep::from_twice_spin(1).sector_id(),
     );
     let build_space = |dimensions: [usize; 4]| {

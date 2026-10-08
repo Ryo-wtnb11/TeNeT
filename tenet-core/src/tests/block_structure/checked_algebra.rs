@@ -160,7 +160,7 @@ fn checked_product_reports_multiplicity_overflow_without_panicking() {
         ProductFusionRule<CheckedMultiplicityRule<{ usize::MAX }>, CheckedMultiplicityRule<2>>;
     let rule = Rule::new(CheckedMultiplicityRule, CheckedMultiplicityRule);
     let sector = rule
-        .try_encode_sector(SectorId::new(0), SectorId::new(0))
+        .try_encode_component_ids(SectorId::new(0), SectorId::new(0))
         .unwrap();
     assert_eq!(
         rule.try_nsymbol(sector, sector, sector),
@@ -185,15 +185,19 @@ fn checked_products_preserve_child_u1_errors_and_distinguish_codec_errors() {
     type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
 
     let pair = Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule);
-    let pair_min = pair.try_encode_sector(z2_odd(), excluded_u1_id()).unwrap();
+    let pair_min = pair
+        .try_encode_component_ids(z2_odd(), excluded_u1_id())
+        .unwrap();
     assert_eq!(
         pair.try_dual_sector(pair_min),
         Err(FusionAlgebraError::InvalidSector {
             sector: excluded_u1_id()
         })
     );
-    let pair_max = pair.try_encode_sector(z2_even(), u1(i32::MAX)).unwrap();
-    let pair_one = pair.try_encode_sector(z2_odd(), u1(1)).unwrap();
+    let pair_max = pair
+        .try_encode_component_ids(z2_even(), u1(i32::MAX))
+        .unwrap();
+    let pair_one = pair.try_encode_component_ids(z2_odd(), u1(1)).unwrap();
     assert_eq!(
         pair.try_fusion_channels(pair_max, pair_one),
         Err(FusionAlgebraError::U1FusionOverflow {
@@ -203,7 +207,7 @@ fn checked_products_preserve_child_u1_errors_and_distinguish_codec_errors() {
     );
 
     let triple = TripleRule::new(pair, SU2FusionRule);
-    let triple_min = triple.try_encode_sector(pair_min, su2(1)).unwrap();
+    let triple_min = triple.try_encode_component_ids(pair_min, su2(1)).unwrap();
     assert_eq!(
         triple.try_dual_sector(triple_min),
         Err(FusionAlgebraError::InvalidSector {

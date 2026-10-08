@@ -516,9 +516,9 @@ fn rule_validation_preserves_builtin_multiplicity_free_keys() {
 
     type ProductRule = ProductFusionRule<U1FusionRule, SU2FusionRule>;
     let product = ProductRule::default();
-    let left = product.encode_sector(u1(1), half);
-    let right = product.encode_sector(u1(-1), half);
-    let coupled = product.encode_sector(u1(0), su2(0));
+    let left = product.encode_component_ids(u1(1), half);
+    let right = product.encode_component_ids(u1(-1), half);
+    let coupled = product.encode_component_ids(u1(0), su2(0));
     assert_preserved(
         &product,
         FusionTreeKey::try_new_for_rule(

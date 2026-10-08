@@ -367,9 +367,9 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let left_sector =
-        |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+        |parity, charge| left_rule.encode_component_ids(parity, U1Irrep::new(charge).sector_id());
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(
+        rule.encode_component_ids(
             left_sector(parity, charge),
             SU2Irrep::from_twice_spin(twice_spin).sector_id(),
         )

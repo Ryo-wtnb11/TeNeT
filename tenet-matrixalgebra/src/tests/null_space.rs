@@ -905,9 +905,9 @@ fn multiplicity_free_full_null_eigen_ops_borrow_canonical_input() {
     let su2 = [0, 1].map(|twice| SU2Irrep::from_twice_spin(twice).sector_id());
     let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let product_sectors = [
-        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
-        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
-        product.encode_sector(SectorId::new(1), U1Irrep::new(-1).sector_id()),
+        product.encode_component_ids(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        product.encode_component_ids(SectorId::new(1), U1Irrep::new(-1).sector_id()),
     ];
     assert_multiplicity_free_full_family_borrows_input::<_, f64>(U1FusionRule, &u1);
     assert_multiplicity_free_full_family_borrows_input::<_, Complex64>(U1FusionRule, &u1);

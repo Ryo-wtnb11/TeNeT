@@ -409,8 +409,8 @@ fn owned_trace_matches_initialized_across_supported_multiplicity_free_rules() {
 
     let left_rule = FpU1Rule::default();
     let product_provider = std::sync::Arc::new(FpU1Su2Rule::default());
-    let product_sector = product_provider.encode_sector(
-        left_rule.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+    let product_sector = product_provider.encode_component_ids(
+        left_rule.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
         SU2Irrep::from_twice_spin(1).sector_id(),
     );
     let product_leg = || SectorLeg::new([(product_sector, 2)], false);
@@ -2571,8 +2571,8 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
     let rule = FpU1Su2Rule::default();
     let odd = SectorId::new(1);
     let product_sector = |charge| {
-        rule.encode_sector(
-            left_rule.encode_sector(odd, U1Irrep::new(charge).sector_id()),
+        rule.encode_component_ids(
+            left_rule.encode_component_ids(odd, U1Irrep::new(charge).sector_id()),
             SU2Irrep::from_twice_spin(1).sector_id(),
         )
     };

@@ -147,10 +147,10 @@ fn fermion_u1_leg(rule: &FermionU1, dual: bool) -> SectorLeg {
     let charge = |q: i32| U1Irrep::new(if dual { -q } else { q }).sector_id();
     SectorLeg::new(
         [
-            (rule.encode_sector(even, charge(0)), 2),
-            (rule.encode_sector(odd, charge(1)), 2),
-            (rule.encode_sector(odd, charge(-1)), 1),
-            (rule.encode_sector(even, charge(1)), 1),
+            (rule.encode_component_ids(even, charge(0)), 2),
+            (rule.encode_component_ids(odd, charge(1)), 2),
+            (rule.encode_component_ids(odd, charge(-1)), 1),
+            (rule.encode_component_ids(even, charge(1)), 1),
         ],
         dual,
     )

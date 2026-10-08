@@ -162,9 +162,9 @@ fn product_sector_api_exposes_only_generic_composition() {
     let chained_rule = FermionParityFusionRule
         .product(U1FusionRule)
         .product(SU2FusionRule);
-    let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+    let left_sector = |parity, charge| left_rule.encode_component_ids(parity, u1(charge));
     let chained_sector = |parity, charge, twice_spin| {
-        chained_rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        chained_rule.encode_component_ids(left_sector(parity, charge), su2(twice_spin))
     };
 
     let a = chained_sector(z2_odd(), 1, 1);
@@ -181,7 +181,7 @@ fn product_sector_api_exposes_only_generic_composition() {
 fn product_fusion_rule_combines_fermion_parity_and_u1_componentwise() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     let rule = FpU1Rule::default();
-    let sector = |parity, charge| rule.encode_sector(parity, u1(charge));
+    let sector = |parity, charge| rule.encode_component_ids(parity, u1(charge));
     let odd_two = sector(z2_odd(), 2);
     let odd_minus_five = sector(z2_odd(), -5);
     let even_minus_three = sector(z2_even(), -3);
@@ -208,9 +208,9 @@ fn product_fusion_rule_nested_fz2_u1_su2_channels_and_symbols_match_tensorkit() 
     type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
-    let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+    let left_sector = |parity, charge| left_rule.encode_component_ids(parity, u1(charge));
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        rule.encode_component_ids(left_sector(parity, charge), su2(twice_spin))
     };
 
     let a = sector(z2_odd(), 1, 1);
@@ -227,8 +227,8 @@ fn product_fusion_rule_nested_fz2_u1_su2_channels_and_symbols_match_tensorkit() 
     assert!((rule.sqrt_dim_scalar(c2) - 3.0_f64.sqrt()).abs() < 1.0e-12);
 
     let vacuum_left = left_sector(z2_even(), 0);
-    let spin_half = rule.encode_sector(vacuum_left, su2(1));
-    let spin_zero = rule.encode_sector(vacuum_left, su2(0));
+    let spin_half = rule.encode_component_ids(vacuum_left, su2(1));
+    let spin_zero = rule.encode_component_ids(vacuum_left, su2(0));
     assert!(
         (rule.f_symbol_scalar(spin_half, spin_half, spin_half, spin_half, spin_zero, spin_zero,)
             + 0.5)
@@ -243,9 +243,9 @@ fn product_fusion_tree_homspace_matches_tensorkit_fz2_u1_su2_fixture() {
     type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
-    let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+    let left_sector = |parity, charge| left_rule.encode_component_ids(parity, u1(charge));
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        rule.encode_component_ids(left_sector(parity, charge), su2(twice_spin))
     };
 
     let a = sector(z2_odd(), 1, 1);
@@ -289,8 +289,8 @@ fn product_fusion_tree_homspace_matches_tensorkit_fz2_u1_su2_fixture() {
 fn product_fusion_rule_panics_on_component_invalid_sector_like_existing_rules() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     let rule = FpU1Rule::default();
-    let invalid_left_component = rule.encode_sector(SectorId::new(2), u1(0));
-    let valid = rule.encode_sector(z2_even(), u1(0));
+    let invalid_left_component = rule.encode_component_ids(SectorId::new(2), u1(0));
+    let valid = rule.encode_component_ids(z2_even(), u1(0));
 
     let _ = rule.fusion_channels(invalid_left_component, valid);
 }
@@ -574,9 +574,12 @@ fn nested_product_elementary_bend_keeps_the_fermionic_phase() {
     type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left_rule = FpU1Rule::default();
     let rule = ProductRule::default();
-    let coupled = rule.encode_sector(left_rule.encode_sector(z2_even(), u1(0)), su2(1));
-    let odd_half = rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(1));
-    let odd_one = rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(-1)), su2(2));
+    let coupled =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_even(), u1(0)), su2(1));
+    let odd_half =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_odd(), u1(1)), su2(1));
+    let odd_one =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_odd(), u1(-1)), su2(2));
     let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&rule, [coupled], coupled, [false], [], []).unwrap(),
         FusionTreeKey::try_new_for_rule(

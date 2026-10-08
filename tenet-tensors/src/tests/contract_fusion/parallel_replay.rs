@@ -119,9 +119,9 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
     let left_rule = FpU1Rule::default();
     let product_rule = FpU1Su2Rule::default();
     let left_sector =
-        |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+        |parity, charge| left_rule.encode_component_ids(parity, U1Irrep::new(charge).sector_id());
     let product_sector = |parity, charge, twice_spin| {
-        product_rule.encode_sector(
+        product_rule.encode_component_ids(
             left_sector(parity, charge),
             SU2Irrep::from_twice_spin(twice_spin).sector_id(),
         )

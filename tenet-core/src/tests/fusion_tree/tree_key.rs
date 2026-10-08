@@ -135,11 +135,11 @@ fn checked_recursive_product_preserves_channel_order_and_valid_multiplicity() {
 
     let pair = Pair::new(FibonacciFusionRule, FibonacciFusionRule);
     let pair_tau = pair
-        .try_encode_sector(SectorId::new(1), SectorId::new(1))
+        .try_encode_component_ids(SectorId::new(1), SectorId::new(1))
         .unwrap();
     let triple = Triple::new(pair, FibonacciFusionRule);
     let input = triple
-        .try_encode_sector(pair_tau, SectorId::new(1))
+        .try_encode_component_ids(pair_tau, SectorId::new(1))
         .unwrap();
     let checked = triple.try_fusion_channels(input, input).unwrap();
     let infallible = triple.fusion_channels(input, input);
@@ -151,9 +151,13 @@ fn checked_recursive_product_preserves_channel_order_and_valid_multiplicity() {
             for pair_left in [SectorId::new(0), SectorId::new(1)] {
                 let pair_channel = triple
                     .left_rule()
-                    .try_encode_sector(pair_left, pair_right)
+                    .try_encode_component_ids(pair_left, pair_right)
                     .unwrap();
-                expected.push(triple.try_encode_sector(pair_channel, right).unwrap());
+                expected.push(
+                    triple
+                        .try_encode_component_ids(pair_channel, right)
+                        .unwrap(),
+                );
             }
         }
     }
