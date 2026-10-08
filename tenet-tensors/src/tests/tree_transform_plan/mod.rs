@@ -87,6 +87,8 @@ fn expert_copy(structure: &BlockStructure) -> Arc<BlockStructure> {
 
 mod admission;
 #[cfg(feature = "racah-generated")]
+mod checked_composer_measurement;
+#[cfg(feature = "racah-generated")]
 mod checked_composer_oracles;
 #[cfg(feature = "racah-generated")]
 mod checked_failure_order;
