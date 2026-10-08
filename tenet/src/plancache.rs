@@ -192,13 +192,14 @@ impl CotengraPythonConfig {
     }
 
     /// Launch this config through `uv run --project <project> python`.
+    /// `project` is stored verbatim and resolved by `uv` against the process
+    /// working directory at launch.
     pub fn uv_project(mut self, project: impl Into<String>) -> Self {
-        let project = resolve_cotengra_uv_project(project.into());
         self.python = "uv".to_string();
         self.python_args = vec![
             "run".to_string(),
             "--project".to_string(),
-            project,
+            project.into(),
             "python".to_string(),
         ];
         self
@@ -222,24 +223,6 @@ impl CotengraPythonConfig {
         self.timeout = None;
         self
     }
-}
-
-#[cfg(feature = "cotengra-python")]
-fn resolve_cotengra_uv_project(project: String) -> String {
-    let path = std::path::Path::new(&project);
-    if path.is_absolute() || path.exists() {
-        return project;
-    }
-
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace) = manifest.parent() {
-        let workspace_path = workspace.join(&project);
-        if workspace_path.exists() {
-            return workspace_path.to_string_lossy().into_owned();
-        }
-    }
-
-    project
 }
 
 /// When to re-plan a topology-matched cache entry whose leg dimensions have
@@ -386,5 +369,17 @@ mod tests {
 
         assert_eq!(default.timeout, Some(Duration::from_secs(300)));
         assert_ne!(default, unbounded);
+    }
+
+    #[test]
+    fn uv_project_is_stored_verbatim_independent_of_cwd_and_build_location() {
+        // Plan-cache identity hashes `python_args`; a build-location- or
+        // CWD-dependent rewrite would make equal configs compare unequal.
+        let config = CotengraPythonConfig::with_uv_project("tools/cotengra-python");
+        assert_eq!(config.python, "uv");
+        assert_eq!(
+            config.python_args,
+            ["run", "--project", "tools/cotengra-python", "python"]
+        );
     }
 }

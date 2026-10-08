@@ -1151,13 +1151,8 @@ mod tests {
 
     #[test]
     fn uv_project_config_builds_python_command() {
-        let config = CotengraPythonConfig::with_uv_project("tools/cotengra-python");
-        let expected_project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("tools/cotengra-python")
-            .to_string_lossy()
-            .into_owned();
+        let expected_project = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/cotengra-python");
+        let config = CotengraPythonConfig::with_uv_project(expected_project);
         assert_eq!(
             python_command(&config),
             PythonCommand {
@@ -1165,7 +1160,7 @@ mod tests {
                 args: vec![
                     "run".to_string(),
                     "--project".to_string(),
-                    expected_project,
+                    expected_project.to_string(),
                     "python".to_string(),
                 ],
             }
@@ -1473,7 +1468,12 @@ mod tests {
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
         let config = std::env::var("TENET_COTENGRA_UV_PROJECT")
             .map(CotengraPythonConfig::with_uv_project)
-            .unwrap_or_default()
+            .unwrap_or_else(|_| {
+                CotengraPythonConfig::with_uv_project(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../tools/cotengra-python"
+                ))
+            })
             .timeout(Duration::from_secs(30));
 
         let steps = CotengraPythonOptimizer::new(config)
