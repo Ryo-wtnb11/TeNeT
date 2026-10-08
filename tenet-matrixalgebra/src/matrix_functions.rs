@@ -893,11 +893,19 @@ where
     typed_from_bound_factor(out)
 }
 
-/// Context-free inverse execution into a caller-admitted swapped output space.
+/// Context-free inverse execution into a caller-admitted swapped output space,
+/// in every fusion mode: the sector routing and one dense LU solve per
+/// coupled sector.
 ///
-/// This is the checked-provider seam: categorical admission belongs above this
-/// layer, while the sector routing and dense LU solve stay shared with the
-/// multiplicity-free facade.
+/// # Preconditions
+///
+/// The caller must have checked `codomain ≅ domain` per coupled sector,
+/// through the mode's factor-space authority
+/// ([`FactorSpaceAuthority::isomorphic`](crate::seam::FactorSpaceAuthority::isomorphic));
+/// the facade is that admitting caller. A violation is not reliably detected
+/// here: a non-square stored block is refused, but a coupled sector stored
+/// on only one side is not, and the result is then the inverse on the stored
+/// sector intersection rather than an error.
 #[doc(hidden)]
 pub fn inv_direct_into_dyn<E, R, D>(
     dense: &mut E,
@@ -911,7 +919,14 @@ where
     inverse_by_sector_dyn_into(dense, input, output_space)
 }
 
-/// Context-free checked-provider pseudo-inverse into a caller-admitted swapped output space.
+/// Context-free pseudo-inverse into a caller-admitted swapped output space, in
+/// every fusion mode.
+///
+/// # Preconditions
+///
+/// None on the operand's shape: a pseudo-inverse is defined for every map, so
+/// no isomorphism is assumed. `output_space` must be the operand's swapped
+/// space on its provider, which this seam validates.
 #[doc(hidden)]
 pub fn pinv_direct_into_dyn<E, R, D>(
     dense: &mut E,
@@ -947,8 +962,18 @@ where
 /// Context-free dynamic-rank left solve into a caller-admitted output space.
 ///
 /// Categorical preflight and destination admission belong to the caller; this
-/// seam validates the complete storage route before allocating output or
-/// executing any dense solve.
+/// seam validates the rule identities, the codomains and the complete storage
+/// route before allocating output or executing any dense solve.
+///
+/// # Preconditions
+///
+/// The caller must have checked that the divisor's `codomain ≅ domain` per
+/// coupled sector, through the mode's factor-space authority
+/// ([`FactorSpaceAuthority::isomorphic`](crate::seam::FactorSpaceAuthority::isomorphic));
+/// the facade is that admitting caller. A violation is not reliably detected
+/// here: a non-square stored divisor block is refused, but a coupled sector
+/// stored on only one side is not, and the result is then the solve on the
+/// stored sector intersection rather than an error.
 #[doc(hidden)]
 pub fn solve_left_direct_into_dyn<E, R, D>(
     dense: &mut E,
