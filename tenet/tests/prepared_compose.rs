@@ -231,7 +231,7 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
     plan.execute(&wide_lhs, &wide_rhs, &mut ws).unwrap();
     assert!(ws.retained_bytes() > cold, "a larger B resizes the output");
 
-    // `execute_into` across a change of B on the same handle: the job list
+    // `execute_into` across a change of B on the same workspace: the job list
     // is rebuilt for each B and the result stays the oracle's.
     for count in [4, 9, 4] {
         let a = members::<_, f64>(&runtime, &[&v, &v], &[&w], count, 1);

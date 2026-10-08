@@ -1,6 +1,6 @@
 //! Host gates of `EighFullPlan` (#1499, leaf L3 of #1287).
 //!
-//! Per member the handle must equal Host eager `eigh_full` (gauge-fixed, so
+//! Per member the plan must equal Host eager `eigh_full` (gauge-fixed, so
 //! the eigenvectors themselves are compared) and the dense Jacobi oracle of
 //! `prepared/eigh.rs`, over U(1), SU(2) and fZ2xU(1) with several coupled
 //! sectors and degeneracies above one. A batch fails as a whole and names
@@ -36,9 +36,9 @@ use fixtures::{codomain_axes, domain_axes};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 7];
 
-/// Runs the handle on `inputs` and checks every member against Host eager
+/// Runs the plan on `inputs` and checks every member against Host eager
 /// and the oracle. At `B = 1` the factors must equal eager bit for bit
-/// (IEEE `==`); at any `B` the Host handle runs the eager code per member,
+/// (IEEE `==`); at any `B` the Host plan runs the eager code per member,
 /// so its gauge-fixed `v` equals eager's within the numerics rule.
 fn check_batch<R>(label: &str, runtime: &Runtime, inputs: &[TensorMap<R, f64>])
 where
@@ -408,7 +408,7 @@ fn warm_calls_reuse_the_outputs() {
     assert!(ws.retained_bytes() < retained);
 }
 
-/// Every member of `output` equals Host eager bit for bit (the Host handle
+/// Every member of `output` equals Host eager bit for bit (the Host plan
 /// runs the eager per-member code), so `d` is exactly zero off its diagonal.
 fn assert_equals_eager<R>(
     what: &str,

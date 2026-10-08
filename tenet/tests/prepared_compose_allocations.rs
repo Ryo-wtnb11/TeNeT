@@ -1,4 +1,4 @@
-//! Warm Host compose workspace and compatibility-wrapper allocation contract:
+//! Warm Host compose workspace and plan/workspace allocation contract:
 //! after one call at
 //! a fixed `B`, `execute` and `execute_into` allocate nothing of TeNeT's on
 //! the caller thread. The one remaining allocation is Tenferro 0.7.1's
@@ -38,7 +38,7 @@ fn allocations(f: impl FnOnce()) -> (usize, usize, std::time::Duration) {
 fn warm_host_calls_allocate_only_the_backend_grouped_validation() {
     // What: at a fixed B, a second `execute` and a second `execute_into`
     // (whose plan has inactive destination blocks to zero-fill) reuse the
-    // handle's output, job list and fill strides, and the Runtime's pooled
+    // workspace's output, job list and fill strides, and the Runtime's pooled
     // context. The zero fill adds nothing (`execute_into` == `execute`), and
     // both stay within the one per-submission allocation of Tenferro's
     // grouped validator. The cold call's count is the control that shows the
