@@ -145,9 +145,8 @@ where
     /// provider `Arc` and validates its identity, HomSpace, rank, and layout
     /// before any SVD/GEMM. The compact arm also checks both source and
     /// swapped-output coupled-sector layouts. Ineligible layouts retain the
-    /// dense route. A checked lazy adjoint is redirected through its parent,
-    /// `(A^H)^+ = (A^+)^H`, and the result is detached; multiplicity-free
-    /// lazy adjoints are read through their parent in the dense stage.
+    /// dense route. A lazy adjoint is read through its parent's SVD in the
+    /// dense stage, `(A^H)^+ = U S^+ Vh` for `A = U S Vh`, in both modes.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
@@ -197,9 +196,10 @@ where
     /// any work.
     ///
     /// Other inputs run one dense QR per sector, with cost
-    /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Multiplicity-free lazy adjoints
-    /// are materialized only for the operation; checked-Generic QR requires
-    /// an owned input. Checked factors use the same provider instance as `self`.
+    /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Lazy adjoints are materialized
+    /// only for the operation (LQ is itself the QR of the adjoint, so the
+    /// copy is the one LQ would make). Checked factors use the same provider
+    /// instance as `self`.
     /// If any sector fails or the provider rejects an output space, no factors
     /// are returned.
     ///
@@ -208,7 +208,6 @@ where
     /// Dense execution returns [`Error::Operation`], while factor-layout
     /// failures return [`Error::Core`] where applicable. If a checked provider
     /// rejects an output space, its original error is available as the source.
-    /// Passing a lazy adjoint there returns [`Error::InvalidArgument`].
     ///
     /// ```
     /// use std::sync::Arc;
@@ -268,9 +267,9 @@ where
     /// multiplicity-free compact diagonal with representable magnitudes is
     /// sorted directly by sector, without
     /// a dense input or dense SVD call; its dense `u` and `vh` still require
-    /// `O(sum_c k_c²)` output storage and writes. A multiplicity-free lazy
-    /// adjoint is handled from its parent without materializing it.
-    /// Checked-Generic SVD requires owned input. A compact diagonal uses the
+    /// `O(sum_c k_c²)` output storage and writes. A lazy adjoint is factored
+    /// from its parent without materializing it, in the same gauge as its
+    /// materialized adjoint. A compact diagonal uses the
     /// same direct per-sector sorting and factor publication in both modes; a
     /// nonfinite entry, here or in dense input, returns
     /// [`Error::Operation`] (an `InvalidArgument`: `svd input components must be finite`)
@@ -362,12 +361,9 @@ where
     ///
     /// Its cost and compact storage contract are the same as [`Self::qr_compact`]:
     /// owned Host compact diagonals preserve `W = V` and both factors
-    /// are compact, including on a dual `V`. Checked Generic requires an owned
-    /// input.
+    /// are compact, including on a dual `V`.
     /// Checked factors use the source provider instance, and a failure returns
-    /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
-    /// parent and returns detached owned factors without materializing the
-    /// receiver.
+    /// no factors. A lazy adjoint is materialized only for the operation.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -391,21 +387,11 @@ where
         cols: &[usize],
     ) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(
-                FactorOp::LqCompact,
-                |parent| {
-                    parent.factor_qr(FactorOp::QrCompact, |lease, source| {
-                        tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(
-                            lease, source,
-                        )
-                    })
-                },
-                |lease, source| {
-                    tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
-                        lease, source,
-                    )
-                },
-            )
+            t.factor_lq(FactorOp::LqCompact, |lease, source| {
+                tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
         })
     }
 }
@@ -528,21 +514,9 @@ where
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(
-                FactorOp::LqFull,
-                |parent| {
-                    parent.factor_qr(FactorOp::QrFull, |lease, source| {
-                        tenet_matrixalgebra::seam::qr_full_from_source::<R::Mode, _, _, _, _>(
-                            lease, source,
-                        )
-                    })
-                },
-                |lease, source| {
-                    tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(
-                        lease, source,
-                    )
-                },
-            )
+            t.factor_lq(FactorOp::LqFull, |lease, source| {
+                tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(lease, source)
+            })
         })
     }
 }
@@ -558,13 +532,12 @@ where
     ///
     /// No factor tensor or intermediate bond is built. This is the least
     /// allocating member of the SVD family when only the spectrum is needed.
-    /// Multiplicity-free lazy adjoints are read through their owned parent,
+    /// Lazy adjoints are read through their owned parent,
     /// and an owned compact diagonal input is read and sorted directly without
     /// a dense solver for both multiplicity-free and checked-Generic providers;
     /// a nonfinite entry, here or in dense input, returns
     /// [`Error::Operation`] (an `InvalidArgument`: `svd input components must be finite`).
-    /// Checked Generic requires an owned
-    /// input and returns [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
+    /// A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
     /// the decomposition contract and representative example.
@@ -607,8 +580,8 @@ where
     /// returns [`Error::Operation`] (an `InvalidArgument`: `eigh input components must be
     /// finite`; dense input too, after the endomorphism and stacking checks
     /// and before the Hermiticity check), the dense route's Hermiticity check is applied to the diagonal,
-    /// and the eigenvalues are its real parts. Checked Generic requires owned input and rejects
-    /// lazy adjoints for this values-only method. Dense failures return
+    /// and the eigenvalues are its real parts. Lazy adjoints use an
+    /// operation-local dense payload. Dense failures return
     /// [`Error::Operation`],
     /// layout failures return [`Error::Core`], and an original provider or
     /// label-decoding error is available as the source. No spectrum is returned
@@ -724,9 +697,8 @@ where
     /// returns [`Error::Operation`] (an `InvalidArgument`: `eig input components must be
     /// finite`; dense input too, after the endomorphism and stacking checks),
     /// and an eigenvalue of infinite magnitude fails the dense
-    /// route's eigenvalue check. For multiplicity-free providers, lazy
-    /// adjoints use an operation-local dense payload; checked Generic rejects
-    /// lazy adjoints for this values-only method. Unlike
+    /// route's eigenvalue check. Lazy adjoints use an operation-local dense
+    /// payload. Unlike
     /// [`Self::eig_full`], no eigenvector-rank gate is needed because no
     /// eigenbasis is returned.
     ///

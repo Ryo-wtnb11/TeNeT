@@ -15,9 +15,10 @@ use crate::compose::compose_bound_dyn;
 use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
-    pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum, solve_left_by_sector_dyn,
-    solve_left_by_sector_dyn_into, svd_compact_factors_dyn, BoundDynFactor, BoundDynamicTensorRef,
-    FactorScalar, HermitianTol, SectorSpectrum, SvdFactorsDyn, EXP_SPECTRAL_ROUTE_EPSILONS,
+    pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum,
+    solve_left_by_sector_dyn, solve_left_by_sector_dyn_into, svd_compact_factors_dyn,
+    BoundDynFactor, BoundDynamicTensorRef, FactorScalar, HermitianTol, SectorSpectrum,
+    SvdFactorsDyn, EXP_SPECTRAL_ROUTE_EPSILONS,
 };
 #[cfg(test)]
 use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
@@ -1072,6 +1073,24 @@ where
 {
     validate_pinv_rcond(rcond)?;
     pinv_by_sector_dyn_into(dense, input, output_space, rcond)
+}
+
+/// Context-free pseudo-inverse of the logical adjoint of `parent`, read in
+/// place, into a caller-admitted output space (`parent`'s hom space).
+#[doc(hidden)]
+pub fn pinv_adjoint_parent_direct_into_dyn<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    validate_pinv_rcond(rcond)?;
+    pinv_adjoint_by_sector_dyn_into(dense, parent, output_space, rcond)
 }
 
 /// Context-free dynamic-rank left solve `A \ B` used by the user layer.

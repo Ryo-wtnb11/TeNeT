@@ -193,6 +193,37 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    pinv_oriented_by_sector_dyn_into(dense, input, output_space, rcond, FactorPlacement::Direct)
+}
+
+/// The pseudo-inverse of the logical adjoint of `parent`, read in place:
+/// `A = U S Vh` gives `(A^H)^+ = U S^+ Vh`, in `parent`'s own hom space.
+pub(crate) fn pinv_adjoint_by_sector_dyn_into<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    pinv_oriented_by_sector_dyn_into(dense, parent, output_space, rcond, FactorPlacement::Adjoint)
+}
+
+fn pinv_oriented_by_sector_dyn_into<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+    rcond: f64,
+    placement: FactorPlacement,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let source_space = input.space().space();
     let Some(source_identity) = source_space.admission().rule_identity() else {
         return Err(OperationError::from_core_preserving_context(
@@ -217,10 +248,13 @@ where
             tensor: "pinv output provider authority",
         });
     }
-    let expected_homspace = FusionTreeHomSpace::new(
-        source_space.homspace().domain().clone(),
-        source_space.homspace().codomain().clone(),
-    );
+    let expected_homspace = match placement {
+        FactorPlacement::Direct => FusionTreeHomSpace::new(
+            source_space.homspace().domain().clone(),
+            source_space.homspace().codomain().clone(),
+        ),
+        FactorPlacement::Adjoint => source_space.homspace().clone(),
+    };
     let expected_nout = expected_homspace.codomain().len();
     let expected_nin = expected_homspace.domain().len();
     if output_space.space().nout() != expected_nout
@@ -248,6 +282,7 @@ where
         &output_regions,
         input.data().len(),
         output_space.space().required_len()?,
+        placement,
     )?;
 
     struct Stage<D> {
@@ -304,35 +339,55 @@ where
                 }
             }
             let output = &mut output_data[output_regions[stage.route.output].range()];
-            let output_shape = [stage.cols, stage.rows];
-            let output_strides = [1, stage.cols];
-            let v_shape = [stage.cols, stage.rank];
-            let v_strides = [stage.rank, 1];
-            let uh_shape = [stage.rank, stage.rows];
-            let uh_strides = [stage.rows, 1];
+            // `A^+ = V S^+ U^H` reads `S^+ Vh` and `U` conjugated and
+            // transposed; `(A^H)^+ = U S^+ Vh` reads them as stored.
+            let (rows, cols, left, left_strides, right, right_strides, conjugate) = match placement
+            {
+                FactorPlacement::Direct => (
+                    stage.cols,
+                    stage.rows,
+                    &vt,
+                    [stage.rank, 1],
+                    &stage.u,
+                    [stage.rows, 1],
+                    true,
+                ),
+                FactorPlacement::Adjoint => (
+                    stage.rows,
+                    stage.cols,
+                    &stage.u,
+                    [1, stage.rows],
+                    &vt,
+                    [1, stage.rank],
+                    false,
+                ),
+            };
+            let output_shape = [rows, cols];
+            let output_strides = [1, rows];
+            let left_shape = [rows, stage.rank];
+            let right_shape = [stage.rank, cols];
             let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
                 .map_err(OperationError::Dense)?;
-            let v_view =
-                DenseView::new(&vt, &v_shape, &v_strides, 0).map_err(OperationError::Dense)?;
-            let uh_view = DenseView::new(&stage.u, &uh_shape, &uh_strides, 0)
+            let left_view = DenseView::new(left, &left_shape, &left_strides, 0)
+                .map_err(OperationError::Dense)?;
+            let right_view = DenseView::new(right, &right_shape, &right_strides, 0)
                 .map_err(OperationError::Dense)?;
             dense
                 .dot_general_into(
                     D::dense_write(output_view),
-                    D::dense_read(v_view),
-                    D::dense_read(uh_view),
-                    &DenseDotConfig::matmul().with_conjugation(true, true),
+                    D::dense_read(left_view),
+                    D::dense_read(right_view),
+                    &DenseDotConfig::matmul().with_conjugation(conjugate, conjugate),
                 )
                 .map_err(OperationError::Dense)?;
         }
         Ok(())
     })?;
-    BoundDynFactor::from_bound(
-        output_space,
-        output_data,
-        source_space.nin(),
-        source_space.nout(),
-    )
+    let (nout, nin) = match placement {
+        FactorPlacement::Direct => (source_space.nin(), source_space.nout()),
+        FactorPlacement::Adjoint => (source_space.nout(), source_space.nin()),
+    };
+    BoundDynFactor::from_bound(output_space, output_data, nout, nin)
 }
 
 pub(super) fn compile_pinv_region_routes(
@@ -340,6 +395,7 @@ pub(super) fn compile_pinv_region_routes(
     output: &[CoupledSectorRegion],
     source_len: usize,
     output_len: usize,
+    placement: FactorPlacement,
 ) -> Result<Vec<InverseSectorRoute>, OperationError> {
     let output_by_sector = sector_region_index_map(output)?;
     let mut used = vec![false; output.len()];
@@ -352,13 +408,23 @@ pub(super) fn compile_pinv_region_routes(
                 message: "pinv output is missing a source coupled sector",
             })?;
         let output_region = &output[output_index];
-        if output_region.rows() != source_region.cols()
-            || output_region.cols() != source_region.rows()
-            || source_region.col_trees() != output_region.row_trees()
-            || source_region.row_trees() != output_region.col_trees()
-        {
+        let matches_layout = match placement {
+            FactorPlacement::Direct => {
+                output_region.rows() == source_region.cols()
+                    && output_region.cols() == source_region.rows()
+                    && source_region.col_trees() == output_region.row_trees()
+                    && source_region.row_trees() == output_region.col_trees()
+            }
+            FactorPlacement::Adjoint => {
+                output_region.rows() == source_region.rows()
+                    && output_region.cols() == source_region.cols()
+                    && source_region.row_trees() == output_region.row_trees()
+                    && source_region.col_trees() == output_region.col_trees()
+            }
+        };
+        if !matches_layout {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "pinv output does not transpose the source coupled-sector layout",
+                message: "pinv output does not match the source coupled-sector layout",
             });
         }
         validate_region_range(source_region, source_len)?;

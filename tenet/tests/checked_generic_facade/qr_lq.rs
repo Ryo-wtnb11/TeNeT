@@ -699,26 +699,37 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
         }
     }
 
-    // A lazy adjoint of a dense dual tensor keeps its typed refusal.
+    // A lazy adjoint of a dense dual tensor factors like its materialized
+    // adjoint (#1755): both QR and LQ materialize it for the call.
     let lazy = u1_real.materialize().unwrap().adjoint().unwrap();
-    let before = calls.total();
-    for error in [
-        lazy.qr_compact(&[0], &[1]).err(),
-        lazy.qr_full(&[0], &[1]).err(),
-    ]
-    .into_iter()
-    .chain([
-        lazy.lq_compact(&[0], &[1]).err(),
-        lazy.lq_full(&[0], &[1]).err(),
-    ]) {
-        assert!(matches!(
-            error,
-            Some(GenericTensorError::Facade(
-                tenet::typed::Error::InvalidArgument(_)
-            ))
-        ));
+    let eager = lazy.materialize().unwrap();
+    let close = |a: &TensorMap<_, f64>, b: &TensorMap<_, f64>| {
+        assert_eq!(a.codomain(), b.codomain());
+        assert_eq!(a.domain(), b.domain());
+        let (a, b) = (a.materialize().unwrap(), b.materialize().unwrap());
+        assert!(a
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(b.dense_data().unwrap())
+            .all(|(x, y)| (x - y).abs() < 1.0e-12));
+    };
+    for (lazy_qr, eager_qr) in [
+        (lazy.qr_compact(&[0], &[1]), eager.qr_compact(&[0], &[1])),
+        (lazy.qr_full(&[0], &[1]), eager.qr_full(&[0], &[1])),
+    ] {
+        let (Qr { q, r }, Qr { q: eq, r: er }) = (lazy_qr.unwrap(), eager_qr.unwrap());
+        close(&q, &eq);
+        close(&r, &er);
     }
-    assert_eq!(calls.total(), before);
+    for (lazy_lq, eager_lq) in [
+        (lazy.lq_compact(&[0], &[1]), eager.lq_compact(&[0], &[1])),
+        (lazy.lq_full(&[0], &[1]), eager.lq_full(&[0], &[1])),
+    ] {
+        let (Lq { l, q }, Lq { l: el, q: eq }) = (lazy_lq.unwrap(), eager_lq.unwrap());
+        close(&l, &el);
+        close(&q, &eq);
+    }
 }
 
 /// A compact diagonal's QR and LQ factors, full and compact alike, live on

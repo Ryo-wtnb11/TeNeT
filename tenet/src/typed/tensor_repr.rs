@@ -1025,8 +1025,8 @@ where
     ///   then converted — an operation-local source-sized buffer plus the
     ///   output. Why not a lazy view over a converted parent: several
     ///   operations (`diagview`, the
-    ///   `permute_into` source, the checked-Generic factorizations,
-    ///   the device path after `to_cuda`) reject lazy adjoints, so a lazy
+    ///   `permute_into` source, the device path after `to_cuda`) reject
+    ///   lazy adjoints, so a lazy
     ///   result would accept less than the owned one `to_c64` always
     ///   returned. Why not one fused pass: `materialize_adjoint_data_dyn` has
     ///   no mapped variant, and adding one would duplicate its block walk.

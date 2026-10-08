@@ -10,6 +10,13 @@ where
     /// exponentiates its entries, everything else takes the mode's dense
     /// route.
     pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
+        // A lazy adjoint is never compact; `exp_dense` materializes it.
+        const {
+            assert!(matches!(
+                FactorOp::Exp.adjoint_rule(),
+                AdjointRule::Materialize
+            ))
+        };
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the
             // dense arm asks about hermiticity: the dense question picks an

@@ -65,8 +65,8 @@ pub mod seam {
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
     pub use crate::matrix_functions::{
         exp_dyn, exp_pade13_direct_into_dyn, inv_direct_dyn, inv_direct_into_dyn,
-        pinv_adjoint_parent_dyn, pinv_direct_into_dyn, pinv_dyn, solve_left_direct_dyn,
-        solve_left_direct_into_dyn,
+        pinv_adjoint_parent_direct_into_dyn, pinv_adjoint_parent_dyn, pinv_direct_into_dyn,
+        pinv_dyn, solve_left_direct_dyn, solve_left_direct_into_dyn,
     };
     pub use crate::truncation::rescaled_power_norm;
 }

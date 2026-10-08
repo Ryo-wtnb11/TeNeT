@@ -1055,22 +1055,19 @@ mod checked_generic {
                         $narrow
                     );
 
-                    // A lazy-adjoint receiver is an explicit unsupported
-                    // boundary on the checked-Generic dispatch, and it must
-                    // stay one at single precision — the same rejection, not a
-                    // silently different path.
+                    // A lazy-adjoint receiver reads its parent at single
+                    // precision too (#1755): the same singular values as its
+                    // materialized adjoint, at the payload's precision.
                     let lazy = short.adjoint().unwrap();
-                    let narrow_error = lazy.svd_vals(&[0], &[1]).unwrap_err().to_string();
-                    let wide_error = wide_short
-                        .adjoint()
-                        .unwrap()
-                        .svd_vals(&[0], &[1])
-                        .unwrap_err()
-                        .to_string();
-                    assert_eq!(
-                        narrow_error, wide_error,
-                        "{name}: the lazy-adjoint rejection must not depend on the payload dtype"
-                    );
+                    let lazy_values = lazy.svd_vals(&[0], &[1]).unwrap();
+                    let eager_values = lazy.materialize().unwrap().svd_vals(&[0], &[1]).unwrap();
+                    assert_eq!(lazy_values.len(), eager_values.len(), "{name}");
+                    for (a, b) in lazy_values.iter().zip(&eager_values) {
+                        assert_eq!(a.sector, b.sector, "{name}");
+                        for (x, y) in a.values.iter().zip(&b.values) {
+                            assert!((x - y).abs() <= 1.0e-4 * y.abs().max(1.0), "{name}");
+                        }
+                    }
                 }
             }
         };

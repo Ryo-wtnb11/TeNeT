@@ -713,7 +713,7 @@ fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_sourc
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy() {
+fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_accepts_lazy() {
     use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -757,11 +757,31 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
         .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 
-    let lazy = source.adjoint().unwrap();
-    assert!(matches!(
-        lazy.svd_full(&[0], &[1]),
-        Err(GenericTensorError::Facade(_))
-    ));
+    // A lazy adjoint is factored from its parent, in the materialized
+    // adjoint's spaces and gauge.
+    let lazy = complex.adjoint().unwrap();
+    let Svd {
+        u: lazy_u,
+        s: lazy_s,
+        vh: lazy_vh,
+    } = lazy.svd_full(&[0], &[1]).unwrap();
+    let Svd {
+        u: eager_u,
+        s: eager_s,
+        vh: eager_vh,
+    } = lazy.materialize().unwrap().svd_full(&[0], &[1]).unwrap();
+    for (lazy, eager) in [(lazy_u, eager_u), (lazy_s, eager_s), (lazy_vh, eager_vh)] {
+        assert_eq!(lazy.codomain(), eager.codomain());
+        assert_eq!(lazy.domain(), eager.domain());
+        assert!(lazy
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(eager.materialize().unwrap().dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+    }
 }
 
 #[cfg(feature = "racah-generated")]

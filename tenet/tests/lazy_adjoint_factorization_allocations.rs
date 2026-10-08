@@ -1,0 +1,128 @@
+//! A lazy adjoint's factorization allocates no more payload than
+//! materializing the adjoint and factoring that (#1755). The parent-reading
+//! stages (`svd_vals`, SVD, `pinv`) save the `O(stored_len)` input copy; a
+//! redirect trades it for one copy of each adjointed output, plus the
+//! adjoint factor spaces, which are metadata. So the excess over
+//! materialize-then-factor, if any, must not grow with the degeneracies.
+//! Warm measurements, one dense thread.
+
+use std::hint::black_box;
+use std::sync::Arc;
+
+use num_complex::Complex64;
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
+
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
+
+#[global_allocator]
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
+
+/// Warm `f` once, then return its allocated bytes.
+fn warm_bytes(f: impl Fn()) -> i64 {
+    f();
+    let ((), allocs) = counting_alloc::measure(&f);
+    allocs.bytes as i64
+}
+
+/// Bytes of `op` on `lazy` minus those of materialize-then-`op`.
+macro_rules! excess {
+    ($lazy:expr, |$t:ident| $op:expr) => {{
+        let lazy = &$lazy;
+        let lazy_bytes = warm_bytes(|| {
+            let $t = lazy;
+            black_box($op);
+        });
+        let eager_bytes = warm_bytes(|| {
+            let materialized = lazy.materialize().unwrap();
+            let $t = &materialized;
+            black_box($op);
+        });
+        (lazy_bytes, eager_bytes)
+    }};
+}
+
+/// Every op on the lazy adjoint of a random `[v, v] <- [v, v]` complex
+/// tensor, for `v` at degeneracy scale 1 and 3.
+macro_rules! assert_excess_is_metadata {
+    ($mode:expr, $runtime:expr, $leg:expr) => {{
+        let mut rows = Vec::new();
+        for scale in [1usize, 3] {
+            let leg = $leg(scale);
+            let parent =
+                TensorMap::<_, Complex64>::rand_with_seed(&$runtime, [&leg, &leg], [&leg, &leg], 7)
+                    .unwrap();
+            let lazy = parent.adjoint().unwrap();
+            let (r, c) = (&[0, 1][..], &[2, 3][..]);
+            rows.push([
+                ("svd_vals", excess!(lazy, |t| t.svd_vals(r, c).unwrap())),
+                (
+                    "svd_compact",
+                    excess!(lazy, |t| t.svd_compact(r, c).unwrap()),
+                ),
+                ("svd_full", excess!(lazy, |t| t.svd_full(r, c).unwrap())),
+                ("pinv", excess!(lazy, |t| t.pinv(r, c, 1.0e-12).unwrap())),
+                ("qr_compact", excess!(lazy, |t| t.qr_compact(r, c).unwrap())),
+                ("lq_compact", excess!(lazy, |t| t.lq_compact(r, c).unwrap())),
+                ("lq_full", excess!(lazy, |t| t.lq_full(r, c).unwrap())),
+                ("left_null", excess!(lazy, |t| t.left_null(r, c).unwrap())),
+                ("left_polar", excess!(lazy, |t| t.left_polar(r, c).unwrap())),
+                ("inv", excess!(lazy, |t| t.inv(r, c).unwrap())),
+            ]);
+        }
+        for (small, large) in rows[0].iter().zip(&rows[1]) {
+            let (name, (small_lazy, small_eager)) = small;
+            let (_, (large_lazy, large_eager)) = large;
+            eprintln!(
+                "{} {name}: lazy/materialize-then-factor bytes {small_lazy}/{small_eager} \
+                 (scale 1), {large_lazy}/{large_eager} (scale 3)",
+                $mode
+            );
+            let small_excess = (small_lazy - small_eager).max(0);
+            assert!(
+                large_lazy - large_eager <= small_excess,
+                "{} {name}: the lazy excess grows with the payload",
+                $mode
+            );
+        }
+    }};
+}
+
+#[test]
+fn multiplicity_free_lazy_adjoint_factorizations_add_no_payload_allocation() {
+    let _measurement = counting_alloc::serial();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SU2FusionRule);
+    let leg = |scale: usize| {
+        GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(0, 2), (1, 2), (2, 1)]
+                .map(|(twice, d)| (SU2Irrep::from_twice_spin(twice), d * scale)),
+        )
+        .unwrap()
+    };
+    assert_excess_is_metadata!("MF SU(2)", runtime, leg);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_lazy_adjoint_factorizations_add_no_payload_allocation() {
+    use tenet::sector::SUNFusionRule;
+
+    let _measurement = counting_alloc::serial();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = |scale: usize| {
+        GradedSpace::try_new(
+            Arc::clone(&provider),
+            [
+                (vec![2i64, 2], scale),
+                (vec![1, 0], scale),
+                (vec![0, 0], scale),
+            ],
+        )
+        .unwrap()
+    };
+    assert_excess_is_metadata!("checked SU(3)", runtime, leg);
+}

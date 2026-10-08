@@ -257,33 +257,10 @@ where
     Ok((positive, isometry))
 }
 
-/// Left polar factors of an adjoint view, executed on its owned parent.
+/// Left polar of an adjoint view, as the *parent's* right polar factors: the
+/// view's left polar is `w = wh^H` and the returned `p`.
 #[doc(hidden)]
 pub fn left_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
-    dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<LeftPolar<BoundDynFactor<R, D>>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    let (positive, isometry) =
-        right_polar_dyn_reported(dense, context, parent, PolarDirection::Left)?;
-    Ok(LeftPolar {
-        w: adjoint_bound_factor(&isometry)?,
-        p: positive,
-    })
-}
-
-/// Right polar factors of an adjoint view, executed on its owned parent.
-#[doc(hidden)]
-pub fn right_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     parent: &BoundDynamicTensorRef<'_, R, D>,
@@ -297,12 +274,29 @@ where
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let (isometry, positive) =
-        left_polar_dyn_reported(dense, context, parent, PolarDirection::Right)?;
-    Ok(RightPolar {
-        p: positive,
-        wh: adjoint_bound_factor(&isometry)?,
-    })
+    let (positive, wh) = right_polar_dyn_reported(dense, context, parent, PolarDirection::Left)?;
+    Ok(RightPolar { p: positive, wh })
+}
+
+/// Right polar of an adjoint view, as the *parent's* left polar factors: the
+/// view's right polar is the returned `p` and `wh = w^H`.
+#[doc(hidden)]
+pub fn right_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<LeftPolar<BoundDynFactor<R, D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    let (w, positive) = left_polar_dyn_reported(dense, context, parent, PolarDirection::Right)?;
+    Ok(LeftPolar { w, p: positive })
 }
 
 #[derive(Clone, Copy)]

@@ -5,18 +5,15 @@ use tenet_matrixalgebra::seam::FactorSpaceAuthority;
 /// The facade half of a fusion mode's factorization contract. Every
 /// factorization has one body over it; the mode chooses only what differs by
 /// design or is still owned by a unification leaf (#1862, table in its body):
-/// the lazy-adjoint rule (D1, #1755), the error type and provider-label decode
-/// (D4, permanent). The numerical stages and factor spaces come from the
-/// matrix-algebra [`FactorMode`](tenet_matrixalgebra::seam::FactorMode).
+/// the error type and provider-label decode (D4, permanent). The lazy-adjoint
+/// rule is the mode-independent [`FactorOp::adjoint_rule`] (#1755). The
+/// numerical stages and factor spaces come from the matrix-algebra
+/// [`FactorMode`](tenet_matrixalgebra::seam::FactorMode).
 #[doc(hidden)]
-pub trait FusionMode<R>:
-    TypedTensorModeDispatch<R> + tenet_matrixalgebra::seam::FactorMode<R>
+pub trait FusionMode<R>: TypedAdjointSpace<R> + tenet_matrixalgebra::seam::FactorMode<R>
 where
     R: TypedSectorAdmission,
 {
-    /// How `op` reads a lazy adjoint input.
-    fn adjoint_rule(op: FactorOp) -> AdjointRule;
-
     /// A matrix-algebra error as this mode's facade error.
     fn map_factor_error(
         error: <Self as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
@@ -26,11 +23,11 @@ where
     /// produced.
     fn decode_label(provider: &R, sector: SectorId) -> Result<R::Sector, Self::FacadeError>;
 
-    // Polar (D1, #1755; D5, #1752): the multiplicity-free dense stages
-    // recouple through the runtime's context lane, which only the facade can
-    // lease, and each mode reads a lazy adjoint's parent through its own
-    // seam (multiplicity-free adjoints `w` inside it, checked at the facade).
-    // These stay per-mode arms until those leaves give polar one kernel.
+    // Polar (D5, #1752): the multiplicity-free dense stages recouple through
+    // the runtime's context lane, which only the facade can lease. These stay
+    // per-mode arms until that leaf gives polar one kernel. The lazy-adjoint
+    // arms return the parent's opposite factors and the facade adjoints the
+    // isometry in both modes (#1755).
 
     /// Left polar of an owned dense `tensor`.
     fn left_polar_dense<D: FactorizationScalar>(
@@ -42,15 +39,17 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
 
-    /// Left polar of the lazy adjoint `tensor`, read through its parent.
+    /// The right polar factors of the lazy adjoint `tensor`'s parent, whose
+    /// direction errors name the requested left polar.
     fn left_polar_adjoint<D: FactorizationScalar>(
         tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError>;
+    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
 
-    /// Right polar of the lazy adjoint `tensor`, read through its parent.
+    /// The left polar factors of the lazy adjoint `tensor`'s parent, whose
+    /// direction errors name the requested right polar.
     fn right_polar_adjoint<D: FactorizationScalar>(
         tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
+    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError>;
 
     // Inverse, pseudo-inverse, solve and exponential share their bodies and
     // compact value maps. What stays per mode, until its leaf unifies it:
@@ -81,8 +80,8 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
-    /// Pseudo-inverse on the dense route; the multiplicity-free mode also
-    /// reads a lazy adjoint here, through its parent (D5, D6).
+    /// Pseudo-inverse on the dense route; a lazy adjoint is read through
+    /// its parent's SVD (D5, D6).
     fn pinv_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
         rcond: f64,
@@ -120,7 +119,7 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
-/// A factorization, as named in its errors.
+/// A factorization that reads a possibly lazy-adjoint input.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FactorOp {
@@ -135,31 +134,52 @@ pub enum FactorOp {
     SvdFull,
     LeftNull,
     RightNull,
+    LeftPolar,
+    RightPolar,
     EighFull,
     EigFull,
     Inv,
     Pinv,
+    Exp,
 }
 
 impl FactorOp {
-    /// The checked-mode lazy-adjoint refusal (D1, #1755).
-    pub(super) fn lazy_adjoint_refusal(self) -> &'static str {
+    /// How `op` reads a lazy adjoint, in every fusion mode (#1755): the
+    /// identity relating the operation of `A^H` to one of `A` is fixed by the
+    /// mathematics, so only the dense stages that execute it are per mode.
+    pub(super) const fn adjoint_rule(self) -> AdjointRule {
         match self {
-            Self::SvdVals => "checked Generic svd_vals does not accept lazy adjoints",
-            Self::EighVals => "checked Generic eigh_vals does not accept lazy adjoints",
-            Self::EigVals => "checked Generic eig_vals does not accept lazy adjoints",
-            Self::QrCompact => "checked Generic qr_compact does not accept lazy adjoints",
-            Self::QrFull => "checked Generic qr_full does not accept lazy adjoints",
-            Self::LqCompact => "checked Generic lq_compact does not accept lazy adjoints",
-            Self::LqFull => "checked Generic lq_full does not accept lazy adjoints",
-            Self::SvdCompact => "checked Generic svd_compact does not accept lazy adjoints",
-            Self::SvdFull => "checked Generic svd_full does not accept lazy adjoints",
-            Self::LeftNull => "checked Generic left_null does not accept lazy adjoints",
-            Self::RightNull => "checked Generic right_null does not accept lazy adjoints",
-            Self::EighFull => "checked Generic eigh_full does not accept lazy adjoints",
-            Self::EigFull => "checked Generic eig_full does not accept lazy adjoints",
-            Self::Inv => "checked Generic inv does not accept lazy adjoints",
-            Self::Pinv => "checked Generic pinv does not accept lazy adjoints",
+            // Singular values and coupled sectors are invariant under adjoint.
+            Self::SvdVals => AdjointRule::Parent,
+            // `A^H = V S U^H`: the mode's adjoint stage factors the parent and
+            // gauges the final left factor `V`, as materialize-then-SVD
+            // would; and `(A^H)^+ = U S^+ Vh` from the same parent SVD.
+            Self::SvdCompact | Self::SvdFull | Self::Pinv => AdjointRule::AdjointSeam,
+            // The null space of `A^H` is the adjoint of the opposite null
+            // space of `A`, `left_polar(A^H)` is the adjoint-swapped
+            // `right_polar(A)` (and vice versa), and `(A^H)^-1 = (A^-1)^H`.
+            Self::LeftNull | Self::RightNull | Self::LeftPolar | Self::RightPolar | Self::Inv => {
+                AdjointRule::Redirect
+            }
+            // Why not redirect QR through LQ of the parent: LQ is itself the
+            // QR of the adjoint, so it would form this copy anyway and add
+            // two factor adjoints. Why not redirect LQ to QR of the parent:
+            // detaching `R^H` and `Q^H` copies at least `min(m, n) (m + n)
+            // >= m n` elements per sector, never fewer than this input copy.
+            Self::QrCompact | Self::QrFull | Self::LqCompact | Self::LqFull => {
+                AdjointRule::Materialize
+            }
+            // Why not read the parent: an admitted near-Hermitian input
+            // differs from its adjoint and the solver reads one triangle; the
+            // values of `B^H` are `conj` of those of `B` only as a multiset,
+            // so the published order would change; and the right
+            // eigenvectors of `B^H` are the left ones of `B`.
+            // `exp` likewise dispatches a near-Hermitian input to the
+            // spectral route. The materialization runs inside `exp_dense`,
+            // after that mode's preflight and leases (D5, D8).
+            Self::EighVals | Self::EighFull | Self::EigVals | Self::EigFull | Self::Exp => {
+                AdjointRule::Materialize
+            }
         }
     }
 }
@@ -168,14 +188,13 @@ impl FactorOp {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdjointRule {
-    /// Refused with `InvalidArgument`.
-    Reject,
     /// The dense parent, for a result that is invariant under adjoint.
     Parent,
     /// An operation-local materialized adjoint.
     Materialize,
-    /// The factorization's adjoint partner on the parent, whose factors are
-    /// adjointed back (LQ of `t^H` from QR of `t`).
+    /// The partner operation on the parent, whose results are adjointed
+    /// back and detached (the left null space of `t^H` from the right null
+    /// space of `t`).
     Redirect,
     /// The dense parent through the factorization's adjoint-aware stage,
     /// which returns the factors of the adjoint without forming it.
@@ -189,23 +208,6 @@ where
         + CheckedFusionAlgebra
         + SectorCodec,
 {
-    fn adjoint_rule(op: FactorOp) -> AdjointRule {
-        match op {
-            // Singular values and coupled sectors are invariant under adjoint.
-            FactorOp::SvdVals => AdjointRule::Parent,
-            FactorOp::EighVals | FactorOp::EigVals | FactorOp::QrCompact | FactorOp::QrFull => {
-                AdjointRule::Materialize
-            }
-            FactorOp::LqCompact | FactorOp::LqFull => AdjointRule::Redirect,
-            FactorOp::SvdCompact | FactorOp::SvdFull => AdjointRule::AdjointSeam,
-            FactorOp::LeftNull | FactorOp::RightNull => AdjointRule::Redirect,
-            FactorOp::EighFull | FactorOp::EigFull => AdjointRule::Materialize,
-            // (A^H)^-1 = (A^-1)^H.
-            FactorOp::Inv => AdjointRule::Redirect,
-            FactorOp::Pinv => AdjointRule::AdjointSeam,
-        }
-    }
-
     fn map_factor_error(error: tenet_tensors::OperationError) -> Error {
         error.into()
     }
@@ -260,27 +262,6 @@ where
 
     fn left_polar_adjoint<D: FactorizationScalar>(
         tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Error> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Err(internal_layout_error(
-                "adjoint polar input must be a lazy adjoint",
-            ));
-        };
-        let mut dense = tensor.runtime.lease_dense();
-        let mut lease = tensor.runtime.lease_context()?;
-        let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-        )?;
-        Ok(LeftPolar {
-            w: wrap_factor_on(&tensor.runtime, w),
-            p: wrap_factor_on(&tensor.runtime, p),
-        })
-    }
-
-    fn right_polar_adjoint<D: FactorizationScalar>(
-        tensor: &TensorMap<R, D>,
     ) -> Result<RightPolar<TensorMap<R, D>>, Error> {
         let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
             return Err(internal_layout_error(
@@ -289,7 +270,7 @@ where
         };
         let mut dense = tensor.runtime.lease_dense();
         let mut lease = tensor.runtime.lease_context()?;
-        let RightPolar { p, wh } = tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn(
+        let RightPolar { p, wh } = tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
@@ -297,6 +278,27 @@ where
         Ok(RightPolar {
             p: wrap_factor_on(&tensor.runtime, p),
             wh: wrap_factor_on(&tensor.runtime, wh),
+        })
+    }
+
+    fn right_polar_adjoint<D: FactorizationScalar>(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<LeftPolar<TensorMap<R, D>>, Error> {
+        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
+            return Err(internal_layout_error(
+                "adjoint polar input must be a lazy adjoint",
+            ));
+        };
+        let mut dense = tensor.runtime.lease_dense();
+        let mut lease = tensor.runtime.lease_context()?;
+        let LeftPolar { w, p } = tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>()?,
+            &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+        )?;
+        Ok(LeftPolar {
+            w: wrap_factor_on(&tensor.runtime, w),
+            p: wrap_factor_on(&tensor.runtime, p),
         })
     }
 
@@ -495,19 +497,6 @@ where
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
 {
-    fn adjoint_rule(op: FactorOp) -> AdjointRule {
-        match op {
-            // The null space of `t^H` is the adjoint of the opposite null
-            // space of `t`.
-            FactorOp::LeftNull | FactorOp::RightNull => AdjointRule::Redirect,
-            FactorOp::EighFull | FactorOp::EigFull => AdjointRule::Materialize,
-            // (A^H)^-1 = (A^-1)^H, and likewise for the pseudo-inverse.
-            FactorOp::Inv | FactorOp::Pinv => AdjointRule::Redirect,
-            // D1: checked Generic refuses the other lazy adjoints until #1755.
-            _ => AdjointRule::Reject,
-        }
-    }
-
     fn map_factor_error(
         error: tenet_matrixalgebra::seam::CheckedGenericFactorPlanError<
             <R as CheckedGenericFusion>::Error,
@@ -556,31 +545,27 @@ where
 
     fn left_polar_adjoint<D: FactorizationScalar>(
         tensor: &TensorMap<R, D>,
-    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError> {
+    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError> {
         let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
             return Err(internal_layout_error("adjoint polar input must be a lazy adjoint").into());
         };
         let mut dense = tensor.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
             .map_err(Error::from)?;
-        let RightPolar { p, wh: w } =
+        let RightPolar { p, wh } =
             tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn_checked_generic(
                 dense.dense(),
                 &input,
             )?;
-        let w = wrap_factor_on(&tensor.runtime, w)
-            .adjoint()?
-            .materialized_tensor_uncached()
-            .map_err(GenericTensorError::from)?;
-        Ok(LeftPolar {
-            w,
+        Ok(RightPolar {
             p: wrap_factor_on(&tensor.runtime, p),
+            wh: wrap_factor_on(&tensor.runtime, wh),
         })
     }
 
     fn right_polar_adjoint<D: FactorizationScalar>(
         tensor: &TensorMap<R, D>,
-    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError> {
+    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError> {
         let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
             return Err(internal_layout_error("adjoint polar input must be a lazy adjoint").into());
         };
@@ -592,13 +577,9 @@ where
                 dense.dense(),
                 &input,
             )?;
-        let w = wrap_factor_on(&tensor.runtime, w)
-            .adjoint()?
-            .materialized_tensor_uncached()
-            .map_err(GenericTensorError::from)?;
-        Ok(RightPolar {
+        Ok(LeftPolar {
+            w: wrap_factor_on(&tensor.runtime, w),
             p: wrap_factor_on(&tensor.runtime, p),
-            wh: w,
         })
     }
 
@@ -689,10 +670,7 @@ where
         rcond: f64,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         // A direct per-sector pseudo-inverse, with no context lane (D5, D6,
-        // #1752).
-        let body = tensor
-            .owned_body()
-            .expect("checked Generic pinv input is owned after lazy dispatch");
+        // #1752); a lazy adjoint is read through its parent's SVD.
         let source = tensor.logical_space();
         let output = <Self as tenet_matrixalgebra::seam::FactorMode<R>>::authority(source)
             .output_space(FusionTreeHomSpace::new(
@@ -700,13 +678,27 @@ where
                 source.space().homspace().codomain().clone(),
             ))?;
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::seam::pinv_direct_into_dyn(
-            dense.dense(),
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
+        let factor = match &tensor.repr {
+            TypedTensorRepr::Adjoint(view) => {
+                tenet_matrixalgebra::seam::pinv_adjoint_parent_direct_into_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                        .map_err(Error::from)?,
+                    output,
+                    rcond,
+                )
+            }
+            TypedTensorRepr::Owned(body) => tenet_matrixalgebra::seam::pinv_direct_into_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(
+                    &body.space,
+                    body.materialized_dense_data().as_ref(),
+                )
                 .map_err(Error::from)?,
-            output,
-            rcond,
-        )
+                output,
+                rcond,
+            ),
+        }
         .map_err(pinv_seam_error)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
