@@ -1300,7 +1300,7 @@ fn checked_trace_pivotal_failure_does_not_publish_destination() {
     })
     .unwrap();
     let payload = source.dense_data().unwrap().as_ptr();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
     let owner = || {
         let info =
             tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure);

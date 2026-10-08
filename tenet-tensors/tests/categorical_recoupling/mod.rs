@@ -4,7 +4,7 @@
 //! These are the structures a provider actually compiles — SU(2) F moves and
 //! their fermionic (fZ2 ⊠ SU(2)) counterparts — reached below the typed
 //! `TensorMap` layer through
-//! [`TreeTransformCache::get_or_compile_tree_pair_structures_with_storage_conjugation`],
+//! [`tenet_tensors::build_tree_pair_transform_group_plan`] and its storage-conjugating compile,
 //! so the recoupling matrices are genuine 6j/R data with irrational entries and
 //! mixed signs rather than hand-written numbers.
 //!
@@ -28,7 +28,7 @@ use tenet_core::{
     RuleIdentity, SU2FusionRule, SectorId, SectorStructure,
 };
 use tenet_operations::{TreeTransformBlock, TreeTransformStructure};
-use tenet_tensors::{TreeTransformCache, TreeTransformOperation};
+use tenet_tensors::{build_tree_pair_transform_group_plan, TreeTransformOperation};
 
 /// Payload dtypes the categorical fixtures are replayed with, plus the host
 /// arithmetic the oracle needs. Deliberately not a TeNeT trait: the oracle must
@@ -285,7 +285,7 @@ pub fn fermion_parity_structure(degeneracy: usize) -> Arc<BlockStructure> {
 /// conjugated.
 pub struct Compiled {
     pub name: String,
-    pub structure: Arc<TreeTransformStructure<f64>>,
+    pub structure: TreeTransformStructure<f64>,
     pub space: Arc<BlockStructure>,
     pub conjugate: bool,
     /// Destination axis `i` reads source axis `source_axes[i]`: the
@@ -366,11 +366,14 @@ where
         .chain(operation.domain_permutation())
         .copied()
         .collect();
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
-    let structure = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            rule, operation, space, space, conjugate,
-        )
+    let structure = build_tree_pair_transform_group_plan(rule, operation, space)
+        .and_then(|plan| {
+            plan.compile_shared_structures_with_storage_conjugation(
+                Arc::clone(space),
+                Arc::clone(space),
+                conjugate,
+            )
+        })
         .unwrap_or_else(|error| panic!("{name} failed to compile: {error:?}"));
     Compiled {
         name: name.to_string(),

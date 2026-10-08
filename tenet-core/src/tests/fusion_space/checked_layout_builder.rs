@@ -127,7 +127,7 @@ fn checked_and_encoded_entries_share_the_same_layout_cache() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let hom = singleton_rank_hom(su2(1), 4);
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let encoded_first = hom.cached_fusion_tree_layout(&SU2FusionRule);
     let checked_second = hom
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
@@ -135,7 +135,7 @@ fn checked_and_encoded_entries_share_the_same_layout_cache() {
         .commit_layout();
     assert!(Arc::ptr_eq(&encoded_first, &checked_second));
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let checked_first = hom
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
         .unwrap()
@@ -151,7 +151,7 @@ fn warm_layout_commit_publishes_nothing() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = singleton_rank_hom(su2(1), 5);
 
     reset_fusion_tree_layout_probe_side_effect_calls();
@@ -170,7 +170,7 @@ fn prepared_layout_publishes_only_at_commit() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_fusion_tree_layout_probe_side_effect_calls();
     let hom = singleton_rank_hom(su2(1), 5);
 
@@ -196,12 +196,12 @@ fn prepared_final_structure_reuses_one_checked_enumeration() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let hom = singleton_rank_hom(su2(1), 5);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let expected = hom
         .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
         .unwrap();
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_fusion_tree_layout_probe_side_effect_calls();
     let prepared = hom
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
@@ -235,7 +235,7 @@ fn prepared_complete_structure_hits_without_rebuilding_layout() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = singleton_rank_hom(su2(1), 5);
 
     let first_prepared = hom
@@ -305,7 +305,7 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg.clone(), leg.clone()]),
@@ -363,7 +363,7 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let leg = SectorLeg::new([(u1(0), 2), (u1(1), 3)], false);
     let split = |nout: usize| {
         let legs = [leg.clone(), leg.clone(), leg.clone()];
@@ -420,7 +420,7 @@ fn complete_structure_overflow_is_rejected_beside_cached_neighbour() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = |first_degeneracy: usize| {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([
@@ -460,7 +460,7 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let source = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(u1(1), 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
@@ -517,7 +517,7 @@ fn cached_commit_readmits_after_core_reset() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = singleton_rank_hom(su2(1), 5);
     hom.prepare_fusion_tree_layout_checked(&SU2FusionRule)
         .unwrap()
@@ -526,7 +526,7 @@ fn cached_commit_readmits_after_core_reset() {
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
         .unwrap();
     let retained = prepared.keys_arc();
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_fusion_tree_layout_probe_side_effect_calls();
 
     let committed = prepared.commit();
@@ -542,7 +542,7 @@ fn concurrent_commits_share_one_layout_admission() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = singleton_rank_hom(su2(1), 5);
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let handles = (0..2)
@@ -706,7 +706,7 @@ fn assert_failed_checked_build_is_transactional<R>(
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_fusion_tree_layout_probe_side_effect_calls();
     let error = hom.prepare_fusion_tree_layout_checked(rule).unwrap_err();
     assert_eq!(error, expected);

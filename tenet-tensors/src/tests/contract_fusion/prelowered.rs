@@ -5,7 +5,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let rule = Z2FusionRule;
     let vacuum = SectorId::new(0);
     let leg = || SectorLeg::new([(vacuum, 2)], false);
@@ -97,7 +97,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         .unwrap();
     let swapped_axes =
         || TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::from_axes(&[1, 0]));
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let mut route_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut ordinary_swapped = vec![0.0; swapped_dst_bound.space().required_len().unwrap()];
     route_context
@@ -209,7 +209,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
             canonical_data.as_slice(),
         ),
     ] {
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let first_output = execute_prelowered(&mut context, first, first_data);
         assert_eq!(first_output, oracle);
@@ -222,7 +222,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         // What: an identical prelowered call remains deterministic.
         assert_eq!(repeated, oracle);
 
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let mut publisher = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         assert_eq!(
             execute_prelowered(&mut publisher, first, first_data),
@@ -240,7 +240,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         );
     }
 
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let mut namespace_context =
         TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut ordinary = vec![0.0; dst.required_len().unwrap()];
@@ -369,7 +369,6 @@ fn tensorcontract_fusion_prelowered_uniform_fermion_twist_takes_the_scaled_core_
 
     let mut no_cache_context =
         crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
-    no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
     let mut no_cache_lazy = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
     no_cache_context
         .tensorcontract_fusion_dyn_prelowered_into(
@@ -496,8 +495,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     let direct_axes =
         TensorContractSpec::new(&[0], &[2], OutputAxisOrder::from_axes(&[2, 0, 3, 1]));
 
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &encoded_lhs,
         &encoded_rhs,
@@ -506,8 +505,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         direct_axes.output_permutation(),
     )
     .unwrap();
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &lowered_lhs,
         &lowered_rhs,
@@ -518,16 +517,12 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     .unwrap();
     assert_eq!(encoded_dst.space(), lowered_dst.space());
 
-    for policy in [
-        OperationCachePolicy::NoCache,
-        OperationCachePolicy::TaskLocal,
-    ] {
-        reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+    for _ in 0..2 {
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let mut encoded = vec![0.0; encoded_dst.space().required_len().unwrap()];
         let mut encoded_context =
             TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
-        encoded_context.set_cache_policy(policy);
         encoded_context
             .tensorcontract_fusion_dyn_into(
                 &encoded_dst,
@@ -542,12 +537,11 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             )
             .unwrap();
 
-        reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let mut lowered = vec![0.0; lowered_dst.space().required_len().unwrap()];
         let mut lowered_context =
             TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
-        lowered_context.set_cache_policy(policy);
         lowered_context
             .tensorcontract_fusion_dyn_into(
                 &lowered_dst,
@@ -571,9 +565,6 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             &encoded,
             lhs_data.len() * rhs_data.len(),
         );
-        let cold_misses = lowered_context.dynamic_fusion_space_cache_misses();
-        let cold_hits = lowered_context.dynamic_fusion_space_cache_hits();
-        assert!(cold_misses >= 3);
         let mut warm = vec![0.0; lowered.len()];
         lowered_context
             .tensorcontract_fusion_dyn_into(
@@ -589,25 +580,13 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             )
             .unwrap();
         assert_eq!(warm, lowered);
-        if policy == OperationCachePolicy::NoCache {
-            assert_eq!(lowered_context.dynamic_fusion_space_cache_len(), 0);
-            assert_eq!(lowered_context.dynamic_fusion_space_cache_hits(), 0);
-            assert!(lowered_context.dynamic_fusion_space_cache_misses() > cold_misses);
-        } else {
-            assert!(lowered_context.dynamic_fusion_space_cache_len() >= 3);
-            assert_eq!(
-                lowered_context.dynamic_fusion_space_cache_misses(),
-                cold_misses
-            );
-            assert!(lowered_context.dynamic_fusion_space_cache_hits() > cold_hits);
-        }
     }
 
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let (eager_lhs, eager_lhs_data) = crate::adjoint_bound_dyn(&encoded_lhs, &lhs_data).unwrap();
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let lazy_lhs = crate::adjoint_bound_space_dyn(&lowered_lhs).unwrap();
     assert_eq!(eager_lhs.space(), lazy_lhs.space());
     let lazy_axes = TensorContractSpec::new_with_conjugation(
@@ -617,8 +596,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         true,
         false,
     );
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded_lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &eager_lhs,
         &encoded_rhs,
@@ -627,8 +606,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         lazy_axes.output_permutation(),
     )
     .unwrap();
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &lazy_lhs,
         &lowered_rhs,
@@ -639,8 +618,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     .unwrap();
     assert_eq!(encoded_lazy_dst.space(), lazy_dst.space());
 
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let mut eager = vec![0.0; lazy_dst.space().required_len().unwrap()];
     let mut eager_context = TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
     eager_context
@@ -661,16 +640,12 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         )
         .unwrap();
 
-    for policy in [
-        OperationCachePolicy::NoCache,
-        OperationCachePolicy::TaskLocal,
-    ] {
-        reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+    for _ in 0..2 {
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let mut encoded_lazy = vec![0.0; encoded_lazy_dst.space().required_len().unwrap()];
         let mut encoded_lazy_context =
             TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
-        encoded_lazy_context.set_cache_policy(policy);
         encoded_lazy_context
             .tensorcontract_fusion_dyn_prelowered_into(
                 &encoded_lazy_dst,
@@ -691,12 +666,11 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             lhs_data.len() * rhs_data.len(),
         );
 
-        reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let mut lazy = vec![0.0; lazy_dst.space().required_len().unwrap()];
         let mut lazy_context =
             TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
-        lazy_context.set_cache_policy(policy);
         let execute_lazy =
             |context: &mut TensorContractFusionExecutionContext<f64, TripleRuleKey>,
              output: &mut [f64]| {
@@ -719,24 +693,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             &eager,
             lhs_data.len() * rhs_data.len(),
         );
-        let cold_misses = lazy_context.dynamic_fusion_space_cache_misses();
-        let cold_hits = lazy_context.dynamic_fusion_space_cache_hits();
-        assert!(cold_misses >= 3);
         let mut warm = vec![0.0; lazy.len()];
         execute_lazy(&mut lazy_context, &mut warm).unwrap();
         assert_eq!(warm, lazy);
-        if policy == OperationCachePolicy::NoCache {
-            assert_eq!(lazy_context.dynamic_fusion_space_cache_len(), 0);
-            assert_eq!(lazy_context.dynamic_fusion_space_cache_hits(), 0);
-            assert!(lazy_context.dynamic_fusion_space_cache_misses() > cold_misses);
-        } else {
-            assert!(lazy_context.dynamic_fusion_space_cache_len() >= 3);
-            assert_eq!(
-                lazy_context.dynamic_fusion_space_cache_misses(),
-                cold_misses
-            );
-            assert!(lazy_context.dynamic_fusion_space_cache_hits() > cold_hits);
-        }
     }
 }
 
@@ -812,7 +771,7 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
     let (canonical, mis_stacked) = (bind(&canonical), bind(&mis_stacked));
     let len = canonical.space().required_len().unwrap();
     let values = (0..len).map(|index| index as f64 + 1.0).collect::<Vec<_>>();
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     for (lhs, rhs) in [(&mis_stacked, &canonical), (&canonical, &mis_stacked)] {
         let mut dst = vec![0.0; len];

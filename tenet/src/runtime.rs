@@ -11,12 +11,12 @@ use num_complex::{Complex32, Complex64};
 use tenet_core::{HomSpaceId, RuleIdentity};
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 
-/// Snapshot of a Runtime's tree-transform caches, one entry per tier; see
-/// [`Runtime::tree_transform_cache_info`]. Observability only.
+/// Snapshot returned by the deprecated [`Runtime::tree_transform_cache_info`];
+/// removed with it. Observability only.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct TreeTransformCacheInfo {
-    /// Completed transforms keyed on exact layouts.
+    /// The process-global completed-transformer cache.
     pub structures: RuntimeTreeTransformCacheInfo,
     /// Categorical plans keyed on sector structures.
     pub plans: RuntimeTreeTransformCacheInfo,
@@ -24,9 +24,8 @@ pub struct TreeTransformCacheInfo {
     pub groups: RuntimeTreeTransformCacheInfo,
 }
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, OperationCachePolicy,
-    RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
-    TensorContractFusionExecutionContext, TreeTransformOperation,
+    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, RuntimeCoefficientLedger,
+    RuntimeCoefficientStore, TensorContractFusionExecutionContext, TreeTransformOperation,
 };
 
 use crate::error::Error;
@@ -87,9 +86,8 @@ struct LaneConfig {
     shared: Option<(
         tenet_dense::SharedCpuContext,
         Option<tenet_dense::CpuBackendKind>,
-        Weak<RuntimeTreeTransformStore<f64>>,
+        Weak<RuntimeCoefficientStore<f64>>,
     )>,
-    cache_policy: OperationCachePolicy,
     recoupling_threads: Option<usize>,
 }
 
@@ -102,7 +100,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
             c32: None,
             lane_config: LaneConfig {
                 shared: None,
-                cache_policy: OperationCachePolicy::default(),
                 recoupling_threads: None,
             },
         }
@@ -128,7 +125,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     pub(crate) fn with_config(
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
-        real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+        real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
     ) -> Result<Self, Error> {
         let mut ctxs = Self {
             f64:
@@ -160,19 +157,15 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     gemm_kind,
                     Weak::clone(&real_tree_transform_store),
                 )),
-                cache_policy: OperationCachePolicy::NoCache,
                 recoupling_threads: None,
             },
         };
-        ctxs.set_cache_policy(OperationCachePolicy::NoCache);
         ctxs.f64
             .tree_context_mut()
-            .cache_mut()
-            .bind_runtime_store(real_tree_transform_store.clone());
+            .bind_runtime_coefficient_store(real_tree_transform_store.clone());
         ctxs.c64
             .tree_context_mut()
-            .cache_mut()
-            .bind_runtime_store(real_tree_transform_store);
+            .bind_runtime_coefficient_store(real_tree_transform_store);
         Ok(ctxs)
     }
 
@@ -192,13 +185,11 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     >>::Workspace::default(),
                 );
                 lane.tree_context_mut()
-                    .cache_mut()
-                    .bind_runtime_store(Weak::clone(store));
+                    .bind_runtime_coefficient_store(Weak::clone(store));
                 lane
             }
             None => Ctx::default(),
         };
-        lane.set_cache_policy(config.cache_policy);
         if let Some(threads) = config.recoupling_threads {
             lane.tree_context_mut()
                 .backend_mut()
@@ -221,18 +212,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             None => Self::make_lane(&self.lane_config)?,
         };
         Ok(self.c32.insert(lane))
-    }
-
-    fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
-        self.lane_config.cache_policy = policy;
-        self.f64.set_cache_policy(policy);
-        self.c64.set_cache_policy(policy);
-        if let Some(lane) = self.f32.as_mut() {
-            lane.set_cache_policy(policy);
-        }
-        if let Some(lane) = self.c32.as_mut() {
-            lane.set_cache_policy(policy);
-        }
     }
 
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
@@ -276,20 +255,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             && self.c32.as_mut().is_none_or(|lane| {
                 lane.tree_context_mut().backend_mut().recoupling_threads() == expected
             })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.f64.local_cache_policy_is(expected)
-            && self.c64.local_cache_policy_is(expected)
-            && self
-                .f32
-                .as_ref()
-                .is_none_or(|lane| lane.local_cache_policy_is(expected))
-            && self
-                .c32
-                .as_ref()
-                .is_none_or(|lane| lane.local_cache_policy_is(expected))
     }
 
     #[cfg(test)]
@@ -344,7 +309,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
 fn make_complex_multiplicity_free_ctx(
     ctx: &tenet_dense::SharedCpuContext,
     gemm_kind: Option<tenet_dense::CpuBackendKind>,
-    tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
+    tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
 ) -> Result<CoefficientCtx<Complex64, RuleIdentity, Complex64>, Error> {
     let mut context = CoefficientCtx::with_parts(
         tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(ctx, gemm_kind)?),
@@ -354,11 +319,9 @@ fn make_complex_multiplicity_free_ctx(
             Complex64,
         >>::Workspace::default(),
     );
-    context.set_cache_policy(OperationCachePolicy::NoCache);
     context
         .tree_context_mut()
-        .cache_mut()
-        .bind_runtime_store(tree_transform_store);
+        .bind_runtime_coefficient_store(tree_transform_store);
     Ok(context)
 }
 
@@ -480,14 +443,6 @@ macro_rules! define_tensor_execution_context {
                         .shares_cpu_context(shared)
             }
 
-            #[cfg(test)]
-            pub(crate) fn local_cache_policy_is(
-                &self,
-                expected: tenet_tensors::OperationCachePolicy,
-            ) -> bool {
-                true $(&& self.$field.local_cache_policy_is(expected))+
-                    && self.mf_c64_coeff_c64.local_cache_policy_is(expected)
-            }
         }
     };
 }
@@ -531,8 +486,8 @@ macro_rules! define_runtime_state {
                 dense: Box<dyn tenet_dense::DenseExecutor + Send>,
                 ctx: &tenet_dense::SharedCpuContext,
                 gemm_kind: Option<tenet_dense::CpuBackendKind>,
-                real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
-                complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
+                real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
+                complex_tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
             ) -> Result<Self, Error> {
                 Ok(Self {
                     $($field: Ctxs::with_config(
@@ -566,12 +521,6 @@ macro_rules! define_runtime_state {
                         .backend_mut()
                         .recoupling_threads()
                         == expected
-            }
-
-            #[cfg(test)]
-            fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-                true $(&& self.$field.local_cache_policy_is(expected))+
-                    && self.mf_c64_coeff_c64.local_cache_policy_is(expected)
             }
 
             #[cfg(test)]
@@ -654,28 +603,30 @@ impl ExtensionSlot {
     }
 }
 
+/// This Runtime's categorical-coefficient tiers (plans and per-group specs),
+/// each at a fixed [`RuntimeCoefficientStore::DEFAULT_BYTE_BUDGET`] until
+/// #2014-4 moves them into `tenet::cache`. Completed transformers are
+/// process-global.
 struct RuntimeTreeTransformStores {
-    ledger: Arc<RuntimeTreeTransformCacheLedger>,
-    real: Arc<RuntimeTreeTransformStore<f64>>,
-    complex: Arc<RuntimeTreeTransformStore<Complex64>>,
+    ledger: Arc<RuntimeCoefficientLedger>,
+    real: Arc<RuntimeCoefficientStore<f64>>,
+    complex: Arc<RuntimeCoefficientStore<Complex64>>,
 }
 
 impl RuntimeTreeTransformStores {
-    fn new(byte_budget: usize) -> Self {
-        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::new(byte_budget));
+    fn new() -> Self {
+        let ledger = Arc::new(RuntimeCoefficientLedger::new(
+            RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
+        ));
         Self {
-            real: Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            real: Arc::new(RuntimeCoefficientStore::with_runtime_ledger(Arc::clone(
                 &ledger,
             ))),
-            complex: Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            complex: Arc::new(RuntimeCoefficientStore::with_runtime_ledger(Arc::clone(
                 &ledger,
             ))),
             ledger,
         }
-    }
-
-    fn info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.ledger.store_pair_info(&self.real, &self.complex)
     }
 
     fn plan_info(&self) -> RuntimeTreeTransformCacheInfo {
@@ -911,7 +862,7 @@ impl std::ops::DerefMut for CudaLease<'_> {
 ///
 /// Read-only: nothing here is a knob. `executor_bytes` is what the executor
 /// retains (uploaded coefficient and recoupling vectors plus the pack/scatter
-/// workspaces) and is released by
+/// workspaces) and is released by the deprecated
 /// [`Runtime::clear_tree_transform_cache`]. `context_scalar_operand_bytes` is
 /// the device context's own ones and zero templates, which many device
 /// operations share and which the executor does not own; the two are reported
@@ -1042,8 +993,8 @@ pub(crate) struct RuntimeExecutionConfig {
     /// `RuntimeBuilder::build` created (issue #155). `None` uses Tenferro's
     /// resolved compiled provider default.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
-    pub(crate) real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
-    pub(crate) complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
+    pub(crate) real_tree_transform_store: Weak<RuntimeCoefficientStore<f64>>,
+    pub(crate) complex_tree_transform_store: Weak<RuntimeCoefficientStore<Complex64>>,
     /// Runtime CPU context shared by built-in executors that use the compiled
     /// default kind: the state, mintable executor pool, and transform backends.
     /// An explicitly requested nondefault kind uses its own provider context;
@@ -1182,57 +1133,45 @@ impl Runtime {
         &self.inner.execution_config
     }
 
-    /// Returns this Runtime's tree-transform cache activity, one snapshot per
-    /// tier. The tiers are sampled one after another, not atomically.
+    /// Deprecated (one release): use [`crate::cache::stats`].
     ///
-    /// - `structures`: completed transforms, keyed on the exact source and
-    ///   destination layouts (degeneracies included).
-    /// - `plans`: categorical plans (recoupling coefficients and fusion-tree
-    ///   pair maps), keyed on the rule, the operation and the sector structures
-    ///   only, so a structure miss caused only by new block dimensions (for
-    ///   example after a truncation) reuses the plan and compiles the layout
-    ///   alone. `misses` counts attempted plan builds, including failed ones;
-    ///   a failed build is not retained.
-    /// - `groups`: per fusion-tree group recoupling for non-unique fusion
-    ///   (for example SU(2) or SU(3)), keyed on the rule, the operation, the
-    ///   group's external sectors and its ordered tree pairs. A plan miss
-    ///   builds only the groups absent here, so a sector change rebuilds only
-    ///   the groups it changed. `misses` counts failed group lookups. Unique
-    ///   fusion never uses this tier.
-    ///
-    /// Bounds: every tier is charged separately against the configured
-    /// [`RuntimeBuilder::tree_transform_cache_byte_budget`] (64 MiB by
-    /// default), so the three retain at most three times that budget. The
-    /// entry caps are 256 structures, 256 plans and 10⁴ groups; any entry that
-    /// fits the budget alone is retained, and one larger than the budget is
-    /// rebuilt per call.
+    /// `structures` reports the process-global completed-transformer cache
+    /// shared by every Runtime: `entry_capacity` = `usize::MAX` (byte-bounded
+    /// only), `misses` = builds offered for admission, `admission_bypasses` =
+    /// oversize rejections. `plans` and `groups` report this Runtime's
+    /// categorical-coefficient tiers, each bounded at a fixed 64 MiB (256
+    /// plans, 10⁴ groups) until #2014-4 moves them into `tenet::cache`. The
+    /// tiers are sampled one after another, not atomically.
+    #[deprecated(note = "use `tenet::cache::stats`; see the method documentation")]
     pub fn tree_transform_cache_info(&self) -> TreeTransformCacheInfo {
         let stores = &self.inner.tree_transform_stores;
         TreeTransformCacheInfo {
-            structures: stores.info(),
+            structures: RuntimeTreeTransformCacheInfo::from_structure_cache(
+                tenet_core::structure_cache_info(
+                    tenet_core::StructureCacheKind::CompletedTreeTransformer,
+                ),
+            ),
             plans: stores.plan_info(),
             groups: stores.group_info(),
         }
     }
 
-    /// Clears this Runtime's tree-transform caches: completed structures,
-    /// categorical plans and their per-group recoupling.
+    /// Deprecated (one release): clears the process-global structure caches
+    /// for **every** Runtime ([`crate::cache::clear`]), then this Runtime's
+    /// categorical-coefficient tiers and its prepared device transform state
+    /// and contraction scratch. The steps run one after another, never
+    /// nested.
     ///
-    /// The device tree-transform executor's prepared state is dropped too, and
-    /// strictly after the host store clear has returned: the two locks are
-    /// taken one after the other, never nested, so this can never invert a
-    /// lock order. Dropping device state is a memory decision, never a
-    /// correctness one — the next device transform re-prepares what it needs.
-    /// On a Runtime with a device this call therefore blocks behind a device
-    /// operation in progress. A device lock poisoned by an earlier panic is
-    /// recovered rather than propagated: dropping prepared device state is
-    /// always safe, and a cache clear is the wrong place to re-raise someone
-    /// else's panic.
-    ///
-    /// The device contraction scratch is released under the same device lease:
-    /// it is execution scratch sized by the transformed operands, so it goes
-    /// with the transform state it was sized from.
+    /// The device state is dropped under the maintenance lease, after the
+    /// host clears have returned, so this never inverts a lock order; on a
+    /// Runtime with a device it blocks behind a device operation in
+    /// progress. A device lock poisoned by an earlier panic is recovered
+    /// rather than propagated: dropping prepared device state is always safe.
+    #[deprecated(
+        note = "use `tenet::cache::clear`; this also clears every Runtime's structure caches"
+    )]
     pub fn clear_tree_transform_cache(&self) {
+        crate::cache::clear();
         self.inner.tree_transform_stores.clear();
         #[cfg(feature = "cuda")]
         if let Some(mut lease) = self.lease_cuda_for_maintenance() {
@@ -1242,50 +1181,43 @@ impl Runtime {
         }
     }
 
-    pub(crate) fn admitted_tree_pair_operation<R>(
-        &self,
+    /// The resolved transformer of a typed Host `*_into` request whose spaces
+    /// were proved to match once before (the exact-layout memo on the
+    /// process-global entry); `None` takes the full path.
+    pub(crate) fn exact_layout_tree_pair_hit<R>(
         rule: &RuleIdentity,
+        operation: tenet_tensors::TreeTransformOperationView<'_>,
         source: &BoundDynamicFusionMapSpace<R>,
         destination: &BoundDynamicFusionMapSpace<R>,
-        matches: impl FnMut(&TreeTransformOperation) -> bool,
-    ) -> Option<TreeTransformOperation> {
+    ) -> Option<tenet_tensors::TreeTransformStructure<f64>> {
         let (source_homspace, source_layout) = bound_layout_identity(source);
         let (destination_homspace, destination_layout) = bound_layout_identity(destination);
-        self.inner
-            .tree_transform_stores
-            .real
-            .admitted_tree_pair_operation(
-                rule,
-                &source_homspace,
-                source_layout,
-                &destination_homspace,
-                destination_layout,
-                matches,
-            )
+        tenet_tensors::exact_layout_tree_pair_hit::<f64>(
+            rule,
+            operation,
+            destination.space().structure(),
+            source.space().structure(),
+            (&source_homspace, source_layout),
+            (&destination_homspace, destination_layout),
+        )
     }
 
     pub(crate) fn admit_exact_tree_pair_layout<R>(
-        &self,
-        rule: RuleIdentity,
+        rule: &RuleIdentity,
         operation: &TreeTransformOperation,
         source: &BoundDynamicFusionMapSpace<R>,
         destination: &BoundDynamicFusionMapSpace<R>,
-    ) {
+    ) -> bool {
         let (source_homspace, source_layout) = bound_layout_identity(source);
         let (destination_homspace, destination_layout) = bound_layout_identity(destination);
-        // Cache retention must not change an already-successful operation.
-        let _ = self
-            .inner
-            .tree_transform_stores
-            .real
-            .admit_exact_tree_pair_layout(
-                rule,
-                operation,
-                destination.space().structure(),
-                source.space().structure(),
-                (&source_homspace, source_layout),
-                (&destination_homspace, destination_layout),
-            );
+        tenet_tensors::admit_exact_tree_pair_layout::<f64>(
+            rule,
+            operation,
+            destination.space().structure(),
+            source.space().structure(),
+            (&source_homspace, source_layout),
+            (&destination_homspace, destination_layout),
+        )
     }
 
     /// Enters this runtime's CPU pool as the calling thread's Host pool until
@@ -1477,7 +1409,8 @@ impl Runtime {
     /// scratch holds, or `None` when the Runtime has no device.
     ///
     /// Read-only and grow-only: the scratch keeps its high-water allocation
-    /// per payload dtype until [`Self::clear_tree_transform_cache`]. It is
+    /// per payload dtype until the deprecated
+    /// [`Self::clear_tree_transform_cache`]. It is
     /// reported apart from [`CudaTreeTransformStats`] so each device byte is
     /// counted once, and is not charged to
     /// `PlanCacheConfig::workspace_budget_bytes`. Takes the device lease like
@@ -1585,6 +1518,7 @@ impl std::error::Error for RuntimeConfigError {}
 /// ([`Self::with_dense_executor`]) is a `Box<dyn DenseExecutor>`, which is
 /// neither cloneable nor `Debug`. A manual [`std::fmt::Debug`] is provided that
 /// reports the executor's presence without touching it.
+#[derive(Default)]
 pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
@@ -1603,23 +1537,6 @@ pub struct RuntimeBuilder {
     /// `None` uses the compiled provider default. Independent of
     /// [`Self::linalg_backend`].
     gemm_backend: Option<LinalgBackend>,
-    tree_transform_cache_byte_budget: usize,
-}
-
-impl Default for RuntimeBuilder {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "cuda")]
-            cuda_device: None,
-            plan_cache: PlanCacheConfig::default(),
-            dense_threads: None,
-            recoupling_threads: None,
-            dense_executor: None,
-            linalg_backend: None,
-            gemm_backend: None,
-            tree_transform_cache_byte_budget: RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
-        }
-    }
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -1633,10 +1550,6 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_executor", &self.dense_executor.is_some())
             .field("linalg_backend", &self.linalg_backend)
             .field("gemm_backend", &self.gemm_backend)
-            .field(
-                "tree_transform_cache_byte_budget",
-                &self.tree_transform_cache_byte_budget,
-            )
             .finish()
     }
 }
@@ -1772,15 +1685,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the retained-byte budget for completed tree-transform structures,
-    /// and separately for categorical tree-transform plans and for their
-    /// per-group recoupling specs, so the three tiers together retain at most
-    /// three times this charge. A zero budget disables admission to all three.
-    pub fn tree_transform_cache_byte_budget(mut self, bytes: usize) -> Self {
-        self.tree_transform_cache_byte_budget = bytes;
-        self
-    }
-
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads) and for tree-transform plan
@@ -1824,8 +1728,7 @@ impl RuntimeBuilder {
             ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let tree_transform_stores =
-            RuntimeTreeTransformStores::new(self.tree_transform_cache_byte_budget);
+        let tree_transform_stores = RuntimeTreeTransformStores::new();
         let real_tree_transform_store = Arc::downgrade(&tree_transform_stores.real);
         let complex_tree_transform_store = Arc::downgrade(&tree_transform_stores.complex);
         let mut state = RuntimeState::with_config(
@@ -1861,23 +1764,18 @@ impl RuntimeBuilder {
                     cuda.warm_up()
                         .map_err(tenet_tensors::OperationError::Dense)?;
                 }
-                // The executor's prepared-structure bound is the host transform
-                // cache's own bound, read from this Runtime's configuration
-                // rather than restated: a structure warm on the host must stay
-                // warm on device, or the warm replay's no-upload contract
-                // quietly stops holding. (One host structure can back two
-                // device entries, f64 and Complex64, so equal counts are not
-                // equal coverage — this bounds memory, never correctness.)
+                // The executor's prepared-structure count is a device-side
+                // bound of its own: the host completed-transformer cache is
+                // process-global and byte-bounded only. It bounds memory,
+                // never correctness.
                 Some(CudaHome {
                     device_lock,
                     state: Mutex::new(CudaDeviceState {
                         dense: cuda,
-                        tree_transform:
-                            tenet_operations::CudaTreeTransformExecutor::with_structure_entries(
-                                tenet_operations::DEFAULT_COEFFICIENT_BUDGET_BYTES,
-                                tenet_operations::DEFAULT_PLAN_CACHE_BUDGET_BYTES,
-                                tree_transform_stores.info().entry_capacity().max(1),
-                            ),
+                        tree_transform: tenet_operations::CudaTreeTransformExecutor::new(
+                            tenet_operations::DEFAULT_COEFFICIENT_BUDGET_BYTES,
+                            tenet_operations::DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+                        ),
                         contract_scratch: tenet_tensors::CudaContractScratch::default(),
                     }),
                 })
@@ -1955,7 +1853,7 @@ mod tests {
             .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         provider.reset_on_dual.store(true, Ordering::SeqCst);
         let stale = source
             .network_zeros_from_effective_legs(
@@ -2010,7 +1908,7 @@ mod tests {
     impl CheckedFusionAlgebra for NetworkResetU1 {
         fn try_dual_sector(&self, s: SectorId) -> Result<SectorId, FusionAlgebraError> {
             if self.reset_on_dual.swap(false, Ordering::SeqCst) {
-                tenet_core::reset_core_intern_tables();
+                tenet_core::clear_structure_caches();
             }
             tenet_core::U1FusionRule.try_dual_sector(s)
         }
@@ -2291,19 +2189,6 @@ mod tests {
         }
     }
 
-    // What: removing the user cache-policy knob does not activate unrelated
-    // context-local retention inside Runtime-owned execution contexts.
-    #[test]
-    fn runtime_contexts_keep_local_caches_disabled() {
-        let runtime = Runtime::builder().build().unwrap();
-        let state = runtime.inner.state.lock().unwrap();
-        assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
-        drop(state);
-
-        let context = TensorExecutionContext::for_config(runtime.execution_config()).unwrap();
-        assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
-    }
-
     #[test]
     fn runtime_and_leased_contexts_share_one_cpu_context() {
         let runtime = Runtime::builder().build().expect("runtime");
@@ -2340,7 +2225,6 @@ mod tests {
             .expect("generic lanes");
         assert!(state.recoupling_threads_are(3));
         assert!(state.shares_cpu_context(&shared));
-        assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
         drop(state);
 
         let mut context =
@@ -2352,7 +2236,6 @@ mod tests {
             .expect("generic lanes");
         assert!(context.recoupling_threads_are(3));
         assert!(context.shares_cpu_context(&shared));
-        assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
     }
 
     #[test]
@@ -2380,6 +2263,12 @@ mod tests {
 
     #[test]
     fn fibonacci_complex_lane_reuses_nonreal_structural_plan() {
+        if crate::test_cache::run_isolated_or_return(
+            "TENET_FIBONACCI_LANE_ISOLATED",
+            "runtime::tests::fibonacci_complex_lane_reuses_nonreal_structural_plan",
+        ) {
+            return;
+        }
         // What: the private Complex64<-Complex64 Runtime lane compiles one
         // Fibonacci braid, then warm replay avoids every structural-symbol
         // query. Layout queries are counted separately and are not claimed to
@@ -2403,7 +2292,7 @@ mod tests {
             .expect("Fibonacci braid destination");
         rule.structural_calls.store(0, Ordering::Relaxed);
         rule.layout_calls.store(0, Ordering::Relaxed);
-        runtime.clear_tree_transform_cache();
+        crate::cache::clear();
 
         let source_structure = Arc::clone(source.space().structure());
         let destination_structure = Arc::clone(destination.space().structure());
@@ -2433,7 +2322,7 @@ mod tests {
         assert!(cold_layout_calls > 0);
         assert!(destination_data.iter().any(|value| value.im != 0.0));
         let cold_destination_data = destination_data.clone();
-        let cold = runtime.tree_transform_cache_info().structures;
+        let cold = crate::test_cache::completed();
         assert_eq!(cold.entries(), 1);
         assert_eq!(cold.misses(), 1);
         assert_eq!(cold.hits(), 0);
@@ -2456,7 +2345,7 @@ mod tests {
         // Layout/admission queries are observed separately; only structural
         // F/R replay is promised to disappear on a warm cache hit.
         assert!(rule.layout_calls() >= cold_layout_calls);
-        let warm = runtime.tree_transform_cache_info().structures;
+        let warm = crate::test_cache::completed();
         assert_eq!(warm.entries(), 1);
         assert_eq!(warm.misses(), 1);
         assert_eq!(warm.hits(), 1);
@@ -2464,6 +2353,12 @@ mod tests {
 
     #[test]
     fn fibonacci_checked_construction_failures_publish_nothing() {
+        if crate::test_cache::run_isolated_or_return(
+            "TENET_FIBONACCI_FAILURES_ISOLATED",
+            "runtime::tests::fibonacci_checked_construction_failures_publish_nothing",
+        ) {
+            return;
+        }
         let runtime = Runtime::builder().build().expect("runtime");
         let rule = Arc::new(CountingFibonacci {
             malformed_channels: true,
@@ -2471,8 +2366,8 @@ mod tests {
         });
         let tau = GradedSpace::try_new(Arc::clone(&rule), [(FibonacciSector::Tau, 1)])
             .expect("label admission");
-        runtime.clear_tree_transform_cache();
-        let cache_before = runtime.tree_transform_cache_info().structures;
+        crate::cache::clear();
+        let cache_before = crate::test_cache::completed();
         let callbacks = AtomicUsize::new(0);
 
         let late = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
@@ -2487,7 +2382,7 @@ mod tests {
         let late = late.unwrap_err();
         assert!(format!("{late:?}").contains("InvalidSector"));
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
-        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
+        assert_eq!(crate::test_cache::completed(), cache_before);
 
         let early = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
             &runtime,
@@ -2504,7 +2399,7 @@ mod tests {
                 if message == "at least one leg is required to infer the fusion provider"
         ));
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
-        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
+        assert_eq!(crate::test_cache::completed(), cache_before);
 
         assert!(TensorMap::<CountingFibonacci, Complex64>::rand_with_seed(
             &runtime,
@@ -2513,11 +2408,18 @@ mod tests {
             0x9E37_79B9_7F4A_7C15,
         )
         .is_err());
-        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
+        assert_eq!(crate::test_cache::completed(), cache_before);
     }
 
     #[test]
-    fn runtime_transform_stores_are_isolated_and_expired_weak_handles_run_eagerly() {
+    #[allow(deprecated)]
+    fn runtimes_share_completed_transformers_and_expired_weak_handles_run_eagerly() {
+        if crate::test_cache::run_isolated_or_return(
+            "TENET_RUNTIMES_SHARE_ISOLATED",
+            "runtime::tests::runtimes_share_completed_transformers_and_expired_weak_handles_run_eagerly",
+        ) {
+            return;
+        }
         let runtime_a = Runtime::builder().build().unwrap();
         let runtime_b = Runtime::builder().build().unwrap();
         let provider = Arc::new(SU2FusionRule);
@@ -2534,28 +2436,35 @@ mod tests {
             TensorMap::rand_with_seed(&runtime_a, [&space, &space], [&space], 475_002).unwrap();
         let source_b: TensorMap<SU2FusionRule, f64> =
             TensorMap::rand_with_seed(&runtime_b, [&space, &space], [&space], 475_002).unwrap();
+        crate::cache::clear();
         let expected_a = source_a.permute(&[1], &[2, 0]).unwrap();
+        let after_a = crate::test_cache::completed();
         let expected_b = source_b.permute(&[1], &[2, 0]).unwrap();
+        let after_b = crate::test_cache::completed();
+        // What: one process-global entry serves both Runtimes (#2014-3).
+        assert_eq!((after_a.entries(), after_a.misses()), (1, 1));
+        assert_eq!((after_b.entries(), after_b.misses()), (1, 1));
+        assert_eq!(after_b.hits(), after_a.hits() + 1);
         assert_eq!(
-            runtime_a.tree_transform_cache_info().structures.entries(),
-            1
-        );
-        assert_eq!(
-            runtime_b.tree_transform_cache_info().structures.entries(),
-            1
+            expected_a.dense_data().unwrap(),
+            expected_b.dense_data().unwrap()
         );
 
+        // The deprecated per-Runtime clear clears the global caches for
+        // every Runtime, and reports the shared cache through either one.
         runtime_a.clear_tree_transform_cache();
-        assert_eq!(
-            runtime_a.tree_transform_cache_info().structures.entries(),
-            0
-        );
-        assert_eq!(runtime_a.tree_transform_cache_info().structures.misses(), 0);
+        assert_eq!(crate::test_cache::completed().entries(), 0);
         assert_eq!(
             runtime_b.tree_transform_cache_info().structures.entries(),
-            1
+            0
         );
-        assert_eq!(runtime_b.tree_transform_cache_info().structures.misses(), 1);
+        assert_eq!(
+            runtime_b
+                .tree_transform_cache_info()
+                .structures
+                .entry_capacity(),
+            usize::MAX
+        );
 
         let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
         let store = runtime_b

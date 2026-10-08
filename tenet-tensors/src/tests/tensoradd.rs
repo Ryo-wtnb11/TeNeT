@@ -811,6 +811,12 @@ fn tensoradd_fusion_conjugation_lowers_source_adjoint_like_tensorkit() {
 #[test]
 fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
     let (rule, src, mut dst, expected) = z2_tensoradd_adjoint_fixture();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tenet_core::testing::mark_structure_canonical(src.structure());
+    tenet_core::testing::mark_structure_canonical(dst.structure());
+    crate::tree_transform::take_completed_transformer_activity();
     type RuleKey = <Z2FusionRule as TreeTransformRuleCacheKey>::Key;
     let mut context = TreeTransformExecutionContext::<
         Complex64,
@@ -830,8 +836,10 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
+    // The fixture is shared with a sibling test running the same lowered
+    // transform: the cold call either published or found its entry.
+    let cold = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!(cold.hits + cold.publications, 1, "{cold:?}");
     assert_eq!(dst.data(), expected.as_slice());
 
     tensoradd_fusion_into_with_context(
@@ -845,8 +853,10 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    assert_eq!(context.cache().stats().structure_hits(), 1);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
+    // What: the oriented key (parent content, orientation, basis order) is
+    // stable across calls, so the repeat hits.
+    let warm = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!((warm.hits, warm.builds), (1, 0));
     assert_eq!(dst.data(), expected.as_slice());
 }
 
@@ -1326,6 +1336,9 @@ fn tensoradd_structure_rejects_incompatible_replay_structure() {
 
 #[test]
 fn static_adjoint_preserves_strided_subset_block_order_and_alpha_beta() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tree = |sector, coupled| {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
@@ -1422,6 +1435,11 @@ fn static_adjoint_preserves_strided_subset_block_order_and_alpha_beta() {
                 beta,
             )
             .unwrap();
+        // Expert strided layouts: mark them canonical so the oriented key
+        // over the parent publishes, as a complete admission would.
+        tenet_core::testing::mark_structure_canonical(src.structure());
+        tenet_core::testing::mark_structure_canonical(actual.structure());
+        crate::tree_transform::take_completed_transformer_activity();
         let mut context = TreeTransformExecutionContext::<
             Complex64,
             RuleIdentity,
@@ -1445,7 +1463,7 @@ fn static_adjoint_preserves_strided_subset_block_order_and_alpha_beta() {
             .unwrap();
             assert_eq!(actual.data(), expected.data());
         }
-        assert_eq!(context.cache().stats().structure_misses(), 1);
-        assert_eq!(context.cache().stats().structure_hits(), 1);
+        let activity = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((activity.builds, activity.hits), (1, 1));
     }
 }

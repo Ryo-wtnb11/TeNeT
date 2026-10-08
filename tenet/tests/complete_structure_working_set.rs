@@ -2,7 +2,14 @@
 //! ledger and of a sweep-like loop, so warm iterations never evict (#1365).
 //! One test per process keeps the global cache statistics isolated.
 
-use tenet::expert::{structure_cache_info, StructureCacheInfo, StructureCacheKind};
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
+
+fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .unwrap()
+}
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 

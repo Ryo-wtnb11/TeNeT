@@ -650,8 +650,8 @@ impl Default for CudaTreeTransformExecutor {
 
 impl CudaTreeTransformExecutor {
     /// An executor whose prepared-structure cache keeps at most 256 structures
-    /// — the host transform cache's own entry bound, so a working set that is
-    /// warm on the host stays warm here. Use [`Self::with_structure_entries`]
+    /// (the host completed-transformer cache is byte-bounded only, so this is
+    /// a device-side bound of its own). Use [`Self::with_structure_entries`]
     /// for another bound.
     pub fn new(coefficient_budget_bytes: usize, plan_cache_budget_bytes: usize) -> Self {
         Self::with_structure_entries(
@@ -664,11 +664,9 @@ impl CudaTreeTransformExecutor {
     /// An executor whose prepared-structure cache keeps at most
     /// `structure_entries` structures.
     ///
-    /// The bound belongs to the caller because it is the device half of the
-    /// host transform cache's own bound: a workload whose structures are warm
-    /// on the host must stay warm here, or the zero-transfer replay contract
-    /// quietly stops holding. Sizing it below the host's is a memory decision,
-    /// never a correctness one.
+    /// The bound belongs to the caller: a workload alternating more
+    /// transformers than it re-uploads the excess per replay, so sizing it is
+    /// a memory decision, never a correctness one.
     pub fn with_structure_entries(
         coefficient_budget_bytes: usize,
         plan_cache_budget_bytes: usize,

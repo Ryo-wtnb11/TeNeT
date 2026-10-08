@@ -424,10 +424,12 @@ fn distinct_plan_signatures(
 
 /// Identity of device state prepared for one completed structure.
 ///
-/// The `Weak` is the structure's own identity marker, so an entry whose
-/// structure has been evicted from the transform cache is unreachable rather
-/// than stale: the key can never match a different structure, and the dead
-/// entry is purged on the next miss.
+/// The `Weak` is the replay core's identity marker, shared by every handle
+/// bound to that core, so all Runtimes replaying one process-global
+/// transformer reuse one preparation each. An entry whose core has been
+/// evicted from the completed-transformer cache and dropped by every holder
+/// is unreachable rather than stale: the key can never match a different
+/// core, and the dead entry is purged on the next miss.
 #[derive(Clone, Debug)]
 pub(crate) struct StructureKey {
     pub(crate) structure: Weak<()>,
@@ -454,11 +456,11 @@ struct CacheEntry<V> {
 ///
 /// A byte budget alone bounds the device memory but not the entry count, so a
 /// replay alternating thousands of tiny structures would grow the cache without
-/// limit. The default is the host transform cache's own entry bound
-/// (`tenet-tensors` `DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES`): a workload whose
-/// working set of structures is warm on the host must not silently fall out of
-/// the device cache and pay an upload per replay, so the two bounds are the
-/// same number by construction rather than by coincidence.
+/// limit. The host completed-transformer cache is byte-bounded only (#2014-3),
+/// so this count is a device-side bound of its own, kept at the former host
+/// entry cap. A workload alternating more than 256 transformers on one device
+/// re-uploads the excess per replay; for large transformers the byte budget,
+/// not this count, is the binding limit.
 pub(crate) const DEFAULT_STRUCTURE_CACHE_ENTRIES: usize = 256;
 
 /// Small LRU cache of per-structure device state, bounded by retained bytes and

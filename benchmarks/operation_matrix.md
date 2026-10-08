@@ -91,9 +91,13 @@ same Apple Accelerate provider as the pinned TensorKit environment.
 `OP_MATRIX_FORM` similarly selects `owned` or `destination`.
 `OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
 profiler can inspect the live process; it is outside every reported timer.
-`OP_MATRIX_CACHE=disabled` constructs each Runtime with a zero tree-transform
-byte budget, disabling completed tree-transform admission for a cache-disabled
-control. The default is `enabled`.
+`OP_MATRIX_CACHE=disabled` sets the process-global completed-transformer
+budget to zero (`tenet::cache::configure_budgets`), so every transformer build
+is offered and counted as a rejection: the disabled-control rows are not fully
+cold. The setting is process-global, not per Runtime, and each Runtime's
+categorical-coefficient tiers (plans and groups) stay active until #2014-4,
+whereas the former Runtime budget of 0 disabled them too. The default is
+`enabled`.
 The executable emits raw per-process samples. `operation_matrix.sh` launches
 three fresh processes, preserves every raw row as a `# raw_sample` record, and
 then appends the complete median-time row for each CSV key; its warm value is

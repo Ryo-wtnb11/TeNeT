@@ -2,13 +2,17 @@ mod cache;
 mod operation;
 mod plan;
 
-#[cfg(test)]
-pub(crate) use cache::take_oriented_tree_pair_compiles;
-pub(crate) use cache::GroupSpecReuse;
-pub(crate) use cache::OrientedBasisOrder;
 pub use cache::{
-    RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
-    TreeTransformCache, TreeTransformCacheStats,
+    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeCoefficientLedger,
+    RuntimeCoefficientStore, RuntimeTreeTransformCacheInfo, TreeTransformOperationView,
+};
+pub(crate) use cache::{
+    lookup_bound, publish_committed, publishable, resolve, CompletedTransformerKey, GroupSpecReuse,
+    OrientedBasisOrder, TransformerMode, TreeTransformPlanning, TreeTransformScope,
+};
+#[cfg(test)]
+pub(crate) use cache::{
+    take_completed_transformer_activity, take_oriented_tree_pair_compiles, CompletedActivity,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,

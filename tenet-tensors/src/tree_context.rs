@@ -1,28 +1,28 @@
 use core::ops::{Add, Mul};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::marker::PhantomData;
+use std::sync::{Arc, Weak};
 
 use num_traits::Zero;
-#[cfg(any(test, feature = "testing"))]
-use tenet_core::GenericRigidSymbols;
 use tenet_core::{
     BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, FusionTreeHomSpace,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement, RuleIdentity,
-    TensorMap,
+    FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    Placement, RuleIdentity, TensorMap,
 };
 
-use crate::cache::OperationCachePolicy;
 use crate::contract::{
     tree_transform_operation_axes, BoundDynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace,
 };
 use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan_validated,
-    validate_checked_generic_tree_pair_plan_preflight, CheckedGenericPlanError, TreeTransformCache,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
+    publish_committed, publishable, validate_checked_generic_tree_pair_plan_preflight,
+    CheckedGenericPlanError, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
+    TreeTransformOperation, TreeTransformPlanning, TreeTransformRuleCacheKey, TreeTransformScope,
 };
+use crate::RuntimeCoefficientStore;
 use crate::{
     validate_oriented_fusion_layout, RecouplingCoefficientAction, ReportsPlacement,
     TreeTransformReplayProfile, TreeTransformStructure,
@@ -191,6 +191,9 @@ where
         }
         .into());
     }
+    // Before admission: a clear during this request leaves its transformer
+    // unpublished.
+    let epoch = tenet_core::core_reset_epoch();
     let identity = std::cell::OnceCell::new();
     let destination = std::cell::OnceCell::new();
     let source_proof = std::cell::OnceCell::new();
@@ -274,18 +277,25 @@ where
     let logical_source_key = operand
         .storage_conjugate()
         .then(|| source.structure().as_ref());
-    let runtime_store = context.cache.runtime_store();
-    let (cached, generation) = match &runtime_store {
-        Some(store) => store.lookup_checked_generic(
+    let key = |destination: &BlockStructure| {
+        CompletedTransformerKey::new::<P::Scalar>(
             identity.clone(),
+            TransformerMode::CheckedGeneric,
+            TreeTransformScope::TreePair,
             &operation,
-            prepared.structure(),
-            storage_source.structure(),
-            logical_source_key,
+            FusionTreePairOrientation::Direct,
+            OrientedBasisOrder::Canonical,
             operand.storage_conjugate(),
-        )?,
-        None => (None, 0),
+            logical_source_key,
+            destination,
+            storage_source.structure(),
+        )
     };
+    let dst_preview = Arc::new(prepared.structure().clone());
+    // A complete-cache hit makes the preview canonical, so its key can hit;
+    // a staged candidate's fresh id never does, and is never published.
+    let cached =
+        lookup_bound::<P::Scalar>(&key(&dst_preview), &dst_preview, storage_source.structure());
     let compiled = cached.is_none();
     let replay = match cached {
         Some(replay) => replay,
@@ -298,7 +308,7 @@ where
                     reuse,
                 )
             };
-            let plan = match &runtime_store {
+            let plan = match context.planning.coefficient_store() {
                 Some(store) => store.get_or_build_checked_generic_plan(
                     identity.clone(),
                     &operation,
@@ -320,21 +330,24 @@ where
                     };
                     operand.storage_block_index(logical_key)
                 };
-                Arc::new(plan.compile_shared_structures_with_storage_mapping(
-                    Arc::new(prepared.structure().clone()),
+                plan.compile_shared_structures_with_storage_mapping(
+                    Arc::clone(&dst_preview),
                     source.structure(),
                     Arc::clone(storage_source.structure()),
                     logical_to_storage_block,
                     |axis| operand.storage_axis(axis),
                     true,
-                )?)
+                )?
             } else {
-                Arc::new(plan.compile_structures(prepared.structure(), source.structure())?)
+                plan.compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(&dst_preview),
+                    Arc::clone(source.structure()),
+                    false,
+                )?
             }
         }
     };
     let mut dst_data = vec![D::zero(); prepared.required_len()];
-    let dst_preview = Arc::new(prepared.structure().clone());
 
     context.backend.tree_transform_structure_into_raw(
         &mut context.workspace,
@@ -347,28 +360,18 @@ where
         D::zero(),
     )?;
     let dst_space = logical_space.commit_final_homspace_generic_bound_checked(prepared)?;
-    if compiled {
-        if let Some(store) = runtime_store {
-            if let Ok(replay) = Arc::try_unwrap(replay) {
-                if let Ok(replay) = replay.with_canonical_structures(
-                    Arc::clone(dst_space.space().structure()),
-                    Arc::clone(storage_source.structure()),
-                ) {
-                    // Retention is an optimization and cannot turn a successful
-                    // transform into an error.
-                    let _ = store.admit_checked_generic(
-                        identity,
-                        &operation,
-                        dst_space.space().structure(),
-                        storage_source.structure(),
-                        logical_source_key,
-                        operand.storage_conjugate(),
-                        Arc::new(replay),
-                        generation,
-                    );
-                }
-            }
-        }
+    // Publication follows commit: only now are the destination's ids
+    // committed, and only a resident (canonical) destination is keyed.
+    let committed = dst_space.space().structure();
+    if compiled
+        && committed.as_ref() == dst_preview.as_ref()
+        && publishable(
+            [committed.as_ref(), storage_source.structure().as_ref()]
+                .into_iter()
+                .chain(logical_source_key),
+        )
+    {
+        publish_committed(&key(committed), replay.replay_core(), epoch);
     }
     Ok((dst_space, dst_data))
 }
@@ -423,7 +426,8 @@ where
 {
     backend: B,
     workspace: B::Workspace,
-    cache: TreeTransformCache<C, RuleKey>,
+    planning: TreeTransformPlanning<C>,
+    rule_key: PhantomData<fn() -> RuleKey>,
 }
 
 impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
@@ -432,16 +436,21 @@ where
     C: Copy,
     B: TreeTransformBackend<D, C>,
 {
-    pub fn with_parts(
-        backend: B,
-        workspace: B::Workspace,
-        cache: TreeTransformCache<C, RuleKey>,
-    ) -> Self {
+    /// Completed tree transformers are resolved through the process-global
+    /// cache (`tenet::cache`); a context owns only its backend and workspace.
+    pub fn with_parts(backend: B, workspace: B::Workspace) -> Self {
         Self {
             backend,
             workspace,
-            cache,
+            planning: TreeTransformPlanning::default(),
+            rule_key: PhantomData,
         }
+    }
+
+    /// Binds this context to one Runtime's categorical-coefficient store.
+    #[doc(hidden)]
+    pub fn bind_runtime_coefficient_store(&mut self, store: Weak<RuntimeCoefficientStore<C>>) {
+        self.planning.bind_coefficient_store(store);
     }
 
     #[inline]
@@ -464,92 +473,8 @@ where
         (&mut self.backend, &mut self.workspace)
     }
 
-    #[inline]
-    pub fn cache(&self) -> &TreeTransformCache<C, RuleKey> {
-        &self.cache
-    }
-
-    #[inline]
-    pub fn cache_mut(&mut self) -> &mut TreeTransformCache<C, RuleKey> {
-        &mut self.cache
-    }
-
-    /// Replaces this context's completed tree-transform retention policy.
-    pub fn set_cache_policy(&mut self, policy: OperationCachePolicy)
-    where
-        RuleKey: Clone + Eq + Hash,
-    {
-        self.cache.set_policy(policy);
-    }
-
-    pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {
-        (self.backend, self.workspace, self.cache)
-    }
-}
-
-#[cfg(test)]
-#[expect(
-    clippy::items_after_test_module,
-    reason = "co-location keeps the large private-helper tests out of the public surface"
-)]
-mod generic_context_tests {
-    use super::*;
-    use crate::tests::GenericMultiplicityRule;
-    use crate::DynamicFusionMapSpace;
-    use tenet_core::{FusionTreeHomSpace, RuleIdentity};
-
-    #[test]
-    fn infallible_generic_context_executes_assign_and_overwrite() {
-        let rule = GenericMultiplicityRule;
-        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
-        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
-        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
-            &rule,
-            homspace,
-            vec![vec![2, 3]; key_count],
-        )
-        .unwrap();
-        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
-        let destination = source.transformed_generic(&rule, &operation).unwrap();
-        let source_data = (1..=source.required_len().unwrap())
-            .map(|value| value as f64)
-            .collect::<Vec<_>>();
-        let mut destination_data = vec![0.0; destination.required_len().unwrap()];
-        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-
-        context
-            .tree_transform_dyn_into_generic(
-                &rule,
-                operation.clone(),
-                destination.structure(),
-                source.structure(),
-                &mut destination_data,
-                &source_data,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-        let expected = destination_data.clone();
-        destination_data.fill(f64::NAN);
-        context
-            .tree_transform_dyn_overwrite_into_generic(
-                &rule,
-                operation,
-                destination.structure(),
-                source.structure(),
-                &mut destination_data,
-                &source_data,
-                1.0,
-            )
-            .unwrap();
-        // Overwrite and accumulate-with-beta-zero are two writers whose
-        // agreement is the contract; each entry sums at most the source length.
-        crate::test_numerics::numerics::assert_slices_close(
-            "generic overwrite vs assign",
-            &destination_data,
-            &expected,
-            source_data.len(),
-        );
+    pub fn into_parts(self) -> (B, B::Workspace) {
+        (self.backend, self.workspace)
     }
 }
 
@@ -638,7 +563,7 @@ where
     B::Workspace: Default,
 {
     pub fn new(backend: B) -> Self {
-        Self::with_parts(backend, B::Workspace::default(), TreeTransformCache::new())
+        Self::with_parts(backend, B::Workspace::default())
     }
 }
 
@@ -846,9 +771,9 @@ where
         )
     }
 
-    /// Compiles — or takes from the cache — the completed
-    /// [`TreeTransformStructure`] for one multiplicity-free operation, without
-    /// replaying it.
+    /// Resolves the completed [`TreeTransformStructure`] for one
+    /// multiplicity-free operation through the process-global cache, without
+    /// replaying it. The returned handle is cheap: a hit clones three `Arc`s.
     ///
     /// This is the seam a *non-host* executor needs: everything categorical
     /// (validation, the group plan, F/R moves, the `RuleIdentity`-keyed cache)
@@ -868,7 +793,7 @@ where
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
-    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
+    ) -> Result<TreeTransformStructure<C>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
@@ -883,23 +808,23 @@ where
         )
     }
 
-    /// The one tree-structure compile of the planner and the eager
+    /// The one tree-structure resolution of the planner and the eager
     /// transform entries: the multiplicity-free
-    /// [`PlanningAlgebra::tree_structure`] through this context's cache.
+    /// [`PlanningAlgebra::tree_structure`] with this context's planning state.
     pub(crate) fn tree_structure<R>(
         &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src: TreeStructureSource<'_>,
-    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
+    ) -> Result<TreeTransformStructure<C>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        self.cache
+        self.planning
             .set_recoupling_threads(self.backend.recoupling_threads());
         <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::tree_structure(
-            &mut self.cache,
+            &mut self.planning,
             rule,
             operation,
             dst_structure,
@@ -1012,86 +937,6 @@ where
         )
     }
 
-    /// Infallible Generic-fusion dynamic-rank tree transform, a test oracle
-    /// (`testing` feature): the raw-slice analogue of
-    /// [`Self::tree_transform_dyn_into`], routed through the non-memoized
-    /// generic cache sibling. Production Generic transforms take the checked
-    /// `tree_transform_dyn_owned_checked_generic*` entries (#1854).
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(any(test, feature = "testing"))]
-    pub fn tree_transform_dyn_into_generic<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: GenericRigidSymbols<Scalar = C>,
-        C: CategoricalScalar,
-    {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_generic(
-            rule,
-            operation,
-            dst_structure,
-            src_structure,
-        )?;
-        backend.tree_transform_structure_into_raw(
-            workspace,
-            &structure,
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-            beta,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "testing"))]
-    pub fn tree_transform_dyn_overwrite_into_generic<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-    ) -> Result<(), OperationError>
-    where
-        R: GenericRigidSymbols<Scalar = C>,
-        C: CategoricalScalar,
-    {
-        self.compile_and_replay_overwrite(
-            |context| {
-                context.cache.get_or_compile_tree_pair_structures_generic(
-                    rule,
-                    operation,
-                    dst_structure,
-                    src_structure,
-                )
-            },
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn compile_and_replay_overwrite<F>(
         &mut self,
@@ -1103,10 +948,8 @@ where
         alpha: D,
     ) -> Result<(), OperationError>
     where
-        F: FnOnce(&mut Self) -> Result<Arc<TreeTransformStructure<C>>, OperationError>,
+        F: FnOnce(&mut Self) -> Result<TreeTransformStructure<C>, OperationError>,
     {
-        self.cache
-            .set_recoupling_threads(self.backend.recoupling_threads());
         let structure = compile(self)?;
         let Self {
             backend, workspace, ..
@@ -1124,6 +967,34 @@ where
         )
     }
 
+    /// Replays an already resolved transformer, beta-accumulating: the
+    /// typed exact-layout hit's entry.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_tree_transform_dyn_into(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        self.tree_transform_structure_into_raw(
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_structure_into_raw(
         &mut self,
@@ -1136,9 +1007,7 @@ where
         beta: D,
     ) -> Result<(), OperationError> {
         let Self {
-            backend,
-            workspace,
-            cache: _,
+            backend, workspace, ..
         } = self;
         backend.tree_transform_structure_into_raw(
             workspace,
@@ -1163,9 +1032,7 @@ where
         alpha: D,
     ) -> Result<(), OperationError> {
         let Self {
-            backend,
-            workspace,
-            cache: _,
+            backend, workspace, ..
         } = self;
         replay_structure_overwrite(
             backend,
@@ -1193,9 +1060,7 @@ where
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let Self {
-            backend,
-            workspace,
-            cache: _,
+            backend, workspace, ..
         } = self;
         backend.tree_transform_structure_into_raw_profiled(
             workspace,
@@ -1222,9 +1087,7 @@ where
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let Self {
-            backend,
-            workspace,
-            cache: _,
+            backend, workspace, ..
         } = self;
         replay_structure_overwrite(
             backend,
@@ -1268,9 +1131,12 @@ where
         let Self {
             backend,
             workspace,
-            cache,
+            planning,
+            ..
         } = self;
-        let structure = cache.get_or_compile_all_codomain(rule, operation, dst, src)?;
+        planning.set_recoupling_threads(backend.recoupling_threads());
+        let structure =
+            planning.resolve_all_codomain(rule, &operation, dst.structure(), src.structure())?;
         backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
 }

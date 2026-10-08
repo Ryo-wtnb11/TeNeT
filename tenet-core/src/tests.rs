@@ -12,7 +12,7 @@ use super::*;
 /// (see tenet-tensors #169, #172 for the shape of the bug).
 ///
 /// So: one process-wide `Mutex`, taken by every test that either mutates
-/// shared intern-table state (`reset_core_intern_tables`, LRU-cap floods) or
+/// shared intern-table state (`clear_structure_caches`, LRU-cap floods) or
 /// asserts on it (`Arc::ptr_eq` of interned values, table lengths, content
 /// ids). Poison-tolerant: a panicking test must not cascade spurious
 /// failures onto every other test sharing the lock.
@@ -37,7 +37,7 @@ pub(crate) mod test_support {
             return false;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test_path])
+            .args(["--exact", test_path, "--include-ignored"])
             .env(isolated_env, "1")
             .output()
             .unwrap();

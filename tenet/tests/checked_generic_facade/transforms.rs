@@ -422,8 +422,7 @@ fn checked_unit_insert_correspondence_failure_does_not_publish_destination() {
     // longer corresponds to inserting an identity leg into `source`.
     provider.unit_layout_fault.store(1, Ordering::Relaxed);
     forget_cached_structures();
-    let before =
-        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    let before = crate::structure_cache_info(tenet::cache::StructureCacheKind::DegeneracyStructure);
     assert_eq!(before.entries(), 0);
 
     let error = source
@@ -436,8 +435,7 @@ fn checked_unit_insert_correspondence_failure_does_not_publish_destination() {
             tenet::typed::CoreError::UnitLayoutCorrespondence
         ))
     ));
-    let after =
-        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    let after = crate::structure_cache_info(tenet::cache::StructureCacheKind::DegeneracyStructure);
     assert_eq!(after.admissions(), before.admissions());
     assert_eq!(after.entries(), before.entries());
     assert_eq!(after.charged_bytes(), before.charged_bytes());
@@ -465,8 +463,7 @@ fn checked_unit_remove_correspondence_failure_does_not_publish_destination() {
     // X x X -> 1 channel that the already-built source still contains.
     provider.unit_layout_fault.store(2, Ordering::Relaxed);
     forget_cached_structures();
-    let before =
-        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    let before = crate::structure_cache_info(tenet::cache::StructureCacheKind::DegeneracyStructure);
     assert_eq!(before.entries(), 0);
 
     let error = source.remove_unit(0).unwrap_err();
@@ -477,8 +474,7 @@ fn checked_unit_remove_correspondence_failure_does_not_publish_destination() {
             tenet::typed::CoreError::UnitLayoutCorrespondence
         ))
     ));
-    let after =
-        tenet::expert::structure_cache_info(tenet::expert::StructureCacheKind::DegeneracyStructure);
+    let after = crate::structure_cache_info(tenet::cache::StructureCacheKind::DegeneracyStructure);
     assert_eq!(after.admissions(), before.admissions());
     assert_eq!(after.entries(), before.entries());
     assert_eq!(after.charged_bytes(), before.charged_bytes());
@@ -1456,6 +1452,12 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
 #[test]
 fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
     use tenet::sector::SUNFusionRule;
+    if crate::run_isolated_or_return(
+        "TENET_CHECKED_FACADE_COMPLETED_STORE",
+        "transforms::sun_checked_generic_transforms_reuse_the_runtime_completed_store",
+    ) {
+        return;
+    }
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -1468,7 +1470,7 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
             .unwrap();
 
         for operation in ["permute", "braid", "repartition"] {
-            runtime.clear_tree_transform_cache();
+            tenet::cache::clear();
             let apply = |tensor: &TensorMap<SUNFusionRule, f64>| match operation {
                 "permute" => tensor.permute(&[1, 0], &[2]),
                 "braid" => tensor.braid(&[1, 0], &[2], &[0, 1, 2]),
@@ -1476,9 +1478,9 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
                 _ => unreachable!(),
             };
             let first = apply(&source).unwrap();
-            let cold = runtime.tree_transform_cache_info().structures;
+            let cold = crate::completed_transformers();
             let repeated = apply(&source).unwrap();
-            let warm = runtime.tree_transform_cache_info().structures;
+            let warm = crate::completed_transformers();
 
             assert_eq!(cold.entries(), 1);
             assert_eq!(cold.misses(), 1);

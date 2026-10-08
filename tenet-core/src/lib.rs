@@ -54,10 +54,16 @@ pub use fusion_tree::*;
 mod block_structure;
 pub use block_structure::*;
 mod cache;
+#[doc(hidden)]
 pub use cache::{
-    set_structure_cache_byte_budget, structure_cache_info, structure_cache_infos,
-    StructureCacheInfo, StructureCacheKind,
+    register_structure_cache, set_structure_cache_byte_budget, structure_cache_info,
+    structure_cache_infos, ErasedStructureCacheControl, StructureCache,
+    StructureCacheRegistrationError,
 };
+pub use cache::{StructureCacheInfo, StructureCacheKind};
+/// Borrowed-key lookups into a [`StructureCache`] implement this.
+#[doc(hidden)]
+pub use quick_cache::Equivalent as StructureCacheEquivalent;
 mod tensor_map;
 pub use tensor_map::*;
 mod error;

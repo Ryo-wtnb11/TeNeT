@@ -58,7 +58,7 @@ fn concurrent_preview_initialization_moves_backing_once() {
 #[test]
 fn equal_uncached_structures_are_semantic_but_keep_monotonic_ids() {
     let first = prepared().commit();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let second = prepared().commit();
     assert_eq!(first, second);
     assert_ne!(first.content_id(), second.content_id());
@@ -72,35 +72,13 @@ fn equal_uncached_structures_are_semantic_but_keep_monotonic_ids() {
     );
 }
 
-#[test]
-#[allow(deprecated)]
-fn removed_interner_compatibility_snapshot_is_zero_state() {
-    assert_eq!(
-        block_structure_intern_cache_info(),
-        BlockStructureInternCacheInfo
-    );
-    assert_eq!(block_structure_intern_cache_info().entries(), 0);
-    assert_eq!(block_structure_intern_cache_info().entry_capacity(), 0);
-    assert_eq!(block_structure_intern_cache_info().charged_key_bytes(), 0);
-    assert_eq!(block_structure_intern_cache_info().byte_budget(), 0);
-    assert_eq!(
-        block_structure_intern_cache_info().max_admitted_entry_bytes(),
-        0
-    );
-    assert_eq!(block_structure_intern_cache_info().pressure_evictions(), 0);
-    assert_eq!(
-        block_structure_intern_cache_info().oversized_admission_bypasses(),
-        0
-    );
-}
-
 #[cfg(feature = "racah-generated")]
 #[test]
 fn uncached_generic_preview_keeps_its_coupled_region_geometry() {
     if test_support::run_isolated_or_return(
         "TENET_GENERIC_PREVIEW_COLD", "tests::block_structure::staged_content::uncached_generic_preview_keeps_its_coupled_region_geometry",
     ) { return; }
-    reset_core_intern_tables();
+    clear_structure_caches();
     let rule = SUNFusionRule::new(3).unwrap();
     let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
     let trivial = rule.encode_dynkin(&[0, 0]).unwrap();

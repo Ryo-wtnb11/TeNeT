@@ -198,6 +198,7 @@ fn facade_exports_are_exactly_the_reviewed_names() {
     assert_exports("tenet::typed", &module_exports("typed.rs").0, TYPED);
     assert_exports("tenet::sector", &module_exports("sector.rs").0, SECTOR);
     assert_exports("tenet::expert", &module_exports("expert.rs").0, EXPERT);
+    assert_exports("tenet::cache", &module_exports("cache.rs").0, CACHE);
     assert_exports(
         "tenet::plancache",
         &module_exports("plancache.rs").0,
@@ -234,6 +235,7 @@ fn each_name_has_one_path() {
         ("typed", TYPED),
         ("sector", SECTOR),
         ("expert", EXPERT),
+        ("cache", CACHE),
         ("plancache", PLANCACHE),
         ("typed::__network", NETWORK),
     ];
@@ -270,7 +272,14 @@ fn scanner_reads_nested_groups_renames_and_inline_modules() {
     );
 }
 
-const ROOT: &[&str] = &["expert", "mathematics", "plancache", "sector", "typed"];
+const ROOT: &[&str] = &[
+    "cache",
+    "expert",
+    "mathematics",
+    "plancache",
+    "sector",
+    "typed",
+];
 const TYPED: &[&str] = &[
     "AdvancedLinalgScalar",
     "Alternative",
@@ -466,9 +475,7 @@ const SECTOR: &[&str] = &[
 const EXPERT: &[&str] = &[
     "BlockLayout",
     "BlockRef",
-    "BlockStructureInternCacheInfo",
     "BlockView",
-    "StructureCacheInfo",
     "CpuBackendKind",
     "CpuSessionStats",
     "CudaDenseContext",
@@ -500,18 +507,20 @@ const EXPERT: &[&str] = &[
     "TensorStorage",
     "TreeTransformOperation",
     "TreeTransformOperationKind",
-    "block_structure_intern_cache_info",
-    "structure_cache_info",
     "cpu_session_stats",
     "cuda_transfer_stats",
     "diagonal_spectrum",
-    "StructureCacheKind",
-    "set_structure_cache_byte_budget",
-    "structure_cache_infos",
     "is_diagonal",
-    "reset_core_intern_tables",
     "reset_cpu_session_stats",
     "reset_cuda_transfer_stats",
+];
+/// The one public control of the process-global structure caches (#2014-3).
+const CACHE: &[&str] = &[
+    "StructureCacheInfo",
+    "StructureCacheKind",
+    "clear",
+    "configure_budgets",
+    "stats",
 ];
 const PLANCACHE: &[&str] = &[
     "CotengraMinimize",

@@ -6,6 +6,11 @@
 //! categorical plan (recoupling coefficients and tree-pair maps), and the
 //! result must be bit-identical to a cold Runtime's. A sector change must
 //! still rebuild.
+//!
+//! The plan tier is per Runtime until #2014-4 and observable only through the
+//! deprecated `Runtime::tree_transform_cache_info`; completed transformers are
+//! process-global (`tenet::cache`).
+#![allow(deprecated)]
 
 use std::sync::Arc;
 use tenet::sector::{
@@ -13,6 +18,24 @@ use tenet::sector::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
+
+fn completed() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .unwrap()
+}
+
+/// Completed transformers are process-global: a test that counts one
+/// Runtime's coefficient-tier activity clears them first and must not race
+/// another test publishing the same keys.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn bits(data: &[f64]) -> Vec<u64> {
     data.iter().map(|value| value.to_bits()).collect()
@@ -48,14 +71,15 @@ macro_rules! check_rule {
         ];
         for (name, operation) in operations {
             let what = format!("{} {name}", $label);
+            tenet::cache::clear();
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
             let plans_before = warm.tree_transform_cache_info().plans;
-            let structures_before = warm.tree_transform_cache_info().structures;
+            let structures_before = completed();
 
             let degeneracy_only = operation(&tensor!(&warm, &b));
             let plans = warm.tree_transform_cache_info().plans;
-            let structures = warm.tree_transform_cache_info().structures;
+            let structures = completed();
             assert!(
                 structures.misses() > structures_before.misses(),
                 "{what}: a new layout must miss the completed-structure tier"
@@ -67,6 +91,9 @@ macro_rules! check_rule {
             );
             assert!(plans.hits() > plans_before.hits(), "{what}: no plan hit");
 
+            // Completed transformers are process-global: clear them so the
+            // cold Runtime builds through its own plan tier.
+            tenet::cache::clear();
             let cold = Runtime::builder().dense_threads(1).build().unwrap();
             let expected = operation(&tensor!(&cold, &b));
             assert!(
@@ -92,6 +119,7 @@ macro_rules! check_rule {
 
 #[test]
 fn u1_degeneracy_change_reuses_the_categorical_plan() {
+    let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
             Arc::new(U1FusionRule),
@@ -109,6 +137,7 @@ fn u1_degeneracy_change_reuses_the_categorical_plan() {
 
 #[test]
 fn su2_degeneracy_change_reuses_the_categorical_plan() {
+    let _serial = serial();
     let leg = |sectors: &[(usize, usize)]| {
         GradedSpace::try_new(
             Arc::new(SU2FusionRule),
@@ -128,6 +157,7 @@ fn su2_degeneracy_change_reuses_the_categorical_plan() {
 
 #[test]
 fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
+    let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         let rule = ProductFusionRule::<FermionParityFusionRule, U1FusionRule>::new(
             FermionParityFusionRule,
@@ -157,6 +187,7 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
+    let _serial = serial();
     use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -177,6 +208,7 @@ fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
 
 #[test]
 fn clear_resets_the_plan_tier() {
+    let _serial = serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(SU2FusionRule),

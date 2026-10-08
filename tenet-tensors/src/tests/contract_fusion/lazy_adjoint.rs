@@ -840,12 +840,8 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
             false,
         )
     };
-    for policy in [
-        OperationCachePolicy::default(),
-        OperationCachePolicy::NoCache,
-    ] {
+    for pass in 0..2 {
         let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
-        ctx.set_cache_policy(policy);
         crate::lowering::reset_adjoint_view_build_count();
         crate::contract::reset_fusion_operand_projection_prepares();
         for _ in 0..2 {
@@ -873,7 +869,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 .fold(0.0f64, f64::max);
             assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
         }
-        if policy == OperationCachePolicy::default() {
+        if pass == 0 {
             let mut ordinary = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
             ctx.tensorcontract_fusion_dyn_into(
                 &dst_bound,

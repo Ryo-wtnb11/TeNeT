@@ -226,7 +226,8 @@ impl PreparedFusionTreeLayout {
         let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
         // A layout is pure data under a semantic key and carries no
         // identity, so any epoch outside a reset may publish it.
-        let published = cache.publish(&key, Arc::clone(&layout), charged_bytes, core_reset_epoch());
+        let (published, _) =
+            cache.publish(&key, Arc::clone(&layout), charged_bytes, core_reset_epoch());
         #[cfg(test)]
         if Arc::ptr_eq(&published, &layout) {
             if cold {

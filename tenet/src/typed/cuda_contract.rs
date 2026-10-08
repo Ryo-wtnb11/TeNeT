@@ -123,7 +123,7 @@ where
     /// new high-water mark of the operand or core-destination scratch costs one
     /// zero upload of the new size per buffer; both then stay resident on the
     /// Runtime (see [`crate::typed::Runtime::cuda_contract_scratch_bytes`]) until
-    /// [`crate::typed::Runtime::clear_tree_transform_cache`]. Per call the
+    /// the deprecated [`crate::typed::Runtime::clear_tree_transform_cache`]. Per call the
     /// device submits one region move per Single block / pack / scatter
     /// column, one GEMM per recoupling job and per coupled-sector job, one
     /// zero fill per inactive layout of each transform in overwrite mode, and

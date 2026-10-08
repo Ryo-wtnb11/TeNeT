@@ -60,15 +60,12 @@ macro_rules! assert_no_costlier_than_permute {
         };
         fused();
         separate();
-        let misses = $runtime.tree_transform_cache_info().structures.misses();
+        let misses = completed_transformers().misses();
         let (fused_cost, fused_value) = allocations(fused);
         let (separate_cost, separate_value) = allocations(separate);
 
         // What: the warm call compiles no new transform plan.
-        assert_eq!(
-            $runtime.tree_transform_cache_info().structures.misses(),
-            misses
-        );
+        assert_eq!(completed_transformers().misses(), misses);
         // What: the same tensor, bit for bit.
         assert_eq!(
             fused_value.dense_data().unwrap(),
@@ -227,4 +224,12 @@ fn warm_output_axes_fz2_u1_costs_no_more_than_contract_then_permute() {
         ),
         centered(3).map(|q| ProductSector::new(parity(q), U1Irrep::new(q))),
     );
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

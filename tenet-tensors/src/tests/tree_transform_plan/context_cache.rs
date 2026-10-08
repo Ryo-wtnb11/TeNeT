@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn independent_tree_transform_contexts_compile_their_own_artifacts() {
+fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -45,6 +45,7 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
         braiding_style: None,
     };
     let mut first = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    crate::tree_transform::take_completed_transformer_activity();
     let run = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>| {
         let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
             vec![1.0, 2.0],
@@ -58,60 +59,25 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
         dst.data().to_vec()
     };
     let first_data = run(&mut first);
-    assert_eq!(first.cache().stats().structure_misses(), 1);
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
+    let again = run(&mut first);
+    assert!(calls.load(Ordering::Relaxed) > 0);
     let mut second = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let second_data = run(&mut second);
-    assert_eq!(second.cache().stats().structure_misses(), 1);
-    assert!(calls.load(Ordering::Relaxed) > 0);
 
-    // What: a fresh execution context recompiles the exact SU(2) transform
-    // instead of inheriting another context's completed structure.
+    // What: a packed expert layout is not canonical (no complete-HomSpace
+    // entry owns it), so its keys are lookup-only: every call builds, the
+    // same context included, nothing is published, and the result is the
+    // same each time (#2014-3 publishability rule).
+    let activity = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!(
+        (activity.hits, activity.builds, activity.publications),
+        (0, 3, 0)
+    );
+    assert_eq!(again, first_data);
     assert_eq!(second_data, first_data);
-}
-
-#[test]
-fn concurrent_tree_transform_contexts_do_not_share_compiled_artifacts() {
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let run = |barrier: Arc<std::sync::Barrier>| {
-        std::thread::spawn(move || {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let rule = AdmissionCountingSu2Rule {
-                nsymbol_calls: Arc::clone(&calls),
-                fusion_style: None,
-                braiding_style: None,
-            };
-            let structure = simple_su2_vertex_structure(1);
-            let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-            let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
-            barrier.wait();
-            cache
-                .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-                    &rule, &operation, &structure, &structure, false,
-                )
-                .unwrap();
-            (
-                calls.load(Ordering::Relaxed),
-                builtin_tree_cache_state(&cache),
-            )
-        })
-    };
-
-    let left = run(Arc::clone(&barrier));
-    let right = run(barrier);
-    let (left_calls, left_state) = left.join().unwrap();
-    let (right_calls, right_state) = right.join().unwrap();
-
-    // What: simultaneous fresh contexts each perform categorical admission and
-    // retain one private completed structure instead of observing sibling state.
-    assert!(left_calls > 0);
-    assert!(right_calls > 0);
-    assert_eq!(left_state.0.structure_misses(), 1);
-    assert_eq!(right_state.0.structure_misses(), 1);
-    assert_eq!(left_state.1, 1);
-    assert_eq!(right_state.1, 1);
 }
 
 #[test]
@@ -159,30 +125,38 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(direct_operation, miss_operation);
     assert_eq!(miss_operation, hit_operation);
     let group_count = src.structure().fusion_tree_groups().len();
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
+    let planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
 
     reset_tree_pair_lowering_calls();
     let direct = tree_transform_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
-    let miss = cache
-        .get_or_compile_tree_pair(&SU2FusionRule, miss_operation, &dst, &src)
+    let miss = planning
+        .resolve_tree_pair(
+            &SU2FusionRule,
+            &miss_operation,
+            dst.structure(),
+            src.structure(),
+            false,
+        )
         .unwrap();
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
-    let hit = cache
-        .get_or_compile_tree_pair(&SU2FusionRule, hit_operation, &dst, &src)
+    let rebuilt = planning
+        .resolve_tree_pair(
+            &SU2FusionRule,
+            &hit_operation,
+            dst.structure(),
+            src.structure(),
+            false,
+        )
         .unwrap();
-    assert_eq!(tree_pair_lowering_calls(), (0, 0));
-
-    // What: independently constructed content-equal operations identify the
-    // same completed structure without relying on Arc pointer identity.
-    assert!(Arc::ptr_eq(&miss, &hit));
-    assert_eq!(cache.structure_len(), 1);
-    assert_eq!(cache.stats().structure_misses(), 1);
-    assert_eq!(cache.stats().structure_hits(), 1);
+    // The packed fixture is an expert layout, so the second resolution
+    // rebuilds (lookup-only key); it runs the same one lowering per group.
+    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
+    let hit = rebuilt;
     assert!(direct.has_pack_gemm_scatter_blocks());
     assert_eq!(direct.blocks(), miss.blocks());
     assert_eq!(direct.layouts(), miss.layouts());
@@ -231,7 +205,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
 }
 
 #[test]
-fn tree_transform_cache_compiles_distinct_all_codomain_degeneracy_shapes() {
+fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -288,35 +262,20 @@ fn tree_transform_cache_compiles_distinct_all_codomain_degeneracy_shapes() {
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
+    let planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let resolve = |dst: &TensorMap<f64, 4, 0>, src: &TensorMap<f64, 4, 0>| {
+        planning
+            .resolve_all_codomain(&SU2FusionRule, &operation, dst.structure(), src.structure())
+            .unwrap()
+    };
 
-    {
-        let structure = cache
-            .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
-            .unwrap();
-        assert!(structure.has_pack_gemm_scatter_blocks());
-    }
-    assert_eq!(cache.structure_len(), 1);
+    let small = resolve(&dst, &src);
+    let large = resolve(&dst_large, &src_large);
+    assert!(small.has_pack_gemm_scatter_blocks() && large.has_pack_gemm_scatter_blocks());
+    // What: a degeneracy change is a distinct layout, hence a distinct core.
+    assert_ne!(small.layouts(), large.layouts());
 
-    {
-        let structure = cache
-            .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
-            .unwrap();
-        assert!(structure.has_pack_gemm_scatter_blocks());
-    }
-    assert_eq!(cache.structure_len(), 1);
-
-    {
-        let structure = cache
-            .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_large, &src_large)
-            .unwrap();
-        assert!(structure.has_pack_gemm_scatter_blocks());
-    }
-    assert_eq!(cache.structure_len(), 2);
-
-    let structure = cache
-        .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
-        .unwrap();
+    let structure = resolve(&dst, &src);
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     tree_transform_execute_with(
@@ -335,7 +294,7 @@ fn tree_transform_cache_compiles_distinct_all_codomain_degeneracy_shapes() {
 }
 
 #[test]
-fn tree_transform_execution_context_reuses_all_codomain_cache() {
+fn tree_transform_execution_context_replays_all_codomain_transforms() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -372,7 +331,6 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
 
     context
         .all_codomain_tree_transform_into(
@@ -385,9 +343,6 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
         )
         .unwrap();
 
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
     assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
     assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
 
@@ -397,291 +352,9 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
         .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 2.0, -1.0)
         .unwrap();
 
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 1);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
     let c = 0.866_025_403_784_438_6;
     assert!((dst.data()[0] - (-1.0 + 2.0 * (0.5 * 3.0 + c * -4.0))).abs() < 1.0e-12);
     assert!((dst.data()[1] - (-2.0 + 2.0 * (c * 3.0 - 0.5 * -4.0))).abs() < 1.0e-12);
-    context.cache_mut().reset_stats();
-    assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
-}
-
-#[test]
-fn all_codomain_artifacts_do_not_cross_context_boundaries() {
-    let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [0, 1],
-        [1, 1, 1],
-    );
-    let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [2, 1],
-        [1, 1, 1],
-    );
-    let structure = packed_fixture_structure(
-        4,
-        [(src_key0, vec![1, 1, 1, 1]), (src_key1, vec![1, 1, 1, 1])],
-    )
-    .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![10.0, 20.0],
-        space.clone(),
-        structure.clone(),
-    )
-    .unwrap();
-    let dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, structure).unwrap();
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-
-    let mut first = TreeTransformCache::<f64, RuleIdentity>::default();
-    let cold = first
-        .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    let warm = first
-        .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    assert!(Arc::ptr_eq(&cold, &warm));
-
-    let mut fresh = TreeTransformCache::<f64, RuleIdentity>::default();
-    let rebuilt = fresh
-        .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
-        .unwrap();
-
-    // What: all-codomain completed structures remain private to the explicit
-    // context while a fresh context rebuilds an equal artifact.
-    assert!(!Arc::ptr_eq(&cold, &rebuilt));
-    assert_eq!(cold.as_ref(), rebuilt.as_ref());
-    assert_eq!(first.stats().structure_hits(), 1);
-    assert_eq!(fresh.stats().structure_hits(), 0);
-    assert_eq!(fresh.stats().structure_misses(), 1);
-}
-
-#[test]
-fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries() {
-    let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [0, 1],
-        [1, 1, 1],
-    );
-    let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [2, 1],
-        [1, 1, 1],
-    );
-    let block_structure = packed_fixture_structure(
-        4,
-        [
-            (src_key0.clone(), vec![1, 1, 1, 1]),
-            (src_key1.clone(), vec![1, 1, 1, 1]),
-        ],
-    )
-    .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![10.0, 20.0],
-        space.clone(),
-        block_structure.clone(),
-    )
-    .unwrap();
-    let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
-            .unwrap();
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .cache_mut()
-        .set_policy(OperationCachePolicy::NoCache);
-
-    for expected_misses in 1..=2 {
-        context
-            .all_codomain_tree_transform_into(
-                &SU2FusionRule,
-                operation.clone(),
-                &mut dst,
-                &src,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-        assert_eq!(context.cache().structure_len(), 0);
-        assert_eq!(context.cache().stats().structure_hits(), 0);
-        assert_eq!(context.cache().stats().structure_misses(), expected_misses);
-    }
-
-    let expected = dst.data().to_vec();
-    for policy in [
-        OperationCachePolicy::TaskLocal,
-        OperationCachePolicy::task_local_lru(1),
-    ] {
-        let mut policy_dst = dst.clone();
-        policy_dst.data_mut().fill(0.0);
-        let mut policy_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-        policy_context.cache_mut().set_policy(policy);
-        policy_context
-            .all_codomain_tree_transform_into(
-                &SU2FusionRule,
-                operation.clone(),
-                &mut policy_dst,
-                &src,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-
-        // What: cache ownership and eviction policy do not change the tensor
-        // produced by the shared eager compiler.
-        assert_eq!(policy_dst.data(), expected);
-    }
-}
-
-#[test]
-fn tree_transform_execution_context_default_is_bounded() {
-    let context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-
-    // What: ordinary contexts retain at most the documented default number of
-    // completed tree-transform structures.
-    assert_eq!(
-        context.cache().policy(),
-        OperationCachePolicy::task_local_lru(256)
-    );
-}
-
-#[test]
-fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
-    let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [0, 1],
-        [1, 1, 1],
-    );
-    let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
-        &SU2FusionRule,
-        [1, 1, 1, 1],
-        0,
-        [false, false, false, false],
-        [2, 1],
-        [1, 1, 1],
-    );
-    let block_structure = packed_fixture_structure(
-        4,
-        [
-            (src_key0.clone(), vec![1, 1, 1, 1]),
-            (src_key1.clone(), vec![1, 1, 1, 1]),
-        ],
-    )
-    .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![10.0, 20.0],
-        space.clone(),
-        block_structure.clone(),
-    )
-    .unwrap();
-    let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
-            .unwrap();
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .cache_mut()
-        .set_policy(OperationCachePolicy::task_local_lru(1));
-
-    context
-        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-        .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-
-    context
-        .all_codomain_tree_transform_into(
-            &SU2FusionRule,
-            operation.clone(),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-
-    context
-        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-        .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 3);
-
-    context
-        .cache_mut()
-        .set_policy(OperationCachePolicy::task_local_lru(2));
-    context
-        .all_codomain_tree_transform_into(
-            &SU2FusionRule,
-            operation.clone(),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-    context
-        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-        .unwrap();
-
-    context.cache_mut().reset_stats();
-    for tree_pair in [false, true, false, true] {
-        if tree_pair {
-            context
-                .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-                .unwrap();
-        } else {
-            context
-                .all_codomain_tree_transform_into(
-                    &SU2FusionRule,
-                    operation.clone(),
-                    &mut dst,
-                    &src,
-                    1.0,
-                    0.0,
-                )
-                .unwrap();
-        }
-    }
-    assert_eq!(context.cache().stats().structure_hits(), 4);
-    assert_eq!(context.cache().stats().structure_misses(), 0);
-
-    let mut cloned = context.cache().clone();
-    cloned.reset_stats();
-    cloned
-        .get_or_compile_tree_pair(
-            &SU2FusionRule,
-            TreeTransformOperation::permute([0, 1, 2, 3], []),
-            &dst,
-            &src,
-        )
-        .unwrap();
-    cloned
-        .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
-        .unwrap();
-
-    // What: cloning a bounded context preserves completed-structure recency.
-    assert_eq!(cloned.stats().structure_hits(), 0);
-    assert_eq!(cloned.stats().structure_misses(), 2);
 }
 
 #[test]
@@ -726,14 +399,15 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     context
         .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
         .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
+    let tree_pair = dst.data().to_vec();
 
     dst.data_mut().copy_from_slice(&[0.0, 0.0]);
     context
         .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
         .unwrap();
 
-    assert_eq!(context.cache().structure_len(), 2);
+    // What: the two scopes are distinct key families that agree here.
+    assert_eq!(tree_pair, dst.data());
     assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
     assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
 }

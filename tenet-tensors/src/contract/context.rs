@@ -12,7 +12,6 @@ use tenet_core::{ScratchStorage, SimilarStorage};
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
-use crate::lowering::adjoint_fusion_space_view;
 use crate::mode::TreeStructureSource;
 #[cfg(test)]
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -27,7 +26,6 @@ use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContra
 #[cfg(test)]
 use super::backend::tensorcontract_structure_with_storage_workspace_dense_executor;
 use super::backend::TensorContractBackend;
-use super::dynamic::DynamicFusionSpaceCache;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     LayoutKeyBuilder,
@@ -464,7 +462,6 @@ pub struct TensorContractFusionExecutionContext<
     BC: TensorContractBackend<D, C>,
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    dynamic_space_cache: DynamicFusionSpaceCache<RuleKey, C>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
@@ -548,7 +545,6 @@ where
     ) -> Self {
         Self {
             tree_context,
-            dynamic_space_cache: DynamicFusionSpaceCache::default(),
             contract_backend,
             contract_workspace,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
@@ -569,26 +565,6 @@ where
     #[inline]
     pub fn tree_context_mut(&mut self) -> &mut TreeTransformExecutionContext<D, RuleKey, C, BT> {
         &mut self.tree_context
-    }
-
-    #[inline]
-    pub fn dynamic_fusion_space_cache_len(&self) -> usize {
-        self.dynamic_space_cache.len()
-    }
-
-    #[inline]
-    pub fn dynamic_fusion_space_cache_hits(&self) -> usize {
-        self.dynamic_space_cache.stats().hits()
-    }
-
-    #[inline]
-    pub fn dynamic_fusion_space_cache_fast_hits(&self) -> usize {
-        self.dynamic_space_cache.stats().fast_hits()
-    }
-
-    #[inline]
-    pub fn dynamic_fusion_space_cache_misses(&self) -> usize {
-        self.dynamic_space_cache.stats().misses()
     }
 
     #[inline]
@@ -750,17 +726,6 @@ where
             ContractRoute::Core { swapped: true, .. } => Some(FusionContractOrientation::RhsLhs),
             ContractRoute::Core { swapped: false, .. } | ContractRoute::CopyC(_) => None,
         };
-    }
-
-    pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
-        self.tree_context.set_cache_policy(policy);
-        self.dynamic_space_cache.set_policy(policy);
-    }
-
-    #[doc(hidden)]
-    pub fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.tree_context.cache().policy() == expected
-            && self.dynamic_space_cache.policy() == expected
     }
 
     pub fn into_parts(
@@ -1878,7 +1843,6 @@ where
             let artifact = if profile.is_some() {
                 super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, true>(
                     &mut self.tree_context,
-                    &mut self.dynamic_space_cache,
                     rule,
                     layout_primer,
                     &plan,
@@ -1892,7 +1856,6 @@ where
             } else {
                 super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
                     &mut self.tree_context,
-                    &mut self.dynamic_space_cache,
                     rule,
                     layout_primer,
                     &plan,
@@ -1929,7 +1892,6 @@ where
                     true,
                 >(
                     &mut self.tree_context,
-                    &mut self.dynamic_space_cache,
                     rule,
                     layout_primer,
                     &plan,
@@ -1948,7 +1910,6 @@ where
                     false,
                 >(
                     &mut self.tree_context,
-                    &mut self.dynamic_space_cache,
                     rule,
                     layout_primer,
                     &plan,
@@ -2762,26 +2723,36 @@ where
         let src_fusion = src
             .fusion_space()
             .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let src_replay_structure = if source_conjugate {
-            Arc::clone(adjoint_fusion_space_view(rule, src_fusion)?.subblock_structure())
-        } else {
-            Arc::clone(src.structure())
-        };
         let dst_structure = Arc::clone(dst.structure());
-        let structure = self.tree_context.tree_structure(
-            rule,
-            &operation,
-            &dst_structure,
-            TreeStructureSource::Stored {
-                structure: &src_replay_structure,
-                storage_conjugate: source_conjugate,
-            },
-        )?;
+        // A conjugated source is read through its parent's storage under the
+        // oriented key (parent content, orientation, basis order), as the
+        // context `tensoradd` does: a per-call adjoint view would key every
+        // call on a fresh content id that only evicts live transformers.
+        let structure = if source_conjugate {
+            let storage_src = DynamicFusionMapSpace::from_typed(src_fusion);
+            let oriented_src = FusionOperand::prepare_storage_ordered_adjoint(&storage_src, rule)?;
+            self.tree_context.tree_structure(
+                rule,
+                &operation,
+                &dst_structure,
+                TreeStructureSource::Oriented(&oriented_src),
+            )?
+        } else {
+            self.tree_context.tree_structure(
+                rule,
+                &operation,
+                &dst_structure,
+                TreeStructureSource::Stored {
+                    structure: src.structure(),
+                    storage_conjugate: false,
+                },
+            )?
+        };
         self.tree_context
             .tree_transform_structure_overwrite_into_raw(
-                structure.as_ref(),
+                &structure,
                 &dst_structure,
-                &src_replay_structure,
+                src.structure(),
                 dst.data_mut(),
                 src.data(),
                 D::one(),

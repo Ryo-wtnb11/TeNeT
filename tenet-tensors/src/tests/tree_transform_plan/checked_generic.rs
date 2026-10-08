@@ -42,6 +42,14 @@ fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() {
+    // Isolated: a sibling test may publish this shared canonical key between
+    // the two calls, turning the cold build into a hit.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_TENSORS_CHECKED_RUNTIME_REUSE_ISOLATED",
+        "tests::tree_transform_plan::checked_generic::checked_generic_runtime_reuses_completed_structure_after_checked_admission",
+    ) {
+        return;
+    }
     // What: the first successful checked transform publishes one completed
     // structure, while a repeat still performs provider admission but skips
     // the F/R coefficient build and reuses the same Runtime entry.
@@ -57,11 +65,10 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         .map(|index| index as f64 + 1.0)
         .collect::<Vec<_>>();
     let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
-    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(&store));
+    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
+    owner_activity();
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     let first = crate::tree_transform_dyn_owned_checked_generic_in_context(
@@ -72,9 +79,8 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         1.0,
     )
     .unwrap();
-    let cold = store.info();
-    assert_eq!(cold.entries(), 1);
-    assert_eq!(cold.misses(), 1);
+    let cold = owner_activity();
+    assert_eq!((cold.hits, cold.publications), (0, 1), "{cold:?}");
     assert!(provider.call_count(CheckedPlanCall::F) > 0);
     assert!(provider.call_count(CheckedPlanCall::R) > 0);
 
@@ -87,11 +93,9 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         1.0,
     )
     .unwrap();
-    let warm = store.info();
+    let warm = owner_activity();
 
-    assert_eq!(warm.entries(), 1);
-    assert_eq!(warm.misses(), 1);
-    assert_eq!(warm.hits(), 1);
+    assert_eq!((warm.hits, warm.builds), (1, 0));
     assert_eq!(provider.call_count(CheckedPlanCall::F), 0);
     assert_eq!(provider.call_count(CheckedPlanCall::R), 0);
     assert_eq!(first.0.space(), repeated.0.space());
@@ -99,7 +103,7 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
     assert!(Arc::ptr_eq(first.0.provider_arc(), &provider));
     assert!(Arc::ptr_eq(repeated.0.provider_arc(), &provider));
 
-    let before_identity_failure = store.info();
+    owner_activity();
     *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
     let identity_error = crate::tree_transform_dyn_owned_checked_generic_in_context(
         &mut context,
@@ -113,7 +117,7 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         identity_error,
         CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
     ));
-    assert_eq!(store.info(), before_identity_failure);
+    assert_owner_untouched(owner_activity());
     *provider.identity.borrow_mut() = None;
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
@@ -130,7 +134,8 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         late_error,
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
     ));
-    assert_eq!(store.info().entries(), 1);
+    // What: a failed build publishes nothing.
+    assert_eq!(owner_activity().publications, 0);
 }
 
 #[test]
@@ -176,6 +181,9 @@ fn checked_generic_adjoint_storage_matches_literal_dense_braid() {
 
 #[test]
 fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let provider = Arc::new(SynchronizedCheckedGeneric::new());
     let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&provider),
@@ -230,12 +238,11 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
     let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
     let alpha = Complex64::new(0.5, -1.25);
     let expected = literal_dense_generic_adjoint_braid(&parent_data, alpha);
-    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context =
         crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
-    context
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(&store));
+    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
+    owner_activity();
     let mut execute = |logical| {
         crate::tree_transform_dyn_owned_checked_generic_input_in_context(
             &mut context,
@@ -249,8 +256,15 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
     assert_eq!(execute(&canonical_logical).1, expected);
     assert_eq!(execute(&reordered_logical).1, expected);
     assert_eq!(execute(&reordered_logical).1, expected);
-    assert_eq!(store.info().misses(), 2);
-    assert_eq!(store.info().hits(), 1);
+    // What: the canonical logical layout and a reordered expert one key
+    // distinct entries. The expert layout is never admitted, so its key is
+    // lookup-only: each of its calls builds, and nothing aliases the
+    // canonical entry.
+    // The canonical call may hit an entry a sibling test published.
+    let activity = owner_activity();
+    assert!(activity.builds >= 2, "{activity:?}");
+    assert_eq!(activity.builds + activity.hits, 3, "{activity:?}");
+    assert_eq!(activity.publications + activity.hits, 1, "{activity:?}");
 }
 
 #[test]
@@ -339,6 +353,9 @@ fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = DenseGenericRule;
     let provider = Arc::new(CheckedPlanSpy::new(&rule));
     let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -350,11 +367,10 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
     let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
     let data = vec![1.0; parent.space().required_len().unwrap()];
     let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
-    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
-    context
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(&store));
+    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
+    owner_activity();
     crate::tree_transform_dyn_owned_checked_generic_input_in_context(
         &mut context,
         operation.clone(),
@@ -362,8 +378,8 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
         1.0,
     )
     .unwrap();
-    let warm = store.info();
-    assert_eq!(warm.entries(), 1);
+    let first = owner_activity();
+    assert_eq!(first.hits + first.publications, 1, "{first:?}");
 
     *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
     let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
@@ -377,7 +393,7 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
         error,
         CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
     ));
-    assert_eq!(store.info(), warm);
+    assert_owner_untouched(owner_activity());
 
     *provider.identity.borrow_mut() = None;
     let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
@@ -391,12 +407,15 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
         error,
         CheckedGenericPlanError::Operation(OperationError::ElementCountMismatch { .. })
     ));
-    assert_eq!(store.info(), warm);
+    assert_owner_untouched(owner_activity());
 }
 
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_cache_change() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = DenseGenericRule;
     let provider = Arc::new(CheckedPlanSpy::new(&rule));
     let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -408,11 +427,10 @@ fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_ca
     let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
     let data = vec![1.0; parent.space().required_len().unwrap()];
     let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
-    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
-    context
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(&store));
+    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
+    owner_activity();
     crate::tree_transform_dyn_owned_checked_generic_input_in_context(
         &mut context,
         operation.clone(),
@@ -420,8 +438,8 @@ fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_ca
         1.0,
     )
     .unwrap();
-    let warm = store.info();
-    assert_eq!(warm.entries(), 1);
+    let first = owner_activity();
+    assert_eq!(first.hits + first.publications, 1, "{first:?}");
 
     let sector = SectorId::new(1);
     let wrong_logical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -452,7 +470,7 @@ fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_ca
             tensor: "checked adjoint relation"
         })
     ));
-    assert_eq!(store.info(), warm);
+    assert_owner_untouched(owner_activity());
 }
 
 #[test]
@@ -554,6 +572,9 @@ fn checked_generic_adjoint_storage_rejects_distinct_provider_allocation() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = DenseGenericRule;
     let provider = Arc::new(CheckedPlanSpy::new(&rule));
     let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -564,11 +585,10 @@ fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
     let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
     let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
     let data = vec![1.0; parent.space().required_len().unwrap()];
-    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
-    context
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(&store));
+    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
+    owner_activity();
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     provider.fail.set(Some((CheckedPlanCall::F, 1)));
 
@@ -585,7 +605,7 @@ fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
     ));
     assert!(provider.call_count(CheckedPlanCall::F) > 0);
-    assert_eq!(store.info().entries(), 0);
+    assert_eq!(owner_activity().publications, 0);
 }
 
 #[test]
@@ -623,7 +643,6 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let source_before = src_space.clone();
     let data_before = src_data.clone();
     let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
-    let store = RuntimeTreeTransformStore::<f64>::default();
 
     for mismatch in [
         Some(tenet_core::RuleIdentity::of_type::<ToyGenericRule>()),
@@ -645,7 +664,7 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         provider.fail.set(Some((CheckedPlanCall::N, 1)));
         let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-        let runtime_before = store.info();
+        owner_activity();
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
             operation.clone(),
@@ -678,7 +697,7 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             complete_before.charged_bytes()
         );
         assert_eq!(complete_after.admissions(), complete_before.admissions());
-        assert_eq!(store.info(), runtime_before);
+        assert_owner_untouched(owner_activity());
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
     }
@@ -706,7 +725,7 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         }
         let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-        let runtime_before = store.info();
+        owner_activity();
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
             operation.clone(),
@@ -741,7 +760,7 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             complete_before.charged_bytes()
         );
         assert_eq!(complete_after.admissions(), complete_before.admissions());
-        assert_eq!(store.info(), runtime_before);
+        assert_owner_untouched(owner_activity());
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
     }
@@ -794,6 +813,9 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
 
 #[test]
 fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = DenseGenericRule;
     let pairs = dense_generic_rank3_pairs(&rule);
     let structure = packed_fixture_structure(
@@ -806,8 +828,7 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
     .unwrap();
     let r_only = TreeTransformOperation::permute([1, 0, 2], []);
     let inner_f_r = TreeTransformOperation::braid([0, 2, 1], [], [0, 1, 2], []);
-    let store = RuntimeTreeTransformStore::<f64>::default();
-    let pristine = store.info();
+    owner_activity();
 
     for (operation, call) in [
         (r_only.clone(), CheckedPlanCall::R),
@@ -834,7 +855,7 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
         );
         // Checked planning is a standalone compile step: a failed provider
         // query cannot publish a partial Runtime cache entry or statistic.
-        assert_eq!(store.info(), pristine);
+        assert_owner_untouched(owner_activity());
     }
 
     for (operation, malformed, symbol) in [
@@ -853,7 +874,7 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
                 ..
             } if found == symbol
         ));
-        assert_eq!(store.info(), pristine);
+        assert_owner_untouched(owner_activity());
     }
 }
 

@@ -103,15 +103,22 @@ fn fibonacci_tau_channel(tensor: &TensorMap<FibonacciFusionRule, Complex64>) -> 
 
 #[test]
 fn fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_FIBONACCI_FORWARD_BRAID_MATCHES_CLOSED_F",
+        "space::fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture",
+    ) {
+        return;
+    }
     let runtime = runtime();
     let source = fibonacci_tau_braid_fixture(&runtime);
-    runtime.clear_tree_transform_cache();
+    tenet::cache::clear();
     let braided = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
-    let cold = runtime.tree_transform_cache_info().structures;
+    let cold = crate::completed_transformers();
     assert_eq!((cold.entries(), cold.misses(), cold.hits()), (1, 1, 0));
     let warm = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
     assert_eq!(warm.dense_data().unwrap(), braided.dense_data().unwrap());
-    let warm_info = runtime.tree_transform_cache_info().structures;
+    let warm_info = crate::completed_transformers();
     assert_eq!(
         (warm_info.entries(), warm_info.misses(), warm_info.hits()),
         (1, 1, 1)
@@ -355,6 +362,13 @@ fn fibonacci_matrix_entry(
 
 #[test]
 fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_FIBONACCI_COMPOSE_IS_COMPLEX_COUPLED_SEC",
+        "space::fibonacci_compose_is_complex_coupled_sector_matrix_multiplication",
+    ) {
+        return;
+    }
     // What: fixed-boundary Fibonacci composition multiplies every coupled
     // sector block, preserves left authority, and is identical cold and warm.
     let _guard = cache_lock();
@@ -385,10 +399,10 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
             fibonacci_matrix_entry(5.0, trees.coupled(), indices[0], indices[1])
         })
         .unwrap();
-    runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info().structures;
+    tenet::cache::clear();
+    let before = crate::completed_transformers();
     let cold = lhs.compose(&rhs).unwrap();
-    let after_cold = runtime.tree_transform_cache_info().structures;
+    let after_cold = crate::completed_transformers();
     let warm = lhs.compose(&rhs).unwrap();
     let expected: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&rows], [&columns], |trees, indices| {
@@ -409,7 +423,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     assert_data_close_c64(warm.dense_data().unwrap(), expected.dense_data().unwrap());
     assert!(std::ptr::eq(cold.provider(), lhs.provider()));
     assert_eq!(after_cold, before);
-    assert_eq!(runtime.tree_transform_cache_info().structures, before);
+    assert_eq!(crate::completed_transformers(), before);
 
     // What: the same genuinely complex blocks are associative, while ordinary
     // contraction refuses even this crossing-free boundary.
@@ -425,8 +439,8 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     let right = a.compose(&b.compose(&c).unwrap()).unwrap();
     assert_data_close_c64(left.dense_data().unwrap(), right.dense_data().unwrap());
 
-    runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info().structures;
+    tenet::cache::clear();
+    let before = crate::completed_transformers();
     let error = a
         .contract(
             &b,
@@ -443,7 +457,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
         tenet::typed::Error::Operation(operation)
             if matches!(*operation, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })
     ));
-    assert_eq!(runtime.tree_transform_cache_info().structures, before);
+    assert_eq!(crate::completed_transformers(), before);
 
     let other_runtime = Runtime::builder().build().unwrap();
     let other: TensorMap<_, Complex64> =
@@ -472,13 +486,20 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
 
 #[test]
 fn fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_FIBONACCI_ORDINARY_PERMUTE_REJECTION_DOE",
+        "space::fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry",
+    ) {
+        return;
+    }
     let runtime = runtime();
     let source = fibonacci_tau_braid_fixture(&runtime);
-    runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info().structures;
+    tenet::cache::clear();
+    let before = crate::completed_transformers();
     let error = source.permute(&[0, 2, 1], &[3]).unwrap_err();
     assert!(format!("{error:?}").contains("UnsupportedBraidingStyle"));
-    assert_eq!(runtime.tree_transform_cache_info().structures, before);
+    assert_eq!(crate::completed_transformers(), before);
 }
 
 #[test]
@@ -742,16 +763,20 @@ fn graded_space_dual_reports_a_non_injective_dual_instead_of_panicking() {
 
 #[test]
 fn graded_space_carries_a_simple_fusion_provider_too() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_GRADED_SPACE_CARRIES_A_SIMPLE_FUSION_PRO",
+        "space::graded_space_carries_a_simple_fusion_provider_too",
+    ) {
+        return;
+    }
     // What: nothing in the typed space is abelian-specific.
     let provider = Arc::new(ExternalSu2);
     let space = su2_leg(&provider, true);
 
     assert_eq!(space.sectors().unwrap(), vec![SU2Irrep::from_twice_spin(1)]);
     assert!(space.is_dual());
-    assert_eq!(
-        runtime().tree_transform_cache_info().structures.entries(),
-        0
-    );
+    assert_eq!(crate::completed_transformers().entries(), 0);
 }
 
 // ---------------------------------------------------------------------------

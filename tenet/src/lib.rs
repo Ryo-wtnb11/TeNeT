@@ -79,12 +79,17 @@
 //!
 #![doc = include_str!("tutorial.md")]
 
+pub mod cache;
+#[cfg(test)]
+mod cache_concurrency_tests;
 mod error;
 pub mod expert;
 pub mod plancache;
 mod runtime;
 pub mod sector;
 mod tensor_core;
+#[cfg(test)]
+mod test_cache;
 pub mod typed;
 
 /// Formula-first explanation of TeNeT's tensor-map convention, duals,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
-use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace};
+use tenet_tensors::BoundDynamicFusionMapSpace;
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;
@@ -20,8 +20,8 @@ fn homspace(sector_count: i32) -> FusionTreeHomSpace {
 }
 
 fn cold_lowered_allocations(sector_count: i32) -> usize {
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     counting_alloc::start();
     let result = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::new(U1FusionRule),
@@ -37,8 +37,8 @@ fn cold_lowered_allocations(sector_count: i32) -> usize {
 }
 
 fn cold_encoded_allocations(sector_count: i32) -> usize {
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     counting_alloc::start();
     let result = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         Arc::new(U1FusionRule),

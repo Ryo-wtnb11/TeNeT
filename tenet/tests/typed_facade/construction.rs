@@ -80,6 +80,13 @@ fn tensor_map_zeros_needs_at_least_one_leg() {
 
 #[test]
 fn checked_construction_failure_publishes_no_cache_state() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_CHECKED_CONSTRUCTION_FAILURE_PUBLISHES_N",
+        "construction::checked_construction_failure_publishes_no_cache_state",
+    ) {
+        return;
+    }
     // What: a provider that fails mid-staging returns a typed error and leaves
     // both process-global layout caches and the runtime's own cache untouched,
     // which is the transactional guarantee the checked path promises.
@@ -100,7 +107,7 @@ fn checked_construction_failure_publishes_no_cache_state() {
         structure_cache_info(StructureCacheKind::SectorStructure),
         structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
-    let runtime_before = runtime.tree_transform_cache_info().structures;
+    let runtime_before = crate::completed_transformers();
 
     let error = TensorMap::<ExternalZ3, f64>::zeros(&runtime, [&codomain], [&domain]).unwrap_err();
 
@@ -115,10 +122,7 @@ fn checked_construction_failure_publishes_no_cache_state() {
         ),
         before
     );
-    assert_eq!(
-        runtime.tree_transform_cache_info().structures,
-        runtime_before
-    );
+    assert_eq!(crate::completed_transformers(), runtime_before);
 }
 
 // ---------------------------------------------------------------------------

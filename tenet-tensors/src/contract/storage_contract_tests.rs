@@ -19,7 +19,7 @@ use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 use crate::contract::dynamic::{
     compile_dynamic_tree_execution_artifact, execute_dynamic_tree_execution_artifact,
-    DynamicFusionSpaceCache, DynamicTreeExecutionArtifact,
+    DynamicTreeExecutionArtifact,
 };
 use crate::contract::fusion::FusionContractOrientation;
 use crate::contract::scratch::DynamicFusionScratchWorkspace;
@@ -808,10 +808,8 @@ where
         .unwrap();
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let mut cache = DynamicFusionSpaceCache::default();
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, D, _, false>(
         &mut tree_context,
-        &mut cache,
         rule,
         crate::contract::encoded_layout_primer::<R>,
         &plan,

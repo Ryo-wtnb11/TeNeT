@@ -30,7 +30,6 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -70,7 +69,6 @@ where
         tree_context,
         contract_backend,
         contract_workspace,
-        dynamic_space_cache,
         fusion_block_workspace,
         scratch,
         rule,
@@ -118,14 +116,12 @@ where
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
-    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let mut scratch = DynamicFusionScratchWorkspace::default();
     tensorcontract_fusion_dynamic_plan_into_context(
         &mut tree_context,
         &mut contract_backend,
         &mut contract_workspace,
-        &mut dynamic_space_cache,
         &mut fusion_block_workspace,
         &mut scratch,
         rule,
@@ -167,7 +163,6 @@ where
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
-    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let dst_space = DynamicFusionMapSpace::from_typed(
         ordinary_dst
@@ -184,7 +179,6 @@ where
     );
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         &mut tree_context,
-        &mut dynamic_space_cache,
         rule,
         encoded_layout_primer::<R>,
         plan,
@@ -255,7 +249,6 @@ where
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
-    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let mut scratch = DynamicFusionScratchWorkspace::default();
     let layout_primer = encoded_layout_primer::<R>;
@@ -263,7 +256,6 @@ where
     let rhs_layout = rhs.prepare(rule, layout_primer)?;
     let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         &mut tree_context,
-        &mut dynamic_space_cache,
         rule,
         layout_primer,
         plan,
@@ -297,7 +289,6 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -324,7 +315,6 @@ where
 {
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         tree_context,
-        dynamic_space_cache,
         rule,
         layout_primer,
         plan,
