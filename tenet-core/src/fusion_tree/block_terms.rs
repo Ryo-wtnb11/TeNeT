@@ -342,11 +342,601 @@ impl CompactMultiplicityFreeTreePairBasis {
     }
 }
 
+/// Sparse source columns of a Generic keyed block: TensorKit's coefficient
+/// matrix `U` of `fsbraid`/`fstranspose`, stored column-major and sparse.
+/// `entries[column_start[n]..column_start[n + 1]]` are source `n`'s present
+/// `(basis row, coefficient)` pairs. Structural absence is a missing entry, so
+/// a present zero stays distinct from an absent coefficient.
+///
+/// Why not the dense `DenseColumns` of the multiplicity-free compact drivers:
+/// spreading a move over `B_j × N` slots costs `O(K_j·N)` per step even when no
+/// intermediate tree is shared, an `N`-fold scale regression against
+/// per-source composition when sharing is low. Sparse columns cost
+/// `Σ_x c_j(x)·k_j(x)` multiplies, exactly the per-source composition count.
+struct GenericSourceColumns<S> {
+    column_start: Vec<usize>,
+    entries: Vec<(usize, S)>,
+}
+
+impl<S> GenericSourceColumns<S> {
+    fn identity(source_count: usize) -> Self
+    where
+        S: CategoricalScalar,
+    {
+        Self {
+            column_start: (0..=source_count).collect(),
+            entries: (0..source_count).map(|row| (row, S::one())).collect(),
+        }
+    }
+
+    fn source_count(&self) -> usize {
+        self.column_start.len() - 1
+    }
+
+    fn column(&self, source: usize) -> &[(usize, S)] {
+        &self.entries[self.column_start[source]..self.column_start[source + 1]]
+    }
+}
+
+type GenericBlockState<S> = (Vec<FusionTreePairKey>, GenericSourceColumns<S>);
+
+/// Apply one move to the whole current basis (TensorKit `U = U_tmp * U` on a
+/// `FusionTreeBlock`): the move runs once per distinct basis row, in row
+/// order, before any coefficient is spread. That step-major visit order is the
+/// approved checked first-error order (#1962). Destination rows are numbered
+/// by first appearance over `(row, move output)`, as in
+/// [`compose_block_terms`]; each source column then accumulates
+/// `step · source` over its own entries in their stored order.
+fn compose_generic_block<S, E, F, I>(
+    basis: &[FusionTreePairKey],
+    columns: &GenericSourceColumns<S>,
+    mut transform: F,
+) -> Result<GenericBlockState<S>, E>
+where
+    S: Clone + Add<Output = S> + Mul<Output = S>,
+    F: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    I: IntoIterator<Item = (FusionTreePairKey, S)>,
+{
+    let mut index: FxHashMap<FusionTreePairKey, usize> = FxHashMap::default();
+    let mut move_start = Vec::with_capacity(basis.len() + 1);
+    let mut move_terms = Vec::with_capacity(basis.len());
+    move_start.push(0);
+    for key in basis {
+        for (destination, coefficient) in transform(key)? {
+            let next_row = index.len();
+            let row = *index.entry(destination).or_insert(next_row);
+            move_terms.push((row, coefficient));
+        }
+        move_start.push(move_terms.len());
+    }
+    let mut slots: Vec<Option<FusionTreePairKey>> = (0..index.len()).map(|_| None).collect();
+    for (key, row) in index {
+        slots[row] = Some(key);
+    }
+    let next_basis: Vec<FusionTreePairKey> = slots
+        .into_iter()
+        .map(|key| key.expect("dense rows 0..len are all filled"))
+        .collect();
+
+    // `position[row]` is the entry of `row` in the column being built; a
+    // position below the column's first entry belongs to an earlier column.
+    let mut position = vec![usize::MAX; next_basis.len()];
+    let mut column_start = Vec::with_capacity(columns.column_start.len());
+    let mut entries: Vec<(usize, S)> = Vec::with_capacity(columns.entries.len());
+    column_start.push(0);
+    for source in 0..columns.source_count() {
+        let begin = entries.len();
+        for (row, source_coefficient) in columns.column(source) {
+            for (next_row, step_coefficient) in &move_terms[move_start[*row]..move_start[*row + 1]]
+            {
+                let contribution = step_coefficient.clone() * source_coefficient.clone();
+                let at = position[*next_row];
+                if (begin..entries.len()).contains(&at) {
+                    let existing = &mut entries[at].1;
+                    *existing = existing.clone() + contribution;
+                } else {
+                    position[*next_row] = entries.len();
+                    entries.push((*next_row, contribution));
+                }
+            }
+        }
+        column_start.push(entries.len());
+    }
+    Ok((
+        next_basis,
+        GenericSourceColumns {
+            column_start,
+            entries,
+        },
+    ))
+}
+
+/// Order a Generic block result source-major by first appearance (the
+/// [`OrderedBlockLinearMap`] contract). Within one source, destinations follow
+/// that source's column order. Cost is `O(nnz + B)` plus the `D × N` dense
+/// matrix of a non-singleton result, which the group spec stores anyway.
+fn order_generic_block<S>(
+    (basis, columns): GenericBlockState<S>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    let source_count = columns.source_count();
+    let mut ordered_row = vec![usize::MAX; basis.len()];
+    let mut ordered_basis_rows = Vec::with_capacity(basis.len());
+    for (row, _) in &columns.entries {
+        if ordered_row[*row] == usize::MAX {
+            ordered_row[*row] = ordered_basis_rows.len();
+            ordered_basis_rows.push(*row);
+        }
+    }
+    let mut slots = basis.into_iter().map(Some).collect::<Vec<_>>();
+    let destinations = ordered_basis_rows
+        .iter()
+        .map(|&row| {
+            slots[row]
+                .take()
+                .expect("ordered block rows contain each basis row once")
+        })
+        .collect::<Vec<_>>();
+    let is_singleton = columns
+        .column_start
+        .windows(2)
+        .all(|range| range[1] - range[0] == 1);
+    let GenericSourceColumns {
+        column_start,
+        entries,
+    } = columns;
+    let storage = if is_singleton {
+        let (destination_rows, coefficients) = entries
+            .into_iter()
+            .map(|(row, coefficient)| (ordered_row[row], coefficient))
+            .unzip();
+        OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows,
+            coefficients,
+        }
+    } else {
+        let mut dense: Vec<Option<S>> = (0..destinations.len().saturating_mul(source_count))
+            .map(|_| None)
+            .collect();
+        let mut source = 0;
+        for (entry, (row, coefficient)) in entries.into_iter().enumerate() {
+            while entry >= column_start[source + 1] {
+                source += 1;
+            }
+            dense[ordered_row[row] * source_count + source] = Some(coefficient);
+        }
+        OrderedBlockLinearStorage::DenseDstSrc(dense)
+    };
+    OrderedBlockLinearMap {
+        destinations,
+        source_count,
+        storage,
+    }
+}
+
+/// The identity transform of a block: every source maps to itself with
+/// coefficient one, without seeding or spreading a coefficient matrix.
+fn identity_generic_block<S: CategoricalScalar>(
+    src_keys: Vec<FusionTreePairKey>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    let source_count = src_keys.len();
+    OrderedBlockLinearMap {
+        destinations: src_keys,
+        source_count,
+        storage: OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows: (0..source_count).collect(),
+            coefficients: (0..source_count).map(|_| S::one()).collect(),
+        },
+    }
+}
+
+/// The one Generic keyed-block driver of the shared block schedule, over the
+/// fallible symbol access (a checked provider, or the test-only infallible
+/// adapter). Each hook is one or two whole-basis moves of the unchanged
+/// `GenericK` kernels, as TensorKit applies `artin_braid`, `bendleft`,
+/// `bendright`, `foldright` and `foldleft` to a whole `FusionTreeBlock`.
+struct GenericTreePairBlockDriver<'a, C> {
+    rule: &'a C,
+}
+
+impl<C> BlockDriver for GenericTreePairBlockDriver<'_, C>
+where
+    C: GenericRigidAccess,
+{
+    type State = GenericBlockState<C::Scalar>;
+    type Error = CheckedGenericSymbolError<C::Error>;
+    type BraidSchedule<'s> = &'s [PreparedArtinStep];
+
+    fn bend(
+        &mut self,
+        (basis, columns): Self::State,
+        bend: Bend,
+    ) -> Result<Self::State, Self::Error> {
+        let rule = self.rule;
+        compose_generic_block(&basis, &columns, |key| match bend {
+            Bend::Left => generic_bendleft_tree_pair_result(rule, key),
+            Bend::Right => generic_bendright_tree_pair_result(rule, key),
+        })
+    }
+
+    /// TensorKit `fsbraid` (`braiding_manipulations.jl:302-339`): one
+    /// whole-block `artin_braid` per adjacent swap, `U = U_tmp * U`.
+    fn braid_codomain(
+        &mut self,
+        mut state: Self::State,
+        steps: &[PreparedArtinStep],
+    ) -> Result<Self::State, Self::Error> {
+        let rule = self.rule;
+        for step in steps {
+            state = compose_generic_block(&state.0, &state.1, |key| {
+                generic_artin_braid_at_with_inverse_checked(
+                    rule,
+                    key.codomain_tree(),
+                    step.index,
+                    step.inverse,
+                )
+                .map(|terms| with_domain(key, terms))
+            })?;
+        }
+        Ok(state)
+    }
+
+    /// TensorKit `cycleclockwise`/`cycleanticlockwise` on a `FusionTreeBlock`
+    /// (`duality_manipulations.jl:401-440`): fold then bend, or bend then fold
+    /// when the side the fold would take from is empty. Every row of a block
+    /// shares one split, so the first row decides for the whole basis.
+    fn cycle(
+        &mut self,
+        state: Self::State,
+        direction: PreparedCycleDirection,
+    ) -> Result<Self::State, Self::Error> {
+        let rule = self.rule;
+        let fold = |key: &FusionTreePairKey| match direction {
+            PreparedCycleDirection::Clockwise => generic_foldright_tree_pair_result(rule, key),
+            PreparedCycleDirection::Anticlockwise => left_move_by_swap(key, |swapped| {
+                generic_foldright_tree_pair_result(rule, swapped)
+            }),
+        };
+        let bend = |key: &FusionTreePairKey| match direction {
+            PreparedCycleDirection::Clockwise => generic_bendleft_tree_pair_result(rule, key),
+            PreparedCycleDirection::Anticlockwise => generic_bendright_tree_pair_result(rule, key),
+        };
+        let bend_first = state.0.first().is_some_and(|key| match direction {
+            PreparedCycleDirection::Clockwise => key.codomain_tree().uncoupled().is_empty(),
+            PreparedCycleDirection::Anticlockwise => key.domain_tree().uncoupled().is_empty(),
+        });
+        let (basis, columns) = state;
+        if bend_first {
+            let (basis, columns) = compose_generic_block(&basis, &columns, bend)?;
+            compose_generic_block(&basis, &columns, fold)
+        } else {
+            let (basis, columns) = compose_generic_block(&basis, &columns, fold)?;
+            compose_generic_block(&basis, &columns, bend)
+        }
+    }
+}
+
+fn empty_generic_block<S>() -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    OrderedBlockLinearMap {
+        destinations: Vec::new(),
+        source_count: 0,
+        storage: OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows: Vec::new(),
+            coefficients: Vec::new(),
+        },
+    }
+}
+
+fn validate_generic_block_split(
+    src_keys: &[FusionTreePairKey],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> Result<(), CoreError> {
+    for source in src_keys {
+        if source.codomain_tree().uncoupled().len() != codomain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: codomain_rank,
+                actual: source.codomain_tree().uncoupled().len(),
+            });
+        }
+        if source.domain_tree().uncoupled().len() != domain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: domain_rank,
+                actual: source.domain_tree().uncoupled().len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whole-block Generic braid: TensorKit `fsbraid` on one `FusionTreeBlock`
+/// (`braiding_manipulations.jl:302-339`) as selected per source block by
+/// `GenericTreeTransformer` (`treetransformers.jl:53-114`), TensorKit
+/// `cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91`. Repartition into the codomain,
+/// apply each Artin step to the whole basis, repartition to the target split.
+///
+/// QSpace `d2d3d7da` has no ordered Artin/tree-block schedule; the borrowed
+/// technique is its grouped structural reuse (`QSpace::Permute`,
+/// `CRef::Permute`/`SortDegQ`, `X3Map::contractDegQ`): every elementary move
+/// runs once per distinct intermediate tree of the group and is shared by all
+/// source columns.
+///
+/// Rust deviations: provider failures are typed and short-circuit at the
+/// first failing row of the first failing step; TensorKit keeps the full dense
+/// block `|D_j| × N`, here only the reachable rows with sparse source columns.
+///
+/// `src_keys` must be admitted for `rule`; the callers own that proof.
+fn generic_braid_block_result<C>(
+    rule: &C,
+    src_keys: Vec<FusionTreePairKey>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
+    let Some(first) = src_keys.first() else {
+        return Ok(empty_generic_block());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        }
+        .into());
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        }
+        .into());
+    }
+    validate_generic_block_split(&src_keys, codomain_rank, domain_rank)?;
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
+        codomain_permutation,
+        domain_permutation,
+        codomain_levels,
+        domain_levels,
+    )?;
+    if identity {
+        return Ok(identity_generic_block(src_keys));
+    }
+    let columns = GenericSourceColumns::identity(src_keys.len());
+    let state = block_braid(
+        &mut GenericTreePairBlockDriver { rule },
+        (src_keys, columns),
+        codomain_rank,
+        permutation.len(),
+        codomain_permutation.len(),
+        &steps,
+    )?;
+    Ok(order_generic_block(state))
+}
+
+fn generic_permute_block_result<C>(
+    rule: &C,
+    src_keys: Vec<FusionTreePairKey>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        }
+        .into());
+    }
+    let Some(first) = src_keys.first() else {
+        return Ok(empty_generic_block());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    generic_braid_block_result(
+        rule,
+        src_keys,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
+}
+
+/// Whole-block Generic planar transpose: TensorKit `fstranspose`
+/// (`duality_manipulations.jl:540-566`, `cfaa073e`) on one `FusionTreeBlock`:
+/// repartition, then whole-block `cycleanticlockwise`/`cycleclockwise` moves.
+/// Same QSpace correspondence, Rust deviations and admission precondition as
+/// [`generic_braid_block_result`].
+fn generic_transpose_block_result<C>(
+    rule: &C,
+    src_keys: Vec<FusionTreePairKey>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
+    let Some(first) = src_keys.first() else {
+        return Ok(empty_generic_block());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        }
+        .into());
+    }
+    validate_generic_block_split(&src_keys, codomain_rank, domain_rank)?;
+    let position = permutation.iter().position(|&axis| axis == 0);
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let Some(position) = position.filter(|_| !identity) else {
+        return Ok(identity_generic_block(src_keys));
+    };
+    let columns = GenericSourceColumns::identity(src_keys.len());
+    let state = block_transpose(
+        &mut GenericTreePairBlockDriver { rule },
+        (src_keys, columns),
+        codomain_rank,
+        codomain_permutation.len(),
+        transpose_cycles(position, codomain_rank + domain_rank),
+    )?;
+    Ok(order_generic_block(state))
+}
+
+/// Proof that every fusion-tree block key of one exact [`BlockStructure`] is
+/// admitted by one checked Generic provider. It lets the whole-block checked
+/// composers skip per-source re-validation without letting an unadmitted
+/// vertex label reach an F/R block lookup: the proof can only be built by
+/// [`Self::try_new`], which validates every key.
+///
+/// Why not make this crate-private: `tenet-tensors` builds it in its checked
+/// plan preflight and consumes it across the crate boundary.
+#[doc(hidden)]
+pub struct CheckedGenericAdmittedFusionTreeBlockStructure<'provider, 'structure, P> {
+    provider: &'provider P,
+    structure: &'structure BlockStructure,
+}
+
+#[doc(hidden)]
+impl<'provider, 'structure, P>
+    CheckedGenericAdmittedFusionTreeBlockStructure<'provider, 'structure, P>
+where
+    P: CheckedGenericFusion,
+{
+    /// Validate every block key with `provider`, in block order. The first
+    /// failure is returned; nothing is retained.
+    pub fn try_new(
+        provider: &'provider P,
+        structure: &'structure BlockStructure,
+    ) -> Result<Self, CheckedGenericStructureError<P::Error>> {
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                }
+                .into());
+            };
+            validate_generic_fusion_tree_pair_checked(provider, key)?;
+        }
+        Ok(Self {
+            provider,
+            structure,
+        })
+    }
+
+    #[inline]
+    pub fn structure(&self) -> &'structure BlockStructure {
+        self.structure
+    }
+
+    fn admitted_keys(&self, block_indices: &[usize]) -> Result<Vec<FusionTreePairKey>, CoreError> {
+        block_indices
+            .iter()
+            .map(|&index| match self.structure.block(index)?.key() {
+                BlockKey::FusionTree(key) => Ok(key.clone()),
+                key => Err(CoreError::ExpectedFusionTreePairKey { actual: key.kind() }),
+            })
+            .collect()
+    }
+}
+
+#[doc(hidden)]
+impl<P> CheckedGenericAdmittedFusionTreeBlockStructure<'_, '_, P>
+where
+    P: CheckedGenericRigidSymbols,
+{
+    /// Whole-block checked Generic braid of the admitted blocks
+    /// `block_indices`, which must share one fusion-tree group.
+    pub fn generic_braid_ordered_for_block_indices(
+        &self,
+        block_indices: &[usize],
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        codomain_levels: &[usize],
+        domain_levels: &[usize],
+    ) -> Result<
+        OrderedBlockLinearMap<FusionTreePairKey, P::Scalar>,
+        CheckedGenericSymbolError<P::Error>,
+    > {
+        generic_braid_block_result(
+            self.provider,
+            self.admitted_keys(block_indices)?,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        )
+    }
+
+    /// Whole-block checked Generic permutation (symmetric braiding only).
+    pub fn generic_permute_ordered_for_block_indices(
+        &self,
+        block_indices: &[usize],
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<
+        OrderedBlockLinearMap<FusionTreePairKey, P::Scalar>,
+        CheckedGenericSymbolError<P::Error>,
+    > {
+        generic_permute_block_result(
+            self.provider,
+            self.admitted_keys(block_indices)?,
+            codomain_permutation,
+            domain_permutation,
+        )
+    }
+
+    /// Whole-block checked Generic planar transpose.
+    pub fn generic_transpose_ordered_for_block_indices(
+        &self,
+        block_indices: &[usize],
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<
+        OrderedBlockLinearMap<FusionTreePairKey, P::Scalar>,
+        CheckedGenericSymbolError<P::Error>,
+    > {
+        generic_transpose_block_result(
+            self.provider,
+            self.admitted_keys(block_indices)?,
+            codomain_permutation,
+            domain_permutation,
+        )
+    }
+}
+
+/// Validate infallible-rule keys as the test-only block entries' seed did.
 #[cfg(any(test, feature = "testing"))]
-fn seed_generic_tree_pair_block<R>(
+fn admit_generic_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
-) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+) -> Result<Vec<FusionTreePairKey>, CoreError>
 where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
@@ -357,82 +947,10 @@ where
             actual: rule.fusion_style(),
         });
     }
-    let mut basis = Vec::with_capacity(src_keys.len());
-    for source in src_keys {
-        validate_fusion_tree_pair_for_rule(rule, source)?;
-        basis.push(source.clone());
-    }
-    let mut columns = DenseColumns::with_capacity(src_keys.len(), src_keys.len());
-    for source in 0..src_keys.len() {
-        let row = columns.push_empty_row();
-        columns.row_mut(row)[source] = Some(R::Scalar::one());
-    }
-    Ok((basis, columns))
-}
-
-#[cfg(any(test, feature = "testing"))]
-fn order_generic_tree_pair_block<S>(
-    basis: Vec<FusionTreePairKey>,
-    columns: DenseColumns<S>,
-) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
-    let mut slots = basis.into_iter().map(Some).collect::<Vec<_>>();
-    order_block_columns(slots.len(), columns, |basis_row| {
-        slots[basis_row]
-            .take()
-            .expect("ordered block rows contain each basis row once")
-    })
-}
-
-/// The Generic keyed-block driver of the shared block schedule.
-#[cfg(any(test, feature = "testing"))]
-struct GenericTreePairBlockDriver<'a, R> {
-    rule: &'a R,
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl<R> BlockDriver for GenericTreePairBlockDriver<'_, R>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar,
-{
-    type State = (Vec<FusionTreePairKey>, DenseColumns<R::Scalar>);
-    type Error = CoreError;
-    type BraidSchedule<'s> = (&'s [usize], &'s [PreparedArtinStep]);
-
-    fn bend(
-        &mut self,
-        (basis, columns): Self::State,
-        bend: Bend,
-    ) -> Result<Self::State, CoreError> {
-        let rule = self.rule;
-        compose_block_terms(&basis, &columns, |key| match bend {
-            Bend::Left => generic_bendleft_tree_pair(rule, key),
-            Bend::Right => generic_bendright_tree_pair(rule, key),
-        })
-    }
-
-    fn braid_codomain(
-        &mut self,
-        (basis, columns): Self::State,
-        (permutation, steps): (&[usize], &[PreparedArtinStep]),
-    ) -> Result<Self::State, CoreError> {
-        let rule = self.rule;
-        compose_block_terms(&basis, &columns, |key| {
-            generic_braid_tree_unchecked(rule, key.codomain_tree(), permutation, steps)
-                .map(|terms| with_domain(key, terms))
-        })
-    }
-
-    fn cycle(
-        &mut self,
-        (basis, columns): Self::State,
-        direction: PreparedCycleDirection,
-    ) -> Result<Self::State, CoreError> {
-        let rule = self.rule;
-        compose_block_terms(&basis, &columns, |key| {
-            generic_cycle_tree_pair_unchecked(rule, key, direction)
-        })
-    }
+    src_keys
+        .iter()
+        .map(|source| validate_fusion_tree_pair_for_rule(rule, source).map(|_| source.clone()))
+        .collect()
 }
 
 #[doc(hidden)]
@@ -449,64 +967,16 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    if src_keys.is_empty() {
-        return Ok(order_generic_tree_pair_block(
-            Vec::new(),
-            DenseColumns::with_capacity(0, 0),
-        ));
-    }
-    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
-    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
-    if codomain_levels.len() != codomain_rank {
-        return Err(CoreError::DimensionMismatch {
-            expected: codomain_rank,
-            actual: codomain_levels.len(),
-        });
-    }
-    if domain_levels.len() != domain_rank {
-        return Err(CoreError::DimensionMismatch {
-            expected: domain_rank,
-            actual: domain_levels.len(),
-        });
-    }
-    for source in src_keys {
-        if source.codomain_tree().uncoupled().len() != codomain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: codomain_rank,
-                actual: source.codomain_tree().uncoupled().len(),
-            });
-        }
-        if source.domain_tree().uncoupled().len() != domain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: domain_rank,
-                actual: source.domain_tree().uncoupled().len(),
-            });
-        }
-    }
-    let GenericBraidSchedule {
-        permutation,
-        identity,
-        steps,
-    } = generic_braid_schedule(
+    let src_keys = admit_generic_tree_pair_block(rule, src_keys)?;
+    generic_braid_block_result(
+        &InfallibleGenericFR(rule),
+        src_keys,
         codomain_permutation,
         domain_permutation,
         codomain_levels,
         domain_levels,
-    )?;
-
-    let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
-    if identity {
-        return Ok(order_generic_tree_pair_block(basis, columns));
-    }
-    (basis, columns) = block_braid(
-        &mut GenericTreePairBlockDriver { rule },
-        (basis, columns),
-        codomain_rank,
-        permutation.len(),
-        codomain_permutation.len(),
-        (&permutation, &steps),
-    )?;
-    Ok(order_generic_tree_pair_block(basis, columns))
+    )
+    .map_err(map_infallible_generic_symbol_error)
 }
 
 #[doc(hidden)]
@@ -527,24 +997,14 @@ where
             actual: rule.braiding_style(),
         });
     }
-    let Some(first) = src_keys.first() else {
-        return Ok(order_generic_tree_pair_block(
-            Vec::new(),
-            DenseColumns::with_capacity(0, 0),
-        ));
-    };
-    let codomain_rank = first.codomain_tree().uncoupled().len();
-    let domain_rank = first.domain_tree().uncoupled().len();
-    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
-    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
-    generic_braid_tree_pair_block_ordered(
-        rule,
+    let src_keys = admit_generic_tree_pair_block(rule, src_keys)?;
+    generic_permute_block_result(
+        &InfallibleGenericFR(rule),
         src_keys,
         codomain_permutation,
         domain_permutation,
-        &codomain_levels,
-        &domain_levels,
     )
+    .map_err(map_infallible_generic_symbol_error)
 }
 
 #[doc(hidden)]
@@ -559,52 +1019,12 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    if src_keys.is_empty() {
-        return Ok(order_generic_tree_pair_block(
-            Vec::new(),
-            DenseColumns::with_capacity(0, 0),
-        ));
-    }
-    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
-    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
-    let permutation = linearize_tree_pair_permutation(
+    let src_keys = admit_generic_tree_pair_block(rule, src_keys)?;
+    generic_transpose_block_result(
+        &InfallibleGenericFR(rule),
+        src_keys,
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
-    )?;
-    if !is_cyclic_permutation(&permutation) {
-        return Err(CoreError::InvalidPermutation {
-            permutation,
-            rank: codomain_rank + domain_rank,
-        });
-    }
-    for source in src_keys {
-        if source.codomain_tree().uncoupled().len() != codomain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: codomain_rank,
-                actual: source.codomain_tree().uncoupled().len(),
-            });
-        }
-        if source.domain_tree().uncoupled().len() != domain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: domain_rank,
-                actual: source.domain_tree().uncoupled().len(),
-            });
-        }
-    }
-    let Some(position) = permutation.iter().position(|&axis| axis == 0) else {
-        let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
-        return Ok(order_generic_tree_pair_block(basis, columns));
-    };
-    let total_rank = codomain_rank + domain_rank;
-    let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
-    let (basis, columns) = block_transpose(
-        &mut GenericTreePairBlockDriver { rule },
-        (basis, columns),
-        codomain_rank,
-        codomain_permutation.len(),
-        transpose_cycles(position, total_rank),
-    )?;
-    Ok(order_generic_tree_pair_block(basis, columns))
+    )
+    .map_err(map_infallible_generic_symbol_error)
 }

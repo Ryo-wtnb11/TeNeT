@@ -10,16 +10,15 @@ use tenet_core::{
     generic_transpose_tree_pair_block_ordered, GenericRigidSymbols,
 };
 use tenet_core::{
-    generic_braid_tree_pair_checked, generic_permute_tree_pair_checked,
-    generic_transpose_tree_pair_checked, multiplicity_free_braid_tree_pair_block_ordered_indexed,
-    multiplicity_free_transpose_tree_pair_block_ordered_indexed,
-    validate_generic_fusion_tree_pair_checked, BlockKey, BlockKeyKind, BlockStructure,
-    CategoricalScalar, CheckedGenericFusion, CheckedGenericRigidSymbols,
-    CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionRule,
-    FusionStyleKind, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey,
-    FusionTreePairOrientation, LocallyValidatedFusionTreeBlockStructure,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
-    OrderedBlockLinearStorage, PreparedTreePairOperation,
+    multiplicity_free_braid_tree_pair_block_ordered_indexed,
+    multiplicity_free_transpose_tree_pair_block_ordered_indexed, BlockKey, BlockKeyKind,
+    BlockStructure, CategoricalScalar, CheckedGenericAdmittedFusionTreeBlockStructure,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
+    CheckedGenericSymbolError, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
+    FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
+    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
+    PreparedTreePairOperation,
 };
 
 use crate::OperationError;
@@ -294,15 +293,27 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
-pub(crate) struct CheckedGenericTreePairPreflight<'structure> {
-    structure: &'structure BlockStructure,
+pub(crate) struct CheckedGenericTreePairPreflight<'provider, 'structure, P> {
+    admitted: CheckedGenericAdmittedFusionTreeBlockStructure<'provider, 'structure, P>,
 }
 
-fn validate_checked_generic_tree_pair_preflight<'structure, P>(
-    provider: &P,
+impl<'structure, P> CheckedGenericTreePairPreflight<'_, 'structure, P>
+where
+    P: CheckedGenericFusion,
+{
+    fn structure(&self) -> &'structure BlockStructure {
+        self.admitted.structure()
+    }
+}
+
+fn validate_checked_generic_tree_pair_preflight<'provider, 'structure, P>(
+    provider: &'provider P,
     operation: &TreeTransformOperation,
     src_structure: &'structure BlockStructure,
-) -> Result<CheckedGenericTreePairPreflight<'structure>, CheckedGenericPlanError<P::Error>>
+) -> Result<
+    CheckedGenericTreePairPreflight<'provider, 'structure, P>,
+    CheckedGenericPlanError<P::Error>,
+>
 where
     P: CheckedGenericFusion,
 {
@@ -325,29 +336,19 @@ where
     validate_tree_transform_rank_syntax(operation, src_structure.rank())?;
     validate_fusion_tree_key_namespace(src_structure)?;
     validate_tree_transform_operation_syntax(operation, src_structure)?;
-    for index in 0..src_structure.block_count() {
-        let block = src_structure.block(index)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            return Err(CheckedGenericPlanError::Operation(
-                OperationError::ExpectedFusionTreeBlock {
-                    tensor: "src",
-                    index,
-                },
-            ));
-        };
-        validate_generic_fusion_tree_pair_checked(provider, key)
-            .map_err(map_checked_generic_structure_error)?;
-    }
-    Ok(CheckedGenericTreePairPreflight {
-        structure: src_structure,
-    })
+    let admitted = CheckedGenericAdmittedFusionTreeBlockStructure::try_new(provider, src_structure)
+        .map_err(map_checked_generic_structure_error)?;
+    Ok(CheckedGenericTreePairPreflight { admitted })
 }
 
-pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<'structure, P>(
-    provider: &P,
+pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<'provider, 'structure, P>(
+    provider: &'provider P,
     operation: &TreeTransformOperation,
     src_structure: &'structure BlockStructure,
-) -> Result<CheckedGenericTreePairPreflight<'structure>, CheckedGenericPlanError<P::Error>>
+) -> Result<
+    CheckedGenericTreePairPreflight<'provider, 'structure, P>,
+    CheckedGenericPlanError<P::Error>,
+>
 where
     P: CheckedGenericFusion,
 {
@@ -2060,6 +2061,12 @@ where
 /// The complete source structure is admitted before the first rigidity or F/R
 /// lookup. A failure returns no plan, and this standalone entry does not access
 /// the Runtime transform store.
+///
+/// Each source group is composed as one whole block, step by step (TensorKit
+/// `GenericTreeTransformer`, `treetransformers.jl:53-114` at `cfaa073e`). The
+/// first provider failure is that of the lowest basis row of the lowest
+/// failing elementary step of the lowest failing group (#1962, approved
+/// step-major order).
 pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
     provider: &P,
     operation: TreeTransformOperation,
@@ -2071,30 +2078,25 @@ where
 {
     let source_proof =
         validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
-    build_checked_generic_tree_pair_transform_group_plan_validated(
-        provider,
-        operation,
-        &source_proof,
-        None,
-    )
+    build_checked_generic_tree_pair_transform_group_plan_validated(operation, &source_proof, None)
 }
 
 pub(crate) fn build_checked_generic_tree_pair_transform_group_plan_validated<P>(
-    provider: &P,
     operation: TreeTransformOperation,
-    source_proof: &CheckedGenericTreePairPreflight<'_>,
+    source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
     reuse: Option<&GroupSpecReuse<'_, P::Scalar>>,
 ) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
     P::Scalar: CategoricalScalar + Zero,
 {
-    // Why dispatch on fusion style: see
-    // `build_tree_pair_transform_group_plan_validated_reusing`.
-    let reuse = reuse.filter(|_| provider.fusion_style() != FusionStyleKind::Unique);
-    let all_groups = source_proof.structure.fusion_tree_group_slice();
+    // The preflight admitted a fusion style with multiplicity, so the Unique
+    // exclusion of `build_tree_pair_transform_group_plan_validated_reusing`
+    // never applies here.
+    let structure = source_proof.structure();
+    let all_groups = structure.fusion_tree_group_slice();
     let flat_keys = reuse
-        .map(|_| source_group_key_refs(source_proof.structure))
+        .map(|_| source_group_key_refs(structure))
         .transpose()?;
     let groups = flat_keys.as_deref().map(|keys| {
         split_source_groups(
@@ -2110,7 +2112,6 @@ where
             .into_iter()
             .map(|index| {
                 build_one_checked_generic_tree_pair_group(
-                    provider,
                     &operation,
                     &source_axes,
                     source_proof,
@@ -2122,50 +2123,40 @@ where
 }
 
 fn build_one_checked_generic_tree_pair_group<P>(
-    provider: &P,
     operation: &TreeTransformOperation,
     source_axes: &Arc<[usize]>,
-    source_proof: &CheckedGenericTreePairPreflight<'_>,
+    source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
     group: &FusionTreeBlockGroup,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<P::Scalar>>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
     P::Scalar: CategoricalScalar + Zero,
 {
-    {
-        let mut rows_for = |_: usize, source: &FusionTreePairKey| {
-            let rows = match operation.kind() {
-                TreeTransformOperationKind::Permute => generic_permute_tree_pair_checked(
-                    provider,
-                    source,
-                    operation.codomain_permutation(),
-                    operation.domain_permutation(),
-                ),
-                TreeTransformOperationKind::Braid => generic_braid_tree_pair_checked(
-                    provider,
-                    source,
-                    operation.codomain_permutation(),
-                    operation.domain_permutation(),
-                    operation.codomain_levels(),
-                    operation.domain_levels(),
-                ),
-                TreeTransformOperationKind::Transpose => generic_transpose_tree_pair_checked(
-                    provider,
-                    source,
-                    operation.codomain_permutation(),
-                    operation.domain_permutation(),
-                ),
-            }
-            .map_err(map_checked_generic_symbol_error)?;
-            Ok::<_, CheckedGenericPlanError<P::Error>>(Arc::new(rows))
-        };
-        assemble_tree_pair_group_specs_result(
-            source_proof.structure,
-            group,
-            source_axes,
-            &mut rows_for,
-        )
+    let admitted = &source_proof.admitted;
+    let indices = group.block_indices();
+    let ordered = match operation.kind() {
+        TreeTransformOperationKind::Permute => admitted.generic_permute_ordered_for_block_indices(
+            indices,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+        ),
+        TreeTransformOperationKind::Braid => admitted.generic_braid_ordered_for_block_indices(
+            indices,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            operation.codomain_levels(),
+            operation.domain_levels(),
+        ),
+        TreeTransformOperationKind::Transpose => admitted
+            .generic_transpose_ordered_for_block_indices(
+                indices,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+            ),
     }
+    .map_err(map_checked_generic_symbol_error)?;
+    assemble_ordered_tree_pair_group_specs(source_proof.structure(), group, source_axes, ordered)
+        .map_err(CheckedGenericPlanError::Operation)
 }
 
 #[cfg(test)]
@@ -2361,6 +2352,7 @@ where
     assemble_tree_pair_group_specs_result(src_structure, group, source_axes, rows_for)
 }
 
+#[cfg(test)]
 fn assemble_tree_pair_group_specs_result<T, E, F>(
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,

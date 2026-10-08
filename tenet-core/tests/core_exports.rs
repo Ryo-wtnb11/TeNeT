@@ -207,6 +207,7 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "CheckedFusionAlgebra",
         "CheckedFusionSpaceError",
         "CheckedGenericAdmissionMode",
+        "CheckedGenericAdmittedFusionTreeBlockStructure",
         "CheckedGenericFusion",
         "CheckedGenericPivotal",
         "CheckedGenericRigidSymbols",
