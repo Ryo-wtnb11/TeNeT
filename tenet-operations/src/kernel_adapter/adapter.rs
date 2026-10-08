@@ -185,9 +185,10 @@ pub trait HostKernelAdapter<T> {
 
 /// Default host kernel adapter backed by the strided-rs style raw kernels.
 ///
-/// The recoupling matrix application is currently a scalar loop; swapping it
-/// for a BLAS/GEMM call happens by replacing this adapter, not by editing the
-/// replay drivers.
+/// Production recoupling is a grouped dense-executor GEMM that does not go
+/// through this adapter; the scalar-loop `recoupling_src_times_u_transpose`
+/// exists only under `cfg(test)` / the `testing` feature as the reference
+/// oracle.
 ///
 /// Why not `Copy` or externally constructible: direct/unbaked calls retain
 /// mutable normalization and traversal scratch. Compiled replay supplies its

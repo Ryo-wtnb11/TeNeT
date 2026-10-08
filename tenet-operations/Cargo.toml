@@ -29,8 +29,10 @@ blas-accelerate = ["tenet-dense/blas-accelerate"]
 blas-openblas = ["tenet-dense/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject"]
-# Reference oracle for tree-transform replay (per-block strided driver and
-# scalar recoupling); production replay never uses it (#1767).
+# Unstable, internal: reference oracle for tree-transform replay (per-block
+# strided driver and scalar recoupling); production replay never uses it
+# (#1767). It also adds `HostKernelAdapter::recoupling_src_times_u_transpose`,
+# a required trait method, so only in-workspace tests/benches may enable it.
 testing = []
 cuda = ["tenet-dense/cuda"]
 

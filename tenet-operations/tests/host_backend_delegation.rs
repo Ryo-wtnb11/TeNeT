@@ -161,3 +161,62 @@ fn host_backend_is_the_batched_gemm_path() {
         "no fixture separates the GEMM path from the scalar oracle bitwise"
     );
 }
+
+#[test]
+fn host_backend_tensor_map_entry_matches_dense() {
+    use tenet_core::{TensorMap, TensorMapSpace};
+    use tenet_operations::TreeTransformStructure;
+    // One Multi group over two 2x2 blocks.
+    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let src_structure = std::sync::Arc::new(
+        tenet_core::BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap(),
+    );
+    let values: Vec<f64> = (0..8).map(|i| (i as f64 * 0.731 + 0.3).sin()).collect();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_shared_structure(
+        values,
+        space.clone(),
+        std::sync::Arc::clone(&src_structure),
+    )
+    .unwrap();
+    let make_dst = || {
+        TensorMap::<f64, 2, 0>::from_vec_with_shared_structure(
+            vec![0.25; 8],
+            space.clone(),
+            std::sync::Arc::clone(&src_structure),
+        )
+        .unwrap()
+    };
+    let structure = TreeTransformStructure::compile(
+        &make_dst(),
+        &src,
+        &[tenet_operations::TreeTransformBlockSpec::multi(
+            vec![0, 1],
+            vec![0, 1],
+            vec![0.3_f64, -1.1, 0.7, 0.9],
+        )],
+    )
+    .unwrap();
+    let mut host = make_dst();
+    let mut dense = make_dst();
+    HostTensorOperations
+        .tree_transform_structure_into(
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &mut host,
+            &src,
+            0.7,
+            0.5,
+        )
+        .unwrap();
+    DenseTreeTransformOperations::default()
+        .tree_transform_structure_into(
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &mut dense,
+            &src,
+            0.7,
+            0.5,
+        )
+        .unwrap();
+    assert_eq!(host.data(), dense.data());
+}
