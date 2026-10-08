@@ -290,7 +290,6 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "SUNFusionRule",
         "SUNFusionRuleError",
         "SUNSymbolError",
-        "ScratchStorage",
         "SectorBlock",
         "SectorCodec",
         "SectorId",
