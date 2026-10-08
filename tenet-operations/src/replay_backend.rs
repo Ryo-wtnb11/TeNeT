@@ -351,11 +351,12 @@ impl<E> DenseTreeTransformOperations<E> {
         self.recoupling_threads
     }
 
-    /// Sets the tree-transform replay worker count. `0` is treated as `1`
-    /// (serial); values `> 1` parallelize replays whose destination length
+    /// Sets the tree-transform replay worker count; must be at least 1.
+    /// Values `> 1` parallelize replays whose destination length
     /// exceeds [`Self::transform_parallel_min_len`].
     pub fn set_recoupling_threads(&mut self, threads: usize) {
-        self.recoupling_threads = threads.max(1);
+        assert!(threads >= 1, "recoupling_threads must be at least 1");
+        self.recoupling_threads = threads;
     }
 
     #[inline]

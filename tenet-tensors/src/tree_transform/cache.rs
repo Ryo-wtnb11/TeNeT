@@ -768,7 +768,8 @@ impl<T> std::fmt::Debug for TreeTransformPlanning<T> {
 
 impl<T> TreeTransformPlanning<T> {
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
-        self.recoupling_threads = threads.max(1);
+        debug_assert!(threads >= 1, "recoupling_threads must be at least 1");
+        self.recoupling_threads = threads;
     }
 
     pub(crate) fn bind_coefficient_store(

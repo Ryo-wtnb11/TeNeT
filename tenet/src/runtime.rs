@@ -1462,7 +1462,7 @@ impl std::fmt::Debug for Runtime {
 }
 
 /// Selects the CPU linear-algebra provider for dense per-coupled-sector
-/// factorizations (SVD / QR / eigh / GEMM), chosen via
+/// factorizations (SVD / QR / eigh / eig / inv / exp), chosen via
 /// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
 /// only — results stay TensorKit-equivalent across providers.
 ///
@@ -1494,6 +1494,8 @@ impl LinalgBackend {
 pub enum RuntimeConfigError {
     /// [`RuntimeBuilder::dense_threads`] was given zero.
     ZeroDenseThreads,
+    /// [`RuntimeBuilder::recoupling_threads`] was given zero.
+    ZeroRecouplingThreads,
     /// Both [`RuntimeBuilder::with_dense_executor`] and
     /// [`RuntimeBuilder::linalg_backend`] select the factorization provider.
     DenseExecutorWithLinalgBackend,
@@ -1503,6 +1505,7 @@ impl std::fmt::Display for RuntimeConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ZeroDenseThreads => "dense_threads must be at least 1",
+            Self::ZeroRecouplingThreads => "recoupling_threads must be at least 1",
             Self::DenseExecutorWithLinalgBackend => {
                 "with_dense_executor and linalg_backend both select the factorization provider"
             }
@@ -1589,13 +1592,15 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
-    /// coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
+    /// Selects the CPU factorization backend (SVD / QR / eigh / eig / inv / exp
+    /// on the coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
     /// When no executor is injected, the selected built-in `linalg_backend` is
     /// used; when it is unset, the provider follows Tenferro's resolved compiled
     /// default: BLAS when its CPU build enables `cpu-blas`, otherwise faer. This
     /// is the seam for a system BLAS/LAPACK or MKL backend: implement
     /// `DenseExecutor` and pass it here — no operator or decomposition code changes.
+    /// Contraction GEMM is not delegated to the injected executor; it is
+    /// selected by [`Self::gemm_backend`].
     ///
     /// The injected executor owns its thread configuration. [`Self::dense_threads`]
     /// sizes the runtime CPU pool, which still runs this runtime's replay,
@@ -1690,7 +1695,8 @@ impl RuntimeBuilder {
     /// SU(2) workloads; **not** BLAS threads) and for tree-transform plan
     /// compile. Default is 1 (serial); values above 1 request parallelism
     /// past the backend's size gate, capped by and run on this runtime's CPU
-    /// pool ([`Self::dense_threads`]).
+    /// pool ([`Self::dense_threads`]). Zero makes [`Self::build`] fail with
+    /// [`RuntimeConfigError::ZeroRecouplingThreads`].
     pub fn recoupling_threads(mut self, threads: usize) -> Self {
         self.recoupling_threads = Some(threads);
         self
@@ -1702,6 +1708,9 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, Error> {
         if self.dense_threads == Some(0) {
             return Err(RuntimeConfigError::ZeroDenseThreads.into());
+        }
+        if self.recoupling_threads == Some(0) {
+            return Err(RuntimeConfigError::ZeroRecouplingThreads.into());
         }
         if self.dense_executor.is_some() && self.linalg_backend.is_some() {
             return Err(RuntimeConfigError::DenseExecutorWithLinalgBackend.into());
