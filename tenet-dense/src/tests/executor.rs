@@ -2473,3 +2473,72 @@ fn batched_matmul_mismatch_and_ops_gap_are_typed() {
         }
     ));
 }
+
+#[test]
+fn copy_into_storage_length_disagreement_is_shape_mismatch() {
+    let mut dst = [0.0_f64; 2];
+    let view = DenseViewMut::new(&mut dst, &[2], &[1], 0).unwrap();
+    let error =
+        crate::executor::copy_contiguous_tensor_into_view(&[1.0_f64], &[2], view, "copy_probe")
+            .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::ShapeMismatch {
+            op: "copy_probe",
+            expected: vec![2],
+            actual: vec![1],
+        }
+    );
+}
+
+#[test]
+fn batched_matmul_with_ops_dtype_mismatch_and_integer_operands_are_typed() {
+    let (a, b, i) = ([1.0_f64], [1.0_f32], [1_i32]);
+    let mut out = [0.0_f64];
+    let mut out_i = [0_i32];
+    let (shape, strides) = ([1, 1], [1, 1]);
+    let (alpha, beta) = (DenseScalar::F64(1.0), DenseScalar::F64(0.0));
+
+    let mut default = DefaultDenseExecutor::new();
+    let error = default
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::F64(DenseViewMut::new(&mut out, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&a, &shape, &strides, 0).unwrap()),
+            DenseRead::F32(DenseView::new(&b, &shape, &strides, 0).unwrap()),
+            &[],
+            &[],
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::DTypeMismatch {
+            op: "matmul_batch_axpby_with_ops_into",
+            expected: DenseDType::F64,
+            actual: DenseDType::F32,
+        }
+    );
+
+    // All operands agree on a dtype the batched route does not cover.
+    let error = NoAxpby::default()
+        .matmul_batch_axpby_into(
+            DenseWrite::I32(DenseViewMut::new(&mut out_i, &shape, &strides, 0).unwrap()),
+            DenseRead::I32(DenseView::new(&i, &shape, &strides, 0).unwrap()),
+            DenseRead::I32(DenseView::new(&i, &shape, &strides, 0).unwrap()),
+            &[],
+            &[],
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "matmul_batch_axpby_into",
+            ..
+        }
+    ));
+}

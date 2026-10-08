@@ -456,7 +456,7 @@ fn copy_dense_tensor_into(
     }
 }
 
-fn copy_contiguous_tensor_into_view<T: Copy>(
+pub(crate) fn copy_contiguous_tensor_into_view<T: Copy>(
     source: &[T],
     source_shape: &[usize],
     mut output: DenseViewMut<'_, T>,
