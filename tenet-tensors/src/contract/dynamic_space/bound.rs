@@ -358,9 +358,18 @@ where
                 tensor: "checked Generic provider binding",
             });
         }
+        // Why not `self.provider.rule_identity()`: `CheckedGenericFusion`
+        // requires an immutable identity, so the one this binding recorded
+        // from its provider is that provider's identity; rebuilding it would
+        // only repeat a content-identity allocation (#2046).
+        let held = self
+            .space
+            .admission()
+            .rule_identity()
+            .expect("checked Generic binding is complete");
         crate::admission::admit_checked_generic_providers(
             &prepared.identity,
-            &self.provider.rule_identity(),
+            held,
             [self.provider.fusion_style()],
         )
         .map_err(OperationError::from_core_preserving_context)?;
