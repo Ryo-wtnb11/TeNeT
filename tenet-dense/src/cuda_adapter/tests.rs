@@ -9,12 +9,13 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, DenseError> {
-    Ok(cuda_hermitian_regions::<D>(
-        ctx,
-        src,
-        &[(offset, n)],
-        <D::Real as CudaRealScalar>::EPSILON.powf(0.75),
-    )?[0])
+    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)], default_tolerance::<D>())?[0])
+}
+
+/// TeNeT's default eigh admission tolerance, `eps(real(D))^(3/4)`
+/// (`HermitianTol::DEFAULT`), which the device fixtures are expressed in.
+fn default_tolerance<D: CudaScalar>() -> f64 {
+    <D::Real as CudaRealScalar>::EPSILON.powf(0.75)
 }
 
 #[test]
@@ -413,20 +414,23 @@ fn cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata() {
     assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.with(Cell::get), 0);
     assert!(CUDA_METADATA_DOWNLOAD_BYTES.with(Cell::get) <= 4 * 8);
 
+    let tol = default_tolerance::<f64>();
     let near_threshold = |ctx: &CudaDenseContext, delta: f64| {
-        // For [[1, delta], [0, 1]], the shared half-residual rule changes
-        // truth value at delta = 128 eps up to negligible O(delta^2).
+        // For [[1, delta], [0, 1]], `delta / sqrt(2) <= tol * sqrt(2 + delta^2)`
+        // changes truth value at delta = 2 tol up to negligible O(delta^2).
         CudaDenseStorage::upload::<f64>(ctx, &[1.0, 0.0, delta, 1.0]).unwrap()
     };
-    let below = near_threshold(&ctx, 120.0 * f64::EPSILON);
-    let above = near_threshold(&ctx, 136.0 * f64::EPSILON);
+    let below = near_threshold(&ctx, 0.97 * 2.0 * tol);
+    let above = near_threshold(&ctx, 1.03 * 2.0 * tol);
     assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &below, 0, 2).unwrap());
     assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &above, 0, 2).unwrap());
 
     let zero = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0; n * n]).unwrap();
     assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &zero, 0, n).unwrap());
 
-    data[n] = 256.0 * f64::EPSILON;
+    // ||A||_F ~ 2 and the half residual is |data[n] - data[1]| / sqrt(2), so
+    // admission needs |data[n] - data[1]| <= 2 sqrt(2) tol; this is ~3x over.
+    data[n] = data[1] + 8.0 * tol;
     let asymmetric = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
     assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &asymmetric, 0, n).unwrap());
 
