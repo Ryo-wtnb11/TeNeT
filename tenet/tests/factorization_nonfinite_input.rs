@@ -61,15 +61,6 @@ fn diagonal_with<D: TensorScalar>(runtime: &Runtime, bad: D, one: D) -> TensorMa
     .unwrap()
 }
 
-/// A multiplicity-free lazy adjoint's LQ runs as the QR of its parent (D1,
-/// #1755), so its refusal names `qr`.
-fn redirected(errors: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
-    errors
-        .into_iter()
-        .map(|(family, error)| (if family == "lq" { "qr" } else { family }, error))
-        .collect()
-}
-
 #[test]
 fn multiplicity_free_factorizations_refuse_nonfinite_real_input() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -78,7 +69,7 @@ fn multiplicity_free_factorizations_refuse_nonfinite_real_input() {
         assert_finite_input_refusals(nonfinite_factor_errors!(&dense), &format!("dense {bad}"));
         let adjoint = dense.adjoint().unwrap();
         assert_finite_input_refusals(
-            redirected(nonfinite_factor_errors!(&adjoint)),
+            nonfinite_factor_errors!(&adjoint),
             &format!("lazy adjoint {bad}"),
         );
         let diagonal = diagonal_with(&runtime, bad, 1.0);
@@ -103,7 +94,7 @@ fn multiplicity_free_factorizations_refuse_nonfinite_complex_input() {
         assert_finite_input_refusals(nonfinite_factor_errors!(&dense), &format!("dense {bad}"));
         let adjoint = dense.adjoint().unwrap();
         assert_finite_input_refusals(
-            redirected(nonfinite_factor_errors!(&adjoint)),
+            nonfinite_factor_errors!(&adjoint),
             &format!("lazy adjoint {bad}"),
         );
         let diagonal = diagonal_with(&runtime, bad, one);
