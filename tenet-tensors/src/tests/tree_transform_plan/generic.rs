@@ -384,11 +384,12 @@ enum MeasurementProviderCall {
     FrobeniusSchur,
     F,
     R,
+    Dim,
 }
 
 #[cfg(feature = "racah-generated")]
 impl MeasurementProviderCall {
-    const COUNT: usize = 8;
+    const COUNT: usize = 9;
 
     fn index(self) -> usize {
         self as usize
@@ -478,6 +479,11 @@ impl<P: CheckedGenericFusion> CheckedGenericFusion for MeasurementProvider<P> {
 #[cfg(feature = "racah-generated")]
 impl<P: CheckedGenericRigidSymbols> CheckedGenericRigidSymbols for MeasurementProvider<P> {
     type Scalar = P::Scalar;
+
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.hit(MeasurementProviderCall::Dim);
+        self.inner.try_dim_scalar(sector)
+    }
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         self.hit(MeasurementProviderCall::SqrtDim);
@@ -1465,7 +1471,7 @@ fn measure_checked_generic_transform_case(
 #[test]
 #[ignore = "benchmark: run via benchmarks.yml"]
 fn measure_checked_generic_transform_phases() {
-    println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r");
+    println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r,dim");
     println!("spy_instrumented_phase_timings_auxiliary_only=true");
     for (n, adjoint_labels) in [(3, &[1, 1][..]), (4, &[1, 0, 1][..])] {
         for (operation_name, operation) in [

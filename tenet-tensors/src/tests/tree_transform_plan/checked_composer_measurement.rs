@@ -62,12 +62,14 @@ impl CategoricalScalar for Counted {
     }
 }
 
-const CALLS: [&str; 8] = ["channels", "dual", "n", "sqrt", "inv_sqrt", "fs", "f", "r"];
+const CALLS: [&str; 9] = [
+    "channels", "dual", "n", "sqrt", "inv_sqrt", "fs", "f", "r", "dim",
+];
 
 /// SU(3) with counted coefficients and per-kind provider call counts.
 struct Measured {
     inner: SUNFusionRule,
-    calls: Cell<[u64; 8]>,
+    calls: Cell<[u64; 9]>,
 }
 
 impl Measured {
@@ -116,6 +118,10 @@ impl CheckedGenericFusion for Measured {
 
 impl CheckedGenericRigidSymbols for Measured {
     type Scalar = Counted;
+    fn try_dim_scalar(&self, a: SectorId) -> Result<Counted, Self::Error> {
+        self.hit(8);
+        self.inner.try_dim_scalar(a).map(Counted)
+    }
     fn try_sqrt_dim_scalar(&self, a: SectorId) -> Result<Counted, Self::Error> {
         self.hit(3);
         self.inner.try_sqrt_dim_scalar(a).map(Counted)
@@ -235,7 +241,7 @@ fn measure_case(
 
     let measured = Measured {
         inner: SUNFusionRule::new(3).unwrap(),
-        calls: Cell::new([0; 8]),
+        calls: Cell::new([0; 9]),
     };
     MULS.set(0);
     ADDS.set(0);

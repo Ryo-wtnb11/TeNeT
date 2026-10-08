@@ -787,6 +787,9 @@ impl CheckedGenericFusion for GaugedSun {
 
 impl CheckedGenericRigidSymbols for GaugedSun {
     type Scalar = Complex64;
+    fn try_dim_scalar(&self, a: SectorId) -> Result<Complex64, Self::Error> {
+        self.inner.try_dim_scalar(a).map(Complex64::from)
+    }
     fn try_sqrt_dim_scalar(&self, a: SectorId) -> Result<Complex64, Self::Error> {
         self.inner.try_sqrt_dim_scalar(a).map(Complex64::from)
     }

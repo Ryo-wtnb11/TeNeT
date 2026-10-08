@@ -1009,6 +1009,23 @@ where
 pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
     type Scalar: CategoricalScalar + Send + Sync;
 
+    /// The quantum dimension `dim(sector)` (TensorKitSectors `dim`), the
+    /// weight of every quantum-dimension-weighted reduction and truncation
+    /// (TensorKit `findtruncated(::SectorVector, ...)`, `truncation.jl:187`).
+    ///
+    /// The default squares [`try_sqrt_dim_scalar`](Self::try_sqrt_dim_scalar),
+    /// which can be one rounding off an integer dimension. A provider that
+    /// knows `dim` exactly overrides this so that weighted budgets and exact
+    /// cross-sector ties compare exactly, as TensorKit's `Int` dimensions do.
+    ///
+    /// A wrapper that forwards to another checked provider must forward this
+    /// method too: left to the default, it silently degrades the wrapped
+    /// provider's exact `dim` to `sqrt(dim)^2`.
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        let sqrt_dim = self.try_sqrt_dim_scalar(sector)?;
+        Ok(sqrt_dim.clone() * sqrt_dim)
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_frobenius_schur_phase_scalar(

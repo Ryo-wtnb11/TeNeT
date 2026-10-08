@@ -360,6 +360,12 @@ impl TypedSectorAdmission for SUNFusionRule {
 impl CheckedGenericRigidSymbols for SUNFusionRule {
     type Scalar = f64;
 
+    /// The Weyl dimension, exact below `2^53`, rounded once above it, and
+    /// [`SUNFusionRuleError::DimensionNotRepresentable`] past `f64::MAX`.
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.dim_scalar(sector)
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         Ok(self.dim_scalar(sector)?.sqrt())
     }
@@ -584,6 +590,21 @@ mod tests {
             rule.try_inv_sqrt_dim_scalar(sector).unwrap(),
             sqrt_dimension.recip()
         );
+        assert_eq!(rule.try_dim_scalar(sector).unwrap(), expected_dimension);
+    }
+
+    #[test]
+    fn checked_rigid_dimension_is_the_exact_weyl_dimension() {
+        // What: `dim` is not `sqrt(dim)^2`, which is off by one rounding for
+        // 3, 6 and 8 (`sqrt(8)^2 = 8.000000000000002`).
+        let rule = SUNFusionRule::new(3).unwrap();
+        for p in 0..6_i64 {
+            for q in 0..6_i64 {
+                let sector = rule.encode_dynkin(&[p, q]).unwrap();
+                let weyl = (p + 1) * (q + 1) * (p + q + 2) / 2;
+                assert_eq!(rule.try_dim_scalar(sector).unwrap(), weyl as f64);
+            }
+        }
     }
 
     #[test]

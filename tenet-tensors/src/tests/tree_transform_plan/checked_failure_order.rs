@@ -70,6 +70,9 @@ impl CheckedGenericFusion for TwoKeyFailures {
 }
 impl CheckedGenericRigidSymbols for TwoKeyFailures {
     type Scalar = f64;
+    fn try_dim_scalar(&self, a: SectorId) -> Result<f64, Self::Error> {
+        self.inner.try_dim_scalar(a).map_err(TwoKeyError::Delegated)
+    }
     fn try_sqrt_dim_scalar(&self, a: SectorId) -> Result<f64, Self::Error> {
         self.inner
             .try_sqrt_dim_scalar(a)
