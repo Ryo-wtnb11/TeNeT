@@ -101,7 +101,8 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
 /// [`cuda_hermitian_regions`] over `members` stacked copies of the same
 /// regions, member `b` of region `(offset, n)` at `offset + b *
 /// member_stride`. Returns one decision per (member, region), member-major:
-/// `decisions[b * regions.len() + r]`.
+/// `decisions[b * regions.len() + r]`. Zero members is an empty stack: no
+/// decisions, no transfers (after the complex check below).
 /// The caller must supply a finite, non-negative `relative_tolerance`.
 ///
 /// Each (member, region) pair is decided by exactly the rule and the three
@@ -132,6 +133,11 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
             op: members.op(),
             message: "per-member normalizers of a complex payload".into(),
         });
+    }
+    if members.count() == 0 {
+        // An empty stack has no (member, region) pair to decide, as an empty
+        // `regions` list has none: the empty result, with no device work.
+        return Ok(Vec::new());
     }
     admit_regions::<D>(ctx, src, regions, members, relative_tolerance)
 }

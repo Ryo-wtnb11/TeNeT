@@ -446,6 +446,30 @@ fn member_stacks_decide_every_member_as_the_single_rule_with_bounded_downloads()
     stack_case::<f32>(&mut ctx, "f32");
     stack_case::<f64>(&mut ctx, "f64");
 
+    // An empty stack decides nothing, before any device work, whatever its
+    // regions or stride.
+    let (data, regions, stride) = stacked::<f64>(1, 0);
+    let src = CudaDenseStorage::upload::<f64>(&ctx, &data).expect("upload");
+    for member_stride in [stride, 0, usize::MAX] {
+        let (decisions, stats) = counted(|| {
+            cuda_hermitian_regions_batched::<f64>(
+                &mut ctx,
+                &src,
+                &regions,
+                0,
+                member_stride,
+                default_tolerance::<f64>(),
+            )
+            .expect("empty stack")
+        });
+        assert_eq!(decisions, Vec::<bool>::new());
+        assert_eq!(
+            stats,
+            CudaTransferStats::default(),
+            "stride {member_stride}"
+        );
+    }
+
     // The explicit complex boundary, before any device work.
     let (data, regions, stride) = stacked::<Complex64>(2, 0);
     let src = CudaDenseStorage::upload::<Complex64>(&ctx, &data).expect("upload");
