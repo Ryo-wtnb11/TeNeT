@@ -234,6 +234,7 @@ where
         .map_err(OperationError::Dense)
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
     kernels: &mut A,
@@ -289,6 +290,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tree_transform_multi_with_scratch_buffers<
     A,

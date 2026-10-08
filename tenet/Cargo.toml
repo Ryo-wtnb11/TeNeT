@@ -32,6 +32,10 @@ tenet-matrixalgebra = { version = "0.1.1", path = "../tenet-matrixalgebra", defa
 tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-features = false }
 tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }
 
+[dev-dependencies]
+# Reference-oracle replay driver (#1767).
+tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-features = false, features = ["testing"] }
+
 [lints.clippy]
 # Edition 2024 (merged doctests) makes clippy suggest let-chains for nested
 # `if let`. Why-not apply them: the workspace's 2021 rustfmt style cannot

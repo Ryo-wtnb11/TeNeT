@@ -167,6 +167,7 @@ pub trait HostKernelAdapter<T> {
     /// computes `buffer_dst = buffer_src * transpose(U)` after packing source
     /// trees as columns. This is the BLAS/GEMM replacement point for the
     /// recoupling matrix application.
+    #[cfg(any(test, feature = "testing"))]
     #[allow(clippy::too_many_arguments)]
     fn recoupling_src_times_u_transpose<C>(
         &mut self,
@@ -184,9 +185,10 @@ pub trait HostKernelAdapter<T> {
 
 /// Default host kernel adapter backed by the strided-rs style raw kernels.
 ///
-/// The recoupling matrix application is currently a scalar loop; swapping it
-/// for a BLAS/GEMM call happens by replacing this adapter, not by editing the
-/// replay drivers.
+/// Production recoupling is a grouped dense-executor GEMM that does not go
+/// through this adapter; the scalar-loop `recoupling_src_times_u_transpose`
+/// exists only under `cfg(test)` / the `testing` feature as the reference
+/// oracle.
 ///
 /// Why not `Copy` or externally constructible: direct/unbaked calls retain
 /// mutable normalization and traversal scratch. Compiled replay supplies its
@@ -687,6 +689,7 @@ where
         scale_raw_strided_kernel_trusted(dst_data, shape, dst_strides, dst_offset, beta)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     fn recoupling_src_times_u_transpose<C>(
         &mut self,
         destination: &mut [T],
@@ -729,6 +732,7 @@ where
 ///
 /// All adapter implementations should validate against the same packed-column
 /// layout before touching data.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn validate_recoupling_lens(
     destination_len: usize,
     source_len: usize,

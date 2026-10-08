@@ -13,7 +13,6 @@ use crate::ReportsPlacement;
 
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
-    tree_transform_structure_with_strided_kernel,
     tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
     OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, TensorAddStructure,
     TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
@@ -492,18 +491,14 @@ impl TensorOperationsBackend for HostTensorOperations {
     }
 }
 
+/// Delegates to a fresh serial [`DenseTreeTransformOperations`] per call, so
+/// Multi blocks run the one batched-GEMM replay. The unit struct carries no
+/// executor to reuse; callers replaying repeatedly own a
+/// `DenseTreeTransformOperations` (the production pairing) and reuse it.
 impl<D, C> TreeTransformBackend<D, C> for HostTensorOperations
 where
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
-    C: Copy,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
 {
     type Workspace = TreeTransformWorkspace<D>;
 
@@ -529,15 +524,8 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
-        tree_transform_structure_with_strided_kernel(
-            &mut StridedHostKernelAdapter::default(),
-            workspace,
-            structure,
-            dst,
-            src,
-            alpha,
-            beta,
-        )
+        DenseTreeTransformOperations::default_executor()
+            .tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
     }
 
     fn tree_transform_structure_into_raw(
@@ -551,8 +539,7 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
-        crate::tree_transform_structure_with_strided_kernel_raw(
-            &mut StridedHostKernelAdapter::default(),
+        DenseTreeTransformOperations::default_executor().tree_transform_structure_into_raw(
             workspace,
             structure,
             dst_structure,
@@ -574,16 +561,16 @@ where
         src_data: &[D],
         alpha: D,
     ) -> Result<(), OperationError> {
-        crate::tree_transform_structure_overwrite_with_strided_kernel_raw(
-            &mut StridedHostKernelAdapter::default(),
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-        )
+        DenseTreeTransformOperations::default_executor()
+            .tree_transform_structure_overwrite_into_raw(
+                workspace,
+                structure,
+                dst_structure,
+                src_structure,
+                dst_data,
+                src_data,
+                alpha,
+            )
     }
 }
 

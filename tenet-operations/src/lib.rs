@@ -7,6 +7,10 @@
 //! compile layer (`tenet-tensors`) hands down already-enumerated fusion-tree
 //! pair identities and scalar coefficients, which are resolved to offsets and
 //! strides before kernel execution.
+//!
+//! The `testing` feature is unstable and internal: it exposes the per-block
+//! strided tree-transform driver and scalar recoupling as a reference oracle
+//! (and adds a method to `HostKernelAdapter`). Do not enable it in applications.
 
 #[cfg(not(any(
     feature = "cpu-faer",

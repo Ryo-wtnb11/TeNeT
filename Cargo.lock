@@ -3671,6 +3671,7 @@ dependencies = [
  "strided-kernel",
  "tenet-core",
  "tenet-dense",
+ "tenet-operations",
 ]
 
 [[package]]
