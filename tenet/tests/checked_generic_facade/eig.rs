@@ -1099,8 +1099,9 @@ fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
 }
 
 /// Independent dense oracle for one coupled block: every returned pair
-/// satisfies `A v = lambda v` to backward error and no eigenvector vanishes.
-/// No inverse of `V` is formed: a defective block has no eigenbasis.
+/// satisfies `A v = lambda v` to backward error relative to `|A| |v|` and no
+/// eigenvector vanishes. No inverse of `V` is formed: a defective block has
+/// no eigenbasis, and the dense backend may return an unnormalized column.
 fn assert_defective_eigenpairs(
     n: usize,
     a: impl Fn(usize, usize) -> Complex64,
@@ -1118,7 +1119,7 @@ fn assert_defective_eigenpairs(
         assert!(norm > 0.5);
         for i in 0..n {
             let av = (0..n).map(|j| a(i, j) * v(j, k)).sum::<Complex64>();
-            assert!((av - lambda(k) * v(i, k)).norm() <= 1.0e-12 * n as f64 * scale);
+            assert!((av - lambda(k) * v(i, k)).norm() <= 1.0e-12 * n as f64 * scale * norm);
         }
     }
 }
