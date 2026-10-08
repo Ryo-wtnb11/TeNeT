@@ -545,26 +545,13 @@ fn eigh_fault_spy(counts: &Arc<SpyCounts>, fail_at: Option<usize>) -> SpyExecuto
     }
 }
 
-#[derive(Clone, Copy)]
-enum EigFault {
-    Eig,
-    Svd,
-}
-
-/// Fails every dense EIG call, or every values-only SVD rank check.
-fn eig_fault_spy(fault: EigFault) -> SpyExecutor {
-    match fault {
-        EigFault::Eig => SpyExecutor::default().failing(
-            &[Kernel::Eig, Kernel::EigVals],
-            None,
-            "injected checked Generic EIG failure",
-        ),
-        EigFault::Svd => SpyExecutor::default().failing(
-            &[Kernel::SvdVals],
-            None,
-            "injected checked Generic EIG rank-check failure",
-        ),
-    }
+/// Fails every dense EIG call.
+fn eig_fault_spy() -> SpyExecutor {
+    SpyExecutor::default().failing(
+        &[Kernel::Eig, Kernel::EigVals],
+        None,
+        "injected checked Generic EIG failure",
+    )
 }
 
 #[test]
@@ -636,25 +623,23 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
 }
 
 #[test]
-fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
-    for fault in [EigFault::Eig, EigFault::Svd] {
-        let runtime = Runtime::builder()
-            .dense_threads(1)
-            .with_dense_executor(Box::new(eig_fault_spy(fault)))
-            .build()
-            .unwrap();
-        let provider = Arc::new(CheckedOnlyToy::new(0));
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-        let source: TensorMap<_, f64> =
-            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
-                [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
-            })
-            .unwrap();
-        let before = source.dense_data().unwrap().to_vec();
-        assert!(source.eig_full(&[0], &[1]).is_err());
-        assert_eq!(source.dense_data().unwrap(), before);
-        assert!(std::ptr::eq(source.provider(), provider.as_ref()));
-    }
+fn checked_generic_eig_dense_failure_preserves_the_source() {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(eig_fault_spy()))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let before = source.dense_data().unwrap().to_vec();
+    assert!(source.eig_full(&[0], &[1]).is_err());
+    assert_eq!(source.dense_data().unwrap(), before);
+    assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
 #[test]
@@ -961,7 +946,7 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
     assert_checked_generic_eig_reconstruction(&dense, &d, &v);
     let fault_runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(eig_fault_spy(EigFault::Eig)))
+        .with_dense_executor(Box::new(eig_fault_spy()))
         .build()
         .unwrap();
     let fault_provider = Arc::new(CheckedOnlyToy::new(1));
@@ -1113,20 +1098,109 @@ fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
     assert!((found.error - (1.0 + 2.0_f64.sqrt()).sqrt()).abs() < 1.0e-12);
 }
 
+/// Independent dense oracle for one coupled block: every returned pair
+/// satisfies `A v = lambda v` to backward error and no eigenvector vanishes.
+/// No inverse of `V` is formed: a defective block has no eigenbasis.
+fn assert_defective_eigenpairs(
+    n: usize,
+    a: impl Fn(usize, usize) -> Complex64,
+    v: impl Fn(usize, usize) -> Complex64,
+    lambda: impl Fn(usize) -> Complex64,
+    exact: Complex64,
+) {
+    let scale = (0..n)
+        .flat_map(|i| (0..n).map(move |j| (i, j)))
+        .map(|(i, j)| a(i, j).norm())
+        .fold(1.0_f64, f64::max);
+    for k in 0..n {
+        assert!((lambda(k) - exact).norm() < 1.0e-6);
+        let norm = (0..n).map(|i| v(i, k).norm_sqr()).sum::<f64>().sqrt();
+        assert!(norm > 0.5);
+        for i in 0..n {
+            let av = (0..n).map(|j| a(i, j) * v(j, k)).sum::<Complex64>();
+            assert!((av - lambda(k) * v(i, k)).norm() <= 1.0e-12 * n as f64 * scale);
+        }
+    }
+}
+
 #[test]
-fn checked_generic_eig_rejects_jordan_and_nonfinite_inputs() {
+fn eig_full_accepts_finite_defective_sectors_in_both_modes_without_a_rank_svd() {
+    use tenet::sector::{SU2FusionRule, SU2Irrep};
+
+    let counts = Arc::new(SpyCounts::default());
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(SpyExecutor::counting(&counts)))
+        .build()
+        .unwrap();
+    // `lambda I + N` with `N` the upper shift: a single Jordan chain, so each
+    // block of dimension two or more is defective.
+    let jordan = |lambda: Complex64, row: usize, col: usize| {
+        if row == col {
+            lambda
+        } else if col == row + 1 {
+            Complex64::new(1.0, 0.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    };
+    let checked_leg = GradedSpace::try_new(
+        Arc::new(CheckedOnlyToy::new(0)),
+        [(Label::Vacuum, 2), (Label::X, 3)],
+    )
+    .unwrap();
+    let mf_leg = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(1), 2),
+            (SU2Irrep::from_twice_spin(2), 3),
+        ],
+    )
+    .unwrap();
+    macro_rules! check {
+        ($leg:expr, $first:expr, $dtype:ty, $from:expr, $lambda:expr) => {{
+            let from: fn(Complex64) -> $dtype = $from;
+            let lambda = |sector: &_| $lambda[usize::from(sector != &$first)];
+            let source: TensorMap<_, $dtype> =
+                TensorMap::from_subblock_fn(&runtime, [&$leg], [&$leg], |trees, index| {
+                    from(jordan(lambda(trees.coupled()), index[0], index[1]))
+                })
+                .unwrap();
+            counts.reset();
+            let Eig { d, v } = source.eig_full(&[0], &[1]).unwrap();
+            // One dense EIG per coupled sector and nothing else: no
+            // eigenvector SVD runs in either mode.
+            assert_eq!(counts.get(Kernel::Eig), 2);
+            assert_eq!(counts.others(&[Kernel::Eig]), 0);
+            let mut sectors = 0;
+            for (sector, a) in source.blocks().unwrap() {
+                let (v, d) = (v.block(&sector).unwrap(), d.block(&sector).unwrap());
+                assert_defective_eigenpairs(
+                    a.rows(),
+                    |i, j| Complex64::from(a.get(i, j).unwrap()),
+                    |i, j| v.get(i, j).unwrap(),
+                    |k| d.get(k, k).unwrap(),
+                    lambda(&sector),
+                );
+                sectors += 1;
+            }
+            assert_eq!(sectors, 2);
+        }};
+    }
+    let real = [Complex64::new(2.0, 0.0), Complex64::new(-0.5, 0.0)];
+    let complex = [Complex64::new(2.0, 1.0), Complex64::new(-0.5, -0.25)];
+    check!(checked_leg, Label::Vacuum, f64, |z| z.re, real);
+    check!(checked_leg, Label::Vacuum, Complex64, |z| z, complex);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    check!(mf_leg, spin_half, f64, |z| z.re, real);
+    check!(mf_leg, spin_half, Complex64, |z| z, complex);
+}
+
+#[test]
+fn checked_generic_eig_rejects_nonfinite_input() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let jordan: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
-            [[1.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
-        })
-        .unwrap();
-    let error = jordan.eig_full(&[0], &[1]).unwrap_err();
-    assert!(format!("{error:?}")
-        .contains("eig requires a numerically diagonalizable coupled-sector matrix"));
-
     let nonfinite: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             if index == [0, 0] {
