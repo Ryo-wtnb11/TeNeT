@@ -14,8 +14,14 @@
 //!
 //! A cache-3 miss whose sectors were seen before (a degeneracy-only change,
 //! or another HomSpace sharing a source group) therefore makes no F/R
-//! provider call. Unique fusion bypasses this cache by builder dispatch: one
-//! group is one tree with one scalar, so a lookup costs what it saves.
+//! provider call.
+//!
+//! Deliberate deviation: Unique fusion is cached as well. TensorKit leaves it
+//! `NoCache` (one tree, one phase per group), but a Unique rebuild allocates
+//! every destination tree key, so the degeneracy-only churn of U(1)/Z2
+//! workloads would pay O(B) allocations per cache-3 miss where a hit pays
+//! O(1); the removed per-Runtime plan tier gave that reuse, and TeNeT keeps
+//! it. A Unique entry is one `Single` spec, a few hundred bytes.
 //!
 //! Rust deviations, each deliberate:
 //! - entries are byte-weighted under the per-kind budget of `tenet::cache`,
@@ -130,11 +136,12 @@ impl tenet_core::StructureCacheEquivalent<CoefficientGroupKey> for GroupKeyRef<'
 /// spec's recoupling matrix is a shared `Arc`, so a cache-3 core bound from
 /// it shares those bytes.
 pub(crate) struct CoefficientGroupEntry<T> {
-    specs: Box<[TreeTransformGroupBlockSpec<T>]>,
+    specs: Arc<[TreeTransformGroupBlockSpec<T>]>,
 }
 
 impl<T> CoefficientGroupEntry<T> {
-    pub(crate) fn specs(&self) -> &[TreeTransformGroupBlockSpec<T>] {
+    /// Shared, so a plan assembled from hits copies no spec.
+    pub(crate) fn specs(&self) -> &Arc<[TreeTransformGroupBlockSpec<T>]> {
         &self.specs
     }
 }
@@ -266,11 +273,14 @@ impl CheckedPendingCoefficients {
 }
 
 /// Per-group reuse handle of one plan build: looks source groups up and
-/// stages the built ones. Only non-Unique builders consult it.
+/// stages the built ones.
 pub(crate) struct CoefficientGroupReuse<T> {
     context: Arc<GroupContext>,
     context_hash: u64,
     built: RefCell<PendingCoefficientGroups>,
+    /// Charge scratch reused across this build's staged groups: a fresh set
+    /// per group would allocate once per Unique group.
+    backings: RefCell<rustc_hash::FxHashSet<usize>>,
     coefficient: PhantomData<fn() -> T>,
 }
 
@@ -299,6 +309,7 @@ where
             context_hash: hasher.finish(),
             context: Arc::new(context),
             built: RefCell::new(PendingCoefficientGroups::default()),
+            backings: RefCell::default(),
             coefficient: PhantomData,
         }
     }
@@ -358,9 +369,13 @@ where
             hash,
         };
         let entry = Arc::new(CoefficientGroupEntry {
-            specs: specs.into_boxed_slice(),
+            specs: specs.into(),
         });
-        let bytes = charged_entry_bytes(&key, &entry.specs) as u64;
+        let bytes = {
+            let mut backings = self.backings.borrow_mut();
+            backings.clear();
+            charged_entry_bytes(&key, &entry.specs, &mut backings) as u64
+        };
         self.built
             .borrow_mut()
             .groups
@@ -378,17 +393,19 @@ where
 fn charged_entry_bytes<T>(
     key: &CoefficientGroupKey,
     specs: &[TreeTransformGroupBlockSpec<T>],
+    backings: &mut rustc_hash::FxHashSet<usize>,
 ) -> usize {
-    let mut backings = rustc_hash::FxHashSet::default();
     let mut bytes = core::mem::size_of::<CoefficientGroupKey>()
         .saturating_add(core::mem::size_of::<CoefficientGroupEntry<T>>())
         .saturating_add(ENTRY_OVERHEAD_BYTES)
+        // The specs' own `Arc` control.
+        .saturating_add(ARC_CONTROL_BYTES)
         // ponytail: the shared context is charged in full to every entry.
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(core::mem::size_of::<GroupContext>())
         .saturating_add(key.context.rule.charged_retained_bytes())
         .saturating_add(key.context.operation.charged_retained_bytes())
-        .saturating_add(key.group_key.charge_retained_backings(&mut backings))
+        .saturating_add(key.group_key.charge_retained_backings(backings))
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
             key.src_keys
@@ -401,9 +418,9 @@ fn charged_entry_bytes<T>(
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         );
     for src in key.src_keys.iter() {
-        bytes = bytes.saturating_add(src.charge_retained_backings(&mut backings));
+        bytes = bytes.saturating_add(src.charge_retained_backings(backings));
     }
-    bytes.saturating_add(charged_spec_bytes(specs, &mut backings))
+    bytes.saturating_add(charged_spec_bytes(specs, backings))
 }
 
 /// Heap bytes of `specs` (excluding their inline structs), coefficients

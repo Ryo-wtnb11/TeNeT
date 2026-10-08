@@ -208,9 +208,9 @@ where
         logical_rank,
         projection,
         threads,
-        reuse.as_ref(),
+        Some(&reuse),
     )?;
-    publish_reuse(reuse, epoch);
+    reuse.into_pending().publish(epoch);
     let source_index = |key: &FusionTreePairKey| {
         projection
             .get(key)
@@ -788,37 +788,27 @@ where
     true
 }
 
-/// The composed-coefficient reuse of one multiplicity-free plan build:
-/// none for Unique fusion, which TensorKit leaves uncached (`NoCache`).
+/// The composed-coefficient reuse of one multiplicity-free plan build. Every
+/// fusion style is cached: TeNeT keeps Unique fusion cached (unlike
+/// TensorKit's `NoCache`), so a degeneracy-only U(1)/Z2 change reuses its
+/// phases.
 fn multiplicity_free_reuse<R, T>(
     rule: &R,
     scope: TreeTransformScope,
     operation: &TreeTransformOperation,
     orientation: FusionTreePairOrientation,
-) -> Option<CoefficientGroupReuse<T>>
+) -> CoefficientGroupReuse<T>
 where
     R: tenet_core::FusionRule,
     T: 'static + Send + Sync,
 {
-    (rule.fusion_style() != tenet_core::FusionStyleKind::Unique).then(|| {
-        CoefficientGroupReuse::new(
-            rule.rule_identity(),
-            TransformerMode::MultiplicityFree,
-            scope,
-            operation,
-            orientation,
-        )
-    })
-}
-
-/// Publishes the groups a successful multiplicity-free plan build staged.
-fn publish_reuse<T>(reuse: Option<CoefficientGroupReuse<T>>, epoch: usize)
-where
-    T: 'static + Send + Sync,
-{
-    if let Some(reuse) = reuse {
-        reuse.into_pending().publish(epoch);
-    }
+    CoefficientGroupReuse::new(
+        rule.rule_identity(),
+        TransformerMode::MultiplicityFree,
+        scope,
+        operation,
+        orientation,
+    )
 }
 
 /// What a context's multiplicity-free resolution needs besides the global
@@ -893,9 +883,9 @@ impl TreeTransformPlanning {
                     dst_structure,
                     src_structure,
                     threads,
-                    reuse.as_ref(),
+                    Some(&reuse),
                 )?;
-                publish_reuse(reuse, epoch);
+                reuse.into_pending().publish(epoch);
                 plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
                     Arc::clone(src_structure),
@@ -1052,9 +1042,9 @@ impl TreeTransformPlanning {
                     &source_proof,
                     operation.clone(),
                     threads,
-                    reuse.as_ref(),
+                    Some(&reuse),
                 )?;
-                publish_reuse(reuse, epoch);
+                reuse.into_pending().publish(epoch);
                 plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
                     Arc::clone(src_structure),

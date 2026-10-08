@@ -27,6 +27,7 @@ use super::cache::{CoefficientGroupReuse, GroupSlot, OrientedBasisOrder, SourceG
 use super::operation::{
     TreeTransformOperation, TreeTransformOperationKind, ValidateBraidingSupport,
 };
+use tenet_operations::SharedTreeTransformGroupPlan;
 
 struct OrientedGroup<'k> {
     // Storage order uses the parent's group indices directly; canonical order
@@ -678,7 +679,7 @@ pub(crate) fn build_multiplicity_free_tree_pair_plan_after_capability_with_threa
     src_structure: &BlockStructure,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: 'static
@@ -710,14 +711,24 @@ pub(crate) fn build_all_codomain_tree_transform_group_plan_validated_with_thread
     operation: TreeTransformOperation,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
     R::Scalar:
         'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        build_unique_all_codomain_tree_transform_group_plan_validated(source_proof, operation)
+        let Some(reuse) = reuse else {
+            return build_unique_all_codomain_tree_transform_group_plan_validated(
+                source_proof,
+                operation,
+            )
+            .map(ComposedPlan::Owned);
+        };
+        let source_axes = operation_source_axes(&operation);
+        build_unique_groups_reusing(source_proof.structure(), reuse, |index| {
+            unique_all_codomain_spec(source_proof, &operation, &source_axes, index)
+        })
     } else {
         build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with_threads(
             source_proof,
@@ -740,26 +751,46 @@ where
         'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     build_tree_pair_transform_group_plan_validated_reusing(source_proof, operation, threads, None)
+        .map(ComposedPlan::into_owned)
 }
 
 /// As [`build_tree_pair_transform_group_plan_validated_with_threads`], reusing
-/// cached source groups for non-Unique fusion. Why not for Unique fusion: one
-/// group is one tree with one scalar, so a per-group lookup costs as much as
-/// the rebuild it saves; TensorKit's `fsbraid`/`fstranspose` use `NoCache`
-/// there, and QSpace's `contractDegQ` skips abelian symmetries.
+/// cached source groups. Unique fusion is cached too, deliberately unlike
+/// TensorKit's `NoCache` for `fsbraid`/`fstranspose` (and QSpace's abelian
+/// skip): a Unique group is one tree with one phase, but a rebuild allocates
+/// its destination tree keys, so without the cache a degeneracy-only change
+/// (the common U(1)/Z2 truncation churn) would cost O(B) allocations where a
+/// hit costs O(1).
 fn build_tree_pair_transform_group_plan_validated_reusing<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar:
         'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
+        let Some(reuse) = reuse else {
+            return build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
+                .map(ComposedPlan::Owned);
+        };
+        let source_axes = operation_source_axes(&operation);
+        let mut primary_prepared = None;
+        let mut additional_prepared =
+            None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
+        build_unique_groups_reusing(source_proof.structure(), reuse, |index| {
+            unique_tree_pair_spec(
+                source_proof,
+                &operation,
+                &source_axes,
+                &mut primary_prepared,
+                &mut additional_prepared,
+                index,
+            )
+        })
     } else {
         build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads(
             source_proof,
@@ -812,15 +843,15 @@ fn build_groups_reusing<T, E>(
     reuse: Option<(&CoefficientGroupReuse<T>, &[SourceGroup<'_>])>,
     group_count: usize,
     build_missing: impl FnOnce(Vec<usize>) -> Result<Vec<Vec<TreeTransformGroupBlockSpec<T>>>, E>,
-) -> Result<TreeTransformGroupPlan<T>, E>
+) -> Result<ComposedPlan<T>, E>
 where
     T: 'static + Clone + Send + Sync,
 {
     let Some((reuse, groups)) = reuse else {
         let built = build_missing((0..group_count).collect())?;
-        return Ok(TreeTransformGroupPlan::from_specs(
+        return Ok(ComposedPlan::Owned(TreeTransformGroupPlan::from_specs(
             built.into_iter().flatten(),
-        ));
+        )));
     };
     let slots = reuse.lookup(groups);
     let missing = slots
@@ -829,7 +860,10 @@ where
         .filter_map(|(index, slot)| matches!(slot, GroupSlot::Miss(_)).then_some(index))
         .collect();
     let mut built = build_missing(missing)?.into_iter();
-    let mut specs = Vec::new();
+    // Why shared slices rather than one flat spec vector: a degeneracy-only
+    // miss whose groups all hit then copies no spec (one spec is hundreds of
+    // bytes of tree keys), only one `Arc` per group.
+    let mut shared = Vec::with_capacity(groups.len());
     for (&group, slot) in groups.iter().zip(slots) {
         let entry = match slot {
             GroupSlot::Hit(entry) => entry,
@@ -839,12 +873,117 @@ where
                 built.next().expect("every missing group was built"),
             ),
         };
-        // Why cloning is cheap: a plan owns its spec array, but a `Multi`
-        // spec shares its keys and recoupling matrix, so a clone only bumps
-        // reference counts; a `Single` spec clones one key pair.
-        specs.extend(entry.specs().iter().cloned());
+        shared.push(Arc::clone(entry.specs()));
     }
-    Ok(TreeTransformGroupPlan::new(specs))
+    Ok(ComposedPlan::Shared(SharedTreeTransformGroupPlan::new(
+        shared,
+    )))
+}
+
+/// A plan build's result: owned specs (an uncached build) or the
+/// composed-coefficient cache's shared group slices.
+pub(crate) enum ComposedPlan<T> {
+    Owned(TreeTransformGroupPlan<T>),
+    Shared(SharedTreeTransformGroupPlan<T>),
+}
+
+impl<T: Copy> ComposedPlan<T> {
+    pub(crate) fn compile_shared_structures_with_storage_conjugation(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Result<tenet_operations::TreeTransformStructure<T>, OperationError> {
+        match self {
+            Self::Owned(plan) => plan.compile_shared_structures_with_storage_conjugation(
+                dst_structure,
+                src_structure,
+                storage_conjugate,
+            ),
+            Self::Shared(plan) => plan.compile_shared_structures_with_storage_conjugation(
+                dst_structure,
+                src_structure,
+                storage_conjugate,
+            ),
+        }
+    }
+
+    pub(crate) fn compile_shared_structures_with_storage_mapping<FBlock, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        logical_src_structure: &BlockStructure,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_to_storage_block: FBlock,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<tenet_operations::TreeTransformStructure<T>, OperationError>
+    where
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        match self {
+            Self::Owned(plan) => plan.compile_shared_structures_with_storage_mapping(
+                dst_structure,
+                logical_src_structure,
+                storage_src_structure,
+                logical_to_storage_block,
+                logical_to_storage_axis,
+                storage_conjugate,
+            ),
+            Self::Shared(plan) => plan.compile_shared_structures_with_storage_mapping(
+                dst_structure,
+                logical_src_structure,
+                storage_src_structure,
+                logical_to_storage_block,
+                logical_to_storage_axis,
+                storage_conjugate,
+            ),
+        }
+    }
+
+    pub(crate) fn compile_shared_structures_with_source_projection<FSource, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_rank: usize,
+        source_index: FSource,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<tenet_operations::TreeTransformStructure<T>, OperationError>
+    where
+        FSource: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        match self {
+            Self::Owned(plan) => plan.compile_shared_structures_with_source_projection(
+                dst_structure,
+                storage_src_structure,
+                logical_rank,
+                source_index,
+                logical_to_storage_axis,
+                storage_conjugate,
+            ),
+            Self::Shared(plan) => plan.compile_shared_structures_with_source_projection(
+                dst_structure,
+                storage_src_structure,
+                logical_rank,
+                source_index,
+                logical_to_storage_axis,
+                storage_conjugate,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T: Clone> ComposedPlan<T> {
+    /// The plan as owned specs, for comparison with an eager producer.
+    pub(crate) fn into_owned(self) -> TreeTransformGroupPlan<T> {
+        match self {
+            Self::Owned(plan) => plan,
+            Self::Shared(plan) => TreeTransformGroupPlan::from_specs(plan.specs().cloned()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -906,43 +1045,63 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
     debug_assert_eq!(source_proof.rule().fusion_style(), FusionStyleKind::Unique);
-    let proof = source_proof.proof();
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
-        let Some(src_key) = proof.fusion_tree_pair_key(index)? else {
-            continue;
-        };
-        let mut rows = match operation.kind() {
-            TreeTransformOperationKind::Permute => {
-                proof.permute_codomain_rows_for_block_index(index, operation.codomain_permutation())
-            }
-            TreeTransformOperationKind::Braid => proof.braid_codomain_rows_for_block_index(
-                index,
-                operation.codomain_permutation(),
-                operation.codomain_levels(),
-            ),
-            TreeTransformOperationKind::Transpose => {
-                unreachable!("all-codomain admission rejected transpose")
-            }
-        }
-        .map_err(OperationError::from_core_preserving_context)?;
-        let Some((destination, coefficient)) = rows.pop() else {
-            return Err(OperationError::EmptyTransformBlock);
-        };
-        if !rows.is_empty() {
-            return Err(OperationError::StructureMismatch {
-                tensor: "proof-bound Unique all-codomain cardinality",
-            });
-        }
-        let dst_key = FusionTreePairKey::pair(destination, src_key.domain_tree().clone());
-        specs.push(
-            TreeTransformGroupBlockSpec::single(dst_key, src_key.clone(), coefficient)
-                .with_shared_source_axes(Arc::clone(&source_axes)),
-        );
+        specs.extend(unique_all_codomain_spec(
+            source_proof,
+            &operation,
+            &source_axes,
+            index,
+        )?);
     }
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+/// The one-term Unique all-codomain spec of source block `index`; `None`
+/// for a block without a fusion-tree key.
+fn unique_all_codomain_spec<R>(
+    source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
+    operation: &TreeTransformOperation,
+    source_axes: &Arc<[usize]>,
+    index: usize,
+) -> Result<Option<TreeTransformGroupBlockSpec<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    let proof = source_proof.proof();
+    let Some(src_key) = proof.fusion_tree_pair_key(index)? else {
+        return Ok(None);
+    };
+    let mut rows = match operation.kind() {
+        TreeTransformOperationKind::Permute => {
+            proof.permute_codomain_rows_for_block_index(index, operation.codomain_permutation())
+        }
+        TreeTransformOperationKind::Braid => proof.braid_codomain_rows_for_block_index(
+            index,
+            operation.codomain_permutation(),
+            operation.codomain_levels(),
+        ),
+        TreeTransformOperationKind::Transpose => {
+            unreachable!("all-codomain admission rejected transpose")
+        }
+    }
+    .map_err(OperationError::from_core_preserving_context)?;
+    let Some((destination, coefficient)) = rows.pop() else {
+        return Err(OperationError::EmptyTransformBlock);
+    };
+    if !rows.is_empty() {
+        return Err(OperationError::StructureMismatch {
+            tensor: "proof-bound Unique all-codomain cardinality",
+        });
+    }
+    let dst_key = FusionTreePairKey::pair(destination, src_key.domain_tree().clone());
+    Ok(Some(
+        TreeTransformGroupBlockSpec::single(dst_key, src_key.clone(), coefficient)
+            .with_shared_source_axes(Arc::clone(source_axes)),
+    ))
 }
 
 pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan<R>(
@@ -1068,7 +1227,7 @@ fn build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with
     operation: TreeTransformOperation,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
     R::Scalar:
@@ -1620,7 +1779,7 @@ fn build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads
     operation: TreeTransformOperation,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar:
@@ -1714,7 +1873,7 @@ pub(crate) fn build_oriented_tree_pair_transform_group_plan_capability_validated
     storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
     threads: usize,
     reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+) -> Result<ComposedPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar:
@@ -1727,7 +1886,6 @@ where
     // Why the logical keys suffice for a group: the adjoint orientation maps
     // each logical tree pair to exactly one storage tree pair, and that pair
     // is all the builder reads at the projected storage index.
-    let reuse = reuse.filter(|_| rule.fusion_style() != FusionStyleKind::Unique);
     let mut group_keys = Vec::new();
     let mut staged_groups = Vec::<OrientedGroup<'_>>::new();
     if basis_order == OrientedBasisOrder::Storage {
@@ -2124,7 +2282,7 @@ pub(crate) fn build_checked_generic_tree_pair_transform_group_plan_validated<P>(
     operation: TreeTransformOperation,
     source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
     reuse: &CoefficientGroupReuse<P::Scalar>,
-) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
+) -> Result<ComposedPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
     P::Scalar: 'static + CategoricalScalar + Zero + Send + Sync,
@@ -2552,29 +2710,87 @@ where
     let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
-        let Some(src_key) = source_proof.fusion_tree_pair_key(index)? else {
-            continue;
-        };
-        let source_split = (
-            src_key.codomain_tree().uncoupled().len(),
-            src_key.domain_tree().uncoupled().len(),
-        );
-        let prepared = prepared_tree_pair_operation_for_split(
+        specs.extend(unique_tree_pair_spec(
+            source_proof,
+            &operation,
+            &source_axes,
             &mut primary_prepared,
             &mut additional_prepared,
-            source_proof.rule(),
-            &operation,
-            source_split,
-        )?;
-        let transformed = source_proof
-            .execute_unique_rigid_for_block_index(index, prepared)
-            .map_err(OperationError::from_core_preserving_context)?;
-        specs.push(
-            TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)
-                .with_shared_source_axes(Arc::clone(&source_axes)),
-        );
+            index,
+        )?);
     }
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+/// The one-term Unique spec of source block `index`; `None` for a block
+/// without a fusion-tree key.
+fn unique_tree_pair_spec<'p, 'o, R>(
+    source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
+    operation: &'o TreeTransformOperation,
+    source_axes: &Arc<[usize]>,
+    primary_prepared: &'p mut Option<((usize, usize), PreparedTreePairOperation<'o>)>,
+    additional_prepared: &'p mut Option<FxHashMap<(usize, usize), PreparedTreePairOperation<'o>>>,
+    index: usize,
+) -> Result<Option<TreeTransformGroupBlockSpec<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let Some(src_key) = source_proof.fusion_tree_pair_key(index)? else {
+        return Ok(None);
+    };
+    let source_split = (
+        src_key.codomain_tree().uncoupled().len(),
+        src_key.domain_tree().uncoupled().len(),
+    );
+    let prepared = prepared_tree_pair_operation_for_split(
+        primary_prepared,
+        additional_prepared,
+        source_proof.rule(),
+        operation,
+        source_split,
+    )?;
+    let transformed = source_proof
+        .execute_unique_rigid_for_block_index(index, prepared)
+        .map_err(OperationError::from_core_preserving_context)?;
+    Ok(Some(
+        TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)
+            .with_shared_source_axes(Arc::clone(source_axes)),
+    ))
+}
+
+/// Unique fusion through the composed-coefficient cache: each source group
+/// (one tree for a Unique rule) is looked up, and the missing ones are built
+/// block by block with `spec_for`.
+fn build_unique_groups_reusing<T, E>(
+    structure: &BlockStructure,
+    reuse: &CoefficientGroupReuse<T>,
+    mut spec_for: impl FnMut(usize) -> Result<Option<TreeTransformGroupBlockSpec<T>>, E>,
+) -> Result<ComposedPlan<T>, E>
+where
+    T: 'static + Clone + Send + Sync,
+    E: From<OperationError>,
+{
+    let all_groups = structure.fusion_tree_group_slice();
+    let flat_keys = source_group_key_refs(structure)?;
+    let groups = split_source_groups(
+        all_groups
+            .iter()
+            .map(|group| (group.group_key(), group.block_indices().len())),
+        &flat_keys,
+    );
+    build_groups_reusing(Some((reuse, &groups)), all_groups.len(), |missing| {
+        missing
+            .into_iter()
+            .map(|group| {
+                let mut specs = Vec::with_capacity(all_groups[group].block_indices().len());
+                for &index in all_groups[group].block_indices() {
+                    specs.extend(spec_for(index)?);
+                }
+                Ok(specs)
+            })
+            .collect()
+    })
 }
 
 fn prepared_tree_pair_operation_for_split<'prepared, 'operation, R>(

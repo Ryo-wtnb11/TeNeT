@@ -133,9 +133,10 @@ consumer adapts every crate the same way.
 2. degeneracy structure per HomSpace (`degeneracystructure`);
 3. tree transformers per (dst space, src space, permutation[, levels])
    (`treetransposer` / `treebraider`);
-4. fusion-tree transformation coefficients per tree key, for every
-   non-Unique (Simple and Generic) fusion style (`fstranspose` / `fsbraid`).
-   Unique fusion is not cached, as in TensorKit.
+4. fusion-tree transformation coefficients per source fusion-tree group,
+   for every fusion style (`fstranspose` / `fsbraid`). Unique fusion is
+   cached too, deliberately unlike TensorKit's `NoCache`, so U(1)/Z2
+   degeneracy churn rebuilds no tree key.
 
 All four run on one byte-weighted cache wrapper with one stats API, and the
 application owns clearing them. A change of degeneracy alone must still hit
@@ -156,7 +157,8 @@ caches 1 and 4.
   `tenet-tensors`, registered the same way. It retains one source
   fusion-tree group's transform specs, keyed on sectors and trees only (no
   degeneracy, no content id), so a degeneracy-only change rebuilds no F/R
-  coefficient. Unique fusion bypasses it (TensorKit `NoCache`). Checked
+  coefficient. Unique fusion is cached too, deliberately unlike TensorKit's
+  `NoCache`, so U(1)/Z2 degeneracy churn rebuilds no tree key. Checked
   Generic transforms publish their groups only after the destination commit.
 - The four share `StructureCache` and one public control, `tenet::cache`
   (`stats`, `clear`, `configure_budgets`).
@@ -273,7 +275,7 @@ Structure caches (`tenet::cache::stats` reports them):
 | Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `tenet-core` | process-global | `sectorstructure` |
 | Degeneracy structure: complete `BlockStructure` | rule, MF/Generic mode and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
 | Completed tree transformer | rule, mode, coefficient type, scope, operation, orientation, basis order, storage conjugation, logical source, dst and src content ids | `tenet-tensors` (`tree_transform/cache.rs`) | process-global | `treetransposer` / `treebraider` |
-| Transformation coefficients (`TreeTransformCoefficients`), Simple and Generic only | rule, mode, coefficient type, scope, operation, orientation, source group (uncoupled sectors and duals) and its ordered source tree pairs; no degeneracies, content ids or storage conjugation | `tenet-tensors` (`tree_transform/cache/coefficients.rs`) | process-global | `fstranspose` / `fsbraid` (`NoCache` for Unique) |
+| Transformation coefficients (`TreeTransformCoefficients`), every fusion style | rule, mode, coefficient type, scope, operation, orientation, source group (uncoupled sectors and duals) and its ordered source tree pairs; no degeneracies, content ids or storage conjugation | `tenet-tensors` (`tree_transform/cache/coefficients.rs`) | process-global | `fstranspose` / `fsbraid` (TensorKit leaves Unique `NoCache`; TeNeT caches it) |
 
 The complete-HomSpace owner replaces the separate block-structure and
 HomSpace intern tables (#2014 PR 2); the completed-transformer owner replaces

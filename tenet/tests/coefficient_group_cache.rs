@@ -1,10 +1,10 @@
 //! The per-group composed-coefficient cache (cache 4 of #2014; #1570).
 //!
-//! A sector change misses the completed-transformer cache. For non-Unique
-//! fusion the rebuild must then recompose only the source fusion-tree groups
+//! A sector change misses the completed-transformer cache. The rebuild must
+//! then recompose only the source fusion-tree groups
 //! whose external sectors are new, as TensorKit's `fsbraid`/`fstranspose`
 //! caches do per `FusionTreeBlock`, and the result must equal a cold
-//! build's. Unique fusion never uses the cache.
+//! build's. Unique fusion uses the cache too (one tree per group).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -194,8 +194,10 @@ fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
     );
 }
 
+/// Unique fusion is cached per group as well (a deliberate deviation from
+/// TensorKit's `NoCache`): a degeneracy-only change hits every group.
 #[test]
-fn unique_fusion_never_uses_the_coefficient_cache() {
+fn unique_fusion_reuses_its_groups_across_a_degeneracy_change() {
     let _serial = serial();
     tenet::cache::clear();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -206,20 +208,23 @@ fn unique_fusion_never_uses_the_coefficient_cache() {
         )
         .unwrap()
     };
-    for space in [
-        leg(&[(-1, 2), (0, 1), (1, 2)]),
-        leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
-    ] {
-        let t = tensor!(&runtime, &space);
+    let mut transform = |space: &GradedSpace<U1FusionRule>| {
+        let t = tensor!(&runtime, space);
         let _ = t.permute(&[2, 0], &[3, 1]).unwrap();
         let _ = t.adjoint().unwrap().permute(&[2, 0], &[3, 1]).unwrap();
-    }
-    let info = groups();
+    };
+    transform(&leg(&[(-1, 2), (0, 1), (1, 2)]));
+    let cold = groups();
+    assert!(cold.misses() > 0 && cold.entries() > 0);
+    assert_eq!(cold.hits(), 0);
+    transform(&leg(&[(-1, 3), (0, 2), (1, 1)]));
+    let warm = groups();
     assert_eq!(
-        (info.hits(), info.misses(), info.entries()),
-        (0, 0, 0),
-        "Unique fusion must not use the coefficient cache"
+        (warm.misses(), warm.entries()),
+        (cold.misses(), cold.entries()),
+        "a degeneracy-only change must compose no group"
     );
+    assert!(warm.hits() > 0);
 }
 
 #[test]

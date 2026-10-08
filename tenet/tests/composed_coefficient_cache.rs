@@ -5,7 +5,8 @@
 //! cache (its key holds the exact layout) but must not recompose any source
 //! group's recoupling coefficients, and the result must be bit-identical to
 //! a cold Runtime's. A sector change must still compose the new groups.
-//! Unique fusion never enters the cache (TensorKit `NoCache`).
+//! Unique fusion is cached too, unlike TensorKit's `NoCache`: a U(1)/Z2
+//! degeneracy-only change must not rebuild its phases either.
 #![allow(deprecated)]
 
 use std::sync::Arc;
@@ -117,11 +118,6 @@ macro_rules! check_rule {
                 cached,
                 "{what}: a sector change must compose its new groups"
             );
-            if !cached {
-                // What: Unique fusion never touches the coefficient cache.
-                let unique = groups();
-                assert_eq!((unique.entries(), unique.hits()), (0, 0), "{what}");
-            }
         }
     }};
 }
@@ -138,7 +134,7 @@ fn u1_degeneracy_change_reuses_the_composed_coefficients() {
     };
     check_rule!(
         "U(1)",
-        false,
+        true,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 3), (0, 2), (1, 1)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
@@ -189,7 +185,7 @@ fn fermion_u1_degeneracy_change_reuses_the_composed_coefficients() {
     };
     check_rule!(
         "fZ2xU(1)",
-        false,
+        true,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 1), (0, 3), (1, 2)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),

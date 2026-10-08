@@ -281,7 +281,7 @@ fn an_entry_charges_its_recoupling_matrix_and_trees() {
         src_keys: multi.1.clone().into(),
         hash: 0,
     };
-    let bytes = charged_entry_bytes(&key, std::slice::from_ref(&spec));
+    let bytes = charged_entry_bytes(&key, std::slice::from_ref(&spec), &mut Default::default());
     // What: the n x n matrix, the two key lists and every tree pair's heap
     // backing are inside the charge.
     let floor = width * width * core::mem::size_of::<f64>()

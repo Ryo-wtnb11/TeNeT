@@ -23,7 +23,7 @@ pub struct TreeTransformCacheInfo {
     /// (plans are assembled from the composed-coefficient cache).
     pub plans: RuntimeTreeTransformCacheInfo,
     /// The process-global composed-coefficient cache (per fusion-tree group,
-    /// non-unique fusion only), shared by every Runtime since #2014-4.
+    /// every fusion style), shared by every Runtime since #2014-4.
     pub groups: RuntimeTreeTransformCacheInfo,
 }
 use tenet_tensors::{
