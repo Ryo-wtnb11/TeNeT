@@ -56,7 +56,6 @@
 //!   [`typed::TensorMap`], their options, results and errors;
 //! - [`sector`]: the symmetry contract — the built-in fusion rules and their
 //!   labels, and the traits a rule of your own implements;
-//! - [`plancache`]: contraction-plan cache configuration;
 //! - [`expert`]: storage, block views, the dense executor seam and cache
 //!   observability.
 //!
@@ -84,7 +83,6 @@ pub mod cache;
 mod cache_concurrency_tests;
 mod error;
 pub mod expert;
-pub mod plancache;
 mod runtime;
 pub mod sector;
 mod tensor_core;

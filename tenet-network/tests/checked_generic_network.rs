@@ -20,8 +20,8 @@ use tenet::typed::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
-    configure_plan_cache, plan_cache_stats, slice_plan_for, DegeneracyRange, DenseCostModel,
-    DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
+    configure_plan_cache, plan_cache_config, plan_cache_stats, slice_plan_for, DegeneracyRange,
+    DenseCostModel, DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
     NetworkExecutionWorkspace, NetworkIR, PlanCacheConfig, PlannedNetwork, SectorSlice, SlicedPlan,
     SymmetricSliceExecutionError, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
     TemporaryLabel, TensorId,
@@ -534,14 +534,14 @@ fn assert_optimizer_does_not_retry_provider_failure(
     optimizer: Optimizer,
     failure: PlanningFailure,
 ) {
-    let runtime = Runtime::builder()
-        .dense_threads(1)
-        .plan_cache(PlanCacheConfig {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
             optimizer,
             ..PlanCacheConfig::default()
-        })
-        .build()
-        .unwrap();
+        },
+    );
     let provider = Arc::new(InjectedGeneric::new());
     let tensors = injected_chain(&runtime, &provider);
     provider.dual_calls.store(0, Ordering::SeqCst);
@@ -1137,7 +1137,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
         &runtime,
         PlanCacheConfig {
             enabled: false,
-            ..runtime.plan_cache_config()
+            ..plan_cache_config(&runtime)
         },
     );
     let uncached = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])

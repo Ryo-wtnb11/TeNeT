@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::{Optimizer, PlanCacheConfig};
+use tenet_network::{configure_plan_cache, Optimizer, PlanCacheConfig};
 
 #[path = "../../tests/support/network.rs"]
 mod network_support;
@@ -39,13 +39,14 @@ fn mf_optimizers_fall_back_on_all_dim1_gram_topology() {
             "upstream fixed the dim-1 {driver} bug; drop the fallback?"
         );
 
-        let rt = Runtime::builder()
-            .plan_cache(PlanCacheConfig {
+        let rt = Runtime::builder().build().unwrap();
+        configure_plan_cache(
+            &rt,
+            PlanCacheConfig {
                 optimizer,
                 ..PlanCacheConfig::default()
-            })
-            .build()
-            .unwrap();
+            },
+        );
         let v = GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 1)])
             .unwrap();
         let cne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 1).unwrap();

@@ -10,7 +10,6 @@ use super::*;
 
 pub use super::network_seam::NetworkDegeneracyRestriction;
 pub use super::tensor_repr::{NetworkPayloadStorage, NetworkReuseClass, RuntimeDetachedTensorMap};
-use crate::plancache::PlanCacheConfig;
 pub use crate::runtime::{ExtensionSlot, RuntimeIdentity};
 
 /// Non-owning identity of `runtime`, for state parked outside an execution.
@@ -18,28 +17,10 @@ pub fn runtime_identity(runtime: &Runtime) -> RuntimeIdentity {
     runtime.identity()
 }
 
-/// Replaces the plan-cache configuration and lets `f` adapt the extension
-/// state to it, under one plan-cache lock.
-pub fn replace_plan_cache_config<T>(
-    runtime: &Runtime,
-    config: PlanCacheConfig,
-    f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut ExtensionSlot) -> T,
-) -> T {
-    runtime.replace_plan_cache_config(config, f)
-}
-
 /// Locked access to the runtime's extension state. Do not run tensor
-/// operations inside `f`: the plan-cache mutex is held for its duration.
+/// operations inside `f`: the extension mutex is held for its duration.
 pub fn with_extension_slot<T>(runtime: &Runtime, f: impl FnOnce(&mut ExtensionSlot) -> T) -> T {
     runtime.with_extension_slot(f)
-}
-
-/// The plan-cache configuration and the extension state under one lock.
-pub fn with_plan_cache<T>(
-    runtime: &Runtime,
-    f: impl FnOnce(&PlanCacheConfig, &mut ExtensionSlot) -> T,
-) -> T {
-    runtime.with_plan_cache(f)
 }
 
 /// The CUDA device ordinal `runtime` was built with.
