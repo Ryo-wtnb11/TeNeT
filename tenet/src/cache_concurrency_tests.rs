@@ -262,6 +262,14 @@ fn cache_concurrency_with_a_racing_clear() {
 
 #[test]
 fn global_clear_takes_no_runtime_or_device_lock() {
+    // Isolated: this clear is process-global and would land inside siblings'
+    // warm-up-to-measurement windows (#2084).
+    if crate::test_cache::run_isolated_or_return(
+        "TENET_GLOBAL_CLEAR_TAKES_NO_RUNTIME_LOCK_ISOLATED",
+        "cache_concurrency_tests::global_clear_takes_no_runtime_or_device_lock",
+    ) {
+        return;
+    }
     // What: `tenet::cache::clear` is semantic only. With this Runtime's state
     // lock and a leased execution context held, a clear still completes.
     let runtime = runtime();

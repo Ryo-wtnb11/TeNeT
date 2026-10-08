@@ -90,6 +90,7 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
 
 #[test]
 fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond =
@@ -285,6 +286,7 @@ fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
 
 #[test]
 fn checked_generic_space_algebra_keeps_multiplicity_dimensions_and_failures_typed() {
+    let _cache = cache_shared();
     let provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
     let rhs_provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
     let left = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -374,6 +376,7 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
 
 #[test]
 fn checked_generic_subblocks_decode_transactionally_and_keep_outer_multiplicity() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -441,6 +444,7 @@ fn checked_generic_subblocks_decode_transactionally_and_keep_outer_multiplicity(
 #[test]
 #[ignore]
 fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let codomain =
@@ -744,6 +748,7 @@ fn checked_errors_stay_typed_and_callback_waits_for_all_decodes() {
 
 #[test]
 fn identity_mismatch_precedes_algebra_queries_and_both_dtypes_fill() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new(0));
     let other = Arc::new(CheckedOnlyToy::new(1));

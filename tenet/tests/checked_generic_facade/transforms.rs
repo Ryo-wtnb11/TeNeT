@@ -308,6 +308,7 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
 
 #[test]
 fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -482,6 +483,7 @@ fn checked_unit_remove_correspondence_failure_does_not_publish_destination() {
 
 #[test]
 fn checked_unit_final_provider_guard_remains_structure_typed() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(243));
     let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -513,6 +515,7 @@ fn checked_unit_final_provider_guard_remains_structure_typed() {
 
 #[test]
 fn checked_only_contract_and_compose_keep_left_authority() {
+    let _cache = cache_exclusive();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(124));
     let right_provider = Arc::new(CheckedOnlyToy::new(124));
@@ -619,6 +622,7 @@ fn checked_only_contract_and_compose_keep_left_authority() {
 
 #[test]
 fn checked_only_identity_transforms_make_no_provider_queries() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -667,6 +671,7 @@ fn checked_only_identity_transforms_make_no_provider_queries() {
 
 #[test]
 fn checked_only_otimes_preserves_typed_late_f_failures() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -714,6 +719,7 @@ fn checked_only_otimes_preserves_typed_late_f_failures() {
 
 #[test]
 fn checked_only_otimes_rejects_runtime_identity_and_style_before_algebra() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new(0));
@@ -767,6 +773,7 @@ fn checked_only_otimes_rejects_runtime_identity_and_style_before_algebra() {
 
 #[test]
 fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new_product_probe(9));
     let second = Arc::new(CheckedOnlyToy::new_product_probe(9));
@@ -1025,6 +1032,7 @@ fn checked_generic_cat_admits_once_and_queries_only_left_before_commit() {
 
 #[test]
 fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing() {
+    let _cache = cache_exclusive();
     // What: admission stamps, runtime, cat arguments, then output admission
     // reject in order; every failure leaves both admitted input payloads alone.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

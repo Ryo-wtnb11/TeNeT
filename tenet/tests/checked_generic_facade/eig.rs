@@ -556,6 +556,7 @@ fn eig_fault_spy() -> SpyExecutor {
 
 #[test]
 fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
+    let _cache = cache_shared();
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -602,6 +603,7 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
 
 #[test]
 fn checked_generic_eigh_dense_failure_preserves_the_source() {
+    let _cache = cache_shared();
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -624,6 +626,7 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
 
 #[test]
 fn checked_generic_eig_dense_failure_preserves_the_source() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder()
         .dense_threads(1)
         .with_dense_executor(Box::new(eig_fault_spy()))
@@ -881,6 +884,7 @@ fn assert_checked_generic_eig_reconstruction(
 
 #[test]
 fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -1130,6 +1134,7 @@ fn assert_defective_eigenpairs(
 
 #[test]
 fn eig_full_accepts_finite_defective_sectors_in_both_modes_without_a_rank_svd() {
+    let _cache = cache_shared();
     use tenet::sector::{SU2FusionRule, SU2Irrep};
 
     let counts = Arc::new(SpyCounts::default());
@@ -1243,6 +1248,7 @@ fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
 
 #[test]
 fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg =
@@ -1365,6 +1371,7 @@ fn literal_weighted_inner<D: Copy>(
 
 #[test]
 fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg =
@@ -1569,6 +1576,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
 /// failing or style-changing provider cannot fail it.
 #[test]
 fn checked_nondual_compact_diagonal_eigh_full_makes_no_provider_query() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for fault in ["fail_algebra", "invalid_style"] {
         let provider = Arc::new(CheckedOnlyToy::new_product_probe(1));

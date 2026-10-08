@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn checked_generic_reductions_cover_real_complex_dense_payloads() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -151,6 +152,7 @@ fn checked_generic_compact_reductions_read_only_the_spectrum() {
 
 #[test]
 fn checked_generic_reductions_do_not_requery_the_admitted_fusion_style() {
+    let _cache = cache_shared();
     // Admission fixed the Generic style; a provider whose answer changes
     // afterwards is neither asked again nor able to drop the `dim` weights.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -210,6 +212,7 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
 
 #[test]
 fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -233,6 +236,7 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
 
 #[test]
 fn checked_generic_add_rejects_layout_mismatch_without_queries() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -255,6 +259,7 @@ fn checked_generic_add_rejects_layout_mismatch_without_queries() {
 
 #[test]
 fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiver() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -287,6 +292,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
 
 #[test]
 fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();

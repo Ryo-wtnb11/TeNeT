@@ -218,6 +218,7 @@ fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_p
 
 #[test]
 fn su2_f_move_compile_has_no_per_destination_coefficient_rows() {
+    let _serial = counting_alloc::serial();
     let structure = su2_f_move_structure();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let _ =
@@ -237,6 +238,7 @@ fn su2_f_move_compile_has_no_per_destination_coefficient_rows() {
 
 #[test]
 fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
+    let _serial = counting_alloc::serial();
     let structure = su2_f_move_structure();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let _ = build_tree_pair_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
@@ -329,6 +331,7 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
 
 #[test]
 fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
+    let _serial = counting_alloc::serial();
     let structure = Arc::new(rank_nine_same_split_su2_groups());
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
@@ -365,6 +368,7 @@ fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {
 
 #[test]
 fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
+    let _serial = counting_alloc::serial();
     for count in [1, 2, 4, 8, 16] {
         let structure = rank_one_u1_pair_structure(count);
         let operation = TreeTransformOperation::permute([0], [1]);
@@ -406,6 +410,7 @@ fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
 
 #[test]
 fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
+    let _serial = counting_alloc::serial();
     const BLOCKS: usize = 2;
     const COEFFICIENT_BYTES: usize = 64 * 1024;
 
@@ -590,6 +595,7 @@ fn reused_sector_change_plan<T: Copy>(
 
 #[test]
 fn sector_change_binding_copies_coefficients_of_changed_groups_only() {
+    let _serial = counting_alloc::serial();
     // Why only operations that keep the space: the binding needs the
     // destination structure, and these map `[s, s, s] <- [d]` onto itself.
     for operation in [

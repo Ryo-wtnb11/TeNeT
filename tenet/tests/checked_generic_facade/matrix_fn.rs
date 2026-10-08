@@ -439,6 +439,7 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
 
 #[test]
 fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -503,6 +504,7 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
 
 #[test]
 fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -850,6 +852,7 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
 
 #[test]
 fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -934,6 +937,7 @@ fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
 
 #[test]
 fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
