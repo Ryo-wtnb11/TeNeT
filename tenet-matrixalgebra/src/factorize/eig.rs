@@ -79,8 +79,8 @@ pub(crate) struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
     pub eigenvalues: Vec<SectorSpectrum>,
 }
 
-/// Dynamic-rank [`EighFull`]. Carries only the eigenvector map and the O(rank)
-/// spectrum; the dense diagonal `D` is built on demand by the typed [`eigh_full`]
+/// Dynamic-rank `EighFull`. Carries only the eigenvector map and the O(rank)
+/// spectrum; the dense diagonal `D` is built on demand by the typed `eigh_full`
 /// wrapper (which returns a `TensorMap`), so callers that keep `D` diagonal
 /// (the user layer, via compact diagonal storage) never pay the O(rank²)
 /// materialization.
@@ -130,7 +130,7 @@ where
     })
 }
 
-/// Dynamic-rank [`eigh_full`]: the shared core, admitting Hermitian blocks
+/// Dynamic-rank `eigh_full`: the shared core, admitting Hermitian blocks
 /// at `hermitian_tol`.
 pub fn eigh_full_dyn<E, R, D>(
     dense: &mut E,
@@ -453,8 +453,8 @@ pub(crate) struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usiz
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
 
-/// Dynamic-rank [`EigFull`]. Spectrum + eigenvectors only; the dense diagonal
-/// is materialized by the typed [`eig_full`] wrapper (see [`EighFullDyn`], #56 N).
+/// Dynamic-rank `EigFull`. Spectrum + eigenvectors only; the dense diagonal
+/// is materialized by the typed `eig_full` wrapper (see [`EighFullDyn`], #56 N).
 #[derive(Clone, Debug)]
 pub struct EigFullDyn<R, D: FactorScalar> {
     pub(super) v: BoundDynFactor<R, D::Eig>,
@@ -502,7 +502,7 @@ where
     })
 }
 
-/// Dynamic-rank [`eig_full`].
+/// Dynamic-rank `eig_full`.
 pub fn eig_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -842,7 +842,7 @@ where
     eigh_vals_dyn(dense, &input.dynamic(), HermitianTol::DEFAULT)
 }
 
-/// Dynamic-rank [`eigh_vals`]: the dense stage, the same in every fusion mode.
+/// Dynamic-rank `eigh_vals`: the dense stage, the same in every fusion mode.
 pub fn eigh_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -888,7 +888,7 @@ where
     eig_vals_dyn::<E, R, D>(dense, &input.dynamic())
 }
 
-/// Dynamic-rank [`eig_vals`]: the dense stage, the same in every fusion mode.
+/// Dynamic-rank `eig_vals`: the dense stage, the same in every fusion mode.
 pub fn eig_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,

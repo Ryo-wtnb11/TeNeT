@@ -114,7 +114,7 @@ where
     })
 }
 
-/// Dynamic-rank [`left_polar`].
+/// Dynamic-rank `left_polar`.
 pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -202,7 +202,7 @@ where
     })
 }
 
-/// Dynamic-rank [`right_polar`].
+/// Dynamic-rank `right_polar`.
 pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,

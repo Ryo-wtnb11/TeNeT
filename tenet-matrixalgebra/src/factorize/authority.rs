@@ -13,9 +13,9 @@ mod sealed {
 /// space; `commit` publishes it. `commit` runs `pre_commit`, the shared
 /// provider-free placement validation, before publishing exactly when the
 /// staged space is not yet published:
-/// - [`CheckedAuthority`] enumerates in `stage` and publishes in `commit`, so a
+/// - `CheckedAuthority` enumerates in `stage` and publishes in `commit`, so a
 ///   malformed placement fails before any bound space exists;
-/// - [`MfAuthority`]'s `stage` is the cached `derive_from_final_homspace`,
+/// - `MfAuthority`'s `stage` is the cached `derive_from_final_homspace`,
 ///   which has already published the layout, so its `commit` skips
 ///   `pre_commit`; the scatter validates placements lazily and the canonical
 ///   fast path does no placement hashing.

@@ -52,7 +52,7 @@ where
     typed_from_bound_factor(out)
 }
 
-/// Dynamic-rank [`exp`].
+/// Dynamic-rank `exp`.
 pub fn exp_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -858,7 +858,7 @@ where
     typed_from_bound_factor(out)
 }
 
-/// Dynamic-rank [`pinv`].
+/// Dynamic-rank `pinv`.
 pub fn pinv_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,

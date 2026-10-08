@@ -145,7 +145,9 @@ where
     /// provider `Arc` and validates its identity, HomSpace, rank, and layout
     /// before any SVD/GEMM. The compact arm also checks both source and
     /// swapped-output coupled-sector layouts. Ineligible layouts retain the
-    /// dense route. A checked lazy adjoint is materialized operation-locally.
+    /// dense route. A checked lazy adjoint is redirected through its parent,
+    /// `(A^H)^+ = (A^+)^H`, and the result is detached; multiplicity-free
+    /// lazy adjoints are read through their parent in the dense stage.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
@@ -179,9 +181,14 @@ where
     /// returns both factors in compact storage with `W = V`, including dual
     /// orientation, for multiplicity-free and checked-Generic providers alike
     /// (TensorKit's diagonal dispatch). Any other input, including a
-    /// materialized diagonal or swapped leg roles, takes the dense route,
-    /// whose `W` is a fresh nondual bond (TensorKit `fuse`); a dual `V` thus
-    /// yields `W = V` or its nondual flip depending on storage.
+    /// materialized diagonal, takes the dense route, whose `W` is a fresh
+    /// nondual bond (TensorKit `fuse`); a dual `V` thus yields `W = V` or its
+    /// nondual flip depending on storage. Swapped leg roles are one
+    /// [`Self::permute`] first, so the rule follows the mode's rank-(1,1)
+    /// swap of a compact diagonal: multiplicity-free rules with a real
+    /// categorical scalar keep it compact, so the direct arm applies with the
+    /// swapped leg as `W`; checked Generic densifies it and takes the dense
+    /// route with a fresh nondual `W`.
     /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
     /// sector/layout validation. Use [`Self::diagview`] to read the factors,
     /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.

@@ -9,7 +9,7 @@
 ///
 /// Returned by the facade's `svd_compact` and `svd_full` (Host and CUDA,
 /// multiplicity-free and checked-Generic providers) and by
-/// [`crate::svd_compact_dyn_checked_generic`].
+/// `crate::svd_compact_dyn_checked_generic`.
 ///
 /// # Order
 ///

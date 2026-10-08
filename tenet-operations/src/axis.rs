@@ -235,7 +235,7 @@ pub(crate) fn validate_permutation(axes: &[usize], rank: usize) -> Result<(), Op
     })
 }
 
-/// [`permutation_axes`] without a heap allocation up to rank 8.
+/// `permutation_axes` without a heap allocation up to rank 8.
 pub fn permutation_axes_inline(
     permutation: OutputAxisOrder<'_>,
     rank: usize,
