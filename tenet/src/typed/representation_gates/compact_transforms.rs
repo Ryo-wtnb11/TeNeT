@@ -1163,3 +1163,6 @@ fn checked_trace_defers_compact_materialization_until_admission() {
         TypedData::Diagonal(_)
     ));
 }
+
+#[cfg(feature = "racah-generated")]
+mod late_trace;
