@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
+    let _cache = cache_shared();
     macro_rules! assert_moore_penrose {
         ($input:expr, $pseudo:expr, $distance:expr) => {{
             let input = $input;
@@ -318,6 +319,7 @@ fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_fo
 
 #[test]
 fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
+    let _cache = cache_shared();
     for (fail_svd, fail_gemm, expected_svd, expected_gemm) in [
         (None, None, 2, 2),
         (Some(1), None, 1, 0),
@@ -426,6 +428,7 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 
 #[test]
 fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
@@ -768,6 +771,7 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
 
 #[test]
 fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
@@ -960,6 +964,7 @@ fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
 /// provider cannot fail it.
 #[test]
 fn checked_compact_diagonal_pinv_keeps_the_input_space_without_provider_queries() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for dual in [false, true] {
         for fault in ["fail_algebra", "invalid_style"] {

@@ -263,6 +263,7 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
 
 #[test]
 fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
+    let _cache = cache_shared();
     // What: sectors stream (each SVD is followed by its W and P GEMMs, so
     // only one sector's factors are live), and any SVD or GEMM failure
     // returns no factor while preserving the source and provider authority.
@@ -317,6 +318,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
 
 #[test]
 fn checked_only_compact_diagonal_polar_is_direct_and_refuses_nonfinite_values() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
@@ -506,6 +508,7 @@ fn checked_only_compact_diagonal_polar_is_direct_and_refuses_nonfinite_values() 
 
 #[test]
 fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
+    let _cache = cache_shared();
     for left in [true, false] {
         let svd_calls = Arc::new(SpyCounts::default());
         let gemm_calls = Arc::clone(&svd_calls);
@@ -550,6 +553,7 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
 
 #[test]
 fn checked_generic_polar_provider_error_precedes_dense_work() {
+    let _cache = cache_shared();
     // What: complete codomain dimensions are queried before domain,
     // direction, admission, and dense work.
     let svd_calls = Arc::new(SpyCounts::default());
@@ -690,6 +694,7 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
 
 #[test]
 fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
+    let _cache = cache_shared();
     // What: a later sector SVD failure crosses the public Generic facade as a
     // typed plan error without changing the source or returning a partial null.
     let svd_calls = Arc::new(SpyCounts::default());
@@ -716,6 +721,7 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
 
 #[test]
 fn checked_compact_null_near_the_cutoff_is_direct_and_agrees_with_dense() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -1052,6 +1058,7 @@ fn sun_checked_generic_polar_cross_mu_qh_oracles_for_both_dtypes() {
 /// fail them.
 #[test]
 fn checked_compact_diagonal_polar_publishes_on_the_input_space_without_provider_queries() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for dual in [false, true] {
         for fault in ["fail_algebra", "invalid_style"] {

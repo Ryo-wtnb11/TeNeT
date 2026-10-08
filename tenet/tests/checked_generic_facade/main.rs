@@ -38,9 +38,24 @@ use tenet::typed::{
 };
 use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
 
-/// Re-executes exactly one global-cache probe in a fresh process. This binary
-/// also contains ordinary tests that mutate the same caches without a shared
-/// lock, so test-thread serialization inside one probe is insufficient.
+/// Orders process-global cache clears against provider-query and cache-count
+/// windows (#2084): a test that clears holds the write side for its whole
+/// body, a test that counts holds the read side, so a sibling's clear cannot
+/// land between a warm-up and a measured call. Poison-tolerant so one failing
+/// test does not cascade.
+static CACHE_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn cache_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    CACHE_TEST_LOCK.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn cache_exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    CACHE_TEST_LOCK.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Re-executes exactly one global-cache probe in a fresh process, for
+/// assertions on absolute counters (`entries() == 0` right after a clear)
+/// that any concurrent, unguarded construction would move.
 fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
     if std::env::var_os(isolated_env).is_some() {
         return false;

@@ -318,6 +318,7 @@ fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
 
 #[test]
 fn checked_compact_diagonal_svd_rejects_nonfinite_and_skips_the_provider_when_finite() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -390,6 +391,7 @@ fn checked_compact_diagonal_svd_rejects_nonfinite_and_skips_the_provider_when_fi
 
 #[test]
 fn checked_compact_diagonal_svd_is_direct_for_subnormal_and_overflowing_values() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -559,6 +561,7 @@ fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bon
 
 #[test]
 fn checked_compact_diagonal_svd_full_refuses_a_provider_bond_mismatch() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -666,6 +669,7 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
 
 #[test]
 fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_source() {
+    let _cache = cache_shared();
     // What: dense storage is refused before any provider query, whether or not
     // it is bond shaped, and the source is untouched.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -897,6 +901,7 @@ fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
 
 #[test]
 fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
+    let _cache = cache_exclusive();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(122));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -949,6 +954,7 @@ fn checked_generic_full_svd_failure_is_typed_and_nonpublishing() {
 /// `svd_compact` with the typed plan error and runs no dense SVD.
 #[test]
 fn checked_dual_compact_diagonal_svd_compact_propagates_provider_errors() {
+    let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
