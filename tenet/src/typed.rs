@@ -77,55 +77,52 @@
 //! facade spells as the `[&v, &w]` leg slices passed to every constructor, not
 //! as a public container type.
 //!
-//! # Phase boundary
+//! # Capabilities
 //!
-//! This is the phase-6 surface of issue #557: construction
-//! ([`TensorMap::zeros`], [`TensorMap::from_subblock_fn`],
+//! Host storage (the default `Vec<D>` body) carries the full surface:
+//! construction ([`TensorMap::zeros`], [`TensorMap::from_subblock_fn`],
 //! [`TensorMap::rand_with_seed`], [`TensorMap::isomorphism`],
-//! [`TensorMap::isometry`]),
-//! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
-//! [`TensorMap::subblock_fusion_trees`], [`TensorMap::subblock`],
-//! [`TensorMap::subblock_count`], [`TensorMap::block`], [`TensorMap::blocks`],
-//! [`TensorMap::dense_data`], [`TensorMap::runtime`]),
-//! the index-manipulation and contraction operations
-//! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
-//! [`TensorMap::repartition`],
-//! [`TensorMap::contract`],
-//! [`TensorMap::compose`]), the scalar operations
+//! [`TensorMap::isometry`]), inspection ([`TensorMap::codomain`],
+//! [`TensorMap::domain`], [`TensorMap::subblock_fusion_trees`],
+//! [`TensorMap::subblock`], [`TensorMap::subblock_count`], [`TensorMap::block`],
+//! [`TensorMap::blocks`], [`TensorMap::dense_data`], [`TensorMap::runtime`],
+//! [`TensorMap::rank`], [`TensorMap::codomain_rank`], [`TensorMap::domain_rank`],
+//! [`TensorMap::leg_dims`], [`TensorMap::scalar`]), index manipulation and
+//! contraction ([`TensorMap::permute`], [`TensorMap::braid`],
+//! [`TensorMap::transpose`], [`TensorMap::repartition`], [`TensorMap::contract`],
+//! [`TensorMap::compose`], [`TensorMap::twist`], [`TensorMap::flip`],
+//! [`TensorMap::insert_unit`], [`TensorMap::remove_unit`]), scalar operations
 //! ([`TensorMap::axpby`], [`TensorMap::scale`], [`TensorMap::norm`],
 //! [`TensorMap::inner`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
-//! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
-//! [`TensorMap::svd_full`], [`TensorMap::svd_vals`],
-//! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
-//! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
+//! [`TensorMap::adjoint`]), factorizations ([`TensorMap::svd_compact`],
+//! [`TensorMap::svd_full`], [`TensorMap::svd_vals`], [`TensorMap::qr_compact`],
+//! [`TensorMap::qr_full`], [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_polar`], [`TensorMap::right_polar`],
-//! [`TensorMap::left_null`], [`TensorMap::right_null`]) and the **truncation
-//! primitives** a truncated factorization is composed from
-//! ([`TensorMap::diagview`], [`GradedSpace::find_truncated`],
-//! [`GradedSpace::truncspace`], [`TensorMap::restrict_leg`]; see the
-//! tutorial) and — with
-//! issue #570
-//! — the **eigendecompositions** ([`TensorMap::eigh_full`],
-//! [`TensorMap::eigh_vals`], [`TensorMap::eig_full`], [`TensorMap::eig_vals`])
-//! and
-//! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
+//! [`TensorMap::left_null`], [`TensorMap::right_null`]), eigendecompositions
+//! ([`TensorMap::eigh_full`], [`TensorMap::eigh_vals`], [`TensorMap::eig_full`],
+//! [`TensorMap::eig_vals`]), matrix functions ([`TensorMap::exp`],
 //! [`TensorMap::inv`], [`TensorMap::pinv`], and the elementwise
-//! [`TensorMap::map_diagonal`] on compact diagonals) and — with
-//! issue #580 — the **typed inspection, scalar and conversion group**
-//! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
-//! [`TensorMap::domain_rank`], [`TensorMap::rank`], [`TensorMap::leg_dims`],
-//! [`TensorMap::codomain`], [`TensorMap::domain`],
-//! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::convert`],
-//! [`TensorMap::re`], [`TensorMap::im`]) and the **concatenation/absorb
-//! group** ([`TensorMap::cat`], [`TensorMap::absorb`]) and the **index-unit
-//! group** ([`TensorMap::twist`], [`TensorMap::flip`],
-//! [`TensorMap::insert_unit`], [`TensorMap::remove_unit`]) and — with
-//! issue #1323 — the **explicit payload precision conversion**
-//! [`TensorMap::convert`] (exact widenings and the two lossy narrowings), with
-//! no implicit conversion anywhere.
+//! [`TensorMap::map_diagonal`] on compact diagonals), the truncation primitives
+//! a truncated factorization is composed from ([`TensorMap::diagview`],
+//! [`GradedSpace::find_truncated`], [`GradedSpace::truncspace`],
+//! [`TensorMap::restrict_leg`]), concatenation ([`TensorMap::cat`],
+//! [`TensorMap::absorb`]) and explicit payload conversion
+//! ([`TensorMap::convert`], [`TensorMap::zeros_like`], [`TensorMap::re`],
+//! [`TensorMap::im`]; exact widenings and the two lossy narrowings, never
+//! implicit).
 //!
-//! Issue #570 also gave the facade **compact diagonal storage**. For
-//! Host providers, the `s` factor from `svd_compact` is compact (and stays
+//! **Device execution** is a storage type, not a runtime switch:
+//! `TensorMap<R, D, CudaStorage<D>>` (feature `cuda`, created by an explicit
+//! `to_cuda` and left by `to_host`) has its own operation set in the CUDA
+//! impls of this module. The device surface is narrower than Host: an
+//! operation that is not implemented for `CudaStorage` does not exist for it
+//! rather than falling back to Host. See the crate-level documentation for the
+//! device synchronization model. [`TensorMap::placement`] is diagnostic
+//! metadata; no `TensorMap` operation dispatches on it.
+//!
+//! # Compact diagonal storage
+//!
+//! For Host providers, the `s` factor from `svd_compact` is compact (and stays
 //! compact through `restrict_leg` on both legs). Checked `Generic` EIGH/EIG
 //! likewise store their `d` factor compactly.
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
@@ -142,51 +139,26 @@
 //! compact source directly and publishes a dense result. Other transform and
 //! contraction geometries use the documented dense route.
 //!
-//! [`TensorMap::compose`] was previously documented here as blocked below this
-//! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
-//! diagnosis was wrong: the composition path never decoded a typed sector, and
-//! the lowered bound was inherited from one inner call in a bosonic
-//! short-circuit that already had a non-lowered twin. Swapping that one call
-//! opened the seam for every provider, fermionic signs included.
+//! # Deliberately absent
 //!
-//! What is still absent — among what remains, the entries below are the ones
-//! with a decision behind them rather than a queue position:
-//!
-//! - The **rest of the matrix-function family** — the trigonometric and
-//!   hyperbolic members, `log`, `sylvester` and a general `sqrt` — is out by
-//!   decision, not by queue position (issue #576). Every one of them is a
-//!   spectral function or a solve over the same seams, so adding them is
-//!   mechanical; what is missing is a reason to. Right solves and integer
+//! - The rest of the matrix-function family (trigonometric and hyperbolic
+//!   members, `log`, `sylvester`, a general `sqrt`). Right solves and integer
 //!   powers are compositions of [`TensorMap::adjoint`], [`TensorMap::solve`],
 //!   [`TensorMap::inv`] and [`TensorMap::compose`] (the zeroth power is
 //!   [`TensorMap::isomorphism`] of the domain onto itself), and elementwise
 //!   maps of a compact spectrum go through [`TensorMap::map_diagonal`].
-//!   One capability gap still stands behind that line: general endomorphism
-//!   **`sqrt`** needs a Schur seam, and that seam does not exist below this
-//!   facade. The one that used to stand beside it is closed —
-//!   [`TensorMap::exp`] accepts any endomorphism since issue #577, through a
-//!   blockwise Padé arm.
-//! - Some **outer multiplicity factorization** leaves remain outside this
-//!   facade. Checked `Generic` providers have provider-neutral SVD/QR/LQ,
-//!   numerical null spaces, and the admitted matrix-function subset; each leaf
-//!   documents its own lazy-adjoint and compact-storage boundary.
-//! - **Device execution** is absent, not device representation: the body can
-//!   carry a non-host `S` through [`TensorMap<R, D, S>`], while public
-//!   construction and arithmetic deliberately remain on the default `Vec<D>`
-//!   storage. Non-host operations wait for an explicit, [`Runtime`]-dependent
-//!   transfer/device leaf. [`crate::expert::Placement`] is diagnostic metadata;
-//!   no operation dispatches on it.
-//! - The **operator overloads** (`impl Add`, `impl Mul`) are out because they
-//!   cannot return `Result`; panicking operators would contradict this
-//!   facade's passthrough-error contract. Adding them later is not a breaking
-//!   change.
-//! - `conj` stays design-gated on its open correctness question for
+//!   General endomorphism `sqrt` additionally needs a Schur seam that does not
+//!   exist below this facade.
+//! - Operator overloads (`impl Add`, `impl Mul`): they cannot return `Result`,
+//!   and panicking operators would contradict the passthrough-error contract.
+//! - `conj`, which stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
 //!   parent view for dense storage. A compact diagonal, in either admission
 //!   mode, keeps its direct `O(Σ_c k_c)` conjugation path.
-//!
-//! Adding any of them ahead of its review would bypass the gate that exists to
-//! keep this surface deliberate.
+//! - Some outer multiplicity factorization leaves. Checked `Generic` providers
+//!   have provider-neutral SVD/QR/LQ, numerical null spaces, and the admitted
+//!   matrix-function subset; each leaf documents its own lazy-adjoint and
+//!   compact-storage boundary.
 //!
 //! Construction consumes only the transactional checked admission path, so a
 //! provider that reports an invalid or unrepresentable algebra fails with a

@@ -22,19 +22,20 @@
 //! [`Network::contract`] runs the same pipeline eagerly through the
 //! Runtime's topology-keyed plan cache.
 //!
-//! There is **no public einsum-string parser** (decision 4 in
-//! `docs/user_api_design.md`): labels are per-operand identifier lists given
-//! to [`Network::new`] and lower directly to [`NetworkIR`].
+//! There is **no public einsum-string parser**: labels are per-operand
+//! identifier lists given to [`Network::new`] and lower directly to
+//! [`NetworkIR`].
 //!
-//! ## Follow-ups (intentionally not in this round)
+//! ## Path search and slicing
 //!
 //! - **cotengra external path search**: the optional `cotengra-python`
 //!   feature calls the installed Python `cotengra` package for path search
 //!   while keeping execution in Rust. The optional `opt-path` feature wraps
 //!   the `opt-einsum-path` crate for optimal / dp / branch-and-bound searches.
 //! - **Sliced execution**: the slicing *decision* types ([`SlicePlan`],
-//!   [`greedy_slice`]) are ported; a memory-bounded sliced executor over
-//!   `Tensor` needs `select_index` on the user layer first.
+//!   [`greedy_slice`]) are ported, and [`Network::lower_symmetric_sliced_plan`]
+//!   with [`Network::execute_symmetric_sliced`] runs a lowered plan under a
+//!   measured payload ceiling.
 
 #[cfg(test)]
 extern crate self as tenet_network;

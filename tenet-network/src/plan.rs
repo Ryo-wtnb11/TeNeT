@@ -297,13 +297,14 @@ impl ContractionPlan {
     ///
     /// `validate` only checks topology (operand ids in range,
     /// single final result, …); it trusts the labels each step claims to emit.
-    /// The executor in `einsum_exec::execute_plan`, however, derives the actual
-    /// result leg order purely from the two operands: a label shared by *both*
+    /// The schedule compiler (`network/schedule.rs`, `compile_schedule`),
+    /// however, derives the actual result leg order purely from the two
+    /// operands: a label shared by *both*
     /// operands is contracted away; every other label (an *open* leg) survives,
     /// in lhs-then-rhs order. A hand-built plan that declares a different
     /// `result_labels` would silently compute the wrong network.
     ///
-    /// This mirrors that derivation (`einsum_exec.rs`, the `c_labels` block) and
+    /// This mirrors that derivation (the `result_labels` block there) and
     /// rejects any step whose declared labels disagree. `input_labels` supplies
     /// the leg labels of each original input tensor (id `0..tensor_count`);
     /// intermediate operands' labels are looked up from earlier steps.

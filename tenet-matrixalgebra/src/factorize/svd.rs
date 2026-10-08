@@ -151,7 +151,7 @@ where
     scale_axis_by_spectrum_mapped(space, data, axis, spectrum, D::from_real)
 }
 
-/// Value-generic sibling of [`scale_axis_by_spectrum`]. Why not convert the
+/// Value-generic sibling of `scale_axis_by_spectrum`. Why not convert the
 /// spectrum before this call: a complex spectrum cannot pass through the
 /// real-only `SectorSpectrum` alias without losing its imaginary component.
 pub fn scale_axis_by_spectrum_mapped<D, V>(
@@ -249,7 +249,7 @@ where
     svd_vals_dyn(dense, &input.dynamic())
 }
 
-/// Dynamic-rank [`svd_vals`]: the dense stage, the same in every fusion mode.
+/// Dynamic-rank `svd_vals`: the dense stage, the same in every fusion mode.
 pub fn svd_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -381,7 +381,7 @@ where
 
 /// The compact-SVD factors without materializing the diagonal `S`:
 /// `(U, Vh, spectrum)`. The shared core of every SVD entry point.
-/// [`svd_compact_dyn`] wraps this and adds the dense `S` as a tensor for callers
+/// `svd_compact_dyn` wraps this and adds the dense `S` as a tensor for callers
 /// that want it; polar and the matrix-function paths scale by the spectrum
 /// directly (TensorKit `DiagonalTensorMap` `rmul!`) and never build `S`.
 pub type SvdFactorsDyn<R, D> = (
