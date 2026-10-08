@@ -263,14 +263,16 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
 
 #[test]
 fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
-    // What: every SVD completes before W/P GEMMs, and either GEMM failure
+    // What: sectors stream (each SVD is followed by its W and P GEMMs, so
+    // only one sector's factors are live), and any SVD or GEMM failure
     // returns no factor while preserving the source and provider authority.
     for (fail_svd, fail_gemm, expected_svd, expected_gemm) in [
         (None, None, 2, 4),
         (Some(1), None, 1, 0),
-        (Some(2), None, 2, 0),
-        (None, Some(1), 2, 1),
-        (None, Some(2), 2, 2),
+        (Some(2), None, 2, 2),
+        (None, Some(1), 1, 1),
+        (None, Some(2), 1, 2),
+        (None, Some(3), 2, 3),
         (None, Some(4), 2, 4),
     ] {
         let svd_calls = Arc::new(SpyCounts::default());
@@ -538,9 +540,10 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
                 tenet::typed::CheckedGenericPlanError::Operation(_)
             ))
         ));
+        // The first sector's W and P GEMMs precede the failing second SVD.
         assert_eq!(svd_calls.of(PINV_SVD), 2);
-        assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
-        assert_eq!(gemm_calls.total(), 2);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), 2);
+        assert_eq!(gemm_calls.total(), 4);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }

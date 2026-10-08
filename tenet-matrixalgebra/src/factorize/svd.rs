@@ -139,7 +139,8 @@ where
 /// with no braiding or fusion-tree recoupling (`block(D, c)` is a `Diagonal`,
 /// so LinearAlgebra dispatches to scaling, not GEMM). A real `spectrum` on a
 /// complex `data` promotes each entry the same way (`D::from_real`).
-pub fn scale_axis_by_spectrum<D>(
+#[cfg(test)]
+pub(crate) fn scale_axis_by_spectrum<D>(
     space: &DynamicFusionMapSpace,
     data: &mut [D],
     axis: Option<usize>,
@@ -696,7 +697,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::Left)
+    svd_compact_factors_dyn_with_gauge(dense, input, CompactSvdGauge::Left)
 }
 
 /// Compact SVD factors for the logical adjoint without constructing its input:
@@ -712,7 +713,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::AdjointLeft)
+    svd_compact_factors_dyn_with_gauge(dense, input, CompactSvdGauge::AdjointLeft)
 }
 
 pub(super) struct CompactSvdNumericalStage<D> {
@@ -811,10 +812,9 @@ pub(super) enum CompactSvdGauge {
     AdjointLeft,
 }
 
-pub(super) fn svd_compact_factors_dyn_with_direction<E, R, D>(
+fn svd_compact_factors_dyn_with_gauge<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
-    polar_direction: Option<(PolarDirection, PolarDirection)>,
     gauge: CompactSvdGauge,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
@@ -823,12 +823,6 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    if let Some((acceptance_direction, error_direction)) = polar_direction {
-        // Stored routes omit side-only sectors, whose logical matrices are
-        // rows x 0 or 0 x columns and still constrain the isometry direction.
-        validate_polar_direction(acceptance_direction, error_direction, input.space())?;
-        require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
-    }
     if let Some(plan) = compact_factor_plan(input.space())? {
         let adjoint_spaces = if matches!(gauge, CompactSvdGauge::AdjointLeft) {
             let adjoint = input.space().adjoint_view()?;

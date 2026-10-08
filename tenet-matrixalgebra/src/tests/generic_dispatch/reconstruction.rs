@@ -329,8 +329,7 @@ fn spectral_outputs_retain_the_exact_input_provider_allocation() {
     let eig = eig_full_dyn(&mut dense, &general_input).unwrap();
     assert!(Arc::ptr_eq(&provider, eig.v().space().provider_arc()));
 
-    let mut context = default_context();
-    let exponential = exp_dyn(&mut dense, &mut context, &hermitian_input).unwrap();
+    let exponential = exp_dyn(&mut dense, &hermitian_input).unwrap();
     assert!(Arc::ptr_eq(&provider, exponential.space().provider_arc()));
 }
 
@@ -780,13 +779,13 @@ fn derived_matrix_functions_inherit_the_exact_provider_arc() {
     let LeftPolar {
         w: w_left,
         p: p_left,
-    } = left_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    } = left_polar_dyn(&mut dense, &input).unwrap();
     let RightPolar {
         p: p_right,
         wh: w_right,
-    } = right_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    } = right_polar_dyn(&mut dense, &input).unwrap();
     let inverse = inv_dyn(&mut dense, &mut context, &input).unwrap();
-    let pseudo_inverse = pinv_dyn(&mut dense, &mut context, &input, 1.0e-13).unwrap();
+    let pseudo_inverse = pinv_dyn(&mut dense, &input, 1.0e-13).unwrap();
 
     for factor in [
         &w_left,

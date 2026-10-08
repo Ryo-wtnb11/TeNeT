@@ -59,6 +59,15 @@ pub trait FactorSpaceAuthority<R>: sealed::Sealed {
         &self,
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError>;
+
+    /// The output space of a factor on `space`'s own hom space (polar `W`).
+    /// Multiplicity-free mode derives the canonical layout, as any input
+    /// tiling may reach it; a checked space is already its hom space's
+    /// enumerated root and is reused without enumerating again.
+    fn same_homspace_output(
+        &self,
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError>;
 }
 
 /// A fusion mode's factorization authority, chosen statically by the mode
@@ -69,7 +78,7 @@ pub trait FactorSpaceAuthority<R>: sealed::Sealed {
 /// different provider bounds and error types, and monomorphizing over the
 /// marker keeps the multiplicity-free path free of the checked one's costs.
 pub trait FactorMode<R>: sealed::Sealed {
-    type Error: From<OperationError>;
+    type Error: From<OperationError> + From<Self::RootError>;
 
     /// The error of [`FactorSpaceAuthority::output_space`].
     type RootError;
@@ -582,6 +591,18 @@ where
 /// layout authority.
 pub(super) struct MfAuthority<'a, R>(pub(super) &'a BoundDynamicFusionMapSpace<R>);
 
+/// The multiplicity-free derived layout of `homspace` on `space`'s provider:
+/// the output of a per-sector kernel whose input layout may be packed.
+pub(crate) fn multiplicity_free_output_space<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    homspace: FusionTreeHomSpace,
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    MfAuthority(space).output_space(homspace)
+}
+
 /// Checked Generic factor spaces, enumerated through the fallible provider.
 pub(super) struct CheckedAuthority<'a, R>(pub(super) &'a Arc<R>);
 
@@ -627,6 +648,13 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
         self.0.derive_from_final_homspace(homspace)
+    }
+
+    fn same_homspace_output(
+        &self,
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
+        self.output_space(space.space().homspace().clone())
     }
 }
 
@@ -683,6 +711,13 @@ where
             Arc::clone(self.0),
             homspace,
         )
+    }
+
+    fn same_homspace_output(
+        &self,
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
+        Ok(space.clone())
     }
 }
 

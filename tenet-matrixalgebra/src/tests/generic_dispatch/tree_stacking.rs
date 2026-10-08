@@ -294,15 +294,14 @@ where
     let hermitian_bound = bound_tensor(Arc::clone(&provider), &hermitian);
     let (general, hermitian) = (general_bound.as_ref(), hermitian_bound.as_ref());
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
     assert_stacking_refusal(eig_vals(&mut dense, &general), "eig_vals ");
     assert_stacking_refusal(eig_full(&mut dense, &general), "eig_full ");
     assert_stacking_refusal(eigh_vals(&mut dense, &hermitian), "eigh_vals ");
     assert_stacking_refusal(eigh_full(&mut dense, &hermitian), "eigh_full ");
-    assert_stacking_refusal(exp(&mut dense, &mut context, &general), "exp ");
-    assert_stacking_refusal(exp(&mut dense, &mut context, &hermitian), "exp ");
+    assert_stacking_refusal(exp(&mut dense, &general), "exp ");
+    assert_stacking_refusal(exp(&mut dense, &hermitian), "exp ");
     assert_stacking_refusal(
-        exp_pade13_direct_into_dyn(&mut dense, &general.dynamic()),
+        exp_direct_into_dyn(&mut dense, &general.dynamic(), general.space().clone()),
         "exp ",
     );
 
@@ -325,7 +324,7 @@ where
         eigh_full_dyn(&mut dense, &hermitian_adjoint, HermitianTol::DEFAULT),
         "eigh_full ",
     );
-    assert_stacking_refusal(exp_dyn(&mut dense, &mut context, &general_adjoint), "exp ");
+    assert_stacking_refusal(exp_dyn(&mut dense, &general_adjoint), "exp ");
 }
 
 #[test]
@@ -618,9 +617,8 @@ where
     let actual = eig_full_dyn(&mut dense, &reordered).unwrap();
     assert_eig_columns_match_up_to_scale(expected.v(), actual.v());
 
-    let mut context = default_context();
-    let expected = left_polar_dyn(&mut dense, &mut context, &facade).unwrap();
-    let actual = left_polar_dyn(&mut dense, &mut context, &reordered).unwrap();
+    let expected = left_polar_dyn(&mut dense, &facade).unwrap();
+    let actual = left_polar_dyn(&mut dense, &reordered).unwrap();
     assert_factor_matches_facade("left_polar W", &expected.w, &actual.w);
     assert_factor_matches_facade("left_polar P", &expected.p, &actual.p);
 
