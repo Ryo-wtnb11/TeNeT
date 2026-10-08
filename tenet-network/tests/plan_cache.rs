@@ -53,10 +53,6 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
     );
     assert_eq!(cold.workspace_byte_admissions, 1);
     assert_eq!(cold.workspace_byte_rejections, 0);
-    #[allow(deprecated)]
-    {
-        assert_eq!(cold.dynamic_aliases, 0);
-    }
 
     let second = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
         .contract(&[&a, &b])

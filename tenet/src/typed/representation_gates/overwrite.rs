@@ -58,7 +58,6 @@ fn assert_overwrite_matches<R, D>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(deprecated)]
 fn assert_contract_overwrite_matches<R, D>(
     label: &str,
     lhs: &TensorMap<R, D>,

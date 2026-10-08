@@ -678,10 +678,9 @@ fn su2_mis_stacked_contractions_match_physical_dense_einsum() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn prepared_compose_rejects_a_non_direct_plan_at_new() {
+fn compose_plan_rejects_a_non_direct_plan_at_new() {
     // What: an expert tiling whose column trees are stacked opposite to the
-    // partner's rows has no canonical fully-direct plan, so the handle refuses
+    // partner's rows has no canonical fully-direct plan, so the plan refuses
     // it at `new` with the typed error the eager device composition reports,
     // while eager Host `compose` still runs it.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -694,9 +693,7 @@ fn prepared_compose_rejects_a_non_direct_plan_at_new() {
     assert!(reversed.compose(&canonical).is_ok());
     let lhs = StackedTensorMap::pack(&[reversed]).unwrap();
     let rhs = StackedTensorMap::pack(&[canonical]).unwrap();
-    let error = PreparedCompose::new(&lhs, &rhs)
-        .err()
-        .expect("non-direct plan");
+    let error = ComposePlan::new(&lhs, &rhs).err().expect("non-direct plan");
     assert!(
         matches!(
             &error,
