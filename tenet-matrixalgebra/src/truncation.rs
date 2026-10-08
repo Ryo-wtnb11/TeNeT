@@ -455,7 +455,11 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             let budget = *rank as f64;
             for (sector, index) in order.drain(..) {
                 let weight = spectra[sector].weight;
-                if used + weight > budget + 1e-12 {
+                // TensorKit `findtruncated(::SectorVector, ::TruncationByOrder)`
+                // (truncation.jl:171-205) compares the running `dim(c)` sum
+                // with no slack. The weights are exact `dim(c)` (#1871), so a
+                // tolerance here would only admit a state TensorKit rejects.
+                if used + weight > budget {
                     break;
                 }
                 debug_assert_eq!(index, kept[sector]);
@@ -999,6 +1003,20 @@ mod tests {
                 decision.error
             );
         }
+    }
+
+    #[test]
+    fn rank_budget_compares_the_dimension_sum_without_slack() {
+        // What: TensorKit `totaldim > howmany && break` (truncation.jl:198):
+        // a state whose weight overflows the budget by any amount is not
+        // kept, and one that meets it exactly is.
+        let over = 1.0 + 1e-13;
+        let entries = [(over, vec![2.0]), (1.0, vec![1.0])];
+        let decision = select(&spectra(&entries), &Truncation::rank(1)).unwrap();
+        assert_eq!(decision.kept, vec![0, 0]);
+        let entries = [(1.0, vec![2.0]), (1.0, vec![1.0])];
+        let decision = select(&spectra(&entries), &Truncation::rank(1)).unwrap();
+        assert_eq!(decision.kept, vec![1, 0]);
     }
 
     #[test]

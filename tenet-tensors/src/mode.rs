@@ -72,7 +72,14 @@ pub trait CoefficientAlgebra<R>: sealed::Sealed {
 /// symbols).
 #[doc(hidden)]
 pub trait RigidCoefficientAlgebra<R>: CoefficientAlgebra<R> {
-    /// The quantum dimension `dim(c)`.
+    /// The quantum dimension `dim(c)`: the one weight of truncation budgets
+    /// and quantum-dimension-weighted reductions in every mode, exact where
+    /// the provider knows it (`CheckedGenericRigidSymbols::try_dim_scalar`).
+    ///
+    /// TensorKit `cfaa073e` `findtruncated(::SectorVector, ...)` weights by
+    /// `dim(c)` (`src/factorizations/truncation.jl:187,239`); QSpace
+    /// `d2d3d7da` `SVD_Data::dmrgTruncate` weights its norm by the integer
+    /// multiplet dimension `qdim_tot` (`Source/mpsortho.cc:616`).
     fn dim(provider: &R, sector: SectorId) -> Result<f64, Self::Error>;
 }
 
@@ -142,11 +149,8 @@ where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
 {
     fn dim(provider: &R, sector: SectorId) -> Result<f64, Self::Error> {
-        // Why not an exact dimension query: the checked provider exposes only
-        // `sqrt(dim)` today (exact `dim(c)` is V7 / #1871).
         provider
-            .try_sqrt_dim_scalar(sector)
-            .map(|sqrt_dim| sqrt_dim * sqrt_dim)
+            .try_dim_scalar(sector)
             .map_err(CheckedGenericPlanError::Provider)
     }
 }

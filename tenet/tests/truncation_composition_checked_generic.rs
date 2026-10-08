@@ -1,7 +1,7 @@
 //! The truncation composition on a checked Generic provider (#1300).
 //!
 //! SU(3) with the adjoint irrep is the case the multiplicity-free file cannot
-//! reach: the quantum-dimension weight is the fallible `try_sqrt_dim_scalar²`.
+//! reach: the quantum-dimension weight is the fallible exact `try_dim_scalar`.
 //! Compact SVD stores `s` diagonally; its explicitly materialized copy also
 //! exercises `diagview`'s strided dense arm.
 //!

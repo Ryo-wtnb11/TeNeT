@@ -608,3 +608,40 @@ fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
     }
     assert_c64_svd_trunc_composition_matches_host(&su2_tensor, &Truncation::rank(2));
 }
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_su2_svd_trunc_matches_host_at_every_weighted_rank_budget() {
+    // What: SU(2) spectra with nontrivial degeneracies and quantum dimensions
+    // 1, 2 and 3 take the Host decision at every integer rank budget, most of
+    // which land exactly on a cumulative `dim(c)` sum (#1871), in f64 and c64.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+            (SU2Irrep::from_twice_spin(2), 1),
+        ],
+    )
+    .unwrap();
+    // Hashed fills keep singular values apart, so device rounding cannot
+    // reorder a near-tie that the budget then splits.
+    let mut ordinal = 0usize;
+    let real = TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
+        ordinal += 1;
+        pseudo_random_c64(ordinal).re
+    })
+    .unwrap();
+    let complex = TensorMap::<_, Complex64>::from_subblock_fn(
+        &runtime,
+        [&leg, &leg],
+        [&leg],
+        distinct_c64_fill(),
+    )
+    .unwrap();
+    for budget in 0..=12 {
+        assert_typed_cuda_svd_trunc_composition_matches_host(&real, &Truncation::rank(budget));
+        assert_c64_svd_trunc_composition_matches_host(&complex, &Truncation::rank(budget));
+    }
+}
