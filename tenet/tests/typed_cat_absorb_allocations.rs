@@ -453,3 +453,60 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
         );
     }
 }
+
+/// Warm allocation calls of one compact-diagonal braid on `$leg`.
+macro_rules! warm_compact_braid_calls {
+    ($leg:expr, $spectrum:expr $(,)?) => {{
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let diagonal: TensorMap<_, f64> = TensorMap::diagonal(&runtime, $leg, $spectrum).unwrap();
+        black_box(diagonal.braid(&[1], &[0], &[0, 1]).unwrap());
+        black_box(diagonal.braid(&[1], &[0], &[0, 1]).unwrap());
+        let (output, allocs) =
+            counting_alloc::measure(|| black_box(diagonal.braid(&[1], &[0], &[0, 1]).unwrap()));
+        assert!(output.dense_data().is_ok());
+        allocs.calls
+    }};
+}
+
+#[test]
+fn compact_braid_finds_dual_sector_blocks_without_allocating() {
+    // What (#2011): the compact braid sends sector c to its dual. For U(1)
+    // charges ±1 that moves each destination to the other ordinal, and the
+    // destination block is still found without an allocation, so the warm
+    // call costs exactly what the self-dual Z2 braid of the same shape does.
+    let _serial = counting_alloc::serial();
+    let z2 = GradedSpace::try_new(
+        Arc::new(Z2FusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+    )
+    .unwrap();
+    let self_dual = warm_compact_braid_calls!(
+        &z2,
+        vec![
+            SectorSpectrum {
+                sector: Z2Irrep::EVEN,
+                values: vec![1.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: Z2Irrep::ODD,
+                values: vec![3.0, 4.0, 5.0],
+            },
+        ],
+    );
+    let u1 = u1_leg(&Arc::new(U1FusionRule), &[(-1, 2), (1, 3)]);
+    let dual_moving = warm_compact_braid_calls!(
+        &u1,
+        vec![
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![1.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![3.0, 4.0, 5.0],
+            },
+        ],
+    );
+    eprintln!("warm compact braid calls: Z2 {self_dual}, U(1) ±1 {dual_moving}");
+    assert_eq!(dual_moving, self_dual);
+}

@@ -8,12 +8,14 @@
 //! so the recoupling matrices are genuine 6j/R data with irrational entries and
 //! mixed signs rather than hand-written numbers.
 //!
-//! The oracle walks `blocks()`, `layouts().{entry,shape,strides}` and
-//! `recoupling_coefficients_dst_src()` with a plain triple loop over *unbaked*
-//! strides. It never reads the baked fused arena, the recoupling plan, a packed
-//! column or a GEMM, so "the host executor agrees with it" and "the device
-//! executor agrees with it" are statements about the replayed semantics, not
-//! about a shared implementation.
+//! The oracle walks `blocks()`, the entries' offsets and the coefficients with
+//! a plain triple loop over *raw* block geometry it rebuilds itself: each
+//! entry's block is found in the fixture `BlockStructure` by offset, and a
+//! source block's axes are permuted by the operation's own permutation. It
+//! never reads the compiled layout roles, the recoupling plan, a packed column
+//! or a GEMM, so "the host executor agrees with it" and "the device executor
+//! agrees with it" are statements about the replayed semantics, not about a
+//! shared implementation.
 
 #![allow(dead_code)]
 
@@ -286,6 +288,9 @@ pub struct Compiled {
     pub structure: Arc<TreeTransformStructure<f64>>,
     pub space: Arc<BlockStructure>,
     pub conjugate: bool,
+    /// Destination axis `i` reads source axis `source_axes[i]`: the
+    /// operation's codomain then domain permutation.
+    pub source_axes: Vec<usize>,
 }
 
 impl Compiled {
@@ -355,6 +360,12 @@ where
     R: tenet_core::MultiplicityFreeRigidSymbols<Scalar = f64>
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
+    let source_axes: Vec<usize> = operation
+        .codomain_permutation()
+        .iter()
+        .chain(operation.domain_permutation())
+        .copied()
+        .collect();
     let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
     let structure = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation(
@@ -366,6 +377,7 @@ where
         structure,
         space: Arc::clone(space),
         conjugate,
+        source_axes,
     }
 }
 
@@ -494,23 +506,52 @@ pub fn non_symmetric_fixture() -> Compiled {
         .expect("su2_rank6_permute fixture")
 }
 
-/// Flat positions of one layout entry, in its own packed column order
-/// (fastest axis first) — the order pack and scatter agree on.
-fn positions(structure: &TreeTransformStructure<f64>, entry: usize) -> Vec<usize> {
-    let layouts = structure.layouts();
-    let layout = layouts.entry(entry);
-    let shape = layouts.shape(layout);
-    let strides = layouts.strides(layout);
+/// Which block structure a layout entry indexes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Side {
+    Destination,
+    Source,
+}
+
+/// Flat positions of one layout entry, in the destination block's column-major
+/// order (fastest axis first) — the order pack and scatter agree on.
+///
+/// The geometry is rebuilt from the fixture alone: the entry's block is the
+/// non-empty block at the entry's offset (every fixture block is non-empty, so
+/// offsets identify blocks), and a source block is read through
+/// `source_axes`, so the walk pairs destination and source elements exactly
+/// as the operation's dense permutation does.
+pub fn positions(fixture: &Compiled, entry: usize, side: Side) -> Vec<usize> {
+    let offset = fixture.structure.layouts().entry(entry).offset;
+    let space = &fixture.space;
+    let index = (0..space.block_count())
+        .find(|&index| {
+            let block = space.block(index).unwrap();
+            block.shape().iter().product::<usize>() != 0
+                && isize::try_from(block.offset()).unwrap() == offset
+        })
+        .unwrap_or_else(|| panic!("{}: no fixture block at offset {offset}", fixture.name));
+    let block = space.block(index).unwrap();
+    let axis = |position: usize| match side {
+        Side::Destination => position,
+        Side::Source => fixture.source_axes[position],
+    };
+    let shape = (0..block.shape().len())
+        .map(|position| block.shape()[axis(position)])
+        .collect::<Vec<_>>();
+    let strides = (0..block.shape().len())
+        .map(|position| block.strides()[axis(position)])
+        .collect::<Vec<_>>();
     let count: usize = shape.iter().product();
     (0..count)
         .map(|linear| {
             let mut remaining = linear;
-            let mut position = layout.offset;
-            for (extent, stride) in shape.iter().zip(strides) {
-                position += ((remaining % extent) as isize) * stride;
+            let mut position = block.offset();
+            for (extent, stride) in shape.iter().zip(&strides) {
+                position += (remaining % extent) * stride;
                 remaining /= extent;
             }
-            usize::try_from(position).expect("a fixture layout addresses no negative position")
+            position
         })
         .collect()
 }
@@ -583,10 +624,10 @@ pub fn expected_scaled<T: TestScalar>(
                 coefficient,
             } => {
                 let coefficient = coefficients[coefficient];
-                for (dst_position, src_position) in positions(structure, dst_layout)
-                    .into_iter()
-                    .zip(positions(structure, src_layout))
-                {
+                let dst_positions = positions(fixture, dst_layout, Side::Destination);
+                let src_positions = positions(fixture, src_layout, Side::Source);
+                assert_eq!(dst_positions.len(), src_positions.len());
+                for (dst_position, src_position) in dst_positions.into_iter().zip(src_positions) {
                     let value = alpha.scale(coefficient).mul(read(src_position));
                     expected[dst_position] = expected[dst_position].add(value);
                 }
@@ -600,7 +641,8 @@ pub fn expected_scaled<T: TestScalar>(
                 ..
             } => {
                 for dst_index in 0..dst_count {
-                    let dst_positions = positions(structure, dst_layout_start + dst_index);
+                    let dst_positions =
+                        positions(fixture, dst_layout_start + dst_index, Side::Destination);
                     // The recoupling sum first, the caller scale once on the
                     // result: `alpha * (U x)`, which is where the host applies
                     // it — at the scatter, not at the pack or the GEMM.
@@ -608,7 +650,9 @@ pub fn expected_scaled<T: TestScalar>(
                     for src_index in 0..src_count {
                         let coefficient =
                             coefficients[coefficient_start + dst_index * src_count + src_index];
-                        let src_positions = positions(structure, src_layout_start + src_index);
+                        let src_positions =
+                            positions(fixture, src_layout_start + src_index, Side::Source);
+                        assert_eq!(src_positions.len(), dst_positions.len());
                         for (slot, src_position) in column.iter_mut().zip(&src_positions) {
                             *slot = slot.add(read(*src_position).scale(coefficient));
                         }

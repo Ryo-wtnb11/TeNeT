@@ -59,8 +59,9 @@ where
         let mut kernels = crate::StridedHostKernelAdapter::default();
 
         for &layout_index in structure.inactive_destination_layouts() {
-            write_uninit_layout_zero(layouts, layouts.entry(layout_index), dst_data)?;
+            write_uninit_layout_zero(layouts, layout_index, dst_data)?;
         }
+        let blocks = structure.blocks();
         // Singles split on the schedule's slice-disjoint boundaries exactly as
         // `replay_single_blocks` does; a non-disjoint schedule stays serial.
         split_join_uninit(
@@ -74,18 +75,19 @@ where
             } else {
                 1
             },
-            &|item| item.dst_lo,
+            &|&item| layouts.destination_lo(scheduled_single(blocks, item)?.0),
             &|items, dst, dst_start, fused_index| {
-                for item in items {
+                for &item in items {
+                    let (dst_layout, src_layout, coefficient) = scheduled_single(blocks, item)?;
                     write_uninit_layout_from_source(
                         layouts,
-                        item.dst_layout,
-                        item.src_layout,
+                        dst_layout,
+                        src_layout,
                         dst,
                         dst_start,
                         src_data,
                         storage_conjugate,
-                        TransformScale::new(alpha, coefficients[item.coefficient]),
+                        TransformScale::new(alpha, coefficients[coefficient]),
                         fused_index,
                     )?;
                 }
@@ -125,7 +127,7 @@ where
                 &mut workspace.fused_indices[..fused_index_len],
                 max_fused_rank,
                 if scatter_slice_disjoint { threads } else { 1 },
-                &|&group| scatter_columns[scatter_groups[group].columns.start].dst_lo,
+                &|&group| Ok(scatter_columns[scatter_groups[group].columns.start].dst_lo),
                 &|groups, dst, dst_start, fused_index| {
                     for &group in groups {
                         for item in &scatter_columns[scatter_groups[group].columns.clone()] {
@@ -176,7 +178,7 @@ fn split_join_uninit<I, D>(
     fused_indices: &mut [usize],
     max_fused_rank: usize,
     threads: usize,
-    dst_lo: &(impl Fn(&I) -> isize + Sync),
+    dst_lo: &(impl Fn(&I) -> Result<isize, OperationError> + Sync),
     leaf: &(impl Fn(&[I], &mut [MaybeUninit<D>], isize, &mut [usize]) -> Result<(), OperationError>
           + Sync),
 ) -> Result<(), OperationError>
@@ -192,7 +194,7 @@ where
     }
 
     let middle = parallel_split(items.len(), threads);
-    let boundary = dst_lo(&items[middle]);
+    let boundary = dst_lo(&items[middle])?;
     let split =
         usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
     let (left_data, right_data) = dst.split_at_mut(split);
@@ -306,21 +308,18 @@ where
 // Why-not fuse the zero writer: it has no paired source view, and a pure
 // permute — the deg=1 U(1) owned-path regime this optimization targets — always
 // touches every destination block, so `inactive_destination_layouts` is empty
-// and this writer never runs on the hot path. A dedicated single-side fused
-// walk would add a fourth baked role for no measured win, so it stays on the
-// per-element odometer (issue #232, condition 2).
+// and this writer never runs on the hot path. It walks the inactive entry's
+// compiled one-sided role, which addresses the same element set as the raw
+// block, on the per-element odometer (issue #232, condition 2).
 fn write_uninit_layout_zero<D: Zero + Copy>(
     layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
+    layout_index: usize,
     dst: &mut [MaybeUninit<D>],
 ) -> Result<(), OperationError> {
+    let (dims, strides) = layouts.inactive_role(layout_index)?;
+    let layout = layouts.entry(layout_index);
     for linear in 0..layout.element_count {
-        let index = layout_linear_offset(
-            linear,
-            layouts.shape(layout),
-            layouts.strides(layout),
-            layout.offset,
-        )?;
+        let index = layout_linear_offset(linear, dims, strides, layout.offset)?;
         dst[index].write(D::zero());
     }
     Ok(())
@@ -421,35 +420,15 @@ where
     D: Copy,
     F: Fn(D) -> D,
 {
-    let dst_layout = layouts.entry(dst_index);
-    let src_layout = layouts.entry(src_index);
-    if let Some(baked) = layouts.fused_baked(dst_index) {
-        return write_fused_uninit(
-            baked,
-            dst,
-            src,
-            dst_layout.offset - dst_start,
-            src_layout.offset,
-            fused_index,
-            map,
-        );
-    }
-    for linear in 0..dst_layout.element_count {
-        let dst_index = layout_linear_offset(
-            linear,
-            layouts.shape(dst_layout),
-            layouts.strides(dst_layout),
-            dst_layout.offset - dst_start,
-        )?;
-        let src_index = layout_linear_offset(
-            linear,
-            layouts.shape(src_layout),
-            layouts.strides(src_layout),
-            src_layout.offset,
-        )?;
-        dst[dst_index].write(map(src[src_index]));
-    }
-    Ok(())
+    write_fused_uninit(
+        layouts.role(dst_index)?,
+        dst,
+        src,
+        layouts.entry(dst_index).offset - dst_start,
+        layouts.entry(src_index).offset,
+        fused_index,
+        map,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -466,56 +445,37 @@ fn write_uninit_layout_from_packed<D>(
 where
     D: Copy + Mul<D, Output = D> + Zero + One + PartialEq,
 {
-    let layout = layouts.entry(dst_index);
     // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so the scatter
     // must copy rather than multiply when the caller's alpha is one. A zero
     // alpha gives `scale_value`'s exact zero even where the recoupling GEMM
     // left a NaN in `packed`, as TensorKit's scatter `tensoradd!` does.
-    let identity = alpha.is_one();
-    if let Some(baked) = layouts.fused_baked(dst_index) {
-        // The scatter role bakes src = packed (column-major) strides, so the
-        // fused walk over `packed` starting at `packed_offset` reproduces the
-        // odometer's `packed[packed_offset + linear]` column-major gather.
-        let dst_offset = layout.offset - dst_start;
-        let src_offset = offset_to_isize(packed_offset)?;
-        if identity {
-            write_fused_uninit(
-                baked,
-                dst,
-                packed,
-                dst_offset,
-                src_offset,
-                fused_index,
-                |v| v,
-            )?;
-        } else {
-            write_fused_uninit(
-                baked,
-                dst,
-                packed,
-                dst_offset,
-                src_offset,
-                fused_index,
-                move |value| scale_value(value, alpha),
-            )?;
-        }
-        return Ok(());
+    // The scatter role bakes src = packed (column-major) strides, so the
+    // fused walk over `packed` starting at `packed_offset` reproduces the
+    // column-major gather `packed[packed_offset + linear]`.
+    let role = layouts.role(dst_index)?;
+    let dst_offset = layouts.entry(dst_index).offset - dst_start;
+    let src_offset = offset_to_isize(packed_offset)?;
+    if alpha.is_one() {
+        write_fused_uninit(
+            role,
+            dst,
+            packed,
+            dst_offset,
+            src_offset,
+            fused_index,
+            |v| v,
+        )
+    } else {
+        write_fused_uninit(
+            role,
+            dst,
+            packed,
+            dst_offset,
+            src_offset,
+            fused_index,
+            move |value| scale_value(value, alpha),
+        )
     }
-    for linear in 0..layout.element_count {
-        let dst_index = layout_linear_offset(
-            linear,
-            layouts.shape(layout),
-            layouts.strides(layout),
-            layout.offset - dst_start,
-        )?;
-        let value = packed[packed_offset + linear];
-        dst[dst_index].write(if identity {
-            value
-        } else {
-            scale_value(value, alpha)
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -157,26 +157,23 @@ where
     D: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    let dst_layout = layouts.entry(dst_index);
-    let src_layout = layouts.entry(src_index);
-    let shape = layouts.shape(dst_layout);
-    let baked = layouts.fused_baked(dst_index);
+    let role = layouts.role(dst_index)?;
     kernels.transform_strided_baked(
         zero_strides,
         dst_data,
         src_data,
-        shape,
-        layouts.strides(dst_layout),
-        layouts.strides(src_layout),
-        dst_layout.offset,
-        src_layout.offset,
+        role.dims(),
+        role.dst_strides(),
+        role.src_strides(),
+        layouts.entry(dst_index).offset,
+        layouts.entry(src_index).offset,
         source_conjugate,
         TransformScale::new(alpha, coefficient),
         match mode {
             DestinationMode::Axpby(beta) => Some(beta),
             DestinationMode::Overwrite => None,
         },
-        baked,
+        Some(role),
         fused_index,
     )
 }
@@ -384,21 +381,19 @@ where
     A: HostKernelAdapter<T>,
     T: Copy + One,
 {
-    let layout = layouts.entry(entry_index);
-    let shape = layouts.shape(layout);
-    let baked = layouts.fused_baked(entry_index);
+    let role = layouts.role(entry_index)?;
     let packed_offset = offset_to_isize(packed_offset)?;
     kernels.copy_scale_strided_baked(
         packed,
         src_data,
-        shape,
-        layouts.packed_strides(layout),
-        layouts.strides(layout),
+        role.dims(),
+        role.dst_strides(),
+        role.src_strides(),
         packed_offset,
-        layout.offset,
+        layouts.entry(entry_index).offset,
         source_conjugate,
         T::one(),
-        baked,
+        Some(role),
         fused_index,
     )
 }
@@ -420,9 +415,8 @@ where
     A: HostKernelAdapter<T>,
     T: Copy,
 {
-    let layout = layouts.entry(entry_index);
-    let shape = layouts.shape(layout);
-    let baked = layouts.fused_baked(entry_index);
+    let role = layouts.role(entry_index)?;
+    let offset = layouts.entry(entry_index).offset;
     let packed_offset = offset_to_isize(packed_offset)?;
     match mode {
         DestinationMode::Axpby(beta) => {
@@ -430,28 +424,28 @@ where
             kernels.axpby_strided_baked(
                 dst_data,
                 packed,
-                shape,
-                layouts.strides(layout),
-                layouts.packed_strides(layout),
-                layout.offset,
+                role.dims(),
+                role.dst_strides(),
+                role.src_strides(),
+                offset,
                 packed_offset,
                 alpha,
                 beta,
-                baked,
+                Some(role),
                 fused_index,
             )
         }
         DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
             dst_data,
             packed,
-            shape,
-            layouts.strides(layout),
-            layouts.packed_strides(layout),
-            layout.offset,
+            role.dims(),
+            role.dst_strides(),
+            role.src_strides(),
+            offset,
             packed_offset,
             false,
             alpha,
-            baked,
+            Some(role),
             fused_index,
         ),
     }
@@ -504,12 +498,12 @@ where
             // Scaling the complete storage would also mutate padding not owned by any
             // block, so compile only the destination layouts with no active replay.
             for &layout_index in task.inactive_destination_layouts() {
-                let layout = task.layouts().entry(layout_index);
+                let (dims, strides) = task.layouts().inactive_role(layout_index)?;
                 kernels.scale_strided(
                     dst_data,
-                    task.layouts().shape(layout),
-                    task.layouts().strides(layout),
-                    layout.offset,
+                    dims,
+                    strides,
+                    task.layouts().entry(layout_index).offset,
                     beta,
                 )?;
             }
@@ -517,16 +511,16 @@ where
         DestinationMode::Overwrite => {
             let zero = [D::zero()];
             for &layout_index in task.inactive_destination_layouts() {
-                let layout = task.layouts().entry(layout_index);
+                let (dims, strides) = task.layouts().inactive_role(layout_index)?;
                 zero_strides.clear();
-                zero_strides.resize(task.layouts().shape(layout).len(), 0);
+                zero_strides.resize(dims.len(), 0);
                 kernels.copy_scale_strided_baked(
                     dst_data,
                     &zero,
-                    task.layouts().shape(layout),
-                    task.layouts().strides(layout),
+                    dims,
+                    strides,
                     zero_strides,
-                    layout.offset,
+                    task.layouts().entry(layout_index).offset,
                     0,
                     false,
                     D::one(),

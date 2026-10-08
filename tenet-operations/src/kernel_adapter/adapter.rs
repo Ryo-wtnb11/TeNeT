@@ -9,6 +9,17 @@ use super::*;
 ///
 /// The data contract is host slices. Device replay needs a separate
 /// storage-aware adapter; device storage must not be hidden behind this trait.
+///
+/// View contract: a caller may pass any strided views that address the same
+/// set of (destination, source) element pairs as the blocks they stand for,
+/// in any traversal order. Compiled
+/// tree-transform replay passes its compiled normalized roles as `shape` and
+/// strides — extent-1 axes dropped, axes reordered, contiguous runs fused, a
+/// zero extent as `[0]` and rank 0 as `[1]` — so their rank is at least 1 and
+/// may differ from the tensor rank. Inactive-destination `scale_strided` and
+/// zero fills pass the one-sided normalized view of the destination block.
+/// Every primitive is elementwise without reduction, so an adapter that
+/// iterates the views it receives produces the same values.
 pub trait HostKernelAdapter<T> {
     /// `dst = alpha * op(src) + beta * dst` over strided views, where `op` is
     /// conjugation when `source_conjugate` is set (tensoradd / single-block
