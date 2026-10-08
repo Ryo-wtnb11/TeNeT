@@ -143,15 +143,21 @@ caches 1 and 4.
 
 **Current caches.**
 - The process-global sector-layout and complete-HomSpace caches live in
-  `tenet-core`. The complete entry owns canonical HomSpace and block content;
-  a weak wrapper link shares a live `BlockStructure` without retaining it.
+  `tenet-core`. The complete entry owns the canonical HomSpace, block content
+  and `BlockStructure` wrapper, whose coupled-sector region memo is charged
+  to the entry as it materializes.
 - Separate block-content, wrapper and HomSpace intern tables are removed.
-  Deprecated block-intern diagnostics report zero retained entries.
-- The tree-transform stores live in `tenet-tensors` and are owned by each
-  `Runtime`. Each store has its own byte budget, clear and info.
-- `tenet-tensors` keeps an operation-cache policy.
-- The two core caches share `StructureCache` and `structure_cache_infos`.
-  Runtime tiers remain separate; the four-cache migration is unfinished.
+- The completed-transformer cache is process-global and owned by
+  `tenet-tensors`, registered with `tenet-core`'s structure-cache registry.
+  It retains structure-free replay cores keyed by content ids and publishes
+  only keys whose structures are canonical (resident in, or admitted to, the
+  complete-HomSpace cache).
+- The three share `StructureCache` and one public control, `tenet::cache`
+  (`stats`, `clear`, `configure_budgets`).
+- The categorical-coefficient tiers (plans and per-group recoupling) stay per
+  `Runtime`, at a fixed 64 MiB each, until #2014-4.
+- `tenet-tensors` keeps an operation-cache policy for the dense
+  `TensorContractCache` only.
 
 ### 3. tenferro and strided-rs (dense backend)
 
@@ -253,23 +259,22 @@ svd / qr / eigh (tenet-rs facade, one body over FusionMode)
 The target is four structure caches behind one `quick_cache` wrapper
 (`tenet-core/src/cache.rs`, #2014), mirroring TensorKit's `@cached`
 functions. Clearing and sizing them belongs to the application
-(`reset_core_intern_tables`, `set_structure_cache_byte_budget`), never to
-library code.
+(`tenet::cache::clear`, `tenet::cache::configure_budgets`), never to library
+code.
 
-Structure caches (`structure_cache_infos` reports them):
+Structure caches (`tenet::cache::stats` reports them):
 
 | Cache | Key | Crate | Scope | TensorKit cfaa073 |
 | --- | --- | --- | --- | --- |
 | Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `tenet-core` | process-global | `sectorstructure` |
 | Degeneracy structure: complete `BlockStructure` | rule, MF/Generic mode and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
-| Tree transformer | dst, src, operation | `tenet-tensors` (`RuntimeTreeTransformStore` structures tier, `TreeTransformCache`) | per `Runtime` today; process-global in #2014 PR 3 | `treetransposer` / `treebraider` |
-| Transformation coefficients, Simple and Generic only | fusion-tree group | `tenet-tensors` (`RuntimeTreeTransformStore` plans and groups tiers) | per `Runtime` today; process-global in #2014 PR 4 | `fstranspose` / `fsbraid` (`NoCache` for Unique) |
+| Completed tree transformer | rule, mode, coefficient type, scope, operation, orientation, basis order, storage conjugation, logical source, dst and src content ids | `tenet-tensors` (`tree_transform/cache.rs`) | process-global | `treetransposer` / `treebraider` |
+| Transformation coefficients, Simple and Generic only | fusion-tree group | `tenet-tensors` (`RuntimeCoefficientStore` plans and groups tiers) | per `Runtime` today; process-global in #2014 PR 4 | `fstranspose` / `fsbraid` (`NoCache` for Unique) |
 
 The complete-HomSpace owner replaces the separate block-structure and
-HomSpace intern tables (#2014 PR 2). Still to be absorbed or removed: the
-`DynamicFusionSpaceCache` of derived spaces (`tenet-tensors`, PR 3) and the
-operation-cache policy of standalone contexts. Transformer and coefficient
-retention work in PRs 3 and 4 remains separate.
+HomSpace intern tables (#2014 PR 2); the completed-transformer owner replaces
+the Runtime structures tier, the context-local `TreeTransformCache` and the
+`DynamicFusionSpaceCache` of derived spaces (#2014 PR 3).
 
 Outside the four, by design:
 
