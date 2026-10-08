@@ -12,12 +12,12 @@ mod categorical_recoupling;
 
 use categorical_recoupling::{
     alphas, assert_close, compile, expected, expected_scaled, fermionic_space, fermionic_su2_rule,
-    fixtures, four_leg_channels, host_replay, host_replay_scaled, non_symmetric_fixture, su2_space,
-    Compiled, TestScalar,
+    fixtures, four_leg_channels, host_replay, host_replay_scaled, non_symmetric_fixture, positions,
+    su2_space, Compiled, Side, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_core::{FermionParityFusionRule, SU2FusionRule};
-use tenet_operations::{TreeTransformBlock, TreeTransformLayout};
+use tenet_operations::TreeTransformBlock;
 use tenet_tensors::TreeTransformOperation;
 
 fn check<T>(fixture: &Compiled)
@@ -131,7 +131,6 @@ fn the_categorical_oracle_agrees_with_host_replay() {
 /// the oracle under test stays the plain one.
 fn transposed_walk(fixture: &Compiled, source: &[f64]) -> Vec<f64> {
     let structure = &fixture.structure;
-    let layouts = structure.layouts();
     let coefficients = structure.gathered_coefficients();
     let mut transposed = vec![0.0_f64; fixture.len()];
     for block in structure.blocks() {
@@ -152,22 +151,9 @@ fn transposed_walk(fixture: &Compiled, source: &[f64]) -> Vec<f64> {
                 // Swapped indices: Uᵀ.
                 let coefficient =
                     coefficients[coefficient_start + src_index * src_count + dst_index];
-                let dst = layouts.entry(dst_layout_start + dst_index);
-                let src = layouts.entry(src_layout_start + src_index);
-                let shape = layouts.shape(dst).to_vec();
-                let count: usize = shape.iter().product();
-                let place = |layout: &TreeTransformLayout, strides: &[isize], linear: usize| {
-                    let mut remaining = linear;
-                    let mut position = layout.offset;
-                    for (extent, stride) in shape.iter().zip(strides) {
-                        position += ((remaining % extent) as isize) * stride;
-                        remaining /= extent;
-                    }
-                    usize::try_from(position).unwrap()
-                };
-                for linear in 0..count {
-                    let dst_position = place(dst, layouts.strides(dst), linear);
-                    let src_position = place(src, layouts.strides(src), linear);
+                let dst = positions(fixture, dst_layout_start + dst_index, Side::Destination);
+                let src = positions(fixture, src_layout_start + src_index, Side::Source);
+                for (dst_position, src_position) in dst.into_iter().zip(src) {
                     transposed[dst_position] += coefficient * source[src_position];
                 }
             }
