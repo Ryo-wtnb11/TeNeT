@@ -82,7 +82,8 @@ use context::SCALAR_OPERAND_SLOTS;
 use elementwise::reject_zero_alpha;
 #[cfg(test)]
 use factorization::{
-    validate_eigh_factor_shapes, validate_qr_factor_shapes, validate_svd_factor_shapes,
+    ensure_spectra_device, validate_eigh_factor_shapes, validate_qr_factor_shapes,
+    validate_svd_factor_shapes,
 };
 
 mod cuda_scalar_sealed {

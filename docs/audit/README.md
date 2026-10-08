@@ -16,6 +16,7 @@ by `artifact-classification.md` and must not be hand-edited.
 | [Lowering-retention measurement](issue-1124-lowering-measurement.md) | `b0984695cfa218cef71ba42ca6c672a6c234e6d2` | No retained TeNeT backend sidecar was justified ([#1128](https://github.com/Ryo-wtnb11/TeNeT/pull/1128)). |
 | [Payload-dtype capability markers](issue-1308-capability-markers.md) | `053d5a74` | Single-precision staging: [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065); the split itself: [#1308](https://github.com/Ryo-wtnb11/TeNeT/issues/1308). |
 | [CPU data ownership and Tenferro contract](cpu-data-tenferro-contract.md) | TeNeT `4ea8348dad1cf2dbc3907a89c1734aae29881580`, registry Tenferro 0.3.0 `9505d5bfd60c890212f0ec44aa9cf07fef185f63`, and the comparison revisions listed in the report | Governing audit: [#1140](https://github.com/Ryo-wtnb11/TeNeT/issues/1140); first evidence leaf: [#1141](https://github.com/Ryo-wtnb11/TeNeT/issues/1141). |
+| [CUDA spectrum device admission](issue-1766-cuda-spectrum-device.md) | TeNeT `0e1280780086b29f142a7b632bb892ddfc2eb92a`, TensorKit `cfaa073e`, TensorOperations 5.8.0, QSpace `d2d3d7da` | Device-identity guard for spectra: [#1766](https://github.com/Ryo-wtnb11/TeNeT/issues/1766). |
 
 Later outcomes are indexed here rather than inserted into the original audit
 narrative. Current source, tests, crate documentation, and normative policy
