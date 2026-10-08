@@ -320,6 +320,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "tensortrace_fusion_dyn_owned_generic_checked",
         "tensortrace_fusion_dyn_preflight_checked",
         "tensortrace_fusion_dyn_preflight_generic_checked",
+        "tensortrace_fusion_dyn_staged_owned_generic_checked",
         "TracePreflight",
         "tensortrace_fusion_dyn_structure_into_raw",
         "tensortrace_fusion_dyn_structure_owned",

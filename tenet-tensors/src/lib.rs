@@ -164,7 +164,8 @@ pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn
 pub use tensortrace::{
     tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
     tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_preflight_checked,
-    tensortrace_fusion_dyn_preflight_generic_checked, tensortrace_fusion_dyn_structure_into_raw,
+    tensortrace_fusion_dyn_preflight_generic_checked,
+    tensortrace_fusion_dyn_staged_owned_generic_checked, tensortrace_fusion_dyn_structure_into_raw,
     tensortrace_fusion_dyn_structure_owned, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm, TracePreflight,
 };

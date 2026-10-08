@@ -833,10 +833,29 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
     let (_, again) = prepare(hom()).commit_with_complete_homspace();
     assert!(Arc::ptr_eq(&revived, &again));
     assert_eq!(degeneracy_cache_info().charged_bytes(), charge);
+    // A staged hit lends the live canonical wrapper to pre-commit plans.
+    let hit = prepare(hom());
+    assert!(Arc::ptr_eq(&hit.shared_structure(), &revived));
+    assert!(Arc::ptr_eq(
+        &hit.commit_with_complete_homspace().1,
+        &revived
+    ));
 
     let budget = info.byte_budget();
     set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
-    let (_, uncached) = prepare(hom()).commit_with_complete_homspace();
+    // A miss lends a local wrapper whose region memo the published
+    // structure keeps.
+    let miss = prepare(hom());
+    let lent_regions = miss
+        .shared_structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let (_, uncached) = miss.commit_with_complete_homspace();
+    assert!(Arc::ptr_eq(
+        &lent_regions,
+        &uncached.coupled_sector_regions(2).unwrap().unwrap()
+    ));
     assert_eq!(*uncached, *revived);
     assert_ne!(uncached.content_id(), content_id);
     assert_eq!(degeneracy_cache_info().entries(), 0);

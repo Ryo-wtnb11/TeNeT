@@ -177,20 +177,13 @@ where
             preflight.into_selected_homspace(),
         )
         .map_err(CheckedGenericPlanError::from)?;
-    let space = source_space
-        .commit_final_homspace_generic_bound_checked(prepared)
-        .map_err(CheckedGenericPlanError::Operation)?;
-    let structure = <tenet_core::CheckedGenericAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
-    // Densified only now: a rejected trace allocates nothing (#1872).
-    let payload = source.body.materialized_dense_data();
-    let data = tenet_tensors::tensortrace_fusion_dyn_structure_owned(
-        &structure,
-        space.space(),
-        source_space.space(),
-        &payload,
+    let (space, data) = tenet_tensors::tensortrace_fusion_dyn_staged_owned_generic_checked(
+        prepared,
+        source_space,
+        || source.body.materialized_dense_data(),
+        axes,
         D::from_real(1.0),
-    )
-    .map_err(CheckedGenericPlanError::Operation)?;
+    )?;
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(space, data)),

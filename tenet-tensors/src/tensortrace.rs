@@ -13,7 +13,9 @@ use tenet_core::{
     OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg, TensorMap, TensorStorage,
 };
 
-use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+use crate::contract::{
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace,
+};
 use crate::lowering::{
     lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
 };
@@ -1299,18 +1301,34 @@ where
     R: CheckedGenericPivotal,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
+    compile_fusion_generic_checked_parts(
+        dst_space.space().homspace(),
+        Arc::clone(dst_space.space().structure()),
+        dst_space.space().nout(),
+        src_space,
+        axes,
+    )
+}
+
+fn compile_fusion_generic_checked_parts<R>(
+    dst_homspace: &FusionTreeHomSpace,
+    dst_structure: Arc<BlockStructure>,
+    dst_nout: usize,
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericPivotal,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
     let orientation = if axes.source_conjugate() {
         FusionTreePairOrientation::Adjoint
     } else {
         FusionTreePairOrientation::Direct
     };
-    let preflight = tensortrace_fusion_dyn_preflight_generic_checked(
-        src_space,
-        axes,
-        dst_space.space().nout(),
-    )?;
+    let preflight = tensortrace_fusion_dyn_preflight_generic_checked(src_space, axes, dst_nout)?;
     // TensorKit's order: the destination space, then the pair duality.
-    if preflight.selected_homspace() != dst_space.space().homspace() {
+    if preflight.selected_homspace() != dst_homspace {
         return Err(CheckedGenericPlanError::Operation(
             OperationError::StructureMismatch { tensor: "dst" },
         ));
@@ -1326,7 +1344,7 @@ where
     .map_err(CheckedGenericPlanError::Operation)?;
     let axis_plan = TensorTraceAxisPlan::compile(
         src_space.space().structure().rank(),
-        dst_space.space().structure().rank(),
+        dst_structure.rank(),
         lowered_axes.as_spec(),
     )
     .map_err(CheckedGenericPlanError::Operation)?;
@@ -1339,18 +1357,76 @@ where
     );
     let terms = build_trace_terms::<CheckedGenericAdmissionMode, R>(
         src_space.provider(),
-        dst_space.space().structure(),
+        &dst_structure,
         source,
         &axis_plan,
-        dst_space.space().nout(),
+        dst_nout,
     )?;
-    TensorTraceFusionStructure::assemble(
-        axis_plan,
-        terms,
-        Arc::clone(dst_space.space().structure()),
-        source,
+    TensorTraceFusionStructure::assemble(axis_plan, terms, dst_structure, source)
+        .map_err(CheckedGenericPlanError::Operation)
+}
+
+/// Executes and then publishes an existing checked trace destination.
+///
+/// Payload production follows all structural admission and pivotal compilation.
+/// The source retains provider authority; failed compilation or execution does
+/// not commit the destination. The final provider guard remains defensive.
+///
+/// [TensorKit trace_permute!](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/tensoroperations.jl#L208-L302)
+/// fixes pair selection, splitting and pivotal factors; [QSpace::trace](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.cc#lines-4501:4625)
+/// and its [traceQS](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/traceQS.cc)
+/// entry retain grouped reduced-block execution. Neither reference has a
+/// checked layout-publication transaction: deferring publication until
+/// execution succeeds is a Rust ownership/error adaptation, not another
+/// numerical path.
+/// A warm complete hit compiles against the live canonical wrapper, so the
+/// published coupled-region memo is reused rather than rebuilt.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn tensortrace_fusion_dyn_staged_owned_generic_checked<R, D, P>(
+    dst: PreparedCheckedGenericDynamicSpace,
+    src: &BoundDynamicFusionMapSpace<R>,
+    payload: impl FnOnce() -> P,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericPivotal,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+    P: AsRef<[D]>,
+{
+    src.validate_prepared_final_homspace_generic_checked(&dst)
+        .map_err(CheckedGenericPlanError::Operation)?;
+    let structure = compile_fusion_generic_checked_parts(
+        dst.homspace(),
+        dst.shared_structure(),
+        dst.nout(),
+        src,
+        axes,
+    )?;
+    let payload = payload();
+    let data = trace_structure_owned_parts(
+        &structure,
+        &structure.dst_structure,
+        dst.nout(),
+        src.space().structure(),
+        payload.as_ref(),
+        alpha,
     )
-    .map_err(CheckedGenericPlanError::Operation)
+    .map_err(CheckedGenericPlanError::Operation)?;
+    let space = src
+        .commit_final_homspace_generic_bound_checked(dst)
+        .map_err(CheckedGenericPlanError::Operation)?;
+    Ok((space, data))
 }
 
 /// Checked Generic trace lowering through the existing strided executor.
@@ -1925,15 +2001,52 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
-    // Why: a public executor must not replay terms compiled for other spaces;
-    // the pointer-equality fast path keeps compiled-in-place callers free.
-    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
-    let descriptor = structure.descriptor();
-
-    if let Some(data) = try_tensortrace_owned_raw(
+    trace_structure_owned_parts(
+        structure,
         dst_space.structure(),
         dst_space.nout(),
         src_space.structure(),
+        src_data,
+        alpha,
+    )
+}
+
+fn trace_structure_owned_parts<C, D>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst_nout: usize,
+    src_structure: &Arc<BlockStructure>,
+    src_data: &[D],
+    alpha: D,
+) -> Result<Vec<D>, OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
+    // Why: a public executor must not replay terms compiled for other spaces;
+    // the pointer-equality fast path keeps compiled-in-place callers free.
+    structure.validate_replay_structures(dst_structure, src_structure)?;
+    let descriptor = structure.descriptor();
+
+    #[cfg(test)]
+    TRACE_RAW_EXECUTION_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook()?;
+        }
+        Ok::<_, OperationError>(())
+    })?;
+    if let Some(data) = try_tensortrace_owned_raw(
+        dst_structure,
+        dst_nout,
+        src_structure,
         src_data,
         descriptor.source_conjugate(),
         descriptor.terms().len(),
@@ -1956,16 +2069,15 @@ where
         return Ok(data);
     }
 
-    let required_len = dst_space
-        .structure()
+    let required_len = dst_structure
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     let mut data = vec![D::zero(); required_len];
-    tensortrace_fusion_dyn_structure_into_raw(
+    replay_fusion_trace_host(
         structure,
-        dst_space,
+        dst_structure,
         &mut data,
-        src_space,
+        src_structure,
         src_data,
         alpha,
         D::zero(),
@@ -2156,4 +2268,12 @@ fn mark_axes(
 
 fn stride_to_isize(stride: usize) -> Result<isize, OperationError> {
     isize::try_from(stride).map_err(|_| OperationError::StrideOverflow { value: stride })
+}
+
+#[cfg(test)]
+type TraceRawExecutionHook = Box<dyn FnOnce() -> Result<(), OperationError>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TRACE_RAW_EXECUTION_HOOK: std::cell::Cell<Option<TraceRawExecutionHook>> = const { std::cell::Cell::new(None) };
 }
