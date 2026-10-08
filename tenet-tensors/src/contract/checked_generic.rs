@@ -916,9 +916,13 @@ mod tests {
     impl CheckedGenericFusion for CheckedGenericSpy {
         type Error = SpyError;
 
+        // Why its own identity rather than the wrapped rule's: the composed
+        // coefficients are cached per identity, and a sibling test's
+        // publication under the shared rule's identity would skip this
+        // spy's provider queries.
         fn rule_identity(&self) -> RuleIdentity {
             self.events.borrow_mut().push(Event::Identity);
-            FusionRule::rule_identity(&self.rule)
+            RuleIdentity::of_type::<Self>()
         }
 
         fn fusion_style(&self) -> FusionStyleKind {
@@ -1548,6 +1552,137 @@ mod tests {
             dst.fill(1.0);
             Ok(())
         }
+    }
+
+    fn coefficient_admissions() -> u64 {
+        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::TreeTransformCoefficients)
+            .admissions()
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_publishes_composed_coefficients_only_after_its_commit() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_COEFFICIENTS_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::checked_contraction_publishes_composed_coefficients_only_after_its_commit",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated coefficient-publication test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (left, lhs, right, rhs) = bound_pair(2, 2);
+        tenet_core::clear_structure_caches();
+        let candidate = contracted_axis_order_candidates(&[3, 2], &[0, 1]).remove(0);
+        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
+        fn contract_with<G: Rank2Gemm<f64>>(
+            (lhs, lhs_data, rhs, rhs_data): (
+                &BoundDynamicFusionMapSpace<CheckedGenericSpy>,
+                &[f64],
+                &BoundDynamicFusionMapSpace<CheckedGenericSpy>,
+                &[f64],
+            ),
+            candidate: &ContractAxisOrderCandidate,
+            gemm: &mut G,
+        ) -> CheckedContractResult<CheckedGenericSpy, f64> {
+            let mut transform_backend = DenseTreeTransformOperations::default();
+            let mut transform_workspace = Default::default();
+            let mut fusion_workspace = FusionBlockContractWorkspace::default();
+            tensorcontract_owned_checked_generic_preselected_with_core_gemm(
+                lhs,
+                lhs_data,
+                rhs,
+                rhs_data,
+                TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
+                2,
+                candidate,
+                FusionContractOrientation::RhsLhs,
+                &mut transform_backend,
+                &mut transform_workspace,
+                gemm,
+                &mut fusion_workspace,
+            )
+        }
+        let operands = (&lhs, lhs_data.as_slice(), &rhs, rhs_data.as_slice());
+        let failing = || {
+            contract_with(
+                operands,
+                &candidate,
+                &mut FailingAtJob {
+                    calls: 0,
+                    fail_at: 0,
+                },
+            )
+        };
+        let succeeding = || {
+            let mut backend = DenseTreeTransformOperations::default();
+            let mut workspace = Default::default();
+            contract_with(
+                operands,
+                &candidate,
+                &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
+            )
+        };
+
+        // What: the staged and output transforms build their groups, then
+        // the core GEMM fails before the commit. Nothing is published, so a
+        // retry replays the identical F/R provider ledger and error.
+        let mut ledgers = Vec::new();
+        for _attempt in 0..2 {
+            left.reset();
+            right.reset();
+            crate::tree_transform::take_coefficient_group_activity();
+            let error = failing().unwrap_err();
+            assert!(matches!(
+                error,
+                CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+            ));
+            let groups = crate::tree_transform::take_coefficient_group_activity();
+            assert!(groups.misses > 0);
+            assert_eq!((groups.hits, groups.publications), (0, 0));
+            assert_eq!(coefficient_admissions(), 0);
+            assert!(left.count(Query::F) > 0 && left.count(Query::R) > 0);
+            // The F/R ledger: layout walks may publish pure-data layouts
+            // (#2030), so structural queries can shrink on a retry.
+            ledgers.push(
+                left.events
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .filter(|event| matches!(event, Event::Query(Query::F | Query::R)))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(ledgers[0], ledgers[1]);
+
+        // What: a committed call publishes its groups; a repeat (every
+        // intermediate still uncommitted, so cache 3 cannot serve it) makes
+        // no F or R query and returns the same bits.
+        left.reset();
+        let (first_space, first) = succeeding().unwrap();
+        assert!(coefficient_admissions() > 0);
+        left.reset();
+        crate::tree_transform::take_coefficient_group_activity();
+        let (repeat_space, repeat) = succeeding().unwrap();
+        let groups = crate::tree_transform::take_coefficient_group_activity();
+        assert_eq!((groups.misses, groups.publications), (0, 0));
+        assert!(groups.hits > 0);
+        assert_eq!((left.count(Query::F), left.count(Query::R)), (0, 0));
+        assert_eq!(first_space.space(), repeat_space.space());
+        assert_eq!(
+            first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

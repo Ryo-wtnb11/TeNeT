@@ -64,8 +64,6 @@ use super::plan::{
 
 mod coefficients;
 #[cfg(test)]
-mod coefficients_tests;
-#[cfg(test)]
 mod owner_tests;
 #[cfg(test)]
 pub(crate) use coefficients::take_coefficient_group_activity;

@@ -1,9 +1,11 @@
 //! Release-mode concurrency gates of the process-global completed-transformer
-//! cache (#2014-3 §5): no single-flight, so no caller parks on another's
-//! build, even when work stealing re-enters a caller's Rayon region. Each
-//! case runs in its own process (the counters are process-global) under a
-//! watchdog, issues one cold transform from many tasks, and requires every
-//! task to finish, one admission, and byte-identical results.
+//! and composed-coefficient caches (#2014-3 §5, #2014-4 §6): no
+//! single-flight, so no caller parks on another's build, even when work
+//! stealing re-enters a caller's Rayon region. Each case runs in its own
+//! process (the counters are process-global) under a watchdog, issues one
+//! cold transform from many tasks with `recoupling_threads > 1`, and requires
+//! every task to finish, one admission per key in each cache, and
+//! byte-identical results.
 //!
 //! Run in release: `cargo test --release -p tenet-rs --lib cache_concurrency`.
 
@@ -81,15 +83,41 @@ fn admissions() -> u64 {
     crate::test_cache::completed().admissions()
 }
 
+fn group_info() -> crate::cache::StructureCacheInfo {
+    crate::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == crate::cache::StructureCacheKind::TreeTransformCoefficients)
+        .expect("every structure cache kind reports")
+}
+
+/// The fixture's source fusion-tree groups: one composed-coefficient key
+/// each.
+fn source_groups(source: &TensorMap<SU2FusionRule, f64>) -> u64 {
+    source
+        .test_bound_space()
+        .space()
+        .structure()
+        .fusion_tree_groups()
+        .len() as u64
+}
+
 /// The resolved transformers agree with each other and with a sequential
-/// rebuild, field for field; exactly `expected` admissions happened.
-fn assert_converged(built: &[TreeTransformStructure<f64>], before: u64, expected: Option<u64>) {
+/// rebuild, field for field; exactly `expected` completed-transformer
+/// admissions happened, and one coefficient entry per source group (the
+/// cache was cleared first) is resident and was admitted once.
+fn assert_converged(
+    built: &[TreeTransformStructure<f64>],
+    before: u64,
+    expected: Option<(u64, u64)>,
+) {
     assert_eq!(built.len(), TASKS);
     for structure in built {
         assert_eq!(structure, &built[0]);
     }
-    if let Some(expected) = expected {
+    if let Some((expected, groups)) = expected {
         assert_eq!(admissions() - before, expected);
+        let info = group_info();
+        assert_eq!((info.entries() as u64, info.admissions()), (groups, groups));
     }
 }
 
@@ -121,7 +149,7 @@ fn cache_concurrency_user_par_iter_on_the_runtime_pool() {
                 .map(|_| resolve(&runtime, &source))
                 .collect::<Vec<_>>()
         });
-        assert_converged(&built, before, Some(1));
+        assert_converged(&built, before, Some((1, source_groups(&source))));
     });
 }
 
@@ -148,7 +176,7 @@ fn cache_concurrency_user_par_iter_on_a_foreign_pool() {
                 .map(|_| resolve(&runtime, &source))
                 .collect::<Vec<_>>()
         });
-        assert_converged(&built, before, Some(1));
+        assert_converged(&built, before, Some((1, source_groups(&source))));
     });
 }
 
@@ -163,6 +191,7 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
     watchdog(|| {
         let runtime = runtime();
         let source = fixture(&runtime);
+        let groups = source_groups(&source);
         let source = source.test_bound_space().clone();
         let destination = source.transformed_multiplicity_free(&operation()).unwrap();
         crate::cache::clear();
@@ -189,7 +218,7 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        assert_converged(&built, before, Some(1));
+        assert_converged(&built, before, Some((1, groups)));
     });
 }
 

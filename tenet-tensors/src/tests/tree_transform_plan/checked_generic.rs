@@ -561,6 +561,69 @@ fn checked_generic_adjoint_storage_rejects_distinct_provider_allocation() {
     ));
 }
 
+/// What: a checked transform whose commit fails after its groups were
+/// composed publishes none of them (C6 commit-deferred publication), so a
+/// retry composes them again; the committed retry publishes them.
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
+    struct CommitFailureIdentity;
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<CommitFailureIdentity>());
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    crate::tree_transform::take_coefficient_group_activity();
+
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    provider
+        .restyle_at
+        .set(Some((CheckedPlanCall::R, FusionStyleKind::Unique)));
+    let error = crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        operation.clone(),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CheckedGenericPlanError::Core(CoreError::UnsupportedFusionStyle { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(provider.call_count(CheckedPlanCall::R) > 0);
+    let failed = crate::tree_transform::take_coefficient_group_activity();
+    assert!(failed.misses > 0);
+    assert_eq!((failed.hits, failed.publications), (0, 0));
+
+    provider.restyle_at.set(None);
+    provider.fusion_style.set(None);
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        operation,
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap();
+    let committed = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!(
+        (committed.hits, committed.misses, committed.publications),
+        (0, failed.misses, failed.misses)
+    );
+    assert!(provider.call_count(CheckedPlanCall::F) > 0);
+}
+
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {

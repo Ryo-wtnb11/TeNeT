@@ -82,6 +82,10 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
 
 #[test]
 fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
+    // Composed-coefficient hits must not race a clearing sibling test.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
 
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
@@ -132,6 +136,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
+    crate::tree_transform::take_coefficient_group_activity();
     let miss = planning
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -141,7 +146,11 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
             false,
         )
         .unwrap();
-    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
+    // One lowering per group the composed-coefficient cache missed (a
+    // sibling test may already have published some of these groups).
+    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!(groups.hits + groups.misses, group_count);
+    assert_eq!(tree_pair_lowering_calls(), (groups.misses, 0));
 
     reset_tree_pair_lowering_calls();
     let rebuilt = planning
@@ -154,8 +163,11 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
         )
         .unwrap();
     // The packed fixture is an expert layout, so the second resolution
-    // rebuilds (lookup-only key); it runs the same one lowering per group.
-    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
+    // rebuilds its transformer (lookup-only key), but every group's
+    // coefficients come from the composed-coefficient cache: no lowering.
+    assert_eq!(tree_pair_lowering_calls(), (0, 0));
+    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!((groups.hits, groups.misses), (group_count, 0));
     let hit = rebuilt;
     assert!(direct.has_pack_gemm_scatter_blocks());
     assert_eq!(direct.blocks(), miss.blocks());
@@ -206,6 +218,10 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
 
 #[test]
 fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
+    // Composed-coefficient hits must not race a clearing sibling test.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -270,10 +286,40 @@ fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
     };
 
     let small = resolve(&dst, &src);
+    crate::tree_transform::take_coefficient_group_activity();
     let large = resolve(&dst_large, &src_large);
     assert!(small.has_pack_gemm_scatter_blocks() && large.has_pack_gemm_scatter_blocks());
-    // What: a degeneracy change is a distinct layout, hence a distinct core.
+    // What: a degeneracy change is a distinct layout, hence a distinct core,
+    // but it recomposes no source group (all-codomain scope, cache 4), and
+    // the bound result equals the uncached eager producer.
     assert_ne!(small.layouts(), large.layouts());
+    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!(
+        (groups.hits, groups.misses, groups.publications),
+        (src_large.structure().fusion_tree_groups().len(), 0, 0)
+    );
+    let eager =
+        crate::tree_transform::build_multiplicity_free_all_codomain_tree_transform_group_plan(
+            &SU2FusionRule,
+            operation.clone(),
+            src_large.structure(),
+        )
+        .unwrap()
+        .compile_shared_structures_with_storage_conjugation(
+            Arc::clone(dst_large.structure()),
+            Arc::clone(src_large.structure()),
+            false,
+        )
+        .unwrap();
+    assert_eq!(large, eager);
+    let bits = |structure: &TreeTransformStructure<f64>| {
+        structure
+            .gathered_coefficients()
+            .iter()
+            .map(|coefficient| coefficient.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&large), bits(&eager));
 
     let structure = resolve(&dst, &src);
     let mut backend = DenseTreeTransformOperations::default();

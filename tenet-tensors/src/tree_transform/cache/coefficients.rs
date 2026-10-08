@@ -45,6 +45,10 @@ use super::{TransformerMode, TreeTransformScope, ENTRY_OVERHEAD_BYTES};
 use crate::tree_transform::operation::TreeTransformOperation;
 use crate::TreeTransformGroupBlockSpec;
 
+#[cfg(test)]
+#[path = "coefficients_tests.rs"]
+mod tests;
+
 type ErasedEntry = dyn Any + Send + Sync;
 
 const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
