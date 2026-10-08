@@ -138,7 +138,10 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 }
 
 #[test]
-fn unique_all_codomain_context_reuses_completed_transformer() {
+fn unique_all_codomain_context_resolves_through_the_completed_transformer_owner() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
     let dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
@@ -152,6 +155,7 @@ fn unique_all_codomain_context_reuses_completed_transformer() {
             .unwrap();
     let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    crate::tree_transform::take_completed_transformer_activity();
 
     context
         .all_codomain_tree_transform_into(
@@ -164,17 +168,17 @@ fn unique_all_codomain_context_reuses_completed_transformer() {
         )
         .unwrap();
     assert_eq!(dst.data(), &[3.0]);
-    assert_eq!(context.cache().structure_len(), 1);
 
     dst.data_mut().fill(0.0);
     context
         .all_codomain_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(dst.data(), &[3.0]);
-    // What: all-codomain Unique lowering shares the same bounded completed
-    // transformer boundary as the tree-pair route.
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 1);
+    // What: all-codomain Unique lowering resolves through the same completed
+    // transformer owner as the tree-pair route; these expert packed layouts
+    // are not canonical, so each call builds and nothing is published.
+    let activity = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!((activity.builds, activity.publications), (2, 0));
 }
 
 #[test]

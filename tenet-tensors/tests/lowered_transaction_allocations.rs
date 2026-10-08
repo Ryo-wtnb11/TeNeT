@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, U1FusionRule};
-use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace};
+use tenet_tensors::BoundDynamicFusionMapSpace;
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;
@@ -13,8 +13,8 @@ static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAl
 fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
     // What: in this single-test process, the transactional lowered warm hit
     // keeps encoded allocation cost and exact retained structure identity.
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let provider = Arc::new(U1FusionRule);
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));

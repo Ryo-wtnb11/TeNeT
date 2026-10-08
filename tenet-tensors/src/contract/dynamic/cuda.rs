@@ -307,7 +307,7 @@ where
     )?;
     transforms.replay(
         ctx,
-        copy.transform.as_ref(),
+        &copy.transform,
         dst_structure,
         &copy.temporary,
         dst,
@@ -443,7 +443,7 @@ where
         let buffer = grow(ctx, slot, bytes, len)?;
         transforms.replay_with_destination_scales(
             ctx,
-            transform.transform_structure.as_ref(),
+            &transform.transform_structure,
             transform.space.structure(),
             &transform.replay_structure,
             buffer,
@@ -489,7 +489,7 @@ where
     )?;
     transforms.replay(
         ctx,
-        core_dst.output_transform_structure.as_ref(),
+        &core_dst.output_transform_structure,
         dst_structure,
         core_dst.space.structure(),
         dst,

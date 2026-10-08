@@ -458,6 +458,12 @@ fn su2_mis_stacked_contractions_match_tree_identity() {
 /// sources (DynamicTree).
 #[test]
 fn mis_stacked_mul_form_contractions_take_the_irregular_host_core() {
+    if crate::test_cache::run_isolated_or_return(
+        "TENET_MIS_STACKED_ISOLATED",
+        "typed::contract_stacking_tests::mis_stacked_mul_form_contractions_take_the_irregular_host_core",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let sectors = [
         (U1Irrep::new(-1).sector_id(), 1),
@@ -478,8 +484,9 @@ fn mis_stacked_mul_form_contractions_take_the_irregular_host_core() {
     ] {
         let tensor = endomorphism(&runtime, U1FusionRule, &sectors, stacking);
         let lookups = || {
-            let info = runtime.tree_transform_cache_info().structures;
-            info.hits() + info.misses()
+            // Isolated process: the global counters move only for this test.
+            let info = crate::test_cache::completed();
+            info.hits() + info.misses() + info.rejections()
         };
         let before = lookups();
         let product = tensor.contract(&tensor, &spec).unwrap();

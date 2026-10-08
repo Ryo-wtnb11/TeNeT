@@ -122,7 +122,7 @@ pub struct CopyCRoute<C> {
     pub(crate) temporary: Arc<BlockStructure>,
     pub(crate) temporary_len: usize,
     /// Permutes the temporary into the destination's order and split.
-    pub(crate) transform: Arc<TreeTransformStructure<C>>,
+    pub(crate) transform: TreeTransformStructure<C>,
 }
 
 impl<C> CopyCRoute<C> {
@@ -138,7 +138,7 @@ impl<C> CopyCRoute<C> {
     }
 
     #[doc(hidden)]
-    pub fn transform(&self) -> &Arc<TreeTransformStructure<C>> {
+    pub fn transform(&self) -> &TreeTransformStructure<C> {
         &self.transform
     }
 }
@@ -1029,10 +1029,7 @@ mod tests {
             contract_compile_counts, reset_core_contract_derivations, ContractCompileCounts,
         };
         use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
-        use crate::{
-            ContractDestinationInit, OperationCachePolicy, RuleIdentity,
-            TensorContractFusionExecutionContext,
-        };
+        use crate::{ContractDestinationInit, RuleIdentity, TensorContractFusionExecutionContext};
 
         type Space = BoundDynamicFusionMapSpace<U1FusionRule>;
 
@@ -1072,7 +1069,6 @@ mod tests {
             let lhs = space(&provider, 2, 1);
             let matrix = space(&provider, 1, 1);
             let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-            context.set_cache_policy(OperationCachePolicy::NoCache);
             let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
             let matrix_data = vec![0.5; matrix.space().required_len().unwrap()];
             for output in [[0usize, 1, 2], [1, 0, 2]] {
@@ -1148,7 +1144,6 @@ mod tests {
             .unwrap();
             let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]);
             let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-            context.set_cache_policy(OperationCachePolicy::NoCache);
             let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
             let square_data = vec![0.5; square.space().required_len().unwrap()];
             let mut dst_data = vec![0.0; dst.space().required_len().unwrap()];

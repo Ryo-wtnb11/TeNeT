@@ -3,12 +3,12 @@ use crate::tests::GenericMultiplicityRule;
 use crate::BoundDynamicTensorRef;
 use std::cell::Cell;
 use tenet_core::{
-    reset_core_intern_tables, structure_cache_info, BlockSpec, BraidingStyleKind,
-    CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
-    FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule,
-    ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorVec, StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2FusionRule, Z2Irrep,
+    clear_structure_caches, structure_cache_info, BlockSpec, BraidingStyleKind, CoupledSectorFold,
+    FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, FusionTreePairKey,
+    Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
+    ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
+    StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep, U1SectorLayout,
+    Z2FusionRule, Z2Irrep,
 };
 
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -90,7 +90,7 @@ impl FailAtCallRule {
 
     fn hit(&self) -> Result<(), FailAtCallError> {
         if self.reset_on_query.replace(false) {
-            reset_core_intern_tables();
+            clear_structure_caches();
         }
         let call = self.calls.get() + 1;
         self.calls.set(call);
@@ -528,7 +528,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         return;
     }
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let provider = Arc::new(FailAtCallRule::new());
     let source_hom = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
     let source =
@@ -611,7 +611,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     );
 
     // Both walks below are cold: each must query the provider in full.
-    reset_core_intern_tables();
+    clear_structure_caches();
     let complete = FailAtCallRule::new();
     let complete_calls = {
         let _staged = source
@@ -621,7 +621,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     };
     let mut failing = FailAtCallRule::new();
     failing.fail_at = Some(complete_calls);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let before_failure = snapshots();
     let error = source
         .prepare_final_homspace_generic_checked(&failing, final_hom())
@@ -814,7 +814,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_scratch_publication_observations();
     let raw = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
     let structure = Arc::clone(raw.structure());
@@ -897,7 +897,7 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
         adjoint: OnceLock::new(),
     };
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_scratch_publication_observations();
     let mut mismatched = base.clone();
     mismatched.admission = FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity());
@@ -914,7 +914,7 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
         FusionSpaceAdmission::Subset(U1FusionRule.rule_identity()),
         FusionSpaceAdmission::Complete(U1FusionRule.rule_identity()),
     ] {
-        reset_core_intern_tables();
+        clear_structure_caches();
         reset_scratch_publication_observations();
         let mut raw = base.clone();
         raw.admission = admission.clone();
@@ -975,7 +975,7 @@ fn lowered_bind_preserves_omitted_product_codec_failure() {
         admission: FusionSpaceAdmission::Subset(rule.rule_identity()),
         adjoint: OnceLock::new(),
     };
-    reset_core_intern_tables();
+    clear_structure_caches();
     reset_scratch_publication_observations();
 
     let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule))
@@ -994,7 +994,7 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let complete = typed_z2_matrix_space();
     let first = complete.subblock_structure().block(0).unwrap();
     let structure = BlockStructure::from_blocks_with_rank(
@@ -1294,7 +1294,7 @@ fn checked_adjoint_provider_derivation_cannot_republish_after_reset() {
     let source =
         BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(Arc::clone(&provider), hom)
             .unwrap();
-    reset_core_intern_tables();
+    clear_structure_caches();
     provider.reset_on_query.set(true);
     let stale = crate::adjoint_bound_space_dyn_generic_checked(&source).unwrap();
     assert!(!provider.reset_on_query.get());

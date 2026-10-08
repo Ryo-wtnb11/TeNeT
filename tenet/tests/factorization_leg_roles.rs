@@ -40,9 +40,9 @@ mod fixtures;
 use fixtures::host_runtime;
 
 /// Tree transforms executed so far: every transform looks its layout up once.
-fn transforms(runtime: &Runtime) -> usize {
-    let info = runtime.tree_transform_cache_info().structures;
-    info.hits() + info.misses()
+fn transforms(_: &Runtime) -> usize {
+    let info = completed_transformers();
+    (info.hits() + info.misses()) as usize
 }
 
 fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
@@ -586,4 +586,12 @@ fn fermionic_boundary_crossing_square_roles_equal_the_permute_composition() {
         1e-8,
         "fz2u1 eig"
     );
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

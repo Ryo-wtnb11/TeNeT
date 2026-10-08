@@ -41,10 +41,10 @@ use super::*;
 /// crate) rejects everything at `f32`. Scale it by the payload's own epsilon
 /// — `f32::EPSILON` is about `1.2e-7` — as TensorKit's `rtoldefault` does.
 ///
-/// Execution state is per payload dtype, but the *plan* caches are not: plans
-/// are structural, so [`Runtime::tree_transform_cache_info`] and
-/// [`Runtime::clear_tree_transform_cache`] report and clear single- and
-/// double-precision activity together, in one shared store.
+/// Execution state is per payload dtype, but the structural caches are not:
+/// completed transformers are process-global ([`crate::cache`]) and a
+/// Runtime's categorical plans live in one store, so single- and
+/// double-precision activity is reported and cleared together.
 ///
 /// # Annotate the payload dtype
 ///

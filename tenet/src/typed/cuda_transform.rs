@@ -414,13 +414,12 @@ where
                     domain_axes.iter().copied(),
                 ))
             },
-            |operation| {
-                tree_operation_matches_axes(
-                    operation,
+            |_, _, probe| {
+                probe(tree_operation_view(
                     TreeTransformOperationKind::Permute,
                     codomain_axes,
                     domain_axes,
-                )
+                ))
             },
         )
     }
@@ -453,13 +452,17 @@ where
             domain_axes,
             levels,
         )?;
-        let expected = operation.clone();
+        let probe_operation = operation.clone();
         self.tree_transform_into_cuda(
             destination,
             alpha,
             beta,
             |_, _| Ok(operation),
-            |admitted| *admitted == expected,
+            |_, _, probe| {
+                probe(tenet_tensors::TreeTransformOperationView::of(
+                    &probe_operation,
+                ))
+            },
         )
     }
 
@@ -502,13 +505,12 @@ where
                     },
                 )
             },
-            |operation| {
-                tree_operation_matches_axes(
-                    operation,
+            |_, _, probe| {
+                probe(tree_operation_view(
                     TreeTransformOperationKind::Transpose,
                     codomain_axes,
                     domain_axes,
-                )
+                ))
             },
         )
     }
@@ -554,27 +556,15 @@ where
                     },
                 )
             },
-            |operation| {
-                let planar_axis = |position: usize| {
-                    if position < source_codomain_rank {
-                        position
-                    } else {
-                        source_rank - 1 - (position - source_codomain_rank)
-                    }
-                };
-                operation.kind() == TreeTransformOperationKind::Transpose
-                    && operation
-                        .codomain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((0..destination_codomain_rank).map(planar_axis))
-                    && operation
-                        .domain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((destination_codomain_rank..source_rank)
-                            .rev()
-                            .map(planar_axis))
+            |source, destination, probe| {
+                if destination.rank() == source.rank() {
+                    repartition_probe(
+                        source_codomain_rank,
+                        source_rank,
+                        destination_codomain_rank,
+                        probe,
+                    );
+                }
             },
         )
     }
@@ -600,7 +590,11 @@ where
         alpha: D,
         beta: D,
         operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
-        admitted_operation_matches: impl FnMut(&TreeTransformOperation) -> bool,
+        exact_layout_probe: impl FnOnce(
+            &Self,
+            &Self,
+            &mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>),
+        ),
     ) -> Result<(), Error> {
         if !self.runtime.same_runtime(&destination.runtime) {
             return Err(Error::RuntimeMismatch);
@@ -652,28 +646,34 @@ where
             ));
         }
 
-        let admitted_operation = self.runtime.admitted_tree_pair_operation(
-            &identity,
-            &source_body.space,
-            &destination_body.space,
-            admitted_operation_matches,
-        );
-        let exact_layout_admitted = admitted_operation.is_some();
-        let operation = match admitted_operation {
-            Some(operation) => operation,
-            None => operation(self, destination)?,
-        };
-        if !exact_layout_admitted {
-            let expected = source_body
-                .space
-                .transformed_multiplicity_free(&operation)?;
-            if destination_body.space.space() != expected.space() {
-                return Err(Error::InvalidArgument(
-                    "destination fusion space or block layout does not match the operation result"
-                        .to_string(),
-                ));
+        // As on Host: a destination proved once to be this operation's
+        // result space of this source hits the completed transformer
+        // directly, without rebuilding the operation or the result space.
+        let mut exact_layout_hit = None;
+        exact_layout_probe(self, destination, &mut |view| {
+            exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit(
+                &identity,
+                view,
+                &source_body.space,
+                &destination_body.space,
+            );
+        });
+        let operation = match exact_layout_hit {
+            Some(_) => None,
+            None => {
+                let operation = operation(self, destination)?;
+                let expected = source_body
+                    .space
+                    .transformed_multiplicity_free(&operation)?;
+                if destination_body.space.space() != expected.space() {
+                    return Err(Error::InvalidArgument(
+                        "destination fusion space or block layout does not match the operation result"
+                            .to_string(),
+                    ));
+                }
+                Some(operation)
             }
-        }
+        };
         let required = destination_body.space.space().required_len()?;
         let actual = TensorStorage::len(destination_storage);
         if actual != required {
@@ -695,18 +695,22 @@ where
         // lease is taken, as in `tree_transform_cuda`. The destination's
         // provider is the authority, exactly as Host's
         // `tree_transform_dyn_into_ref` call passes it.
-        let structure = {
-            let mut lease = self.runtime.lease_context()?;
-            lease
-                .context()
-                .multiplicity_free_lane::<D>()?
-                .tree_context_mut()
-                .compile_tree_pair_structure(
-                    destination_body.space.provider(),
-                    &operation,
-                    &destination_structure,
-                    &source_structure,
-                )?
+        let structure = match (exact_layout_hit, &operation) {
+            (Some(structure), _) => structure,
+            (None, Some(operation)) => {
+                let mut lease = self.runtime.lease_context()?;
+                lease
+                    .context()
+                    .multiplicity_free_lane::<D>()?
+                    .tree_context_mut()
+                    .compile_tree_pair_structure(
+                        destination_body.space.provider(),
+                        operation,
+                        &destination_structure,
+                        &source_structure,
+                    )?
+            }
+            (None, None) => unreachable!("a miss builds the operation"),
         };
 
         {
@@ -745,10 +749,11 @@ where
                 CudaTreeTransformDestination::Axpby(beta),
             )?;
         }
-        if !exact_layout_admitted {
-            self.runtime.admit_exact_tree_pair_layout(
-                identity,
-                &operation,
+        if let Some(operation) = &operation {
+            // Retention is an optimization: a lookup-only key keeps no proof.
+            let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout(
+                &identity,
+                operation,
                 &source_body.space,
                 destination.logical_space(),
             );

@@ -737,7 +737,7 @@ mod publication_order_tests {
             );
             return;
         }
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         let rule = tenet_core::SU2FusionRule;
         let provider = Arc::new(tenet_core::InfallibleGeneric::new(&rule));
         let authority = CheckedAuthority(&provider);

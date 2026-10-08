@@ -280,7 +280,7 @@ fn fusion_layout_reset_preserves_coupled_structure() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let rule = U1FusionRule;
     let hom = FusionTreeHomSpace::from_sectors([(U1Irrep::new(0), 2)], [(U1Irrep::new(0), 3)]);
     let old_layout = hom.cached_fusion_tree_layout(&rule);
@@ -295,7 +295,7 @@ fn fusion_layout_reset_preserves_coupled_structure() {
         .unwrap();
     assert_eq!(old_structure.as_ref(), reused_structure.as_ref());
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let after_reset_layout = hom.cached_fusion_tree_layout(&rule);
     let after_reset_structure = hom
         .coupled_subblock_structure(&rule, 1, [vec![2, 3]])

@@ -4,7 +4,7 @@ use crate::tensortrace::{
 };
 use std::cell::Cell;
 use std::rc::Rc;
-use tenet_core::{reset_core_intern_tables, structure_cache_info, StructureCacheKind};
+use tenet_core::{clear_structure_caches, structure_cache_info, StructureCacheKind};
 
 fn isolated(name: &str) -> bool {
     if std::env::var_os("TENET_STAGED_TRACE_CHILD").is_some() {
@@ -70,7 +70,7 @@ fn raw_execution_failure_does_not_publish() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let dst = stage(&src);
     let payloads = Rc::new(Cell::new(0));
     let executions = Rc::new(Cell::new(0));
@@ -110,7 +110,7 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let dst = stage(&src);
     TRACE_TEST_FAIL_TWIST.set(true);
     TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| {
@@ -138,7 +138,7 @@ fn destination_error_precedes_pivotal_and_payload() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let wrong_dst = src
         .prepare_final_homspace_generic_with_checked(
             src.provider(),
@@ -172,7 +172,7 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let dst = stage(&src);
     let payload = (0..16)
         .map(|i| num_complex::Complex64::new(i as f64 + 1.0, 2.0 * i as f64 - 3.0))
@@ -219,7 +219,7 @@ fn admission_runs_before_payload_and_again_after_execution() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let dst = stage(&src);
     TRACE_TEST_WRONG_STYLE.set(true);
     let early = tensortrace_fusion_dyn_staged_owned_generic_checked::<_, f64, Vec<f64>>(
@@ -268,7 +268,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
         return;
     }
     let src = source();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let (winner, _) = tensortrace_fusion_dyn_staged_owned_generic_checked(
         stage(&src),
         &src,
@@ -308,7 +308,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     assert_eq!(owner(), before);
     let staged = stage(&src);
     let stale = staged.structure().content_key();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let (out, data) = tensortrace_fusion_dyn_staged_owned_generic_checked(
         staged,
         &src,
@@ -323,9 +323,9 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     assert_unpublished();
 
     drop((winner, again, out));
-    reset_core_intern_tables();
+    clear_structure_caches();
     let staged_miss = stage(&src);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let (_, data) = tensortrace_fusion_dyn_staged_owned_generic_checked(
         staged_miss,
         &src,

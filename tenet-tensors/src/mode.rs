@@ -38,12 +38,15 @@ use tenet_core::{
 use tenet_operations::TreeTransformStructure;
 
 use crate::contract::{rhs_contract_twist_factor_oriented, FusionOperandLayout};
-use crate::tree_transform::build_checked_generic_tree_pair_transform_group_plan;
+use crate::tree_transform::{
+    build_checked_generic_tree_pair_transform_group_plan, publishable, resolve,
+    CompletedTransformerKey, OrientedBasisOrder, TransformerMode, TreeTransformPlanning,
+    TreeTransformScope,
+};
 use crate::{
     adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic_checked, BoundDynamicFusionMapSpace,
     CheckedGenericPlanError, DenseBlockScalar, OperationError, TensorTraceAxisSpec,
-    TensorTraceFusionStructure, TreeTransformCache, TreeTransformOperation,
-    TreeTransformRuleCacheKey,
+    TensorTraceFusionStructure, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 mod sealed {
@@ -179,7 +182,8 @@ pub(crate) enum TreeStructureSource<'a> {
 pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     type Scalar;
     type Error: From<OperationError>;
-    /// What retains compiled structures across calls.
+    /// The per-context planning state a structure resolution reads (the
+    /// completed transformers themselves are process-global).
     type StructureCache;
     type Structure;
 
@@ -216,8 +220,8 @@ where
 {
     type Scalar = R::Scalar;
     type Error = OperationError;
-    type StructureCache = TreeTransformCache<R::Scalar, R::Key>;
-    type Structure = Arc<TreeTransformStructure<R::Scalar>>;
+    type StructureCache = TreeTransformPlanning<R::Scalar>;
+    type Structure = TreeTransformStructure<R::Scalar>;
 
     /// Unit unless fermionic; a fermionic twist that varies within the
     /// sector declines, so the `DynamicTree` artifact applies it per block.
@@ -256,14 +260,8 @@ where
             TreeStructureSource::Stored {
                 structure,
                 storage_conjugate,
-            } => cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-                rule,
-                operation,
-                dst,
-                structure,
-                storage_conjugate,
-            ),
-            TreeStructureSource::Oriented(source) => cache.get_or_compile_tree_pair_oriented(
+            } => cache.resolve_tree_pair(rule, operation, dst, structure, storage_conjugate),
+            TreeStructureSource::Oriented(source) => cache.resolve_tree_pair_oriented(
                 rule,
                 operation,
                 dst,
@@ -287,7 +285,8 @@ where
 {
     type Scalar = f64;
     type Error = CheckedGenericPlanError<R::Error>;
-    /// The checked Generic engine retains no structures between calls.
+    /// Checked Generic contraction reads no per-context planning state; it
+    /// resolves through the process-global completed-transformer cache.
     type StructureCache = ();
     type Structure = TreeTransformStructure<f64>;
 
@@ -327,11 +326,33 @@ where
             }
             .into());
         };
-        let plan = build_checked_generic_tree_pair_transform_group_plan(
-            rule,
-            operation.clone(),
+        // Staged and core intermediates are uncommitted, hence not
+        // canonical: their keys are lookup-only until #2014-3c commits them.
+        let epoch = tenet_core::core_reset_epoch();
+        let key = CompletedTransformerKey::new::<f64>(
+            rule.rule_identity(),
+            TransformerMode::CheckedGeneric,
+            TreeTransformScope::TreePair,
+            operation,
+            tenet_core::FusionTreePairOrientation::Direct,
+            OrientedBasisOrder::Canonical,
+            storage_conjugate,
+            None,
+            dst,
             structure,
-        )?;
-        Ok(plan.compile_structures_with_storage_conjugation(dst, structure, storage_conjugate)?)
+        );
+        let may_publish = publishable([dst.as_ref(), structure.as_ref()]);
+        resolve(key, may_publish, epoch, dst, structure, || {
+            let plan = build_checked_generic_tree_pair_transform_group_plan(
+                rule,
+                operation.clone(),
+                structure,
+            )?;
+            Ok(plan.compile_shared_structures_with_storage_conjugation(
+                Arc::clone(dst),
+                Arc::clone(structure),
+                storage_conjugate,
+            )?)
+        })
     }
 }

@@ -24,7 +24,8 @@ pub use self::compile::*;
 pub use self::layout_table::*;
 pub use self::schedule::*;
 
-/// Replay-ready tree-transform descriptor.
+/// Replay-ready tree-transform descriptor: a cheap shared handle. Clone
+/// copies three `Arc`s.
 ///
 /// This is the TensorKit-style transformer-build boundary: construction resolves
 /// tree keys, block layouts, offsets, and pack/scatter descriptors against
@@ -32,6 +33,14 @@ pub use self::schedule::*;
 /// coefficients may be shared across compatible layout bindings. Hot paths
 /// should build this once and replay it with `tree_transform_execute_with`
 /// while reusing a backend and workspace.
+///
+/// The compiled payload is a [`TreeTransformReplay`] core that holds no
+/// structure: TensorKit's `AbelianTreeTransformer`/`GenericTreeTransformer`
+/// likewise keep only coefficients and `StridedStructure` tuples
+/// (`treetransformers.jl:10-129` @cfaa073). The handle binds that core to the
+/// caller's destination and source structures, so a process-global cache can
+/// retain cores without retaining (or charging) structure content, and a hit
+/// rebinds one to the caller's structures without allocating.
 ///
 /// Why not expose mutable compiled fields: the recoupling plan, converted
 /// coefficient cache, and threaded replay schedule all derive from the same
@@ -52,8 +61,21 @@ pub use self::schedule::*;
 /// with [`Self::block_coefficients`], or copy the whole payload explicitly
 /// with [`Self::gather_recoupling_coefficients_into`]. Post-compilation
 /// mutation is no longer supported.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TreeTransformStructure<T> {
+    core: Arc<TreeTransformReplay<T>>,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+}
+
+/// The structure-free compiled payload of a [`TreeTransformStructure`]:
+/// what the completed-transformer cache retains.
+///
+/// Its identity marker keys device-side preparation, so every handle bound
+/// to one core shares that preparation.
+#[doc(hidden)]
+#[derive(Debug, PartialEq)]
+pub struct TreeTransformReplay<T> {
     rank: usize,
     storage_conjugate: bool,
     identity: Arc<()>,
@@ -64,26 +86,24 @@ pub struct TreeTransformStructure<T> {
     physical_overwrite_len: Option<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     parallel_schedule: TreeTransformParallelSchedule,
-    dst_structure: Arc<BlockStructure>,
-    src_structure: Arc<BlockStructure>,
 }
 
-impl<T> TreeTransformStructure<T> {
-    /// Conservative retained-byte charge for this immutable replay payload.
+impl<T> TreeTransformReplay<T> {
+    /// Conservative retained-byte charge of this core: its own allocation
+    /// (inline value and `Arc` control), every owned capacity and the
+    /// identity control block. It retains no structure.
     ///
-    /// This counts owned capacities and the structure identity control block.
-    /// The source and destination structures are separate canonical owners, so
-    /// only their inline `Arc` handles are included through `size_of::<Self>()`.
     /// Shared categorical recoupling matrices are conservatively charged in
-    /// full for every bound structure; aggregate unique-byte accounting belongs
+    /// full for every bound core; aggregate unique-byte accounting belongs
     /// with a future retention policy, not this ownership split.
-    #[doc(hidden)]
-    pub fn charged_payload_bytes(&self) -> usize {
+    pub fn charged_bytes(&self) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
         let vector_bytes =
             |capacity: usize, element_size: usize| capacity.saturating_mul(element_size);
         core::mem::size_of::<Self>()
+            .saturating_add(ARC_CONTROL_BYTES)
+            // The identity marker's own allocation.
             .saturating_add(ARC_CONTROL_BYTES)
             .saturating_add(vector_bytes(
                 self.blocks.capacity(),
@@ -137,28 +157,89 @@ impl<T> TreeTransformStructure<T> {
     }
 }
 
+impl<T> TreeTransformStructure<T> {
+    /// Conservative retained-byte charge of this handle and its core. The
+    /// source and destination structures are separate canonical owners, so
+    /// only the handle's inline `Arc`s are included through
+    /// `size_of::<Self>()`.
+    #[doc(hidden)]
+    pub fn charged_payload_bytes(&self) -> usize {
+        core::mem::size_of::<Self>().saturating_add(self.core.charged_bytes())
+    }
+
+    /// The shared structure-free core.
+    #[doc(hidden)]
+    #[inline]
+    pub fn replay_core(&self) -> &Arc<TreeTransformReplay<T>> {
+        &self.core
+    }
+
+    /// Binds a cached core to the caller's structures. O(1), no allocation.
+    ///
+    /// The caller proves that `dst_structure` and `src_structure` are the
+    /// structures the core was compiled against (equal content); replay
+    /// re-checks that identity against the structures it is given.
+    #[doc(hidden)]
+    #[inline]
+    pub fn from_replay_core(
+        core: Arc<TreeTransformReplay<T>>,
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+    ) -> Self {
+        Self {
+            core,
+            dst_structure,
+            src_structure,
+        }
+    }
+
+    /// Destination structure this handle is bound to.
+    #[doc(hidden)]
+    #[inline]
+    pub fn dst_structure(&self) -> &Arc<BlockStructure> {
+        &self.dst_structure
+    }
+
+    /// Source structure this handle is bound to.
+    #[doc(hidden)]
+    #[inline]
+    pub fn src_structure(&self) -> &Arc<BlockStructure> {
+        &self.src_structure
+    }
+}
+
+// Why manual: the same core under content-equal structures is equal, and the
+// shared core short-circuits the payload comparison.
+impl<T: PartialEq> PartialEq for TreeTransformStructure<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.core, &other.core) || self.core == other.core)
+            && self.dst_structure == other.dst_structure
+            && self.src_structure == other.src_structure
+    }
+}
+
 impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub fn rank(&self) -> usize {
-        self.rank
+        self.core.rank
     }
 
     #[inline]
     pub fn block_count(&self) -> usize {
-        self.blocks.len()
+        self.core.blocks.len()
     }
 
     /// Immutable compiled block descriptors.
     #[inline]
     pub fn blocks(&self) -> &[TreeTransformBlock] {
-        &self.blocks
+        &self.core.blocks
     }
 
     /// Immutable compiled layout table: per entry its offset and element
     /// count. Its geometry is read through [`Self::layout_diagnostics`].
     #[inline]
     pub fn layouts(&self) -> &TreeTransformLayoutTable {
-        &self.layouts
+        &self.core.layouts
     }
 
     /// Owned copy of every layout entry's role and compiled normalized
@@ -175,39 +256,41 @@ impl<T: Copy> TreeTransformStructure<T> {
     /// source; [`Self::layouts`] still gives each entry's offset and element
     /// count.
     pub fn layout_diagnostics(&self) -> TreeTransformLayoutDiagnostics {
-        self.layouts.diagnostics(&self.blocks)
+        self.core.layouts.diagnostics(&self.core.blocks)
     }
 
     /// Block `block_index`'s `U[dst, src]` coefficients, read in place: a
     /// Single block's scalar, or the Multi block's shared matrix.
     #[inline]
     pub fn block_coefficients(&self, block_index: usize) -> Option<&[T]> {
-        match *self.blocks.get(block_index)? {
-            TreeTransformBlock::Single { coefficient, .. } => {
-                self.coefficients.singles.get(coefficient..=coefficient)
-            }
+        match *self.core.blocks.get(block_index)? {
+            TreeTransformBlock::Single { coefficient, .. } => self
+                .core
+                .coefficients
+                .singles
+                .get(coefficient..=coefficient),
             TreeTransformBlock::Multi { .. } => self.block_matrix(block_index),
         }
     }
 
     #[inline]
     pub(crate) fn block_matrix(&self, block_index: usize) -> Option<&[T]> {
-        match *self.blocks.get(block_index)? {
+        match *self.core.blocks.get(block_index)? {
             TreeTransformBlock::Single { .. } => None,
-            TreeTransformBlock::Multi { matrix, .. } => self.coefficients.matrix(matrix),
+            TreeTransformBlock::Multi { matrix, .. } => self.core.coefficients.matrix(matrix),
         }
     }
 
     /// Scalars of the Single blocks, indexed by their `coefficient`.
     #[inline]
     pub(crate) fn single_coefficients(&self) -> &[T] {
-        &self.coefficients.singles
+        &self.core.coefficients.singles
     }
 
     /// Length of the logical coefficient payload the block offsets index.
     #[inline]
     pub fn coefficient_len(&self) -> usize {
-        self.coefficients.len
+        self.core.coefficients.len
     }
 
     /// Copies the logical destination-by-source coefficient payload into
@@ -232,21 +315,18 @@ impl<T: Copy> TreeTransformStructure<T> {
     ) where
         T: Copy,
     {
+        let coefficients = &self.core.coefficients;
         out.clear();
-        out.reserve(self.coefficients.len);
-        out.extend(
-            self.coefficients
-                .singles
-                .iter()
-                .map(|&value| convert(value)),
-        );
-        for matrix in &self.coefficients.matrices {
+        out.reserve(coefficients.len);
+        out.extend(coefficients.singles.iter().map(|&value| convert(value)));
+        for matrix in &coefficients.matrices {
             out.extend(matrix.iter().map(|&value| convert(value)));
         }
     }
 
     pub fn workspace_lens(&self) -> (usize, usize) {
-        self.blocks
+        self.core
+            .blocks
             .iter()
             .fold((0, 0), |(max_src, max_dst), block| match block {
                 TreeTransformBlock::Single { .. } => (max_src, max_dst),
@@ -268,12 +348,13 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     pub fn has_pack_gemm_scatter_blocks(&self) -> bool {
-        !self.recoupling_plan.is_empty()
+        !self.core.recoupling_plan.is_empty()
     }
 
+    /// The core's identity: shared by every handle bound to one core.
     #[inline]
     pub(crate) fn identity_marker(&self) -> &Arc<()> {
-        &self.identity
+        &self.core.identity
     }
 
     #[cfg(test)]
@@ -288,27 +369,28 @@ impl<T: Copy> TreeTransformStructure<T> {
 
     #[cfg(test)]
     pub(crate) fn shares_recoupling_matrices_with(&self, other: &Self) -> bool {
-        !self.coefficients.matrices.is_empty()
-            && Arc::ptr_eq(&self.coefficients, &other.coefficients)
+        !self.core.coefficients.matrices.is_empty()
+            && Arc::ptr_eq(&self.core.coefficients, &other.core.coefficients)
     }
 
     #[inline]
     pub fn recoupling_plan(&self) -> &TreeTransformRecouplingPlan {
-        &self.recoupling_plan
+        &self.core.recoupling_plan
     }
 
     /// Test/diagnostic helper: per-block replay weights.
     #[doc(hidden)]
     pub fn replay_weights(&self) -> Vec<usize> {
-        self.blocks
+        self.core
+            .blocks
             .iter()
-            .map(|block| tree_transform_block_weight(block, &self.layouts.entries))
+            .map(|block| tree_transform_block_weight(block, &self.core.layouts.entries))
             .collect()
     }
 
     #[inline]
     pub fn storage_conjugate(&self) -> bool {
-        self.storage_conjugate
+        self.core.storage_conjugate
     }
 
     /// Scalar of a [`TreeTransformBlock::Single`] block: `index` is that
@@ -316,22 +398,22 @@ impl<T: Copy> TreeTransformStructure<T> {
     /// (Multi matrices are read with [`Self::block_coefficients`]).
     #[inline]
     pub fn single_coefficient(&self, index: usize) -> Option<T> {
-        self.coefficients.singles.get(index).copied()
+        self.core.coefficients.singles.get(index).copied()
     }
 
     #[inline]
     pub(crate) fn inactive_destination_layouts(&self) -> &[usize] {
-        &self.inactive_dst_layouts
+        &self.core.inactive_dst_layouts
     }
 
     #[inline]
     pub(crate) fn physical_overwrite_len(&self) -> Option<usize> {
-        self.physical_overwrite_len
+        self.core.physical_overwrite_len
     }
 
     #[inline]
     pub(crate) fn parallel_schedule(&self) -> &TreeTransformParallelSchedule {
-        &self.parallel_schedule
+        &self.core.parallel_schedule
     }
 
     pub fn validate_replay_structures(
@@ -529,7 +611,11 @@ mod tests {
         assert!(compiled.layouts().inactive_role(0).is_err());
 
         let charged = compiled.charged_payload_bytes();
-        compiled.layouts.fused_dims.reserve_exact(128);
+        Arc::get_mut(&mut compiled.core)
+            .unwrap()
+            .layouts
+            .fused_dims
+            .reserve_exact(128);
         assert!(compiled.charged_payload_bytes() > charged);
     }
 

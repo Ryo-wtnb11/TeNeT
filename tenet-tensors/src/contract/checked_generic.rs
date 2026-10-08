@@ -1124,7 +1124,7 @@ mod tests {
         }
 
         let (left, lhs, right, rhs) = bound_pair(1, 1);
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
@@ -1249,7 +1249,7 @@ mod tests {
         }
 
         let (left, lhs, right, rhs) = bound_pair(2, 2);
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         let candidate = contracted_axis_order_candidates(&[3, 2], &[0, 1]).remove(0);
         let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
@@ -1331,7 +1331,7 @@ mod tests {
         }
 
         let (left, lhs, right, rhs) = bound_pair(1, 1);
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let mut transform_backend = DenseTreeTransformOperations::default();
         let mut transform_workspace = Default::default();
@@ -1394,7 +1394,7 @@ mod tests {
         }
 
         let (left, lhs, right, rhs) = bound_pair(1, 1);
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let (output, _) = tensorcontract_owned_checked_generic_preselected(
             &lhs,

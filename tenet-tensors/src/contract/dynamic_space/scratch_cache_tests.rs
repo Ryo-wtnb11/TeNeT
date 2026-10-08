@@ -144,7 +144,7 @@ fn u1_space(charge: i32, deg: usize) -> DynamicFusionMapSpace {
 }
 
 fn reset_final_result_layout_test_state() {
-    crate::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     reset_final_result_layout_builds();
 }
 
@@ -809,7 +809,7 @@ fn canonical_explicit_shapes_preserve_content_after_homspace_intern_eviction() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let before = u1_space(73, 3);
     for charge in 10_000..19_000 {
         let sid = U1Irrep::new(charge).sector_id();
@@ -844,11 +844,11 @@ fn reset_and_concurrent_rebuild_keep_structure_semantics() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let spaces = std::thread::scope(|scope| {
         let resetter = scope.spawn(|| {
             for _ in 0..32 {
-                crate::reset_global_operation_caches();
+                tenet_core::clear_structure_caches();
             }
         });
         let builders = (0..4)

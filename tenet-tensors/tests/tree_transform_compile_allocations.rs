@@ -12,8 +12,8 @@ use tenet_core::{
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    reset_global_operation_caches, RuleIdentity, TreeTransformBlockSpec, TreeTransformCache,
-    TreeTransformOperation, TreeTransformStructure,
+    RuleIdentity, TreeTransformBlockSpec, TreeTransformExecutionContext, TreeTransformOperation,
+    TreeTransformStructure,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -184,34 +184,34 @@ fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
 #[test]
 fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_provider_work() {
     let _global_cache_guard = counting_alloc::serial();
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
 
     let calls = Arc::new(AtomicUsize::new(0));
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
     };
     let structure = rank_129_su2_vacuum_structure();
+    // A hand-built layout is lookup-only unless admitted; mark it canonical
+    // so the exact key publishes.
+    tenet_core::testing::mark_structure_canonical(&structure);
     let operation = TreeTransformOperation::permute(0..129, []);
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
-    let cold = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, false,
-        )
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    let cold = context
+        .compile_tree_pair_structure(&rule, &operation, &structure, &structure)
         .unwrap();
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
     counting_alloc::start();
-    let warm = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, false,
-        )
+    let warm = context
+        .compile_tree_pair_structure(&rule, &operation, &structure, &structure)
         .unwrap();
     let allocs = counting_alloc::stop();
 
-    // What: cloning the runtime-rank operation into the completed-structure
-    // lookup key performs no allocation or provider work on an exact warm hit.
-    assert!(Arc::ptr_eq(&cold, &warm));
+    // What: cloning the runtime-rank operation into the completed-transformer
+    // lookup key and binding the cached core to the caller's structures
+    // perform no allocation or provider work on an exact warm hit.
+    assert!(Arc::ptr_eq(cold.replay_core(), warm.replay_core()));
     assert_eq!(allocs.calls, 0);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
@@ -286,32 +286,32 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
 
     // What: exact counts cover missing-position plan compilation after registry
     // capacity exists, independently of unrelated typed-cache test order.
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let (dst, src) = rank_eight_su2_subset(1);
-    TreeTransformCache::<f64, RuleIdentity>::new()
-        .get_or_compile_tree_pair(
+    TreeTransformExecutionContext::<f64, RuleIdentity>::default()
+        .compile_tree_pair_structure(
             &SU2FusionRule,
-            TreeTransformOperation::permute(0..8, []),
-            &dst,
-            &src,
+            &TreeTransformOperation::permute(0..8, []),
+            dst.structure(),
+            src.structure(),
         )
         .unwrap();
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
 
     for (source_count, expected_allocations) in
         [(1, 41), (2, 46), (4, 54), (5, 62), (8, 68), (9, 76)]
     {
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let (dst, src) = rank_eight_su2_subset(source_count);
-        let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
-        cache.set_recoupling_threads(1);
+        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+        let operation = TreeTransformOperation::permute(0..8, []);
         counting_alloc::start();
-        let plan = cache
-            .get_or_compile_tree_pair(
+        let plan = context
+            .compile_tree_pair_structure(
                 &SU2FusionRule,
-                TreeTransformOperation::permute(0..8, []),
-                &dst,
-                &src,
+                &operation,
+                dst.structure(),
+                src.structure(),
             )
             .unwrap();
         let allocs = counting_alloc::stop();
@@ -331,17 +331,10 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
 fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
     let structure = Arc::new(rank_nine_same_split_su2_groups());
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
-    cache.set_recoupling_threads(1);
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     counting_alloc::start();
-    let compiled = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &SU2FusionRule,
-            &operation,
-            &structure,
-            &structure,
-            false,
-        )
+    let compiled = context
+        .compile_tree_pair_structure(&SU2FusionRule, &operation, &structure, &structure)
         .unwrap();
     let allocs = counting_alloc::stop();
 

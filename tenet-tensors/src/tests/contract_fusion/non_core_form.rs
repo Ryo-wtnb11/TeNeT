@@ -244,6 +244,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
+    crate::tree_transform::take_completed_transformer_activity();
     context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
@@ -254,13 +255,12 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         );
     }
     let expects_dynamic_replay = !(lhs_conjugate && rhs_conjugate);
+    let first = crate::tree_transform::take_completed_transformer_activity();
     if expects_dynamic_replay {
-        assert!(context.tree_context().cache().stats().structure_misses() > 0);
+        assert!(first.builds + first.hits > 0);
     } else {
-        assert_eq!(context.tree_context().cache().structure_len(), 0);
+        assert_eq!(first, Default::default());
     }
-
-    let tree_stats_after_first = context.tree_context().cache().stats();
     context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context);
@@ -273,15 +273,14 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
             "actual {actual} expected {expected}"
         );
     }
+    // What: the repeat builds nothing: conjugated sources are keyed on their
+    // canonical parent, so every transformer was published.
+    let second = crate::tree_transform::take_completed_transformer_activity();
     if expects_dynamic_replay {
-        assert_eq!(
-            context.tree_context().cache().stats(),
-            tree_stats_after_first
-        );
-        assert!(context.dynamic_fusion_space_cache_hits() > 0);
-        assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
+        assert_eq!(second.builds, 0);
+        assert!(second.hits > 0);
     } else {
-        assert_eq!(context.tree_context().cache().structure_len(), 0);
+        assert_eq!(second, Default::default());
     }
 }
 
@@ -634,7 +633,7 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     for (&actual, &expected) in after_eviction.data().iter().zip(&expected) {
         assert!((actual - expected).norm() < 1.0e-12);
     }
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let after_reset = rebuild_and_contract();
     assert_eq!(after_reset.structure(), &expected_structure);
     for (&actual, &expected) in after_reset.data().iter().zip(&expected) {

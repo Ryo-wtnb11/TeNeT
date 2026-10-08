@@ -32,9 +32,11 @@ static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAl
 
 type Map = TensorMap<U1FusionRule, f64>;
 
-fn transform_lookups(runtime: &Runtime) -> usize {
-    let info = runtime.tree_transform_cache_info().structures;
-    info.hits() + info.misses()
+/// Lookups of the process-global completed-transformer cache (#2014-3); this
+/// binary runs one test, so only it moves them.
+fn transform_lookups(_: &Runtime) -> usize {
+    let info = completed_transformers();
+    (info.hits() + info.misses()) as usize
 }
 
 #[test]
@@ -123,4 +125,12 @@ fn split_moving_intermediate_retains_one_buffer_and_one_transform() {
         retained >= intermediate_bytes && retained < intermediate_bytes + intermediate_bytes / 4,
         "retained workspace bytes {retained} vs one intermediate buffer {intermediate_bytes}"
     );
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

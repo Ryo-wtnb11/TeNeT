@@ -453,7 +453,7 @@ where
 {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         if self.reset_on_dual.swap(false, Ordering::SeqCst) {
-            reset_core_intern_tables();
+            clear_structure_caches();
         }
         self.dual_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.try_dual_sector(sector)
@@ -801,7 +801,7 @@ fn checked_mf_complete_epoch_precedes_provider_and_homspace_derivation() {
     let rule = DualCountingRule::new(U1FusionRule);
     let hom = FusionTreeHomSpace::from_sectors([(u1(1), 2)], [(u1(1), 3)]);
     for derive in [false, true] {
-        reset_core_intern_tables();
+        clear_structure_caches();
         rule.reset_on_dual.store(true, Ordering::SeqCst);
         let (hom, prepared) = if derive {
             FusionTreeHomSpace::prepare_fusion_tree_layout_checked_with(&rule, || {

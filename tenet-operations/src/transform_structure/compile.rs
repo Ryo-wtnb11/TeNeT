@@ -371,20 +371,22 @@ impl<T: Copy> TreeTransformStructure<T> {
         // table keeps only the compiled roles replay executes.
         let layouts = layouts.finish(&blocks, &inactive_dst_layouts)?;
 
-        Ok(Self {
-            rank,
-            storage_conjugate,
-            identity: Arc::new(()),
-            blocks,
-            layouts,
-            coefficients: shared,
-            inactive_dst_layouts,
-            physical_overwrite_len,
-            recoupling_plan,
-            parallel_schedule,
+        Ok(Self::from_replay_core(
+            Arc::new(TreeTransformReplay {
+                rank,
+                storage_conjugate,
+                identity: Arc::new(()),
+                blocks,
+                layouts,
+                coefficients: shared,
+                inactive_dst_layouts,
+                physical_overwrite_len,
+                recoupling_plan,
+                parallel_schedule,
+            }),
             dst_structure,
             src_structure,
-        })
+        ))
     }
 }
 

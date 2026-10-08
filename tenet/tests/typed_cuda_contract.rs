@@ -360,6 +360,8 @@ fn a_warm_general_contraction_uploads_only_its_output() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+// Exercises the deprecated per-Runtime wrapper's device-state clear.
+#[allow(deprecated)]
 fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let large = u1_rank_five::<f64>(&runtime);

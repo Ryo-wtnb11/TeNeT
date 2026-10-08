@@ -484,7 +484,7 @@ fn checked_prepare_surfaces_each_stage_failure_without_publishing() {
             },
         ),
     ] {
-        reset_core_intern_tables();
+        clear_structure_caches();
         reset_fusion_tree_layout_probe_side_effect_calls();
         let error = homspace
             .prepare_fusion_tree_layout_checked(&CheckedFailRule { fail: stage })

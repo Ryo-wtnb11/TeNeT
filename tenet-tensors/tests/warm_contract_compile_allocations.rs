@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, try_compile_storage_contract_core_route,
-    BoundDynamicFusionMapSpace, DirectCoreExecutor, FusionOperand, OperationCachePolicy,
-    OutputAxisOrder, RuleIdentity, RuntimeTreeTransformStore, StorageContractResolution,
-    TensorContractFusionExecutionContext, TensorContractSpec,
+    BoundDynamicFusionMapSpace, DirectCoreExecutor, FusionOperand, OutputAxisOrder, RuleIdentity,
+    RuntimeCoefficientStore, StorageContractResolution, TensorContractFusionExecutionContext,
+    TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -73,18 +73,20 @@ fn space_of(
     .unwrap()
 }
 
-/// Runtime-configured context: no context-local space cache, tree
-/// transforms from one shared store.
+/// Runtime-configured context: categorical coefficients from one shared
+/// store; completed transformers from the process-global cache.
 fn runtime_like_context(
-    store: &Arc<RuntimeTreeTransformStore<f64>>,
+    store: &Arc<RuntimeCoefficientStore<f64>>,
 ) -> TensorContractFusionExecutionContext<f64, RuleIdentity> {
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context.set_cache_policy(OperationCachePolicy::NoCache);
     context
         .tree_context_mut()
-        .cache_mut()
-        .bind_runtime_store(Arc::downgrade(store));
+        .bind_runtime_coefficient_store(Arc::downgrade(store));
     context
+}
+
+fn completed_transformers() -> tenet_core::StructureCacheInfo {
+    tenet_core::structure_cache_info(tenet_core::StructureCacheKind::CompletedTreeTransformer)
 }
 
 /// The storage ladder these rows pin: the lock-free canonical core, then the
@@ -154,8 +156,8 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
         OutputAxisOrder::from_axes(&swapped),
     )
     .unwrap();
-    let store = Arc::new(RuntimeTreeTransformStore::new(
-        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    let store = Arc::new(RuntimeCoefficientStore::new(
+        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
     ));
     let mut context = runtime_like_context(&store);
     let dynamic_tree = warm_allocations(|| {
@@ -218,8 +220,8 @@ fn crossing_compile_allocations(
         OutputAxisOrder::from_axes(&open),
     )
     .unwrap();
-    let store = Arc::new(RuntimeTreeTransformStore::new(
-        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    let store = Arc::new(RuntimeCoefficientStore::new(
+        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
     ));
     let mut context = runtime_like_context(&store);
     warm_allocations(|| {
@@ -304,10 +306,11 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
         rank,
     )
     .unwrap();
-    let store = Arc::new(RuntimeTreeTransformStore::new(
-        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    let store = Arc::new(RuntimeCoefficientStore::new(
+        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
     ));
     let mut context = runtime_like_context(&store);
+    let rejections = completed_transformers().rejections();
     let copy_c = warm_allocations(|| {
         let resolution = context
             .plan_contract::<DirectCoreExecutor, _>(
@@ -335,9 +338,14 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
     });
     // #1993: every structure this fixture builds is retained; the old 8 MiB
     // per-entry limit bypassed the rank-5 transform and recompiled it per call.
-    for info in [store.info(), store.plan_info(), store.group_info()] {
+    for info in [store.plan_info(), store.group_info()] {
         assert_eq!(info.admission_bypasses(), 0, "rank {rank}: {info:?}");
     }
+    assert_eq!(
+        completed_transformers().rejections(),
+        rejections,
+        "rank {rank}: a completed transformer was rejected"
+    );
     [copy_c, dynamic_tree]
 }
 
@@ -406,11 +414,12 @@ fn rank_six_complete_owner_reuses_content_across_derivations() {
 #[test]
 fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
     let _serial = counting_alloc::serial();
-    // What (#2011): the rank-6 C1p working set — the CopyC output transform
-    // and the DynamicTree route's transforms — fits one default 64 MiB store,
-    // so alternating the two routes evicts nothing and every warm call reuses
-    // its retained transforms. Before #2011 each 65 MB transform evicted the
-    // other and the DynamicTree call recompiled with 8.26 M allocations.
+    // What (#2011, re-homed by #2014-3): the rank-6 C1p working set — the
+    // CopyC output transform and the DynamicTree route's transforms — fits
+    // the default 64 MiB process-global completed-transformer cache, so
+    // alternating the two routes evicts nothing and every warm call reuses
+    // its retained transformers. Before #2011 each 65 MB transform evicted
+    // the other and the DynamicTree call recompiled with 8.26 M allocations.
     let rank = 6;
     let provider = Arc::new(U1FusionRule);
     let lhs = space(&provider, rank, rank);
@@ -430,8 +439,8 @@ fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
         rank,
     )
     .unwrap();
-    let store = Arc::new(RuntimeTreeTransformStore::new(
-        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    let store = Arc::new(RuntimeCoefficientStore::new(
+        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
     ));
     let mut context = runtime_like_context(&store);
     let mut run = |copy_c: bool| -> usize {
@@ -461,13 +470,16 @@ fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
         drop(resolution);
         counting_alloc::stop().calls as usize
     };
+    // A clean cache: the working set alone decides residency.
+    tenet_core::clear_structure_caches();
     run(true);
     run(false);
-    let warm = store.info();
+    let warm = completed_transformers();
     let warm_calls = (0..4).map(|step| run(step % 2 == 0)).collect::<Vec<_>>();
-    let after = store.info();
+    let after = completed_transformers();
+    eprintln!("rank-6 working set: {warm:?}");
 
-    assert_eq!(warm.admission_bypasses(), 0, "{warm:?}");
+    assert_eq!(warm.rejections(), 0, "{warm:?}");
     assert_eq!(warm.evictions(), 0, "{warm:?}");
     assert_eq!(after.entries(), warm.entries(), "{after:?}");
     assert_eq!(after.evictions(), 0, "{after:?}");

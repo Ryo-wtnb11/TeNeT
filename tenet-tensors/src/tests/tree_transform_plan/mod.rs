@@ -23,6 +23,68 @@ impl<T: Copy> GatheredCoefficients<T> for tenet_operations::TreeTransformStructu
     }
 }
 
+/// Resolves through the process-global completed-transformer owner as an
+/// unbound context does.
+fn resolve_tree_pair<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst: &Arc<BlockStructure>,
+    src: &Arc<BlockStructure>,
+    storage_conjugate: bool,
+) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy
+        + core::ops::Add<Output = R::Scalar>
+        + core::ops::Mul<Output = R::Scalar>
+        + num_traits::Zero
+        + Send
+        + Sync
+        + 'static,
+{
+    crate::tree_transform::TreeTransformPlanning::default().resolve_tree_pair(
+        rule,
+        operation,
+        dst,
+        src,
+        storage_conjugate,
+    )
+}
+
+/// Whether two handles share one replay core (one cache entry).
+fn same_core<T>(
+    left: &tenet_operations::TreeTransformStructure<T>,
+    right: &tenet_operations::TreeTransformStructure<T>,
+) -> bool {
+    Arc::ptr_eq(left.replay_core(), right.replay_core())
+}
+
+/// Marks hand-built fixture layouts canonical so their keys publish, as a
+/// complete-HomSpace admission would.
+fn mark_canonical<'a>(structures: impl IntoIterator<Item = &'a BlockStructure>) {
+    for structure in structures {
+        tenet_core::testing::mark_structure_canonical(structure);
+    }
+}
+
+/// An equal layout under a fresh, never-admitted content id: an expert copy
+/// whose transformer keys are lookup-only.
+fn expert_copy(structure: &BlockStructure) -> Arc<BlockStructure> {
+    let blocks = (0..structure.block_count())
+        .map(|index| {
+            let block = structure.block(index).unwrap();
+            tenet_core::BlockSpec::with_key(
+                block.key().clone(),
+                block.shape().to_vec(),
+                block.strides().to_vec(),
+                block.offset(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    Arc::new(BlockStructure::from_blocks_with_rank(structure.rank(), blocks).unwrap())
+}
+
 mod admission;
 mod checked_generic;
 mod context_cache;

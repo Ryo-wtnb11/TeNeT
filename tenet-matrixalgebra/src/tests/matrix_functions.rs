@@ -1076,8 +1076,6 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
             ..
         })
     ));
-    assert_eq!(context.tree_context().cache().structure_len(), 0);
-    assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
 }
 
 #[test]

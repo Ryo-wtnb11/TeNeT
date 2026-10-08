@@ -171,7 +171,6 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -190,7 +189,7 @@ where
     C: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
-    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+    let lhs_transform = compile_transformed_source(
         tree_context,
         rule,
         lhs_space,
@@ -206,7 +205,7 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     );
-    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+    let rhs_transform = compile_transformed_source(
         tree_context,
         rule,
         rhs_space,
@@ -232,7 +231,6 @@ where
     )?;
     finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
-        dynamic_space_cache,
         rule,
         layout_primer,
         plan,
@@ -255,7 +253,6 @@ pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
     const PROFILED: bool,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -283,7 +280,6 @@ where
     let lhs_direct = lhs.is_direct();
     let lhs_transform = compile_prelowered_source_transform(
         tree_context,
-        dynamic_space_cache,
         rule,
         lhs,
         plan.lhs_transform(),
@@ -300,7 +296,6 @@ where
     let rhs_direct = rhs.is_direct();
     let rhs_transform = compile_prelowered_source_transform(
         tree_context,
-        dynamic_space_cache,
         rule,
         rhs,
         plan.rhs_transform(),
@@ -324,7 +319,6 @@ where
     )?;
     let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
-        dynamic_space_cache,
         rule,
         layout_primer,
         plan,
@@ -340,7 +334,6 @@ where
 
 pub(super) fn compile_prelowered_source_transform<RuleKey, BT, R, D, C>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     source: &FusionOperandLayout<'_>,
     operation: &TreeTransformOperation,
@@ -354,7 +347,7 @@ where
     C: DenseBlockScalar,
 {
     if source.is_direct() {
-        dynamic_space_cache.get_or_compile_transformed_source(
+        compile_transformed_source(
             tree_context,
             rule,
             source.storage_space(),
@@ -364,20 +357,13 @@ where
             layout_primer,
         )
     } else {
-        dynamic_space_cache.get_or_compile_transformed_source_oriented(
-            tree_context,
-            rule,
-            source,
-            operation,
-            layout_primer,
-        )
+        compile_transformed_source_oriented(tree_context, rule, source, operation, layout_primer)
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -438,7 +424,7 @@ where
     let core_dst = if plan.output_transform_is_identity() {
         None
     } else {
-        Some(dynamic_space_cache.get_or_compile_core_dst(
+        Some(compile_core_dst(
             tree_context,
             rule,
             core_left_space,
@@ -630,7 +616,7 @@ where
                 .as_deref_mut()
                 .expect("profiled replay carries a profile");
             tree_context.tree_transform_structure_overwrite_into_raw_profiled(
-                lhs_transform.transform_structure.as_ref(),
+                &lhs_transform.transform_structure,
                 &lhs_dst_structure,
                 &lhs_transform.replay_structure,
                 lhs_scratch.data_mut(),
@@ -640,7 +626,7 @@ where
             )?;
         } else {
             tree_context.tree_transform_structure_overwrite_into_raw(
-                lhs_transform.transform_structure.as_ref(),
+                &lhs_transform.transform_structure,
                 &lhs_dst_structure,
                 &lhs_transform.replay_structure,
                 lhs_scratch.data_mut(),
@@ -679,7 +665,7 @@ where
                 .as_deref_mut()
                 .expect("profiled replay carries a profile");
             tree_context.tree_transform_structure_overwrite_into_raw_profiled(
-                rhs_transform.transform_structure.as_ref(),
+                &rhs_transform.transform_structure,
                 &rhs_dst_structure,
                 &rhs_transform.replay_structure,
                 rhs_scratch.data_mut(),
@@ -689,7 +675,7 @@ where
             )?;
         } else {
             tree_context.tree_transform_structure_overwrite_into_raw(
-                rhs_transform.transform_structure.as_ref(),
+                &rhs_transform.transform_structure,
                 &rhs_dst_structure,
                 &rhs_transform.replay_structure,
                 rhs_scratch.data_mut(),
@@ -832,7 +818,7 @@ where
             .as_deref_mut()
             .expect("profiled replay carries a profile");
         tree_context.tree_transform_structure_into_raw_profiled(
-            core_dst.output_transform_structure.as_ref(),
+            &core_dst.output_transform_structure,
             dst_structure,
             &core_dst_structure,
             dst_data,
@@ -843,7 +829,7 @@ where
         )
     } else {
         tree_context.tree_transform_structure_into_raw(
-            core_dst.output_transform_structure.as_ref(),
+            &core_dst.output_transform_structure,
             dst_structure,
             &core_dst_structure,
             dst_data,

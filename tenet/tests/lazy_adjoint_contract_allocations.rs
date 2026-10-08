@@ -63,7 +63,7 @@ macro_rules! assert_warm_lazy_adjoint {
         let cold_contract = contract_conj();
         let cold_compose = compose_conj();
         contract();
-        let misses = runtime.tree_transform_cache_info().structures.misses();
+        let misses = completed_transformers().misses();
         let (contract_conj_calls, warm_contract) = allocations(contract_conj);
         let (compose_conj_calls, warm_compose) = allocations(compose_conj);
         let (contract_calls, _) = allocations(contract);
@@ -72,10 +72,7 @@ macro_rules! assert_warm_lazy_adjoint {
         assert_eq!(allocations(compose_conj).0, compose_conj_calls);
 
         // What: warm calls reuse every Runtime-owned transform plan.
-        assert_eq!(
-            runtime.tree_transform_cache_info().structures.misses(),
-            misses
-        );
+        assert_eq!(completed_transformers().misses(), misses);
         // What: warm replay is deterministic.
         assert_eq!(
             warm_contract.dense_data().unwrap(),
@@ -127,4 +124,12 @@ fn warm_lazy_adjoint_fz2_u1_allocates_like_owned_contract() {
         ),
         centered(3).map(|q| ProductSector::new(parity(q), U1Irrep::new(q))),
     );
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

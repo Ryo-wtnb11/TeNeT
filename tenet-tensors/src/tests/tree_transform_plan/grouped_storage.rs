@@ -535,28 +535,21 @@ fn tree_transform_structure_cache_key_tracks_concrete_layout() {
         vec![BlockSpec::with_key(key.clone().into(), vec![2, 3], vec![1, 2], 1).unwrap()],
     )
     .unwrap();
-    let base = TreeTransformStructureCacheKey::from_structures((), &src, &src).unwrap();
-    let conjugating = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
-        (),
-        &src,
-        &src,
-        true,
-    )
-    .unwrap();
+    let key = |dst: &BlockStructure, src: &BlockStructure, conjugate: bool| {
+        crate::tree_transform::CompletedTransformerKey::tree_pair::<f64>(
+            tenet_core::RuleIdentity::of_type::<()>(),
+            &TreeTransformOperation::permute([0, 1], []),
+            dst,
+            src,
+            conjugate,
+        )
+    };
+    let base = key(&src, &src, false);
 
-    assert_ne!(base, conjugating);
-    assert_ne!(
-        base,
-        TreeTransformStructureCacheKey::from_structures((), &shape_changed, &src).unwrap()
-    );
-    assert_ne!(
-        base,
-        TreeTransformStructureCacheKey::from_structures((), &stride_changed, &src).unwrap()
-    );
-    assert_ne!(
-        base,
-        TreeTransformStructureCacheKey::from_structures((), &offset_changed, &src).unwrap()
-    );
+    assert_ne!(base, key(&src, &src, true));
+    assert_ne!(base, key(&shape_changed, &src, false));
+    assert_ne!(base, key(&stride_changed, &src, false));
+    assert_ne!(base, key(&offset_changed, &src, false));
 }
 
 #[test]

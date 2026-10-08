@@ -114,3 +114,11 @@ where
         domain_permutation,
     )
 }
+
+/// Marks `structure`'s content canonical, as a complete-HomSpace admission
+/// would: lets sibling tests drive completed-transformer publication with a
+/// hand-built fixture layout. Production publication requires a real
+/// admission.
+pub fn mark_structure_canonical(structure: &BlockStructure) {
+    structure.content_key().mark_canonical();
+}

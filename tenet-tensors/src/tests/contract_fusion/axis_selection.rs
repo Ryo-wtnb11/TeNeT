@@ -327,27 +327,30 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     .unwrap();
     // What: cold candidate scoring never enters the runtime HomSpace identity path.
     assert_eq!(crate::contract::source_layout_homspace_id_comparisons(), 0);
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     crate::contract::reset_candidate_score_calls();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    crate::tree_transform::take_completed_transformer_activity();
 
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    // What: eager resolution scores four candidates and retains only reusable
-    // transform/core-destination components.
+    // What: eager resolution scores four candidates and builds only the
+    // reusable completed transformers, which it publishes.
     assert_eq!(crate::contract::candidate_score_calls(), 4);
-    assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert_eq!(context.dynamic_fusion_space_cache_len(), 2);
-    let cache_len = context.dynamic_fusion_space_cache_len();
+    // The canonical fixture may be shared with a sibling test that already
+    // published one of these keys.
+    let cold = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!(cold.publications + cold.hits, 2, "{cold:?}");
 
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    // What: an ordinary repeat resolves eagerly while component caches do not
-    // accumulate another complete execution artifact.
+    // What: an ordinary repeat resolves eagerly and hits the published
+    // transformers instead of rebuilding them.
     assert_eq!(crate::contract::candidate_score_calls(), 8);
-    assert_eq!(context.dynamic_fusion_space_cache_len(), cache_len);
+    let warm = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!((warm.builds, warm.hits), (0, 2));
 }
 
 #[test]
@@ -571,7 +574,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     };
 
     for storage_first in [true, false] {
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut storage_dst = vec![0.0; initial.len()];
         let mut owned_dst =
@@ -633,7 +636,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     }
 
     for typed_first in [true, false] {
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut typed_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
@@ -682,7 +685,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     }
 
     for profiled_first in [true, false] {
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut ordinary_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())

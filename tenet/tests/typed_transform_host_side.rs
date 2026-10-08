@@ -119,7 +119,16 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
 }
 
 #[test]
+// Exercises the deprecated per-Runtime wrapper's device-state clear.
+#[allow(deprecated)]
 fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears() {
+    // Isolated: the completed-transformer counters are process-global.
+    if run_isolated_or_return(
+        "TENET_TYPED_TRANSFORM_HOST_SIDE_ISOLATED",
+        "a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears",
+    ) {
+        return;
+    }
     // The device half of `clear_tree_transform_cache` is reached only through
     // the device lease, so a device-less Runtime must clear its Host store and
     // do nothing else — including when the `cuda` feature is compiled in.
@@ -131,11 +140,11 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
     let tensor: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
     let _ = tensor.permute(&[1, 0], &[3, 2]).unwrap();
-    assert!(runtime.tree_transform_cache_info().structures.entries() > 0);
+    assert!(completed_transformers().entries() > 0);
 
     runtime.clear_tree_transform_cache();
 
-    assert_eq!(runtime.tree_transform_cache_info().structures.entries(), 0);
+    assert_eq!(completed_transformers().entries(), 0);
     #[cfg(feature = "cuda")]
     assert!(runtime.cuda_tree_transform_stats().is_none());
 }
@@ -586,4 +595,34 @@ fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
         .dense_data()
         .unwrap()
         .is_empty());
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
+}
+
+/// Re-executes exactly one global-cache probe in a fresh process. This binary
+/// also contains ordinary tests that mutate the same caches without a shared
+/// lock, so test-thread serialization inside one probe is insufficient.
+fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+    if std::env::var_os(isolated_env).is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_path, "--include-ignored"])
+        .env(isolated_env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    true
 }

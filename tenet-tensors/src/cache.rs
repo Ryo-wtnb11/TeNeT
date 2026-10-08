@@ -1,6 +1,4 @@
 use std::collections::VecDeque;
-use std::fmt;
-use std::num::NonZeroUsize;
 
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
@@ -8,24 +6,12 @@ use std::sync::Arc;
 
 use tenet_core::{BlockStructure, BlockStructureContent};
 
-use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
+use crate::{OperationError, TensorContractStructure};
 
-/// Clears the tenet-core intern tables.
+/// Retention policy of an explicit dense [`crate::TensorContractCache`].
 ///
-/// Tree-transform execution plans are not persisted to disk, so this function
-/// has no filesystem ownership or cross-process reset effect.
-///
-/// Why not rename it: public compatibility; no operation-result cache remains,
-/// and it resets only global tenet-core intern and layout state. Racah's
-/// coefficient cache has separate provider-owned reset semantics.
-pub fn reset_global_operation_caches() {
-    tenet_core::reset_core_intern_tables();
-}
-
-/// Cache policy for reusable algebra and tree-transform components.
-///
-/// Ordinary contraction routes resolve eagerly; complete replay is retained
-/// only by an explicit prepared handle.
+/// Completed tree transformers are not governed by it: they live in the
+/// process-global structure caches controlled through `tenet::cache`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationCachePolicy {
     NoCache,
@@ -118,22 +104,6 @@ impl BlockStructureCacheKey {
             content: structure.content_key(),
         })
     }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn charged_retained_bytes(&self) -> usize {
-        self.content.charged_retained_bytes()
-    }
-
-    #[inline]
-    pub(crate) fn content(&self) -> &Arc<BlockStructureContent> {
-        &self.content
-    }
-
-    #[inline]
-    pub(crate) fn same_content(&self, other: &Self) -> bool {
-        self.content == other.content
-    }
 }
 
 impl PartialEq for BlockStructureCacheKey {
@@ -149,102 +119,6 @@ impl Hash for BlockStructureCacheKey {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.content.id().hash(state);
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TreeTransformStructureCacheKey<PlanKey> {
-    plan: PlanKey,
-    dst: BlockStructureCacheKey,
-    src: BlockStructureCacheKey,
-    storage_conjugate: bool,
-}
-
-impl<PlanKey> TreeTransformStructureCacheKey<PlanKey>
-where
-    PlanKey: Clone,
-{
-    #[cfg(test)]
-    pub fn from_structures(
-        plan: PlanKey,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-    ) -> Result<Self, OperationError> {
-        Self::from_structures_with_storage_conjugation(plan, dst_structure, src_structure, false)
-    }
-
-    pub fn from_structures_with_storage_conjugation(
-        plan: PlanKey,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        storage_conjugate: bool,
-    ) -> Result<Self, OperationError> {
-        Ok(Self {
-            plan,
-            dst: BlockStructureCacheKey::from_structure(dst_structure)?,
-            src: BlockStructureCacheKey::from_structure(src_structure)?,
-            storage_conjugate,
-        })
-    }
-
-    #[inline]
-    pub fn plan(&self) -> &PlanKey {
-        &self.plan
-    }
-
-    #[inline]
-    pub fn dst(&self) -> &BlockStructureCacheKey {
-        &self.dst
-    }
-
-    #[inline]
-    pub fn src(&self) -> &BlockStructureCacheKey {
-        &self.src
-    }
-
-    #[inline]
-    pub fn storage_conjugate(&self) -> bool {
-        self.storage_conjugate
-    }
-}
-
-pub struct TreeTransformStructureCache<T, PlanKey> {
-    structures: lru::LruCache<
-        TreeTransformStructureCacheKey<PlanKey>,
-        Arc<TreeTransformStructure<T>>,
-        rustc_hash::FxBuildHasher,
-    >,
-    policy: OperationCachePolicy,
-}
-
-impl<T, PlanKey> Clone for TreeTransformStructureCache<T, PlanKey>
-where
-    PlanKey: Clone + Eq + Hash,
-{
-    fn clone(&self) -> Self {
-        let mut cloned = Self::with_policy(self.policy);
-        for (key, structure) in self.structures.iter().rev() {
-            cloned.structures.put(key.clone(), Arc::clone(structure));
-        }
-        cloned
-    }
-}
-
-impl<T, PlanKey> fmt::Debug for TreeTransformStructureCache<T, PlanKey> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("TreeTransformStructureCache")
-            .field("policy", &self.policy)
-            .finish()
-    }
-}
-
-impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey>
-where
-    PlanKey: Clone + Eq + Hash,
-{
-    fn default() -> Self {
-        Self::with_policy(OperationCachePolicy::default())
     }
 }
 
@@ -396,90 +270,10 @@ where
     }
 }
 
-impl<T, PlanKey> TreeTransformStructureCache<T, PlanKey>
-where
-    PlanKey: Clone + Eq + Hash,
-{
-    #[cfg(test)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_policy(policy: OperationCachePolicy) -> Self {
-        Self {
-            structures: local_lru(policy),
-            policy,
-        }
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub fn policy(&self) -> OperationCachePolicy {
-        self.policy
-    }
-
-    pub fn set_policy(&mut self, policy: OperationCachePolicy) {
-        self.policy = policy;
-        if !policy.stores_entries() {
-            self.structures.clear();
-        }
-        self.structures.resize(local_lru_capacity(policy));
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.structures.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.structures.is_empty()
-    }
-
-    pub fn get_arc(
-        &self,
-        key: &TreeTransformStructureCacheKey<PlanKey>,
-    ) -> Option<Arc<TreeTransformStructure<T>>> {
-        self.structures.peek(key).map(Arc::clone)
-    }
-
-    pub fn touch(&mut self, key: &TreeTransformStructureCacheKey<PlanKey>) {
-        let _ = self.structures.get(key);
-    }
-
-    pub fn insert_arc(
-        &mut self,
-        key: TreeTransformStructureCacheKey<PlanKey>,
-        structure: Arc<TreeTransformStructure<T>>,
-    ) -> Option<Arc<TreeTransformStructure<T>>> {
-        if !self.policy.stores_entries() {
-            return None;
-        }
-        self.structures.put(key, structure)
-    }
-}
-
-pub(crate) fn local_lru_capacity(policy: OperationCachePolicy) -> NonZeroUsize {
-    NonZeroUsize::new(policy.max_entries().unwrap_or(usize::MAX).max(1))
-        .expect("local LRU capacity is at least one")
-}
-
-pub(crate) fn local_lru<K, V>(
-    policy: OperationCachePolicy,
-) -> lru::LruCache<K, V, rustc_hash::FxBuildHasher>
-where
-    K: Eq + Hash,
-{
-    let mut cache = lru::LruCache::unbounded_with_hasher(rustc_hash::FxBuildHasher);
-    cache.resize(local_lru_capacity(policy));
-    cache
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        reset_global_operation_caches, OperationCachePolicy, TensorContractStructureCache,
-        TreeTransformStructureCache, DEFAULT_OPERATION_CACHE_ENTRIES,
+        OperationCachePolicy, TensorContractStructureCache, DEFAULT_OPERATION_CACHE_ENTRIES,
     };
     use crate::test_support::CACHE_TEST_LOCK;
     use tenet_core::{
@@ -497,19 +291,11 @@ mod tests {
     }
 
     #[test]
-    fn default_operation_policy_and_tree_transform_structure_caches_are_bounded() {
-        let policy = OperationCachePolicy::default();
+    fn default_operation_policy_is_bounded() {
         assert_eq!(
-            policy,
+            OperationCachePolicy::default(),
             OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES)
         );
-
-        for cache in [
-            TreeTransformStructureCache::<f64, usize>::default(),
-            TreeTransformStructureCache::<f64, usize>::new(),
-        ] {
-            assert_eq!(cache.policy(), policy);
-        }
     }
 
     #[test]
@@ -522,24 +308,19 @@ mod tests {
     }
 
     #[test]
-    fn reset_global_operation_caches_chains_core_intern_reset_without_id_reuse() {
-        // What: this public reset facade races any test that assumes the shared
-        // tenet-core intern table stays stable across
-        // two builds (e.g. `dynamic_fusion_fast_space_key_uses_structure_content_identity`
-        // in `contract::dynamic`) — a reset landing between such a test's two
-        // interning builds would evict the first entry and hand the second a
-        // fresh id. See `test_support` for why this is a shared lock.
+    fn structure_cache_clear_does_not_reuse_content_ids() {
+        // What: the clear-all races any test that assumes the shared
+        // tenet-core structure caches stay stable across two builds. See
+        // `test_support` for why this is a shared lock.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Cross-layer coherence: the tensors-level reset must chain into the
-        // tenet-core intern tables. If it did not, the identical content would
-        // stay interned and re-yield the same id (a stale key could then alias).
-        // The monotonic counter + cleared table give a strictly greater id.
+        // Content ids are never reused across a clear: id-keyed completed
+        // transformers could otherwise alias.
         let base = 700_000_000usize;
         let before = BlockStructure::trivial(&[base]).unwrap();
         let id_before = before.content_id();
-        reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         assert_eq!(before.required_len().unwrap(), base);
         let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
         assert!(
@@ -584,7 +365,7 @@ mod tests {
         );
         let populated = racah::cache::base_cache_stats();
         assert_ne!(populated.total().entries, 0);
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
         assert_eq!(racah::cache::base_cache_stats(), populated);
     }
 }

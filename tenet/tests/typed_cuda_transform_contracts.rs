@@ -157,6 +157,8 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+// Exercises the deprecated per-Runtime wrapper's device-state clear.
+#[allow(deprecated)]
 fn clearing_the_transform_cache_releases_the_device_executor_state() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
@@ -179,7 +181,7 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
         after.context_scalar_operand_bytes, before.context_scalar_operand_bytes,
         "context operands are counted once and are not the executor's to drop"
     );
-    assert_eq!(runtime.tree_transform_cache_info().structures.entries(), 0);
+    assert_eq!(completed_transformers().entries(), 0);
 
     // Re-preparing after the clear still produces the same answer.
     let expected = fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap();
@@ -189,6 +191,8 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+// Exercises the deprecated per-Runtime wrapper's device-state clear.
+#[allow(deprecated)]
 fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
     // What: `clear_tree_transform_cache` returns the executor's plan-entry
     // reservation, so repeated clear/re-prepare cycles of the same structures
@@ -530,18 +534,18 @@ fn device_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     let expected = host.permute(&[2, 0], &[1, 3]).unwrap();
     let source = host.to_cuda().unwrap();
 
-    runtime.clear_tree_transform_cache();
+    tenet::cache::clear();
     let mut first = expected.to_cuda().unwrap();
     source
         .permute_into(&[2, 0], &[1, 3], &mut first, 1.0, 0.0)
         .unwrap();
-    let cold = runtime.tree_transform_cache_info().structures;
+    let cold = completed_transformers();
 
     let mut second = expected.to_cuda().unwrap();
     source
         .permute_into(&[2, 0], &[1, 3], &mut second, 1.0, 0.0)
         .unwrap();
-    let warm = runtime.tree_transform_cache_info().structures;
+    let warm = completed_transformers();
     assert_eq!(
         warm.entries(),
         cold.entries(),
@@ -964,4 +968,12 @@ fn device_twist_rejections_happen_before_any_device_work() {
         "a rejected twist must submit nothing: {counters:?}"
     );
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), before);
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

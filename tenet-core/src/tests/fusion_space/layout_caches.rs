@@ -6,24 +6,25 @@ fn degeneracy_cache_info() -> StructureCacheInfo {
 }
 
 #[test]
-fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions() {
+fn complete_homspace_layout_cache_owns_its_wrapper_and_charges_its_regions() {
     // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
     // this asserts process-global complete-structure cache counters, which
     // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
     // unlocked complete-structure builds landing between two reads (#1903).
     if test_support::run_isolated_or_return(
         "TENET_CORE_COMPLETE_HOMSPACE_REUSE_ISOLATED",
-        "tests::fusion_space::layout_caches::complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions",
+        "tests::fusion_space::layout_caches::complete_homspace_layout_cache_owns_its_wrapper_and_charges_its_regions",
     ) {
         return;
     }
     // What: independently constructed complete multiplicity-free U1,
-    // SU2, and product HomSpaces share frozen content by value; cached
-    // content never owns a wrapper-local coupled-region state.
+    // SU2, and product HomSpaces share one canonical wrapper, which the
+    // cache entry owns with its region memo; the memo joins the entry's
+    // charge when it materializes.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
 
     fn assert_reused<R>(rule: &R, first_hom: FusionTreeHomSpace, second_hom: FusionTreeHomSpace)
     where
@@ -44,31 +45,31 @@ fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions()
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
 
-        // Dead wrapper: content stays cached (a hit, not a miss), only the
-        // wrapper is rebuilt; region state died with the old wrapper.
-        let content = first.content_key();
+        // No caller holds the wrapper: the entry still does, so the next
+        // hit returns it with its region memo.
         let region = first.weak_region_state();
-        drop(first);
+        let first = Arc::downgrade(&first);
         drop(second);
-        assert!(region.upgrade().is_none());
+        assert!(region.upgrade().is_some());
+        let charged = degeneracy_cache_info().charged_bytes();
         let third = second_hom
             .coupled_subblock_structure_from_leg_degeneracies(rule)
             .unwrap();
-        assert!(Arc::ptr_eq(&third.content_key(), &content));
-        assert!(third.weak_region_state().upgrade().is_some());
+        assert!(Arc::ptr_eq(&third, &first.upgrade().unwrap()));
+        let regions = third.coupled_sector_regions(1).unwrap().unwrap();
+        let grown = degeneracy_cache_info().charged_bytes() - charged;
+        assert!(
+            grown >= std::mem::size_of_val(regions.as_ref()) as u64,
+            "{grown}"
+        );
+        // A repeated query reuses the memo and charges nothing more.
+        let again = third.coupled_sector_regions(1).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&regions, &again));
+        assert_eq!(degeneracy_cache_info().charged_bytes() - charged, grown);
         let after = degeneracy_cache_info();
         assert_eq!(after.hits(), info.hits() + 2);
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
-        // The entry's Weak was refreshed: the next hit is the rebuilt Arc.
-        let fourth = first_hom
-            .coupled_subblock_structure_from_leg_degeneracies(rule)
-            .unwrap();
-        assert!(Arc::ptr_eq(&third, &fourth));
-        let region = third.weak_region_state();
-        drop(third);
-        drop(fourth);
-        assert!(region.upgrade().is_none());
     }
 
     let u1_hom = || FusionTreeHomSpace::from_sectors([(u1(1), 2)], [(u1(1), 3)]);
@@ -116,7 +117,7 @@ fn complete_homspace_layout_cache_concurrent_hits_share_one_canonical_arc() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = || FusionTreeHomSpace::from_sectors([(su2(1), 2), (su2(3), 1)], [(su2(1), 3)]);
     let held = hom()
         .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
@@ -182,7 +183,7 @@ fn complete_homspace_layout_cache_keys_semantics_and_preserves_direct_layout() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
 
     let base = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(u1(0), 2), (u1(1), 3)], false)]),
@@ -228,7 +229,7 @@ fn complete_homspace_layout_cache_keys_semantics_and_preserves_direct_layout() {
     assert_eq!(degeneracy_cache_info().entries(), 4);
 
     let live = Arc::clone(&cached);
-    reset_core_intern_tables();
+    clear_structure_caches();
     assert_eq!(live.required_len(), cached.required_len());
     assert_eq!(degeneracy_cache_info().entries(), 0);
 }
@@ -240,7 +241,7 @@ fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(z2_even(), 1), (z2_odd(), 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(z2_even(), 1), (z2_odd(), 1)], false)]),
@@ -267,13 +268,18 @@ fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
     let transient = transient_hom
         .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
         .unwrap();
-    let expired = Arc::downgrade(&transient);
+    // The cache entry owns the canonical wrapper: dropping the caller's
+    // handle keeps it, and the next build returns the same one.
+    let owned = Arc::downgrade(&transient);
     drop(transient);
-    assert!(expired.upgrade().is_none());
     let rebuilt = transient_hom
         .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
         .unwrap();
+    assert!(Arc::ptr_eq(&rebuilt, &owned.upgrade().unwrap()));
     assert_eq!(rebuilt.block(0).unwrap().shape(), &[4, 5]);
+    drop(rebuilt);
+    clear_structure_caches();
+    assert!(owned.upgrade().is_none(), "a clear releases the wrapper");
 }
 
 #[test]
@@ -285,7 +291,7 @@ fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg.clone(), leg.clone()]),
@@ -355,7 +361,7 @@ fn complete_cache_publishes_a_build_that_saw_no_reset() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let homspace = reset_test_homspace();
     let epoch = core_reset_epoch();
     let (key, built) = complete_build(&homspace);
@@ -376,7 +382,7 @@ fn complete_admission_preserves_the_winner_wrapper_and_region_memo() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let homspace = reset_test_homspace();
     let epoch = core_reset_epoch();
     let (key, winner) = complete_build(&homspace);
@@ -408,7 +414,7 @@ fn complete_cache_separates_multiplicity_free_and_generic_modes() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
 
     let multiplicity_free = hom
@@ -445,11 +451,15 @@ fn complete_cache_separates_multiplicity_free_and_generic_modes() {
     assert_eq!(rejected_generic.as_ref(), generic.as_ref());
     assert_ne!(rejected_mf.content_id(), multiplicity_free.content_id());
     assert_ne!(rejected_generic.content_id(), generic.content_id());
+    // What: residency alone makes content canonical (#2014-3 N1): admitted
+    // winners are, zero-budget rejections are not.
+    assert!(multiplicity_free.is_canonical() && generic.is_canonical());
+    assert!(!rejected_mf.is_canonical() && !rejected_generic.is_canonical());
     assert_eq!(degeneracy_cache_info().entries(), 0);
     assert_eq!(degeneracy_cache_info().charged_bytes(), 0);
     assert!(degeneracy_cache_info().rejections() >= 2);
     set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let fresh_generic = hom
         .coupled_subblock_structure_from_leg_degeneracies_generic(&SU2FusionRule)
         .unwrap();
@@ -458,6 +468,9 @@ fn complete_cache_separates_multiplicity_free_and_generic_modes() {
         .unwrap();
     assert_ne!(fresh_mf.content_id(), rejected_mf.content_id());
     assert_ne!(fresh_generic.content_id(), rejected_generic.content_id());
+    assert!(fresh_mf.is_canonical() && fresh_generic.is_canonical());
+    // The flag outlives the clear that evicted these contents.
+    assert!(multiplicity_free.is_canonical());
     assert_eq!(degeneracy_cache_info().entries(), 2);
 }
 
@@ -470,7 +483,7 @@ fn checked_homspace_factory_captures_reset_epoch_before_the_producer() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let rule = InfallibleGeneric::new(&SU2FusionRule);
     let hom = || FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
 
@@ -478,7 +491,7 @@ fn checked_homspace_factory_captures_reset_epoch_before_the_producer() {
         FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with(
             &rule,
             |_| {
-                reset_core_intern_tables();
+                clear_structure_caches();
                 Ok::<_, CheckedGenericStructureError<Infallible>>(hom())
             },
         )
@@ -499,13 +512,13 @@ fn complete_cache_drops_a_build_that_started_before_a_reset() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let homspace = reset_test_homspace();
     // A1: a build records its epoch and interns content, then a reset runs,
     // then the build admits.
     let epoch = core_reset_epoch();
     let (key, stale) = complete_build(&homspace);
-    reset_core_intern_tables();
+    clear_structure_caches();
 
     let (returned, canonical) = admit_complete_hom_space_structure(key, Arc::clone(&stale), epoch);
 
@@ -525,7 +538,7 @@ fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let homspace = reset_test_homspace();
     let source = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
@@ -541,7 +554,7 @@ fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
             *slot.borrow_mut() = Some((epoch, complete_build(&hom)));
         })));
     });
-    reset_core_intern_tables();
+    clear_structure_caches();
     let (epoch, (key, stale)) = during.borrow_mut().take().unwrap();
     assert_eq!(stale.as_ref(), source.as_ref());
     assert_ne!(stale.content_id(), source.content_id());
@@ -560,7 +573,7 @@ fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let homspace = reset_test_homspace();
     // Kept alive so the intern table still resolves its content mid-reset.
     let source = homspace
@@ -580,7 +593,7 @@ fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
             // Reset B starts on another thread while reset A is mid-way.
             let finished = Arc::clone(&done);
             *slot.borrow_mut() = Some(std::thread::spawn(move || {
-                reset_core_intern_tables();
+                clear_structure_caches();
                 finished.store(true, std::sync::atomic::Ordering::SeqCst);
             }));
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -595,7 +608,7 @@ fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
             assert_ne!(inside.content_id(), source_id);
         })));
     });
-    reset_core_intern_tables();
+    clear_structure_caches();
     second.borrow_mut().take().unwrap().join().unwrap();
 
     assert!(second_done.load(std::sync::atomic::Ordering::SeqCst));
@@ -615,7 +628,7 @@ fn a_degeneracy_only_change_reuses_the_sector_structure() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let hom = |small: usize, large: usize| {
         let leg = SectorLeg::new([(u1(-1), small), (u1(0), large), (u1(1), small)], false);
         FusionTreeHomSpace::new(
@@ -751,7 +764,7 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
         "TENET_GENERIC_OWNER_CANONICAL_BUDGET",
         "tests::fusion_space::layout_caches::generic_complete_owner_keeps_canonical_identity_regions_and_budget",
     ) { return; }
-    reset_core_intern_tables();
+    clear_structure_caches();
     let rule = SUNFusionRule::new(3).unwrap();
     let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
     let vacuum = rule.encode_dynkin(&[0, 0]).unwrap();
@@ -797,7 +810,10 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
         CheckedGenericFusion::rule_identity(&rule),
         &canonical_hom,
     );
-    let charge = charged_complete_hom_space_structure_bytes(&key, &winner.content_key());
+    // The owned wrapper's region memo, built on the preview, is charged too.
+    let charge = charged_complete_hom_space_structure_bytes(&key, &winner.content_key())
+        + winner.materialized_region_bytes();
+    assert!(winner.materialized_region_bytes() > 0);
     let info = degeneracy_cache_info();
     assert_eq!(info.entries(), 1);
     assert_eq!(info.charged_bytes(), charge);
@@ -826,6 +842,8 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
     drop((winner, second, preview_regions));
     let (revived_hom, revived) = prepare(hom()).commit_with_complete_homspace();
     assert_eq!(revived.content_id(), content_id);
+    // A committed staged candidate became resident, hence canonical.
+    assert!(revived.is_canonical());
     assert!(canonical_hom
         .id()
         .downgrade()
@@ -852,6 +870,8 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
         .unwrap()
         .unwrap();
     let (_, uncached) = miss.commit_with_complete_homspace();
+    // A staged commit refused by a zero budget publishes nothing canonical.
+    assert!(!uncached.is_canonical());
     assert!(Arc::ptr_eq(
         &lent_regions,
         &uncached.coupled_sector_regions(2).unwrap().unwrap()
