@@ -2066,7 +2066,10 @@ where
 /// `GenericTreeTransformer`, `treetransformers.jl:53-114` at `cfaa073e`). The
 /// first provider failure is that of the lowest basis row of the lowest
 /// failing elementary step of the lowest failing group (#1962, approved
-/// step-major order).
+/// step-major order). A grouped (Multi) spec lists destinations source-major
+/// by first appearance; the order among one source's destinations follows
+/// the block composer and is not the per-pair term order, so consumers
+/// resolve destinations by key.
 pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
     provider: &P,
     operation: TreeTransformOperation,
