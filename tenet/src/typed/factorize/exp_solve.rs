@@ -46,14 +46,14 @@ where
     /// The one body of `self \ rhs`, solved sector by sector without forming
     /// an inverse.
     ///
-    /// One preflight in every mode (#1995): runtime, rule, codomain
-    /// equality, the divisor's isomorphism, then the borrowed-view
-    /// admission, before any representation work. The result is
+    /// One preflight in every mode (#1995): after the caller's
+    /// [`Self::require_solve_operands`] (runtime, rule), codomain equality,
+    /// the divisor's isomorphism, then the borrowed-view admission, before
+    /// any representation work. The result is
     /// `domain(self) <- domain(rhs)`. A nonsingular compact divisor scales
     /// `rhs` by its reciprocal spectrum; every other divisor is solved
     /// densely into the final output.
     pub(super) fn factor_solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
-        self.require_solve_operands(rhs)?;
         if self.logical_space().space().homspace().codomain()
             != rhs.logical_space().space().homspace().codomain()
         {

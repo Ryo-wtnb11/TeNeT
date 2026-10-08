@@ -27,26 +27,6 @@ pub(super) struct InverseBasisExtent {
     pub(super) extent: usize,
 }
 
-pub(crate) fn inverse_by_sector_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let authority = MfAuthority(input.space());
-    let homspace = input.space().space().homspace();
-    if !authority.isomorphic(input.space())? {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inv requires isomorphic codomain and domain",
-        });
-    }
-    let output_space = authority.output_space(inverse_homspace(homspace))?;
-    inverse_by_sector_dyn_into(dense, input, output_space)
-}
-
 /// Coefficient-free inverse execution into an already admitted swapped output.
 ///
 /// The caller owns categorical admission; this body only routes the existing
@@ -431,43 +411,6 @@ where
         FactorPlacement::Adjoint => (source_space.nout(), source_space.nin()),
     };
     BoundDynFactor::from_bound(output_space, output_data, nout, nin)
-}
-
-pub(crate) fn solve_left_by_sector_dyn<E, R, D>(
-    dense: &mut E,
-    divisor: &BoundDynamicTensorRef<'_, R, D>,
-    rhs: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let divisor_space = divisor.space().space();
-    let rhs_space = rhs.space().space();
-    let expected = divisor.space().provider().rule_identity();
-    let actual = rhs.space().provider().rule_identity();
-    if expected != actual {
-        return Err(OperationError::from_core_preserving_context(
-            CoreError::FusionRuleMismatch { expected, actual },
-        ));
-    }
-    if divisor_space.homspace().codomain() != rhs_space.homspace().codomain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "solve requires equal divisor and right-hand-side codomains",
-        });
-    }
-    let authority = MfAuthority(divisor.space());
-    if !authority.isomorphic(divisor.space())? {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "solve requires an isomorphic divisor codomain and domain",
-        });
-    }
-    let output_space = authority.output_space(solve_homspace(
-        divisor_space.homspace(),
-        rhs_space.homspace(),
-    ))?;
-    solve_left_by_sector_dyn_into(dense, divisor, rhs, output_space)
 }
 
 pub(crate) fn solve_left_by_sector_dyn_into<E, R, D>(

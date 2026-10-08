@@ -5,6 +5,7 @@
 #[cfg(test)]
 use std::hash::Hash;
 
+#[cfg(test)]
 use tenet_core::MultiplicityFreeRigidSymbols;
 use tenet_dense::{DenseDotConfig, DenseExecutor, DenseView, DenseViewMut};
 use tenet_tensors::OperationError;
@@ -15,9 +16,8 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    compact_eigh_owned, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
-    is_hermitian_endomorphism_dyn, map_square_sectors_dyn_into, multiplicity_free_output_space,
-    pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into, solve_left_by_sector_dyn,
+    compact_eigh_owned, inverse_by_sector_dyn_into, is_hermitian_endomorphism_dyn,
+    map_square_sectors_dyn_into, pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into,
     solve_left_by_sector_dyn_into, validate_real_eigenvalues, BoundDynFactor,
     BoundDynamicTensorRef, FactorScalar,
 };
@@ -36,25 +36,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let out = exp_dyn(dense, &input.dynamic())?;
+    let out = exp_into_mf(dense, &input.dynamic())?;
     typed_from_bound_factor(out)
-}
-
-/// Multiplicity-free dynamic-rank `exp`, into the layout derived from the
-/// input's hom space.
-pub fn exp_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    require_endomorphism(input)?;
-    let output_space =
-        multiplicity_free_output_space(input.space(), input.space().space().homspace().clone())?;
-    exp_direct_into_dyn(dense, input, output_space)
 }
 
 /// Matrix exponential into a caller-admitted output space with the input's
@@ -874,29 +857,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let out = pinv_dyn(dense, &input.dynamic(), rcond)?;
+    let out = pinv_into_mf(dense, &input.dynamic(), rcond)?;
     typed_from_bound_factor(out)
-}
-
-/// Multiplicity-free dynamic-rank `pinv`, into the layout derived from the
-/// swapped hom space; see [`pinv_direct_into_dyn`].
-pub fn pinv_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    rcond: f64,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    validate_pinv_rcond(rcond)?;
-    let homspace = input.space().space().homspace();
-    let output_space = multiplicity_free_output_space(
-        input.space(),
-        tenet_core::FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone()),
-    )?;
-    pinv_by_sector_dyn_into(dense, input, output_space, rcond)
 }
 
 fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
@@ -906,26 +868,6 @@ fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
         });
     }
     Ok(())
-}
-
-/// Multiplicity-free pseudo-inverse of a logical adjoint, `(A^H)^+ = U S^+
-/// V^H` from the parent's compact SVD, into the layout derived from the
-/// parent's hom space; see [`pinv_adjoint_parent_direct_into_dyn`].
-#[doc(hidden)]
-pub fn pinv_adjoint_parent_dyn<E, R, D>(
-    dense: &mut E,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-    rcond: f64,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    validate_pinv_rcond(rcond)?;
-    let output_space =
-        multiplicity_free_output_space(parent.space(), parent.space().space().homspace().clone())?;
-    pinv_adjoint_by_sector_dyn_into(dense, parent, output_space, rcond)
 }
 
 #[cfg(test)]
@@ -946,40 +888,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let out = inv_dyn(dense, context, &input.dynamic())?;
+    let _ = context;
+    let out = inv_into_mf(dense, &input.dynamic())?;
     typed_from_bound_factor(out)
-}
-
-#[cfg(test)]
-/// Dynamic-rank [`inv`].
-pub(crate) fn inv_dyn<E, RuleKey, BT, BC, R, D>(
-    dense: &mut E,
-    _context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    inv_direct_dyn(dense, input)
-}
-
-/// Context-free dynamic-rank inverse used by the user layer.
-#[doc(hidden)]
-pub fn inv_direct_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    inverse_by_sector_dyn(dense, input)
 }
 
 /// Context-free inverse execution into a caller-admitted swapped output space.
@@ -1033,21 +944,6 @@ where
     pinv_adjoint_by_sector_dyn_into(dense, parent, output_space, rcond)
 }
 
-/// Context-free dynamic-rank left solve `A \ B` used by the user layer.
-#[doc(hidden)]
-pub fn solve_left_direct_dyn<E, R, D>(
-    dense: &mut E,
-    divisor: &BoundDynamicTensorRef<'_, R, D>,
-    rhs: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    solve_left_by_sector_dyn(dense, divisor, rhs)
-}
-
 /// Context-free dynamic-rank left solve into a caller-admitted output space.
 ///
 /// Categorical preflight and destination admission belong to the caller; this
@@ -1065,4 +961,103 @@ where
     D: FactorScalar,
 {
     solve_left_by_sector_dyn_into(dense, divisor, rhs, output_space)
+}
+
+// Test fixtures: each seam into the multiplicity-free layout derived from the
+// operation's hom space, with no categorical preflight — that belongs to the
+// facade (#1995); the `_into` seams validate their own operands and output.
+
+#[cfg(test)]
+fn mf_output<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    homspace: tenet_core::FusionTreeHomSpace,
+) -> Result<tenet_tensors::BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    crate::factorize::multiplicity_free_output_space(input.space(), homspace)
+}
+
+#[cfg(test)]
+fn swapped(homspace: &tenet_core::FusionTreeHomSpace) -> tenet_core::FusionTreeHomSpace {
+    tenet_core::FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn exp_into_mf<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let output = mf_output(input, input.space().space().homspace().clone())?;
+    exp_direct_into_dyn(dense, input, output)
+}
+
+#[cfg(test)]
+pub(crate) fn inv_into_mf<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let output = mf_output(input, swapped(input.space().space().homspace()))?;
+    inv_direct_into_dyn(dense, input, output)
+}
+
+#[cfg(test)]
+pub(crate) fn pinv_into_mf<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let output = mf_output(input, swapped(input.space().space().homspace()))?;
+    pinv_direct_into_dyn(dense, input, output, rcond)
+}
+
+#[cfg(test)]
+pub(crate) fn pinv_adjoint_parent_into_mf<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let output = mf_output(parent, parent.space().space().homspace().clone())?;
+    pinv_adjoint_parent_direct_into_dyn(dense, parent, output, rcond)
+}
+
+#[cfg(test)]
+pub(crate) fn solve_left_into_mf<E, R, D>(
+    dense: &mut E,
+    divisor: &BoundDynamicTensorRef<'_, R, D>,
+    rhs: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let output = mf_output(
+        divisor,
+        tenet_core::FusionTreeHomSpace::new(
+            divisor.space().space().homspace().domain().clone(),
+            rhs.space().space().homspace().domain().clone(),
+        ),
+    )?;
+    solve_left_direct_into_dyn(dense, divisor, rhs, output)
 }

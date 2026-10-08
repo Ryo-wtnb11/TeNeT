@@ -324,7 +324,7 @@ where
         eigh_full_dyn(&mut dense, &hermitian_adjoint, HermitianTol::DEFAULT),
         "eigh_full ",
     );
-    assert_stacking_refusal(exp_dyn(&mut dense, &general_adjoint), "exp ");
+    assert_stacking_refusal(exp_into_mf(&mut dense, &general_adjoint), "exp ");
 }
 
 #[test]

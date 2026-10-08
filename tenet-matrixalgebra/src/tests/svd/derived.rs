@@ -8,7 +8,7 @@ fn inv_propagates_unsupported_solve_without_svd_fallback() {
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
 
-    let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
+    let error = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
 
     assert!(matches!(
         error,
@@ -33,7 +33,7 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_input_pack_bytes();
 
-    let output = pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.5).unwrap();
+    let output = pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.5).unwrap();
     assert_eq!(dense.counts().svd, 2);
     assert!(Arc::ptr_eq(output.space().provider_arc(), &provider));
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
@@ -56,7 +56,7 @@ fn pinv_adjoint_parent_rejects_invalid_rcond_before_svd() {
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
         let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
         assert!(matches!(
-            pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), rcond,),
+            pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), rcond,),
             Err(OperationError::InvalidArgument { .. })
         ));
     }
@@ -75,7 +75,7 @@ fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
     crate::factorize::reset_input_pack_bytes();
 
     assert!(matches!(
-        pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.0,),
+        pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.0,),
         Err(OperationError::Dense(DenseError::Backend {
             op: "svd_into",
             ..

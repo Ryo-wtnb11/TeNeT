@@ -66,7 +66,8 @@ where
     /// modes. A dense divisor or either moved role pair would copy the view
     /// and returns [`Error::Unsupported`]. Pass `&t.adjoint()?.materialize()?`
     /// instead. Moved roles refuse the view after the runtime and rule checks
-    /// but before the shape checks, which need the permuted operands.
+    /// (which precede the leg roles' own [`Self::permute`] errors) but before
+    /// the shape checks, which need the permuted operands.
     pub fn solve<'a>(
         &self,
         rows: &[usize],
@@ -77,15 +78,14 @@ where
     ) -> Result<Self, TypedFacadeError<R>> {
         let rhs = rhs.into().operand()?;
         let rhs = &*rhs;
-        // Permuting a borrowed view would copy it, so moved roles refuse it
-        // here, after the operand checks the permute cannot change; the
-        // shape checks need the permuted operands. A moved compact divisor
-        // also becomes dense.
+        // Runtime and rule first, ahead of the leg roles: the permute cannot
+        // change them, so the first error does not depend on the roles or on
+        // the rhs's ownership. Permuting a borrowed view would copy it, so
+        // moved roles refuse it next; the shape checks need the permuted
+        // operands. A moved compact divisor also becomes dense.
+        self.require_solve_operands(rhs)?;
         if !self.axes_are_identity(rows, cols) || !rhs.axes_are_identity(rhs_rows, rhs_cols) {
-            if let Err(refusal) = rhs.refuse_borrowed_view("solve") {
-                self.require_solve_operands(rhs)?;
-                return Err(refusal.into());
-            }
+            rhs.refuse_borrowed_view("solve")?;
         }
         self.with_leg_roles(rows, cols, |lhs| {
             rhs.with_leg_roles(rhs_rows, rhs_cols, |right| lhs.factor_solve(right))

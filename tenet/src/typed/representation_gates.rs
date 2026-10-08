@@ -21,7 +21,6 @@ mod lazy_adjoint_factorize;
 mod lazy_adjoint_spectral;
 mod network_restriction;
 mod overwrite;
-#[cfg(feature = "racah-generated")]
 mod preflight_order;
 
 impl<T: ScalarOps> ChainCoefficient for T {

@@ -224,8 +224,8 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
-             exp_direct_into_dyn exp_dyn inv_direct_dyn inv_direct_into_dyn \
-             pinv_adjoint_parent_direct_into_dyn pinv_adjoint_parent_dyn pinv_direct_into_dyn pinv_dyn solve_left_direct_dyn \
+             exp_direct_into_dyn inv_direct_into_dyn \
+             pinv_adjoint_parent_direct_into_dyn pinv_direct_into_dyn \
              solve_left_direct_into_dyn rescaled_power_norm"
         )
     );
