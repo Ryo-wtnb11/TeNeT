@@ -2146,13 +2146,18 @@ where
     })
 }
 
+type CheckedGroupSpecs<P> = Result<
+    Vec<Vec<TreeTransformGroupBlockSpec<<P as CheckedGenericRigidSymbols>::Scalar>>>,
+    CheckedGenericPlanError<<P as tenet_core::CheckedGenericFusion>::Error>,
+>;
+
 /// Builds the listed source groups, in order: the first provider error is
 /// that of the lowest failing listed group.
 fn build_checked_generic_tree_pair_groups<P>(
     operation: &TreeTransformOperation,
     source_proof: &CheckedGenericTreePairPreflight<'_, '_, P>,
     group_indices: Vec<usize>,
-) -> Result<Vec<Vec<TreeTransformGroupBlockSpec<P::Scalar>>>, CheckedGenericPlanError<P::Error>>
+) -> CheckedGroupSpecs<P>
 where
     P: CheckedGenericRigidSymbols,
     P::Scalar: CategoricalScalar + Zero,
