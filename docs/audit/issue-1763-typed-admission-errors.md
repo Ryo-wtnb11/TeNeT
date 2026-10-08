@@ -21,6 +21,7 @@ before any device work. Execution and successful replay are unchanged.
 | `Structure(t)` | `InvalidArgument` | `task_view.rs:validate_structures_and_lengths` → `structure_identity.rs:validate_structure_identity` | `StructureMismatch { tensor: t }` |
 | `Length { expected, actual }` | `InvalidArgument` | `task_view.rs:validate_exact_len` | `ElementCountMismatch { expected, actual }` |
 | `ArithmeticOverflow` | `InvalidArgument` | `task_view.rs:validate_workspace_requirements`, `transform_replay/mod.rs:checked_fused_index_len` | `ElementCountOverflow` |
+| `ArithmeticOverflow` from Stage C `validate_region` (`Layout::array` of a storage's usable capacity) | `InvalidArgument` | none reachable: a real allocation's capacity always has a valid layout; the failure is an element-count overflow | `ElementCountOverflow` |
 | `Task(e)` | `InvalidArgument` | the Host returns `e` itself | `e` |
 | `Placement`, `Context`, `Capability`, `InvalidRegion`, `Aliasing`, `WorkspaceCapacity`, `CoefficientReadiness` | `InvalidArgument` | none: Host storage is borrowed slices with no placement, context, region or readiness to admit | `InvalidArgument` (unchanged) |
 
@@ -54,7 +55,11 @@ which Stage A already does.
 
 ## Preserved TeNeT contract
 
-Host and CUDA return the same `OperationError` for the same supported
-structure, length and overflow failure. Executor-only resource verdicts stay
+Host and CUDA return the same `OperationError` for each single supported
+structure, length or overflow failure. The order differs for one combination:
+the Host checks lengths before workspace overflow, while CUDA Stage A checks
+overflow before lengths, so an input that is both mis-sized and
+overflowing could report different errors. Real storage cannot produce that
+combination. Executor-only resource verdicts stay
 `InvalidArgument`; no public error type was added and no capability boundary
 moved.
