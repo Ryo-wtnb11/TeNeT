@@ -2495,6 +2495,47 @@ mod tests {
         assert!(workspace.take_output().is_none());
     }
 
+    #[test]
+    fn compose_failure_after_the_output_is_taken_keeps_it_unobservable() {
+        // What: an error inside the replay, after the output buffer is
+        // taken (forced by a stack whose payload is shorter than its
+        // layout, which only a corrupted stack carries), leaves no
+        // observable output; the buffer is kept and the next call recovers.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let v = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
+        let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v], 3).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v], [&v], 4).unwrap();
+        let lhs = super::StackedTensorMap::pack(&[&a, &a]).unwrap();
+        let rhs = super::StackedTensorMap::pack(&[&b, &b]).unwrap();
+        let mut corrupt = super::StackedTensorMap::pack(&[&a, &a]).unwrap();
+        corrupt.storage.pop();
+        let plan = super::ComposePlan::new(&lhs, &rhs).unwrap();
+        let mut workspace = plan.workspace().unwrap();
+        let expected = plan
+            .execute(&lhs, &rhs, &mut workspace)
+            .unwrap()
+            .storage
+            .clone();
+        let bytes = workspace.retained_bytes();
+
+        assert!(plan.execute(&corrupt, &rhs, &mut workspace).is_err());
+        assert!(
+            workspace.output.spare.is_some(),
+            "the error is after the take"
+        );
+        assert!(workspace.take_output().is_none());
+        assert_eq!(workspace.retained_bytes(), bytes);
+        assert_eq!(
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap().storage,
+            expected
+        );
+        assert!(workspace.take_output().is_some());
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]

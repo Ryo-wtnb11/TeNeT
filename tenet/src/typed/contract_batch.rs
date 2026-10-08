@@ -768,6 +768,73 @@ impl<R, D, S> Drop for ContractWorkspace<R, D, S> {
 }
 
 #[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::sector::{U1FusionRule, U1Irrep};
+    use crate::typed::GradedSpace;
+
+    #[test]
+    fn a_failure_after_the_output_is_taken_keeps_it_unobservable() {
+        // What: on the direct Core and the CopyC route, an error inside the
+        // replay, after the output buffer is taken (forced by an operand
+        // whose layout and payload are consistently one entry short, which
+        // only a corrupted stack carries), leaves no observable output; the
+        // buffer is kept and the next call recovers.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let rule = Arc::new(U1FusionRule);
+        let v = GradedSpace::try_new(
+            Arc::clone(&rule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 3),
+            ],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new(rule, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)]).unwrap();
+        let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w], 5).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w], [&v], 6).unwrap();
+        let lhs = StackedTensorMap::pack(&[&a, &a]).unwrap();
+        let rhs = StackedTensorMap::pack(&[&b, &b]).unwrap();
+        let mut corrupt = StackedTensorMap::pack(&[&a, &a]).unwrap();
+        corrupt.member_len -= 1;
+        corrupt
+            .storage
+            .truncate(corrupt.member_len * corrupt.members);
+        for (codomain, copy_c) in [([0, 1], false), ([1, 0], true)] {
+            let spec = super::super::super::ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &codomain,
+                domain: &[2],
+            };
+            let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+            assert_eq!(plan.copy_c().is_some(), copy_c);
+            let mut workspace = plan.workspace().unwrap();
+            let expected = plan
+                .execute(&lhs, &rhs, &mut workspace)
+                .unwrap()
+                .storage
+                .clone();
+            let bytes = workspace.retained_bytes();
+
+            assert!(plan.execute(&corrupt, &rhs, &mut workspace).is_err());
+            assert!(
+                workspace.output.spare.is_some(),
+                "the error is after the take"
+            );
+            assert!(workspace.take_output().is_none());
+            assert_eq!(workspace.retained_bytes(), bytes);
+            assert_eq!(
+                plan.execute(&lhs, &rhs, &mut workspace).unwrap().storage,
+                expected
+            );
+            assert!(workspace.take_output().is_some());
+        }
+    }
+}
+
+#[cfg(test)]
 mod fermionic_unit_tests {
     use super::*;
     use crate::sector::{
