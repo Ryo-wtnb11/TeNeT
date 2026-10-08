@@ -24,7 +24,9 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
-use crate::cuda_hermitian::{power_of_two_normalizer, scaled_hermitian_residual_accepts};
+use crate::cuda_hermitian::{
+    input_stage, residual_stage, scaled_hermitian_residual_accepts, StageOutcome,
+};
 use crate::cuda_region::{
     validate_destination_layout, validate_gather_rows, validate_region, CudaRegion,
 };

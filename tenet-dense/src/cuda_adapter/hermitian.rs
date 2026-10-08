@@ -9,12 +9,11 @@ use super::*;
 /// `cuda-single-precision-probe-2026-09-20.md`, finding 3).
 fn upload_scalar<R: CudaRealScalar>(
     ctx: &CudaDenseContext,
+    op: &'static str,
     value: f64,
 ) -> Result<Tensor, DenseError> {
-    let host = R::into_tensor(vec![], vec![R::narrow(value)])
-        .map_err(|err| cuda_error("cuda_hermitian", err))?;
-    let tensor = upload_tensor(ctx.backend.runtime(), &host)
-        .map_err(|err| cuda_error("cuda_hermitian", err))?;
+    let host = R::into_tensor(vec![], vec![R::narrow(value)]).map_err(|err| cuda_error(op, err))?;
+    let tensor = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(op, err))?;
     record_h2d(std::mem::size_of::<R>());
     Ok(tensor)
 }
@@ -22,6 +21,7 @@ fn upload_scalar<R: CudaRealScalar>(
 /// a payload by the exact power of two `normalizer`.
 fn power_of_two_operand<D: CudaScalar>(
     ctx: &CudaDenseContext,
+    op: &'static str,
     normalizer: f64,
 ) -> Result<Tensor, DenseError> {
     let operand = if D::IS_COMPLEX {
@@ -30,7 +30,7 @@ fn power_of_two_operand<D: CudaScalar>(
         // Exact: the reciprocal of a power of two inside the lane's range.
         normalizer.recip()
     };
-    upload_scalar::<D::Real>(ctx, operand)
+    upload_scalar::<D::Real>(ctx, op, operand)
 }
 /// Multiplies a payload tensor by the power of two that `operand` encodes.
 fn scale_by_power_of_two<D: CudaScalar>(
@@ -82,17 +82,9 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
 /// of two normalizer; it is why the device tests' scale window stops at
 /// `2^(MAX_EXP - 4)`.
 ///
-/// Each region's rule needs three dependent scalar stages: its maximum picks
-/// the input normalizer, the residual maximum picks the residual normalizer,
-/// and the residual sum of squares decides. Every stage runs over all
-/// still-undecided regions before its scalars are gathered with one
-/// `concatenate` and downloaded together, so a call makes at most three
-/// downloads whatever the region count. Why not per region: each download
-/// blocks the host (a D2H plus a CubeCL flush), which made admission the
-/// largest TeNeT-owned cost of `eigh` (#1483). The price is that the
-/// materialized input, then residual, of every undecided region is live
-/// across a stage boundary: one extra copy of the regions' payload, the same
-/// order as the eigenvector factor `eigh` allocates anyway.
+/// This is the one-member case of the pipeline [`admit_regions`] runs for
+/// [`cuda_hermitian_regions_batched`] too; see there for the stages, their
+/// download bound and their working set.
 ///
 /// Only scalar norm metadata is downloaded; no region is copied to the host.
 #[doc(hidden)]
@@ -102,119 +94,9 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
     regions: &[(usize, usize)],
     relative_tolerance: f64,
 ) -> Result<Vec<bool>, DenseError> {
-    const OP: &str = "cuda_hermitian";
-    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
-    let max_exp = <D::Real as CudaRealScalar>::MAX_EXP;
-    let mut accepted = vec![true; regions.len()];
-
-    // Stage 1: max |A|.
-    let mut inputs = Vec::new();
-    let mut maxima = Vec::new();
-    for (index, &(offset, n)) in regions.iter().enumerate() {
-        if n == 0 {
-            continue;
-        }
-        let normal = contiguous_square::<D>(ctx, src, n, [1, n], offset)?;
-        let input_abs = ctx
-            .backend
-            .abs(&normal)
-            .map_err(|err| cuda_error(OP, err))?;
-        maxima.push(
-            ctx.backend
-                .reduce_max(&input_abs, &[0, 1])
-                .map_err(|err| cuda_error(OP, err))?,
-        );
-        inputs.push((index, normal));
-    }
-    let input_scales = download_gathered::<D::Real>(ctx, &maxima, OP)?;
-    drop(maxima);
-
-    // Stage 2: sum |A/s|^2 and max |(A - A^H)/s|.
-    let mut residuals = Vec::new();
-    let mut input_sums = Vec::new();
-    let mut residual_maxima = Vec::new();
-    for ((index, normal), input_scale) in inputs.into_iter().zip(input_scales) {
-        // Pinned Tenferro's CUDA reduce_max propagates NaN. Keep this check
-        // before the zero fast path so an otherwise-zero matrix containing NaN
-        // is rejected.
-        if !input_scale.is_finite() {
-            accepted[index] = false;
-            continue;
-        }
-        if input_scale == 0.0 {
-            continue;
-        }
-        let (offset, n) = regions[index];
-        let transpose = contiguous_square::<D>(ctx, src, n, [n, 1], offset)?;
-        // Conjugation is a backend op on the transposed copy, never a TeNeT loop.
-        let transpose = if D::IS_COMPLEX {
-            ctx.backend
-                .conj(&transpose)
-                .map_err(|err| cuda_error(OP, err))?
-        } else {
-            transpose
-        };
-        let normalizer =
-            power_of_two_operand::<D>(ctx, power_of_two_normalizer(input_scale, max_exp))?;
-        let normal_scaled = scale_by_power_of_two::<D>(ctx, OP, &normal, &normalizer)?;
-        drop(normal);
-        let transpose_scaled = scale_by_power_of_two::<D>(ctx, OP, &transpose, &normalizer)?;
-        input_sums.push(sum_of_squares::<D>(ctx, OP, &normal_scaled)?);
-        let residual = ctx
-            .backend
-            .sub(&normal_scaled, &transpose_scaled)
-            .map_err(|err| cuda_error(OP, err))?;
-        let residual_abs = ctx
-            .backend
-            .abs(&residual)
-            .map_err(|err| cuda_error(OP, err))?;
-        residual_maxima.push(
-            ctx.backend
-                .reduce_max(&residual_abs, &[0, 1])
-                .map_err(|err| cuda_error(OP, err))?,
-        );
-        residuals.push((index, residual));
-    }
-    let count = residuals.len();
-    input_sums.append(&mut residual_maxima);
-    let stage2 = download_gathered::<D::Real>(ctx, &input_sums, OP)?;
-    drop(input_sums);
-    let (input_ss, residual_scales) = stage2.split_at(count);
-
-    // Stage 3: sum |R/r|^2.
-    let mut undecided = Vec::new();
-    let mut residual_sums = Vec::new();
-    for (((index, residual), &input_ss), &residual_scale) in
-        residuals.into_iter().zip(input_ss).zip(residual_scales)
-    {
-        if !residual_scale.is_finite() {
-            accepted[index] = false;
-            continue;
-        }
-        if residual_scale == 0.0 {
-            accepted[index] = input_ss.is_finite() && input_ss >= 0.0;
-            continue;
-        }
-        let residual_normalizer = power_of_two_normalizer(residual_scale, max_exp);
-        let residual_normalizer_tensor = power_of_two_operand::<D>(ctx, residual_normalizer)?;
-        let residual_normalized =
-            scale_by_power_of_two::<D>(ctx, OP, &residual, &residual_normalizer_tensor)?;
-        residual_sums.push(sum_of_squares::<D>(ctx, OP, &residual_normalized)?);
-        undecided.push((index, input_ss, residual_normalizer));
-    }
-    let residual_ss = download_gathered::<D::Real>(ctx, &residual_sums, OP)?;
-    for ((index, input_ss, residual_normalizer), residual_ss) in
-        undecided.into_iter().zip(residual_ss)
-    {
-        accepted[index] = scaled_hermitian_residual_accepts(
-            input_ss,
-            // Exact: the reciprocal of a normal power of two.
-            residual_normalizer.recip(),
-            residual_ss,
-            relative_tolerance,
-        );
-    }
-    Ok(accepted)
+    let members = Members::One;
+    ensure_cuda_device(ctx.device, members.op(), &[("src", src.device)])?;
+    admit_regions::<D>(ctx, src, regions, members, relative_tolerance)
 }
 /// [`cuda_hermitian_regions`] over `members` stacked copies of the same
 /// regions, member `b` of region `(offset, n)` at `offset + b *
@@ -223,14 +105,10 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
 /// The caller must supply a finite, non-negative `relative_tolerance`.
 ///
 /// Each (member, region) pair is decided by exactly the rule and the three
-/// scalar stages of [`cuda_hermitian_regions`], with its own power-of-two
-/// normalizers: members of one batch may differ by many orders of magnitude,
-/// and a normalizer shared across members would change the acceptance of the
-/// small ones. The member axis is a trailing mode of every device tensor, so
-/// every stage still ends in one download (at most three per call) and the
-/// submissions per region do not depend on `members`. The normalizers of a
-/// region are one `[members]` upload per stage, broadcast along the matrix
-/// modes.
+/// scalar stages of [`cuda_hermitian_regions`] — the same [`admit_regions`]
+/// pipeline — with its own power-of-two normalizers: members of one batch may
+/// differ by many orders of magnitude, and a normalizer shared across members
+/// would change the acceptance of the small ones.
 ///
 /// Real payloads only: a complex payload returns [`DenseError::Unsupported`].
 /// Why: Tenferro 0.7.1 scales a complex tensor by a real operand only when the
@@ -244,18 +122,101 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
     member_stride: usize,
     relative_tolerance: f64,
 ) -> Result<Vec<bool>, DenseError> {
-    const OP: &str = "cuda_hermitian_batched";
-    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    let members = Members::Stack {
+        count: members,
+        stride: member_stride,
+    };
+    ensure_cuda_device(ctx.device, members.op(), &[("src", src.device)])?;
     if D::IS_COMPLEX {
         return Err(DenseError::Unsupported {
-            op: OP,
+            op: members.op(),
             message: "per-member normalizers of a complex payload".into(),
         });
     }
+    admit_regions::<D>(ctx, src, regions, members, relative_tolerance)
+}
+/// How the admitted regions are stored: one copy each, or `count` copies
+/// `stride` elements apart.
+///
+/// Why two materializations rather than a one-member stack: each entry keeps
+/// its own bound validation (`check_matrix_bound` for a single region,
+/// `validate_region` for a stack) and so its own error variants.
+#[derive(Clone, Copy)]
+enum Members {
+    One,
+    Stack { count: usize, stride: usize },
+}
+impl Members {
+    fn op(self) -> &'static str {
+        match self {
+            Members::One => "cuda_hermitian",
+            Members::Stack { .. } => "cuda_hermitian_batched",
+        }
+    }
+    fn count(self) -> usize {
+        match self {
+            Members::One => 1,
+            Members::Stack { count, .. } => count,
+        }
+    }
+    /// The `n x n` region at `offset` with element strides `strides`, every
+    /// member of it, as one compact `[n, n, count]` device tensor.
+    fn materialize<D: CudaScalar>(
+        self,
+        ctx: &mut CudaDenseContext,
+        src: &CudaDenseStorage,
+        n: usize,
+        strides: [usize; 2],
+        offset: usize,
+    ) -> Result<Tensor, DenseError> {
+        match self {
+            Members::One => contiguous_square::<D>(ctx, src, n, strides, offset),
+            Members::Stack { count, stride } => {
+                contiguous_stack::<D>(ctx, src, n, strides, offset, count, stride)
+            }
+        }
+    }
+}
+/// The admission pipeline of both entries: one decision per (member,
+/// region), member-major.
+///
+/// Each pair's rule needs three dependent scalar stages: its maximum picks
+/// the input normalizer, the residual maximum picks the residual normalizer,
+/// and the residual sum of squares decides ([`input_stage`],
+/// [`residual_stage`], [`scaled_hermitian_residual_accepts`]). Every stage
+/// runs over all still-undecided regions before its scalars are gathered with
+/// one `concatenate` and downloaded together, so a call makes at most three
+/// downloads whatever the region or member count. The member axis is a
+/// trailing mode of every device tensor, so the submissions per region do not
+/// depend on the member count. Why not per region: each download blocks the
+/// host (a D2H plus a CubeCL flush), which made admission the largest
+/// TeNeT-owned cost of `eigh` (#1483). The price is that the materialized
+/// input, then residual, of every undecided region is live across a stage
+/// boundary: one extra copy of the regions' payload, the same order as the
+/// eigenvector factor `eigh` allocates anyway.
+///
+/// Reference: the rule is MatrixAlgebraKit 0.6.8 (`33d77fdf`)
+/// `src/implementations/eigh.jl:check_hermitian` ->
+/// `src/common/matrixproperties.jl:strided_ishermitian_approx`, reached per
+/// block from TensorKit `cfaa073e` `src/factorizations/matrixalgebrakit.jl`
+/// (`eigh_full!` over `foreachblock`). TeNeT keeps its approved relative
+/// tolerance instead of MAK's absolute `default_hermitian_tol` (#1987). QSpace
+/// `dd2cc7e1` `Source/wbarray_blas.cc:wbEigenS` ->
+/// `Source/wbarray.cc:wbarray::isSym_aux` checks entrywise and is not ported.
+/// Neither reference has a device or member-stacked admission path: the
+/// stages, normalizers and member axis are TeNeT's.
+fn admit_regions<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    regions: &[(usize, usize)],
+    members: Members,
+    relative_tolerance: f64,
+) -> Result<Vec<bool>, DenseError> {
+    let op = members.op();
+    let count = members.count();
     let max_exp = <D::Real as CudaRealScalar>::MAX_EXP;
-    let count = regions.len();
-    let mut accepted = vec![true; count * members];
-    let slot = |member: usize, region: usize| member * count + region;
+    let mut accepted = vec![true; regions.len() * count];
+    let slot = |member: usize, region: usize| member * regions.len() + region;
 
     // Stage 1: max |A| per member.
     let mut inputs = Vec::new();
@@ -264,108 +225,100 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
         if n == 0 {
             continue;
         }
-        let normal = contiguous_stack::<D>(ctx, src, n, [1, n], offset, members, member_stride)?;
+        let normal = members.materialize::<D>(ctx, src, n, [1, n], offset)?;
         let input_abs = ctx
             .backend
             .abs(&normal)
-            .map_err(|err| cuda_error(OP, err))?;
+            .map_err(|err| cuda_error(op, err))?;
         maxima.push(
             ctx.backend
                 .reduce_max(&input_abs, &[0, 1])
-                .map_err(|err| cuda_error(OP, err))?,
+                .map_err(|err| cuda_error(op, err))?,
         );
         inputs.push((index, normal));
     }
-    let input_scales = download_concatenated::<D::Real>(ctx, &maxima, members, OP)?;
+    let input_scales = download_concatenated::<D::Real>(ctx, &maxima, count, op)?;
     drop(maxima);
 
     // Stage 2: sum |A/s|^2 and max |(A - A^H)/s| per member.
     let mut residuals = Vec::new();
     let mut input_sums = Vec::new();
     let mut residual_maxima = Vec::new();
-    for ((index, normal), scales) in inputs.into_iter().zip(input_scales.chunks(members)) {
-        let mut undecided = false;
-        let divisors: Vec<f64> = scales
+    for ((index, normal), scales) in inputs.into_iter().zip(input_scales.chunks(count)) {
+        let normalizers: Vec<Option<f64>> = scales
             .iter()
             .enumerate()
-            .map(|(member, &scale)| {
-                // As the single-region rule: NaN rejects before the zero
-                // fast path, and a decided member divides by one.
-                if !scale.is_finite() {
-                    accepted[slot(member, index)] = false;
-                    1.0
-                } else if scale == 0.0 {
-                    1.0
-                } else {
-                    undecided = true;
-                    // Exact: the reciprocal of a power of two inside the lane.
-                    power_of_two_normalizer(scale, max_exp).recip()
+            .map(|(member, &scale)| match input_stage(scale, max_exp) {
+                StageOutcome::Decided(decision) => {
+                    accepted[slot(member, index)] = decision;
+                    None
                 }
+                StageOutcome::Normalize(normalizer) => Some(normalizer),
             })
             .collect();
-        if !undecided {
+        if normalizers.iter().all(Option::is_none) {
             continue;
         }
         let (offset, n) = regions[index];
-        let transpose = contiguous_stack::<D>(ctx, src, n, [n, 1], offset, members, member_stride)?;
-        let divisor = broadcast_member_divisors::<D>(ctx, &divisors, n, OP)?;
-        let normal_scaled = ctx
-            .backend
-            .div(&normal, &divisor)
-            .map_err(|err| cuda_error(OP, err))?;
+        let transpose = members.materialize::<D>(ctx, src, n, [n, 1], offset)?;
+        // Conjugation is a backend op on the transposed copy, never a TeNeT loop.
+        let transpose = if D::IS_COMPLEX {
+            ctx.backend
+                .conj(&transpose)
+                .map_err(|err| cuda_error(op, err))?
+        } else {
+            transpose
+        };
+        let scale = MemberScale::upload::<D>(ctx, op, &normalizers, n)?;
+        let normal_scaled = scale.apply::<D>(ctx, op, &normal)?;
         drop(normal);
-        let transpose_scaled = ctx
-            .backend
-            .div(&transpose, &divisor)
-            .map_err(|err| cuda_error(OP, err))?;
-        input_sums.push(sum_of_squares::<D>(ctx, OP, &normal_scaled)?);
+        let transpose_scaled = scale.apply::<D>(ctx, op, &transpose)?;
+        input_sums.push(sum_of_squares::<D>(ctx, op, &normal_scaled)?);
         let residual = ctx
             .backend
             .sub(&normal_scaled, &transpose_scaled)
-            .map_err(|err| cuda_error(OP, err))?;
+            .map_err(|err| cuda_error(op, err))?;
         let residual_abs = ctx
             .backend
             .abs(&residual)
-            .map_err(|err| cuda_error(OP, err))?;
+            .map_err(|err| cuda_error(op, err))?;
         residual_maxima.push(
             ctx.backend
                 .reduce_max(&residual_abs, &[0, 1])
-                .map_err(|err| cuda_error(OP, err))?,
+                .map_err(|err| cuda_error(op, err))?,
         );
-        residuals.push((index, residual, scales.to_vec()));
+        residuals.push((index, residual, normalizers));
     }
     let stage2_regions = residuals.len();
     input_sums.append(&mut residual_maxima);
-    let stage2 = download_concatenated::<D::Real>(ctx, &input_sums, members, OP)?;
+    let stage2 = download_concatenated::<D::Real>(ctx, &input_sums, count, op)?;
     drop(input_sums);
-    let (input_ss, residual_scales) = stage2.split_at(stage2_regions * members);
+    let (input_ss, residual_scales) = stage2.split_at(stage2_regions * count);
 
     // Stage 3: sum |R/r|^2 per member.
     let mut undecided = Vec::new();
     let mut residual_sums = Vec::new();
-    for (((index, residual, scales), input_ss), residual_scales) in residuals
+    for (((index, residual, input_normalizers), input_ss), residual_scales) in residuals
         .into_iter()
-        .zip(input_ss.chunks(members))
-        .zip(residual_scales.chunks(members))
+        .zip(input_ss.chunks(count))
+        .zip(residual_scales.chunks(count))
     {
         let mut pending = Vec::new();
-        let divisors: Vec<f64> = (0..members)
-            .map(|member| {
-                let scale = scales[member];
-                let residual_scale = residual_scales[member];
-                if !scale.is_finite() || scale == 0.0 {
-                    1.0
-                } else if !residual_scale.is_finite() {
-                    accepted[slot(member, index)] = false;
-                    1.0
-                } else if residual_scale == 0.0 {
-                    let input_ss = input_ss[member];
-                    accepted[slot(member, index)] = input_ss.is_finite() && input_ss >= 0.0;
-                    1.0
-                } else {
-                    let normalizer = power_of_two_normalizer(residual_scale, max_exp);
-                    pending.push((member, input_ss[member], normalizer));
-                    normalizer.recip()
+        let normalizers: Vec<Option<f64>> = input_normalizers
+            .iter()
+            .enumerate()
+            .map(|(member, input_normalizer)| {
+                // A member decided by stage 1 has no residual to read.
+                (*input_normalizer)?;
+                match residual_stage(input_ss[member], residual_scales[member], max_exp) {
+                    StageOutcome::Decided(decision) => {
+                        accepted[slot(member, index)] = decision;
+                        None
+                    }
+                    StageOutcome::Normalize(normalizer) => {
+                        pending.push((member, input_ss[member], normalizer));
+                        Some(normalizer)
+                    }
                 }
             })
             .collect();
@@ -373,16 +326,13 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
             continue;
         }
         let (_, n) = regions[index];
-        let divisor = broadcast_member_divisors::<D>(ctx, &divisors, n, OP)?;
-        let residual_normalized = ctx
-            .backend
-            .div(&residual, &divisor)
-            .map_err(|err| cuda_error(OP, err))?;
-        residual_sums.push(sum_of_squares::<D>(ctx, OP, &residual_normalized)?);
+        let scale = MemberScale::upload::<D>(ctx, op, &normalizers, n)?;
+        let residual_normalized = scale.apply::<D>(ctx, op, &residual)?;
+        residual_sums.push(sum_of_squares::<D>(ctx, op, &residual_normalized)?);
         undecided.push((index, pending));
     }
-    let residual_ss = download_concatenated::<D::Real>(ctx, &residual_sums, members, OP)?;
-    for ((index, pending), residual_ss) in undecided.into_iter().zip(residual_ss.chunks(members)) {
+    let residual_ss = download_concatenated::<D::Real>(ctx, &residual_sums, count, op)?;
+    for ((index, pending), residual_ss) in undecided.into_iter().zip(residual_ss.chunks(count)) {
         for (member, input_ss, residual_normalizer) in pending {
             accepted[slot(member, index)] = scaled_hermitian_residual_accepts(
                 input_ss,
@@ -394,6 +344,52 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
         }
     }
     Ok(accepted)
+}
+/// The device operand that multiplies member `b` of an `[n, n, members]`
+/// payload by its exact power-of-two normalizer; a member the stage already
+/// decided (`None`) is multiplied by one and its reductions are ignored.
+enum MemberScale {
+    /// One member: a rank-0 lane operand. Also the only form a complex
+    /// payload has (see [`cuda_hermitian_regions_batched`]), and one
+    /// broadcast kernel fewer than the per-member form.
+    Scalar(Tensor),
+    /// One real divisor per member, broadcast over the matrix modes.
+    PerMember(Tensor),
+}
+impl MemberScale {
+    fn upload<D: CudaScalar>(
+        ctx: &mut CudaDenseContext,
+        op: &'static str,
+        normalizers: &[Option<f64>],
+        n: usize,
+    ) -> Result<Self, DenseError> {
+        let normalizer = |value: &Option<f64>| value.unwrap_or(1.0);
+        match normalizers {
+            [single] => power_of_two_operand::<D>(ctx, op, normalizer(single)).map(Self::Scalar),
+            _ => {
+                // Exact: the reciprocal of a power of two inside the lane.
+                let divisors: Vec<f64> = normalizers
+                    .iter()
+                    .map(|value| normalizer(value).recip())
+                    .collect();
+                broadcast_member_divisors::<D>(ctx, &divisors, n, op).map(Self::PerMember)
+            }
+        }
+    }
+    fn apply<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        op: &'static str,
+        tensor: &Tensor,
+    ) -> Result<Tensor, DenseError> {
+        match self {
+            Self::Scalar(operand) => scale_by_power_of_two::<D>(ctx, op, tensor, operand),
+            Self::PerMember(divisor) => ctx
+                .backend
+                .div(tensor, divisor)
+                .map_err(|err| cuda_error(op, err)),
+        }
+    }
 }
 /// Materializes `members` stacked `n x n` regions (element strides `strides`
 /// within a member, `member_stride` between members) as one compact
@@ -518,32 +514,4 @@ fn sum_of_squares<D: CudaScalar>(
             &[0, 1],
         )
         .map_err(|err| cuda_error(op, err))
-}
-/// Downloads rank-1 real reductions of lane `R` with one transfer: they are
-/// concatenated on device first. No parts means no transfer.
-fn download_gathered<R: CudaRealScalar>(
-    ctx: &mut CudaDenseContext,
-    parts: &[Tensor],
-    op: &'static str,
-) -> Result<Vec<f64>, DenseError> {
-    if parts.is_empty() {
-        return Ok(Vec::new());
-    }
-    let refs: Vec<&Tensor> = parts.iter().collect();
-    let gathered = ctx
-        .backend
-        .concatenate(&refs, 0)
-        .map_err(|err| cuda_error(op, err))?;
-    let values = download_values::<R>(ctx, &gathered)?;
-    if values.len() != parts.len() {
-        return Err(cuda_error(
-            op,
-            format!(
-                "device reductions returned {} values; expected {}",
-                values.len(),
-                parts.len()
-            ),
-        ));
-    }
-    Ok(values)
 }

@@ -35,6 +35,42 @@ pub(crate) fn scaled_hermitian_residual_accepts(
         && 0.5 * residual_scale * residual_ss.sqrt() <= relative_tolerance * input_ss.sqrt()
 }
 
+/// What one (member, region) learned from a downloaded stage scalar: its
+/// decision, or the exact power of two that normalizes its next reduction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum StageOutcome {
+    Decided(bool),
+    Normalize(f64),
+}
+
+/// Stage 1 of the device rule, from the input's maximum magnitude.
+///
+/// A non-finite maximum rejects *before* the zero fast path: pinned
+/// Tenferro's CUDA `reduce_max` propagates NaN, so an otherwise-zero matrix
+/// containing NaN must not be admitted as zero. A zero matrix is Hermitian.
+pub(crate) fn input_stage(input_scale: f64, max_exp: i32) -> StageOutcome {
+    if !input_scale.is_finite() {
+        StageOutcome::Decided(false)
+    } else if input_scale == 0.0 {
+        StageOutcome::Decided(true)
+    } else {
+        StageOutcome::Normalize(power_of_two_normalizer(input_scale, max_exp))
+    }
+}
+
+/// Stage 2 of the device rule, from the normalized input's sum of squares
+/// and the normalized residual's maximum magnitude. A zero residual admits
+/// any finite input; a non-finite one rejects.
+pub(crate) fn residual_stage(input_ss: f64, residual_scale: f64, max_exp: i32) -> StageOutcome {
+    if !residual_scale.is_finite() {
+        StageOutcome::Decided(false)
+    } else if residual_scale == 0.0 {
+        StageOutcome::Decided(input_ss.is_finite() && input_ss >= 0.0)
+    } else {
+        StageOutcome::Normalize(power_of_two_normalizer(residual_scale, max_exp))
+    }
+}
+
 /// The exact power of two `2^-k`, `k = floor(log2(scale))`, that brings a
 /// finite positive `scale` of a real lane with `max_exp` (its `MAX_EXP`)
 /// into `[1, 2)`.
@@ -233,5 +269,163 @@ mod tests {
             f64::from_bits(1) * power_of_two_normalizer(f64::from_bits(1), f64::MAX_EXP)
                 >= 2f64.powi(-52)
         );
+    }
+
+    /// The stage boundaries, including NaN before the zero fast path.
+    #[test]
+    fn the_stages_decide_nonfinite_and_zero_before_normalizing() {
+        let max_exp = f64::MAX_EXP;
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert_eq!(input_stage(bad, max_exp), StageOutcome::Decided(false));
+            assert_eq!(
+                residual_stage(1.0, bad, max_exp),
+                StageOutcome::Decided(false)
+            );
+        }
+        assert_eq!(input_stage(0.0, max_exp), StageOutcome::Decided(true));
+        assert_eq!(
+            residual_stage(4.0, 0.0, max_exp),
+            StageOutcome::Decided(true)
+        );
+        assert_eq!(
+            residual_stage(f64::NAN, 0.0, max_exp),
+            StageOutcome::Decided(false)
+        );
+        assert_eq!(input_stage(3.0, max_exp), StageOutcome::Normalize(0.5));
+        assert_eq!(
+            residual_stage(1.0, 0.75, max_exp),
+            StageOutcome::Normalize(2.0)
+        );
+    }
+
+    /// Independent oracle: `||(A - A^T)/2||_F <= tol ||A||_F` with both norms
+    /// kept as the LAPACK `lassq` pair `(scale, sum of squares)` (no
+    /// power-of-two normalization), compared as a ratio of scales so a norm
+    /// past the lane's range still decides; any non-finite entry rejects.
+    fn half_residual_oracle(a: &[f64], n: usize, tolerance: f64) -> bool {
+        fn lassq(values: impl Iterator<Item = f64>) -> (f64, f64) {
+            let (mut scale, mut ssq) = (0.0_f64, 1.0_f64);
+            for value in values.map(f64::abs).filter(|&value| value != 0.0) {
+                if scale < value {
+                    ssq = 1.0 + ssq * (scale / value).powi(2);
+                    scale = value;
+                } else {
+                    ssq += (value / scale).powi(2);
+                }
+            }
+            (scale, ssq)
+        }
+        if a.iter().any(|value| !value.is_finite()) {
+            return false;
+        }
+        let (residual_scale, residual_ssq) =
+            lassq((0..n * n).map(|index| a[index] - a[(index % n) * n + index / n]));
+        if residual_scale == 0.0 {
+            return true;
+        }
+        let (input_scale, input_ssq) = lassq(a.iter().copied());
+        0.5 * (residual_scale / input_scale) * residual_ssq.sqrt() <= tolerance * input_ssq.sqrt()
+    }
+
+    /// The device pipeline's three stages as host `f64` arithmetic: a
+    /// NaN-propagating maximum, the power-of-two normalizers the stages
+    /// choose, and the scaled sums of squares.
+    fn staged_rule(a: &[f64], n: usize, tolerance: f64) -> bool {
+        let max_exp = f64::MAX_EXP;
+        let max_abs = |values: &[f64]| {
+            values.iter().fold(0.0_f64, |max, value| {
+                if max.is_nan() || value.is_nan() {
+                    f64::NAN
+                } else {
+                    max.max(value.abs())
+                }
+            })
+        };
+        let normalizer = match input_stage(max_abs(a), max_exp) {
+            StageOutcome::Decided(decision) => return decision,
+            StageOutcome::Normalize(normalizer) => normalizer,
+        };
+        let scaled: Vec<f64> = a.iter().map(|value| value * normalizer).collect();
+        let input_ss: f64 = scaled.iter().map(|value| value * value).sum();
+        let residual: Vec<f64> = (0..n * n)
+            .map(|index| scaled[index] - scaled[(index % n) * n + index / n])
+            .collect();
+        let residual_normalizer = match residual_stage(input_ss, max_abs(&residual), max_exp) {
+            StageOutcome::Decided(decision) => return decision,
+            StageOutcome::Normalize(normalizer) => normalizer,
+        };
+        let residual_ss: f64 = residual
+            .iter()
+            .map(|value| (value * residual_normalizer).powi(2))
+            .sum();
+        scaled_hermitian_residual_accepts(
+            input_ss,
+            residual_normalizer.recip(),
+            residual_ss,
+            tolerance,
+        )
+    }
+
+    /// The shared stages compose to the half-residual rule at every scale
+    /// and tolerance, decided against the independent oracle.
+    #[test]
+    fn the_staged_rule_matches_an_independent_half_residual_oracle() {
+        let symmetric = |n: usize, scale: f64| -> Vec<f64> {
+            (0..n * n)
+                .map(|index| {
+                    let (row, col) = (index % n, index / n);
+                    scale
+                        * (1.0 + 0.5 * (row.min(col) % 7) as f64 + 0.25 * (row.max(col) % 5) as f64)
+                })
+                .collect()
+        };
+        let asymmetric = |n: usize, scale: f64| {
+            let mut block = symmetric(n, scale);
+            block[1] += scale;
+            block
+        };
+        let default = f64::EPSILON.powf(0.75);
+        let skewed = |of: f64| vec![1.0, 0.0, of * 2.0 * default, 1.0];
+        let poisoned = |bad: f64| {
+            let mut block = vec![0.0; 9];
+            block[4] = bad;
+            block
+        };
+        let mut blocks = vec![
+            vec![0.0; 4],
+            skewed(0.5),
+            skewed(2.0),
+            poisoned(f64::NAN),
+            poisoned(f64::INFINITY),
+            poisoned(f64::NEG_INFINITY),
+        ];
+        for scale in [
+            1.0,
+            f64::MIN_POSITIVE,
+            2f64.powi(-500),
+            2f64.powi(500),
+            2f64.powi(1020),
+        ] {
+            for n in [1, 3, 8] {
+                blocks.push(symmetric(n, scale));
+                if n > 1 {
+                    blocks.push(asymmetric(n, scale));
+                }
+            }
+        }
+        let mut decisions = [0usize; 2];
+        for tolerance in [0.0, default, 1e-3, 0.5] {
+            for block in &blocks {
+                let n = (block.len() as f64).sqrt() as usize;
+                let expected = half_residual_oracle(block, n, tolerance);
+                assert_eq!(
+                    staged_rule(block, n, tolerance),
+                    expected,
+                    "n {n}, tolerance {tolerance:e}, block {block:?}"
+                );
+                decisions[usize::from(expected)] += 1;
+            }
+        }
+        assert!(decisions[0] > 0 && decisions[1] > 0, "{decisions:?}");
     }
 }
