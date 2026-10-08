@@ -26,9 +26,11 @@ where
     /// diagonal divisor instead applies its elementwise reciprocal: a compact
     /// right-hand side on the same bond gives a compact quotient, and a dense
     /// one has its leading (bond) axis scaled, `O(Σ_c k_c m_c)` with no LU.
-    /// Checked Generic takes that arm only for an aligned bond layout whose
-    /// right-hand side space is the destination, and otherwise materializes
-    /// both operands for the dense route. An exact zero divisor entry is the
+    /// Both fusion modes admit every compact divisor, in any bond layout, through
+    /// one shared structural check; checked Generic scales a dense right-hand
+    /// side in place only when it is laid out as the destination, and
+    /// otherwise materializes both operands for the dense route. Nonfinite
+    /// divisor entries map through the reciprocal. An exact zero divisor entry is the
     /// dense route's singular-block operation error in every mode. A compact
     /// right-hand side of a dense divisor is densified into the solve buffer.
     /// Lazy adjoints are materialized only for this call.
@@ -120,10 +122,9 @@ where
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative,
     ///   checked before any provider work or dense allocation.
-    /// - A non-finite compact entry on checked Generic retains the dense SVD
-    ///   route and its typed [`Error::Operation`] failure; the multiplicity-free
-    ///   compact arm returns [`Error::InvalidArgument`]. Checked finite entries
-    ///   that require the dense route inherit its dense error behavior.
+    /// - [`Error::InvalidArgument`] (`pinv singular values must be finite`)
+    ///   for a nonfinite compact entry, in every fusion mode: the dense
+    ///   cutoff's own refusal of a nonfinite singular value.
     /// - [`Error::Operation`] / [`Error::Core`] from dense SVD or recomposition.
     ///
     /// There is no singular-input failure: sending the offending directions to
@@ -133,19 +134,17 @@ where
     ///
     /// Dense input uses one compact SVD per nonempty coupled sector,
     /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
-    /// one local GEMM. An admitted finite Host compact diagonal input stays
-    /// compact in multiplicity-free mode. Checked Generic also requires a
-    /// matching source/output layout and retained values with normal magnitudes
-    /// and finite reciprocals; otherwise it follows the dense route. For `K`
-    /// stored values, `B` checked
-    /// source/output blocks, and `G` sectors, its elementwise cutoff and
-    /// reciprocal take `O(K + B + G)` time and `O(K + G)` result space.
+    /// one local GEMM. A Host compact diagonal input stays compact in every
+    /// fusion mode and bond layout (TensorKit `pinv(::DiagonalTensorMap)`
+    /// keeps `d.domain`): its magnitudes are compared unrounded against the
+    /// same global cutoff, and a retained subnormal inverts to its IEEE
+    /// reciprocal (`Inf`). For `K` stored values and `G` sectors, its
+    /// elementwise cutoff and reciprocal take `O(K + G)` time and result
+    /// space.
     ///
-    /// Checked Generic admits the swapped output with the source's exact
-    /// provider `Arc` and validates its identity, HomSpace, rank, and layout
-    /// before any SVD/GEMM. The compact arm also checks both source and
-    /// swapped-output coupled-sector layouts. Ineligible layouts retain the
-    /// dense route. A lazy adjoint is read through its parent's SVD in the
+    /// Checked Generic admits the dense route's swapped output with the
+    /// source's exact provider `Arc` and validates its identity, HomSpace,
+    /// rank, and layout before any SVD/GEMM. A lazy adjoint is read through its parent's SVD in the
     /// dense stage, `(A^H)^+ = U S^+ Vh` for `A = U S Vh`, in both modes.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
@@ -256,16 +255,18 @@ where
     /// `vh : W <- domain(self)`. `u` has orthonormal columns, `vh` has
     /// orthonormal rows, and each sector's singular values are non-negative and
     /// descending. [`Self::svd_full`] instead returns square outer factors and
-    /// a generally rectangular `s`; its storage depends on the admitted bond.
+    /// a generally rectangular `s`.
     ///
     /// On Host, compact `s` stores only `sum_c k_c` diagonal values for both
     /// multiplicity-free and checked-Generic providers. `s.materialize()`
     /// produces dense storage when needed.
     /// All checked factors retain the source's exact provider `Arc`.
     ///
+    /// The bond `W` of `s` is TensorKit's `fuse(codomain)`: a nondual bond of
+    /// the singular-value sectors, which a nondual `V <- V` input already is.
+    ///
     /// Dense inputs cost `O(sum_c m_c * n_c * min(m_c, n_c))`. An owned
-    /// multiplicity-free compact diagonal with representable magnitudes is
-    /// sorted directly by sector, without
+    /// compact diagonal is sorted directly by sector, without
     /// a dense input or dense SVD call; its dense `u` and `vh` still require
     /// `O(sum_c k_c²)` output storage and writes. A lazy adjoint is factored
     /// from its parent without materializing it, in the same gauge as its
@@ -321,14 +322,13 @@ where
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
     /// `vh : W_in <- domain`. It accepts the same inputs as
     /// [`Self::svd_compact`], but its square outer factors can require more
-    /// dense storage. On Host, `s` uses compact diagonal storage exactly when
-    /// the constructed `W_out` and `W_in` legs coincide, every positive bond
-    /// sector has a complete spectrum, and the compact layout is admitted.
-    /// Otherwise it is dense. An owned compact diagonal input is factorized
-    /// directly, without dense input materialization or a solver call. For a
-    /// checked-Generic provider whose coupled row and column dimensions
-    /// disagree with the diagonal's own bond, it returns
-    /// [`Error::InvalidArgument`].
+    /// dense storage. On Host, `s` uses compact diagonal storage on the bond
+    /// `fuse(codomain)` exactly when the constructed `W_out` and `W_in` legs
+    /// coincide and every positive bond sector has a complete spectrum.
+    /// Otherwise it is dense. An owned compact diagonal input returns its
+    /// [`Self::svd_compact`], with which its full SVD coincides (TensorKit
+    /// `svd_compact!(::DiagonalAlgorithm)` is `svd_full!`), in every fusion
+    /// mode: no dense input materialization or solver call.
     /// Call `s.materialize()` before `dense_data()` when needed.
     /// Checked factors use the source provider instance; a failure returns no
     /// factors.
@@ -1014,7 +1014,7 @@ where
     /// # Complexity
     ///
     /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
-    /// multiplicity-free compact input (a spectrum factor, TensorKit's
+    /// input (a spectrum factor, TensorKit's
     /// `DiagonalTensorMap`): the
     /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
     /// stored values, and the result stays compact — matching TensorKit's
@@ -1026,10 +1026,9 @@ where
     /// Checked Generic performs the same isomorphism preflight, admits the
     /// swapped output with the source provider `Arc` before output allocation
     /// or dense work, and preserves provider admission failures as typed errors.
-    /// A checked compact input on an aligned bond layout takes the same
+    /// Every compact input, in any bond layout and fusion mode, takes the same
     /// elementwise-reciprocal arm, with the same zero-entry error and the same
-    /// NaN/infinity pass-through, and stays compact; any other layout keeps the
-    /// dense LU route.
+    /// NaN/infinity pass-through, and stays compact on its own space.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
@@ -1067,12 +1066,10 @@ where
     /// block. The results agree only up to their numerical approximation; pinned
     /// source coordinates are recorded in `tenet/references.md`.
     ///
-    /// The multiplicity-free **compact** arm is TensorKit's
+    /// The **compact** arm is TensorKit's
     /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
-    /// hermiticity gate. Checked Generic shares that arm for a compact input on
-    /// an aligned bond layout (nonfinite entries map through `exp` without an
-    /// error, as in multiplicity-free mode); any other layout keeps the dense
-    /// Padé route.
+    /// hermiticity gate, for every compact input in any bond layout and
+    /// fusion mode. Nonfinite entries map through `exp` without an error.
     ///
     /// # Errors
     ///

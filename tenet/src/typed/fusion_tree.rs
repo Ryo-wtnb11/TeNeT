@@ -545,7 +545,8 @@ pub(super) enum TypedData<D, S = Vec<D>> {
 /// leaving the sector keys and the per-sector lengths untouched.
 ///
 /// This is the whole of the O(rank) arm shared by [`TensorMap::exp`],
-/// [`TensorMap::inv`], [`TensorMap::pinv`] and [`TensorMap::map_diagonal`]: a spectral
+/// [`TensorMap::inv`] and [`TensorMap::map_diagonal`] (the pseudo-inverse's
+/// is matrix-algebra `pinv_diagonal_spectrum`, which owns its cutoff): a spectral
 /// function acts on eigenvalues, so it never moves weight between sectors and
 /// never changes a bond dimension, which is exactly why the result can stay on
 /// the space it was called on.

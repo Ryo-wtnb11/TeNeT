@@ -933,4 +933,25 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         };
         assert_eq!(space.space().structure(), expert.space().structure());
     }
+    // #1994: the elementwise matrix functions admit the expert layout through
+    // the same structural admission (no dense fallback), and a spectrum
+    // factor's bond `fuse(V)` is the canonical layout, not the expert one.
+    admit_compact_diagonal::<CheckedGenericAdmissionMode, _, _>(&expert, &spectrum).unwrap();
+    let bond = |space| {
+        spectrum_bond::<CheckedGenericAdmissionMode, _, _>(space, &spectrum)
+            .unwrap()
+            .space()
+            .structure()
+            .clone()
+    };
+    assert_eq!(bond(&expert), bond(&canonical));
+    assert_ne!(bond(&expert), *expert.space().structure());
+    let mut missing = spectrum.to_vec();
+    missing.pop();
+    assert!(matches!(
+        admit_compact_diagonal::<CheckedGenericAdmissionMode, _, _>(&expert, &missing),
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::InvalidArgument { .. }
+        ))
+    ));
 }

@@ -528,9 +528,11 @@ where
 /// TensorKit's `fuse(codomain(t))` (`src/factorizations/diagonal.jl`,
 /// `initialize_output(svd_full!, …)`), the nondual leg of the spectrum's
 /// sectors and lengths. When that is `space`'s own hom space (a nondual
-/// `V <- V` whose spectrum covers `V`, where `fuse(V) = V`), the mode's
-/// [`FactorSpaceAuthority::same_homspace_output`] publishes it: a checked
-/// space is reused with no provider query.
+/// `V <- V` whose spectrum covers `V`, where `fuse(V) = V`) in a layout the
+/// compact-diagonal admission keeps as it is (aligned one-tree regions), the
+/// mode's [`FactorSpaceAuthority::same_homspace_output`] publishes it: a
+/// checked space is reused with no provider query. Any other layout gets the
+/// canonical one.
 ///
 /// Why one rule rather than a bond per storage route: the input bond of a
 /// dual diagonal is not `fuse(V)`, and choosing by route made the bond depend
@@ -544,7 +546,10 @@ where
     M: FactorMode<R>,
 {
     let authority = M::authority(space);
-    if factor_bond_is_input_bond(space.space(), || spectrum_leg(spectrum)) {
+    if factor_bond_is_input_bond(space.space(), || spectrum_leg(spectrum))
+        && checked_sector_regions(space.space().structure(), 1)?
+            .is_some_and(|regions| aligned_one_tree_regions(&regions))
+    {
         return Ok(authority.same_homspace_output(space)?);
     }
     let leg = spectrum_leg(spectrum);

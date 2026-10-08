@@ -65,7 +65,7 @@ impl<R, D> Deref for DiagonalBond<'_, R, D> {
     }
 }
 
-fn aligned_one_tree_regions(regions: &[CoupledSectorRegion]) -> bool {
+pub(super) fn aligned_one_tree_regions(regions: &[CoupledSectorRegion]) -> bool {
     regions.iter().all(|region| {
         region.has_aligned_diagonal()
             && region.row_trees().len() == 1
