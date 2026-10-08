@@ -1588,3 +1588,31 @@ fn checked_trace_nonselfdual_multiblock_lazy_matches_hand_weighted_trace() {
     assert!(Arc::ptr_eq(&view.parent, &parent));
 }
 
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_trace_nonselfdual_multiblock_real_matches_hand_weighted_trace() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2), (vec![2, 0], 3)]).unwrap();
+    let source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
+        (1 + ij[0] + 4 * ij[1]) as f64
+    })
+    .unwrap();
+    assert_eq!(source.subblock_count(), 2);
+    // SU(3) fundamental and symmetric-square dimensions are 3 and 6:
+    // 3*(1+6) + 6*(1+6+11) = 129. Off-diagonal values do not contribute.
+    let expected = 129.0;
+    let direct = source.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(direct.dense_data().unwrap().len(), 1);
+    assert!((direct.dense_data().unwrap()[0] - expected).abs() < 1e-12);
+    let lazy = source.adjoint().unwrap();
+    assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
+    let result = lazy.trace_pairs(&[(0, 1)]).unwrap();
+    assert!((result.dense_data().unwrap()[0] - expected).abs() < 1e-12);
+    assert!(Arc::ptr_eq(
+        result.logical_space().provider_arc(),
+        &provider
+    ));
+    assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
+}
