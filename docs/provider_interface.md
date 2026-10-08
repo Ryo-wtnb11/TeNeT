@@ -203,6 +203,10 @@ are deliberately independent of `FusionRule` so that a provider with a finite
 generated catalog can use the checked path while reporting unavailable data as
 an error. F and R become dense blocks (`GenericFArray`,
 `GenericRMatrix`) indexed by one-based vertex labels.
+`CheckedGenericRigidSymbols::try_dim_scalar` defaults to
+`try_sqrt_dim_scalar²`; override it when `dim` is known exactly (SU(N) does),
+because truncation budgets and quantum-dimension-weighted norms compare
+`dim(c)` exactly, as TensorKit's integer dimensions do.
 
 `InfallibleGeneric<'a, R>` adapts an existing infallible
 provider to the checked interface; see `tenet-sectors/src/sun.rs` for a

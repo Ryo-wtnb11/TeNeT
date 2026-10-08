@@ -142,11 +142,8 @@ where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
 {
     fn dim(provider: &R, sector: SectorId) -> Result<f64, Self::Error> {
-        // Why not an exact dimension query: the checked provider exposes only
-        // `sqrt(dim)` today (exact `dim(c)` is V7 / #1871).
         provider
-            .try_sqrt_dim_scalar(sector)
-            .map(|sqrt_dim| sqrt_dim * sqrt_dim)
+            .try_dim_scalar(sector)
             .map_err(CheckedGenericPlanError::Provider)
     }
 }

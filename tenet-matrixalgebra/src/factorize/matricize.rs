@@ -483,9 +483,8 @@ where
 //      matricization already stacks ALL trees of a coupled sector into one
 //      dense block (TensorKit `block(t, c)`), so outer multiplicity rides the
 //      row/col tree lists with no math change;
-//   3. truncation dim weight: `dim_scalar(c)` -> `sqrt_dim(c)²`, preserving
-//      non-integer quantum dimensions instead of assuming an SU(N)-only rule,
-//      matching the mult-free weighted-truncation convention.
+//   3. truncation dim weight: `dim_scalar(c)` -> the checked provider's
+//      `try_dim_scalar(c)`, both through `RigidCoefficientAlgebra::dim`.
 // Duplicated rather than bound-relaxed so the mult-free path stays
 // byte-for-byte untouched (the B-series byte-invariance rule; the same
 // rationale as the B3c-1 `is_core_form_..._generic` sibling).
