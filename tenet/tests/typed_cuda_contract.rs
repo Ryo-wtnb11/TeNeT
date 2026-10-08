@@ -319,6 +319,7 @@ fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_general_contraction_uploads_only_its_output() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let case = u1_rank_five::<f64>(&runtime);
     let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
@@ -363,6 +364,7 @@ fn a_warm_general_contraction_uploads_only_its_output() {
 // Exercises the deprecated per-Runtime wrapper's device-state clear.
 #[allow(deprecated)]
 fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path() {
+    let _cache = cache_exclusive();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let large = u1_rank_five::<f64>(&runtime);
     let small = u1_reordered::<f64>(&runtime);
@@ -411,6 +413,19 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
         small.host().dense_data().unwrap(),
         small.terms(),
     );
+}
+
+/// Orders process-global cache clears against warm/cold count windows
+/// (#2084). Cooperative: every new clearing test must take `cache_exclusive`
+/// and every new count-dependent test `cache_shared`.
+static CACHE_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn cache_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    CACHE_TEST_LOCK.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn cache_exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    CACHE_TEST_LOCK.write().unwrap_or_else(|e| e.into_inner())
 }
 
 fn device_contract<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> TensorMap<R, D> {

@@ -41,7 +41,9 @@ use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpec
 /// Orders process-global cache clears against provider-query and cache-count
 /// windows (#2084): a test that clears holds the write side for its whole
 /// body, a test that counts holds the read side, so a sibling's clear cannot
-/// land between a warm-up and a measured call. Poison-tolerant so one failing
+/// land between a warm-up and a measured call. Cooperative: every new
+/// count-dependent test must take `cache_shared` and every new clearing test
+/// `cache_exclusive`. Poison-tolerant so one failing
 /// test does not cascade.
 static CACHE_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 

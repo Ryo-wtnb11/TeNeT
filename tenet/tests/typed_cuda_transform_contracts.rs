@@ -56,6 +56,19 @@ use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Error;
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
+/// Orders process-global cache clears against warm/cold count windows
+/// (#2084). Cooperative: every new clearing test must take `cache_exclusive`
+/// and every new count-dependent test `cache_shared`.
+static CACHE_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn cache_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    CACHE_TEST_LOCK.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn cache_exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    CACHE_TEST_LOCK.write().unwrap_or_else(|e| e.into_inner())
+}
+
 fn leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -104,6 +117,7 @@ fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
     // Sized on the Host, so the device's first call below really is its cold
@@ -160,6 +174,7 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
 // Exercises the deprecated per-Runtime wrapper's device-state clear.
 #[allow(deprecated)]
 fn clearing_the_transform_cache_releases_the_device_executor_state() {
+    let _cache = cache_exclusive();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
     let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
@@ -194,6 +209,7 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
 // Exercises the deprecated per-Runtime wrapper's device-state clear.
 #[allow(deprecated)]
 fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
+    let _cache = cache_exclusive();
     // What: `clear_tree_transform_cache` returns the executor's plan-entry
     // reservation, so repeated clear/re-prepare cycles of the same structures
     // leave the ledger and the cap where the first preparation put them.
@@ -334,6 +350,7 @@ fn device_transform_rejections_happen_before_any_device_work() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
+    let _cache = cache_shared();
     // SU(2) recouples, so the structure has a real coefficient payload and a
     // pack/scatter workspace. Both are uploaded once, on the first replay of
     // that structure, and never again while the Host store admits it.
@@ -430,6 +447,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_device_into_transfers_nothing_and_allocates_nothing() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let source = fixture(&runtime).to_cuda().unwrap();
     let mut destination = fixture(&runtime)
@@ -525,6 +543,7 @@ fn a_warm_device_into_transfers_nothing_and_allocates_nothing() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_into_admits_the_exact_layout_on_the_shared_runtime_store() {
+    let _cache = cache_exclusive();
     // Host `overwrite_tree_transform` admits the source/destination layout
     // pair after a successful replay, so a second call resolves the operation
     // out of the store instead of deriving it. The store is the Runtime's own
@@ -824,6 +843,7 @@ fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::sector::FermionParit
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
+    let _cache = cache_shared();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let host = fermionic_fixture(&runtime);
     let device = host.to_cuda().unwrap();
