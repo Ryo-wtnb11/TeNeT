@@ -1202,9 +1202,10 @@ fn mismatched_structures_and_lengths_are_rejected_by_admission() {
             CudaTreeTransformDestination::Overwrite,
         )
         .unwrap_err();
-    assert!(
-        matches!(wrong_structure, OperationError::InvalidArgument { .. }),
-        "{wrong_structure:?}"
+    // The Host replay's categories (#1763), not a collapsed InvalidArgument.
+    assert_eq!(
+        wrong_structure,
+        OperationError::StructureMismatch { tensor: "dst" }
     );
 
     let wrong_length = executor
@@ -1219,9 +1220,12 @@ fn mismatched_structures_and_lengths_are_rejected_by_admission() {
             CudaTreeTransformDestination::Overwrite,
         )
         .unwrap_err();
-    assert!(
-        matches!(wrong_length, OperationError::InvalidArgument { .. }),
-        "{wrong_length:?}"
+    assert_eq!(
+        wrong_length,
+        OperationError::ElementCountMismatch {
+            expected: destination.len(),
+            actual: destination.len() - 1,
+        }
     );
 
     // The same call with the right structures and lengths succeeds.

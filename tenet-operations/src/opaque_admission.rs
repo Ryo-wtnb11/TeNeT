@@ -105,18 +105,26 @@ pub(crate) enum TreeTransformAdmissionError {
     Task(OperationError),
 }
 
+/// Failures the Host replay also detects keep the Host's typed category:
+/// `validate_structures_and_lengths` reports `StructureMismatch` and
+/// `ElementCountMismatch`, and `validate_workspace_requirements` /
+/// `checked_fused_index_len` report `ElementCountOverflow`. Only the
+/// placement, context, capability, region, aliasing, workspace and readiness
+/// verdicts are opaque-executor-only and have no Host category to keep.
+/// Design record: `docs/audit/issue-1763-typed-admission-errors.md`.
 impl From<TreeTransformAdmissionError> for OperationError {
     fn from(error: TreeTransformAdmissionError) -> Self {
         let message = match error {
-            TreeTransformAdmissionError::Structure(_) => {
-                "tree transform structure admission failed"
+            TreeTransformAdmissionError::Structure(tensor) => {
+                return OperationError::StructureMismatch { tensor }
             }
-            TreeTransformAdmissionError::Length { .. } => {
-                "tree transform storage length admission failed"
+            TreeTransformAdmissionError::Length { expected, actual } => {
+                return OperationError::ElementCountMismatch { expected, actual }
             }
             TreeTransformAdmissionError::ArithmeticOverflow => {
-                "tree transform admission arithmetic overflow"
+                return OperationError::ElementCountOverflow
             }
+            TreeTransformAdmissionError::Task(error) => return error,
             TreeTransformAdmissionError::Placement(_) => {
                 "tree transform placement admission failed"
             }
@@ -134,7 +142,6 @@ impl From<TreeTransformAdmissionError> for OperationError {
             TreeTransformAdmissionError::CoefficientReadiness => {
                 "tree transform coefficient readiness admission failed"
             }
-            TreeTransformAdmissionError::Task(_) => "tree transform task admission failed",
         };
         OperationError::InvalidArgument { message }
     }
@@ -937,6 +944,152 @@ mod tests {
                 message: "tree transform capability admission failed"
             }
         );
+    }
+
+    /// #1763: every Stage A failure the Host replay also detects surfaces with
+    /// the Host's `OperationError`, in Stage A order, before any device work.
+    #[test]
+    fn host_shared_admission_failures_keep_the_host_category() {
+        let strided = Arc::new(
+            BlockStructure::from_blocks_with_rank(
+                2,
+                vec![BlockSpec::new(vec![2, 2], vec![1, 3], 0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let other = Arc::new(BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &strided,
+            &strided,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let task = transform.task_view().unwrap();
+        assert!(task.workspace_requirements().fused_index_len_per_worker > 1);
+        let executor = |workers| ExecutorSnapshot {
+            placement: Placement::Cuda(0),
+            context: ContextIdentity(7),
+            supports_strided: true,
+            supports_matrix: true,
+            scalar: TypeId::of::<f64>(),
+            fused_index_workers: workers,
+        };
+        let storage = |allocation, active_len| StorageSnapshot {
+            active_len,
+            usable_capacity: active_len,
+            placement: Placement::Cuda(0),
+            context: ContextIdentity(7),
+            region: region(1, allocation, 0, active_len * size_of::<f64>()),
+        };
+        // (case, dst structure, dst len, workers, stage-A placement fault, expected)
+        let cases = [
+            (
+                "structure",
+                &other,
+                5,
+                0,
+                false,
+                OperationError::StructureMismatch { tensor: "dst" },
+            ),
+            (
+                "structure before length and placement",
+                &other,
+                4,
+                0,
+                true,
+                OperationError::StructureMismatch { tensor: "dst" },
+            ),
+            (
+                "length",
+                &strided,
+                4,
+                0,
+                false,
+                OperationError::ElementCountMismatch {
+                    expected: 5,
+                    actual: 4,
+                },
+            ),
+            (
+                "length before placement",
+                &strided,
+                4,
+                0,
+                true,
+                OperationError::ElementCountMismatch {
+                    expected: 5,
+                    actual: 4,
+                },
+            ),
+            (
+                "fused-index overflow",
+                &strided,
+                5,
+                usize::MAX,
+                false,
+                OperationError::ElementCountOverflow,
+            ),
+        ];
+        for (case, dst_structure, dst_len, workers, misplaced, expected) in cases {
+            let mut dst = storage(1, dst_len);
+            if misplaced {
+                dst.placement = Placement::Host;
+            }
+            let error = validate_stage_a::<f64, _>(
+                task,
+                dst_structure,
+                &strided,
+                dst,
+                storage(2, 5),
+                executor(workers),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{case}: admitted"));
+            assert_eq!(OperationError::from(error), expected, "{case}");
+            if workers == 0 {
+                // The Host replay's own entry check reports the same error.
+                assert_eq!(
+                    task.validate_structures_and_lengths(dst_structure, &strided, dst_len, 5),
+                    Err(expected),
+                    "{case}: host"
+                );
+            }
+        }
+
+        // A task error passes through unchanged, as the Host returns it.
+        for error in [
+            OperationError::EmptyTransformBlock,
+            OperationError::BlockCountMismatch { dst: 1, src: 2 },
+        ] {
+            assert_eq!(
+                OperationError::from(TreeTransformAdmissionError::Task(error.clone())),
+                error
+            );
+        }
+        // Executor-only verdicts have no Host category and stay InvalidArgument.
+        for (error, message) in [
+            (
+                TreeTransformAdmissionError::Placement("source"),
+                "tree transform placement admission failed",
+            ),
+            (
+                TreeTransformAdmissionError::Context("source"),
+                "tree transform context admission failed",
+            ),
+            (
+                TreeTransformAdmissionError::Capability("matrix"),
+                "tree transform capability admission failed",
+            ),
+            (
+                TreeTransformAdmissionError::Aliasing,
+                "tree transform storage regions overlap",
+            ),
+        ] {
+            assert_eq!(
+                OperationError::from(error),
+                OperationError::InvalidArgument { message }
+            );
+        }
     }
 
     #[test]
