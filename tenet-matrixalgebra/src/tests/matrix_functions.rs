@@ -189,7 +189,7 @@ fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
     let rhs = bound_tensor(Arc::clone(&rhs_provider), &rhs);
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
-    let solved = solve_left_direct_dyn(
+    let solved = solve_left_into_mf(
         &mut dense,
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
@@ -252,7 +252,7 @@ fn solve_left_preserves_complex_values_without_adjointing() {
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
-    let solved = solve_left_direct_dyn(
+    let solved = solve_left_into_mf(
         &mut dense,
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
@@ -274,7 +274,7 @@ fn solve_left_discards_an_output_when_a_later_sector_fails() {
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
     let mut dense = ScriptedExecutor::<FailSecondSolve>::default();
 
-    let error = solve_left_direct_dyn(
+    let error = solve_left_into_mf(
         &mut dense,
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
@@ -293,14 +293,13 @@ fn solve_left_discards_an_output_when_a_later_sector_fails() {
 
 #[test]
 fn solve_left_validates_spaces_before_backend_execution() {
-    // What: codomain mismatch and a rectangular divisor are structural
-    // failures, not backend calls.
+    // What: a codomain mismatch is a structural failure, not a backend call.
     let divisor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 1.0])]);
     let wrong_codomain = u1_cross_space_map::<f64>(&[(0, 3)], &[(0, 1)]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let wrong_codomain = bound_tensor(Arc::new(U1FusionRule), &wrong_codomain);
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-    let error = solve_left_direct_dyn(
+    let error = solve_left_into_mf(
         &mut dense,
         &divisor.as_ref().dynamic(),
         &wrong_codomain.as_ref().dynamic(),
@@ -312,40 +311,8 @@ fn solve_left_validates_spaces_before_backend_execution() {
             message: "solve requires equal divisor and right-hand-side codomains"
         }
     ));
-
-    let rectangular = u1_cross_space_map::<f64>(&[(0, 2)], &[(0, 3)]);
-    let rhs = u1_cross_space_map::<f64>(&[(0, 2)], &[(0, 1)]);
-    let rectangular = bound_tensor(Arc::new(U1FusionRule), &rectangular);
-    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let error = solve_left_direct_dyn(
-        &mut dense,
-        &rectangular.as_ref().dynamic(),
-        &rhs.as_ref().dynamic(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        OperationError::UnsupportedTensorContractScope {
-            message: "solve requires an isomorphic divisor codomain and domain"
-        }
-    ));
-
-    let incomplete = u1_cross_space_map::<f64>(&[(0, 1), (1, 1)], &[(0, 1)]);
-    let rhs = u1_cross_space_map::<f64>(&[(0, 1), (1, 1)], &[(0, 1)]);
-    let incomplete = bound_tensor(Arc::new(U1FusionRule), &incomplete);
-    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let error = solve_left_direct_dyn(
-        &mut dense,
-        &incomplete.as_ref().dynamic(),
-        &rhs.as_ref().dynamic(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        OperationError::UnsupportedTensorContractScope {
-            message: "solve requires an isomorphic divisor codomain and domain"
-        }
-    ));
+    // The divisor's isomorphism is the facade preflight's (#1995): this
+    // seam requires an admitted divisor.
 }
 
 #[test]
@@ -356,7 +323,7 @@ fn solve_left_preserves_dense_singularity_and_capability_errors() {
     let rhs = u1_block_map(&[(0, 2, 1, vec![1.0_f64, 1.0])]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let error = solve_left_direct_dyn(
+    let error = solve_left_into_mf(
         &mut tenet_dense::DefaultDenseExecutor::new(),
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
@@ -374,7 +341,7 @@ fn solve_left_preserves_dense_singularity_and_capability_errors() {
     let rhs = u1_block_map(&[(0, 1, 1, vec![1.0_f64])]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let error = solve_left_direct_dyn(
+    let error = solve_left_into_mf(
         &mut ScriptedExecutor::new(RejectExecutorCalls),
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
@@ -548,37 +515,6 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
         "{error:?}"
     );
     assert_eq!(dense.counts().solve, 0);
-}
-
-#[test]
-#[expect(
-    clippy::type_complexity,
-    reason = "the test table pairs codomain and domain sector fixtures directly"
-)]
-fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
-    // What: neither a square stored-sector intersection nor equal total
-    // dimension substitutes for complete coupled-sector isomorphism.
-    let cases: &[(&[(i32, usize)], &[(i32, usize)])] = &[
-        (&[(0, 1), (1, 1)], &[(0, 1)]),
-        (&[(0, 1), (1, 1)], &[(0, 1), (2, 1)]),
-    ];
-    for &(codomain, domain) in cases {
-        let tensor = u1_cross_space_map::<f64>(codomain, domain);
-        let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-        let error = inv(
-            &mut dense,
-            &mut context,
-            &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            OperationError::UnsupportedTensorContractScope {
-                message: "inv requires isomorphic codomain and domain"
-            }
-        ));
-    }
 }
 
 fn u1_block_map<D>(blocks: &[(i32, usize, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
@@ -911,7 +847,7 @@ fn inv_preserves_genuinely_complex_nonhermitian_sector_values() {
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
 
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
 
     let determinant = a * d - b * c;
     let oracle = [
@@ -953,7 +889,7 @@ fn inv_dyn_reverses_isomorphic_spaces_with_different_tree_ranks() {
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
     let inverse: BoundTensorMap<_, _, 1, 2> = typed_from_bound_factor(inverse).unwrap();
 
     assert_eq!(
@@ -1017,13 +953,13 @@ fn inv_accepts_tiny_nonzero_pivots_for_all_factor_dtypes() {
 
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f32, 0.0, 0.0, 1.0e-8])]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
     assert!((inverse.data()[0] - 1.0).abs() < 1.0e-6);
     assert!((inverse.data()[3] * 1.0e-8 - 1.0).abs() < 1.0e-5);
 
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 1.0e-16])]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
     assert!((inverse.data()[0] - 1.0).abs() < 1.0e-12);
     assert!((inverse.data()[3] * 1.0e-16 - 1.0).abs() < 1.0e-12);
 
@@ -1039,7 +975,7 @@ fn inv_accepts_tiny_nonzero_pivots_for_all_factor_dtypes() {
         ],
     )]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
     assert!((inverse.data()[3] * phase - Complex32::new(1.0, 0.0)).norm() < 1.0e-5);
 
     let phase = Complex64::from_polar(1.0e-16, 0.23);
@@ -1054,7 +990,7 @@ fn inv_accepts_tiny_nonzero_pivots_for_all_factor_dtypes() {
         ],
     )]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
     assert!((inverse.data()[3] * phase - Complex64::new(1.0, 0.0)).norm() < 1.0e-12);
 }
 
@@ -1089,7 +1025,7 @@ fn inv_discards_unpublished_output_when_a_later_sector_fails() {
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
     let mut dense = ScriptedExecutor::<FailSecondSolve>::default();
 
-    let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
+    let error = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
 
     assert!(matches!(
         error,
@@ -1199,7 +1135,7 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_input_pack_bytes();
-    let output = pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.0).unwrap();
+    let output = pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.0).unwrap();
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
     let adjoint = tenet_tensors::adjoint(provider.as_ref(), &canonical).unwrap();
     let first = crate::compose::compose(&mut context, provider.as_ref(), &adjoint, output.tensor())
@@ -1234,7 +1170,7 @@ fn pinv_adjoint_parent_discards_unpublished_output_on_recomposition_failure() {
     );
 
     assert!(matches!(
-        pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.0),
+        pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.0),
         Err(OperationError::Dense(DenseError::Backend {
             op: "dot_general_into",
             ..
@@ -2743,12 +2679,12 @@ fn mf_pinv_exp_and_polar_publish_no_factor_layout() {
             crate::factorize::reset_compact_svd_copy_probe();
             let before = stages();
 
-            pinv_dyn(&mut dense, &general, 1e-12).unwrap();
-            pinv_adjoint_parent_dyn(&mut dense, &general, 1e-12).unwrap();
+            pinv_into_mf(&mut dense, &general, 1e-12).unwrap();
+            pinv_adjoint_parent_into_mf(&mut dense, &general, 1e-12).unwrap();
             left_polar_dyn(&mut dense, &general).unwrap();
             right_polar_dyn(&mut dense, &general).unwrap();
             let solves = dense.counts().solve;
-            exp_dyn(&mut dense, &hermitian).unwrap();
+            exp_into_mf(&mut dense, &hermitian).unwrap();
             assert_eq!(dense.counts().solve, solves, "Hermitian exp is spectral");
 
             assert_eq!(stages(), before, "padded={padded}: factor spaces staged");
