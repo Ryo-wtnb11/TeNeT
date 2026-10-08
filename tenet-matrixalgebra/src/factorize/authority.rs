@@ -124,15 +124,8 @@ pub trait FactorMode<R>: sealed::Sealed {
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
 
-    // SVD (#1862 D3, owned by #1994): the multiplicity-free and checked
-    // diagonal and dense stages publish through their own builders, and the
-    // bond of a spectrum factor (`S`, `D`) is fresh in multiplicity-free mode
-    // and the input bond on a checked diagonal route.
-
-    /// Whether a full SVD of a compact diagonal runs the compact route:
-    /// multiplicity-free compact and full factor spaces coincide on a
-    /// diagonal and that mode publishes them without a layout check.
-    const SVD_FULL_DIAGONAL_IS_COMPACT: bool;
+    // SVD: the multiplicity-free and checked diagonal and dense stages
+    // publish `U`/`Vh` through their own builders.
 
     fn svd_compact_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
@@ -155,11 +148,6 @@ pub trait FactorMode<R>: sealed::Sealed {
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
 
-    fn svd_full_diagonal<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum<D>],
-    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>;
-
     fn svd_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
@@ -175,12 +163,6 @@ pub trait FactorMode<R>: sealed::Sealed {
     where
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
-
-    fn spectrum_bond<V>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        route: FactorRoute,
-        spectrum: &[SectorSpectrum<V>],
-    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error>;
 
     fn rectangular_spectrum_factor<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
@@ -236,8 +218,6 @@ where
         MfAuthority(space)
     }
 
-    const SVD_FULL_DIAGONAL_IS_COMPACT: bool = true;
-
     fn svd_compact_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
@@ -267,16 +247,6 @@ where
         svd_compact_adjoint_factors_dyn(dense, parent)
     }
 
-    fn svd_full_diagonal<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum<D>],
-    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error> {
-        let _ = (space, spectrum);
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: "multiplicity-free full SVD of a compact diagonal runs the compact route",
-        })
-    }
-
     fn svd_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
@@ -297,15 +267,6 @@ where
         D: FactorScalar,
     {
         svd_full_adjoint_factors_dyn(dense, parent)
-    }
-
-    fn spectrum_bond<V>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        route: FactorRoute,
-        spectrum: &[SectorSpectrum<V>],
-    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error> {
-        let _ = route;
-        diagonal_bond_bound_space_like(space, spectrum)
     }
 
     fn rectangular_spectrum_factor<D: FactorScalar>(
@@ -413,8 +374,6 @@ where
         CheckedAuthority(space.provider_arc())
     }
 
-    const SVD_FULL_DIAGONAL_IS_COMPACT: bool = false;
-
     fn svd_compact_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
@@ -444,13 +403,6 @@ where
         svd_compact_adjoint_factors_dyn_checked_generic(dense, parent)
     }
 
-    fn svd_full_diagonal<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum<D>],
-    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error> {
-        svd_full_diagonal_factors_dyn_checked_generic(space, spectrum)
-    }
-
     fn svd_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
@@ -471,22 +423,6 @@ where
         D: FactorScalar,
     {
         svd_full_adjoint_factors_dyn_checked_generic(dense, parent)
-    }
-
-    fn spectrum_bond<V>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        route: FactorRoute,
-        spectrum: &[SectorSpectrum<V>],
-    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error> {
-        match route {
-            FactorRoute::Diagonal => {
-                diagonal_bond_bound_space_on_source_checked_generic(space, spectrum)
-            }
-            FactorRoute::Dense => diagonal_bond_bound_space_generic_checked(
-                Arc::clone(space.provider_arc()),
-                spectrum,
-            ),
-        }
     }
 
     fn rectangular_spectrum_factor<D: FactorScalar>(
@@ -585,6 +521,53 @@ where
     {
         eig_full_dyn_checked_generic(dense, input)
     }
+}
+
+/// The bond `W <- W` of a spectrum factor (`S`, `D`) of a factorization of
+/// `space` in fusion mode `M`, for dense and compact-diagonal input alike:
+/// TensorKit's `fuse(codomain(t))` (`src/factorizations/diagonal.jl`,
+/// `initialize_output(svd_full!, …)`), the nondual leg of the spectrum's
+/// sectors and lengths. When that is `space`'s own hom space (a nondual
+/// `V <- V` whose spectrum covers `V`, where `fuse(V) = V`) in a layout the
+/// compact-diagonal admission keeps as it is (aligned one-tree regions), the
+/// mode's [`FactorSpaceAuthority::same_homspace_output`] publishes it: a
+/// checked space is reused with no provider query. Any other layout gets the
+/// canonical one.
+///
+/// Why one rule rather than a bond per storage route: the input bond of a
+/// dual diagonal is not `fuse(V)`, and choosing by route made the bond depend
+/// on storage and mode (#1994).
+#[doc(hidden)]
+pub fn spectrum_bond<M, R, V>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<BoundDynamicFusionMapSpace<R>, M::Error>
+where
+    M: FactorMode<R>,
+{
+    let authority = M::authority(space);
+    if factor_bond_is_input_bond(space.space(), || spectrum_leg(spectrum))
+        && checked_sector_regions(space.space().structure(), 1)?
+            .is_some_and(|regions| aligned_one_tree_regions(&regions))
+    {
+        return Ok(authority.same_homspace_output(space)?);
+    }
+    let leg = spectrum_leg(spectrum);
+    Ok(authority.output_space(FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    ))?)
+}
+
+/// The nondual bond leg of `spectrum`: one sector per entry, its length as
+/// the degeneracy.
+fn spectrum_leg<V>(spectrum: &[SectorSpectrum<V>]) -> SectorLeg {
+    SectorLeg::new(
+        spectrum
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    )
 }
 
 /// Multiplicity-free factor spaces, derived through the source space's cached

@@ -287,5 +287,4 @@ fn svd_compact_factors<E: tenet_dense::DenseExecutor + ?Sized>(
         dense,
         FactorSource::Dense(source),
     )
-    .map(|(factors, _)| factors)
 }

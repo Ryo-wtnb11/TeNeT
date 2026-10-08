@@ -606,7 +606,6 @@ where
         _,
         _,
     >(dense, dense_source(input))
-    .map(|(factors, _)| factors)
 }
 
 fn left_null_dyn<E, R, D>(
@@ -693,10 +692,7 @@ fn eigh_full_checked_generic<L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
 ) -> Result<
-    (
-        tenet_matrixalgebra::seam::EighFullDyn<R, D>,
-        tenet_matrixalgebra::seam::FactorRoute,
-    ),
+    tenet_matrixalgebra::seam::EighFullDyn<R, D>,
     <tenet_core::CheckedGenericAdmissionMode as FactorMode<R>>::Error,
 >
 where

@@ -302,7 +302,7 @@ where
     }
 
     /// The one body of the Hermitian eigendecomposition: `d` is a compact
-    /// diagonal on the bond the mode chooses for the route (D3, #1994).
+    /// diagonal on the spectrum bond `fuse(V)` (`seam::spectrum_bond`).
     fn factor_eigh_full(
         &self,
         hermitian_tol: HermitianTol,
@@ -312,16 +312,15 @@ where
     {
         let mut local = None;
         let source = self.factor_input(FactorOp::EighFull, &mut local)?;
-        let (out, route) = tenet_matrixalgebra::seam::eigh_full_from_source::<R::Mode, _, _, _, _>(
+        let out = tenet_matrixalgebra::seam::eigh_full_from_source::<R::Mode, _, _, _, _>(
             RuntimeDense(&self.runtime),
             source,
             hermitian_tol,
         )
         .map_err(R::Mode::map_factor_error)?;
         let (v, mut eigenvalues) = out.into_parts();
-        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+        let space = tenet_matrixalgebra::seam::spectrum_bond::<R::Mode, _, _>(
             self.logical_space(),
-            route,
             &eigenvalues,
         )
         .map_err(R::Mode::map_factor_error)?;
@@ -332,7 +331,7 @@ where
     }
 
     /// The one body of the general eigendecomposition; complex factors at the
-    /// payload's precision, `d` on the mode's bond as for
+    /// payload's precision, `d` on the spectrum bond as for
     /// [`Self::factor_eigh_full`].
     #[allow(clippy::type_complexity)]
     fn factor_eig_full(
@@ -344,15 +343,14 @@ where
     {
         let mut local = None;
         let source = self.factor_input(FactorOp::EigFull, &mut local)?;
-        let (out, route) = tenet_matrixalgebra::seam::eig_full_from_source::<R::Mode, _, _, _, _>(
+        let out = tenet_matrixalgebra::seam::eig_full_from_source::<R::Mode, _, _, _, _>(
             RuntimeDense(&self.runtime),
             source,
         )
         .map_err(R::Mode::map_factor_error)?;
         let (v, mut eigenvalues) = out.into_parts();
-        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+        let space = tenet_matrixalgebra::seam::spectrum_bond::<R::Mode, _, _>(
             self.logical_space(),
-            route,
             &eigenvalues,
         )
         .map_err(R::Mode::map_factor_error)?;
@@ -367,19 +365,16 @@ where
         })
     }
 
-    /// The SVD factors `op` computes, with their route. Under
-    /// [`AdjointRule::AdjointSeam`] a lazy adjoint's dense parent is read in
-    /// place by `adjoint_stage`.
+    /// The SVD factors `op` computes. Under [`AdjointRule::AdjointSeam`] a
+    /// lazy adjoint's dense parent is read in place by `adjoint_stage`.
     fn svd_factors<T>(
         &self,
         op: FactorOp,
         stage: impl FnOnce(
             RuntimeDense<'_>,
             tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
-        ) -> Result<
-            (T, tenet_matrixalgebra::seam::FactorRoute),
-            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
-        >,
+        )
+            -> Result<T, <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error>,
         adjoint_stage: impl FnOnce(
             RuntimeDense<'_>,
             BoundDynamicTensorRef<'_, R, D>,
@@ -387,16 +382,13 @@ where
             T,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<(T, tenet_matrixalgebra::seam::FactorRoute), TypedFacadeError<R>> {
+    ) -> Result<T, TypedFacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             if op.adjoint_rule() == AdjointRule::AdjointSeam {
                 let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
-                let factors = adjoint_stage(RuntimeDense(&self.runtime), parent)
-                    .map_err(R::Mode::map_factor_error)?;
-                // A lazy adjoint's parent is dense by construction, so the
-                // spectrum bond follows the dense route (D3).
-                return Ok((factors, tenet_matrixalgebra::seam::FactorRoute::Dense));
+                return adjoint_stage(RuntimeDense(&self.runtime), parent)
+                    .map_err(R::Mode::map_factor_error);
             }
         }
         let mut local = None;
@@ -404,13 +396,13 @@ where
         stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)
     }
 
-    /// The one body of compact SVD: `s` is a compact diagonal on the bond the
-    /// mode chooses for the route (D3, #1994).
+    /// The one body of compact SVD: `s` is a compact diagonal on the fresh
+    /// spectrum bond `fuse(V)` (`seam::spectrum_bond`).
     fn factor_svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
     where
         D: FactorizationScalar,
     {
-        let ((u, vh, mut spectrum), route) = self.svd_factors(
+        let (u, vh, mut spectrum) = self.svd_factors(
             FactorOp::SvdCompact,
             |lease, source| {
                 tenet_matrixalgebra::seam::svd_compact_from_source::<R::Mode, _, _, _, _>(
@@ -423,9 +415,8 @@ where
                 )
             },
         )?;
-        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+        let space = tenet_matrixalgebra::seam::spectrum_bond::<R::Mode, _, _>(
             self.logical_space(),
-            route,
             &spectrum,
         )
         .map_err(R::Mode::map_factor_error)?;
@@ -436,19 +427,19 @@ where
         })
     }
 
-    /// The one body of full SVD: `s` is compact only on the exact constructed
-    /// bond with an admitted layout, and dense (possibly rectangular)
-    /// otherwise.
+    /// The one body of full SVD. A compact diagonal takes the compact SVD,
+    /// with which its full SVD coincides (TensorKit
+    /// `svd_compact!(::DiagonalAlgorithm)` is `svd_full!`). Otherwise `s` is
+    /// compact on the spectrum bond when every sector is square, and
+    /// dense (possibly rectangular) when not.
     fn factor_svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
     where
         D: FactorizationScalar,
     {
-        if <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::SVD_FULL_DIAGONAL_IS_COMPACT
-            && self.spectrum().is_some()
-        {
+        if self.spectrum().is_some() {
             return self.factor_svd_compact();
         }
-        let (factors, route) = self.svd_factors(
+        let factors = self.svd_factors(
             FactorOp::SvdFull,
             |lease, source| {
                 tenet_matrixalgebra::seam::svd_full_from_source::<R::Mode, _, _, _, _>(
@@ -463,19 +454,16 @@ where
         )?;
         let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
         if full_svd_compact_bond(&u, &vh, &spectrum) {
-            let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+            let space = tenet_matrixalgebra::seam::spectrum_bond::<R::Mode, _, _>(
                 self.logical_space(),
-                route,
                 &spectrum,
             )
             .map_err(R::Mode::map_factor_error)?;
-            if full_svd_compact_layout(&space, &spectrum) {
-                return Ok(Svd {
-                    u: wrap_factor_on(&self.runtime, u),
-                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
-                    vh: wrap_factor_on(&self.runtime, vh),
-                });
-            }
+            return Ok(Svd {
+                u: wrap_factor_on(&self.runtime, u),
+                s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                vh: wrap_factor_on(&self.runtime, vh),
+            });
         }
         let s = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::rectangular_spectrum_factor(
             self.logical_space(),
