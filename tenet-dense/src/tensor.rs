@@ -43,7 +43,23 @@ impl DenseTensor {
         }
     }
 
+    /// TeNeT's own dtype check, ahead of the Tenferro accessor, so asking a
+    /// tensor for the wrong scalar type is [`DenseError::DTypeMismatch`] and
+    /// [`DenseError::Backend`] stays reserved for Tenferro's own failures.
+    fn require_dtype(&self, expected: DenseDType, op: &'static str) -> Result<(), DenseError> {
+        if self.dtype == expected {
+            Ok(())
+        } else {
+            Err(DenseError::DTypeMismatch {
+                op,
+                expected,
+                actual: self.dtype,
+            })
+        }
+    }
+
     pub fn as_f32_slice(&self) -> Result<&[f32], DenseError> {
+        self.require_dtype(DenseDType::F32, "DenseTensor::as_f32_slice")?;
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => tensor
@@ -55,6 +71,7 @@ impl DenseTensor {
     }
 
     pub fn as_f64_slice(&self) -> Result<&[f64], DenseError> {
+        self.require_dtype(DenseDType::F64, "DenseTensor::as_f64_slice")?;
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => tensor
@@ -66,6 +83,7 @@ impl DenseTensor {
     }
 
     pub fn as_c32_slice(&self) -> Result<&[Complex32], DenseError> {
+        self.require_dtype(DenseDType::C32, "DenseTensor::as_c32_slice")?;
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => tensor
@@ -77,6 +95,7 @@ impl DenseTensor {
     }
 
     pub fn as_c64_slice(&self) -> Result<&[Complex64], DenseError> {
+        self.require_dtype(DenseDType::C64, "DenseTensor::as_c64_slice")?;
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => tensor
@@ -89,6 +108,7 @@ impl DenseTensor {
 
     /// Consume a host-backed tensor and transfer its `f64` buffer.
     pub fn into_f64_vec(self) -> Result<Vec<f64>, DenseError> {
+        self.require_dtype(DenseDType::F64, "DenseTensor::into_f64_vec")?;
         match self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => {
@@ -103,6 +123,7 @@ impl DenseTensor {
 
     /// Consume a host-backed tensor and transfer its `f32` buffer.
     pub fn into_f32_vec(self) -> Result<Vec<f32>, DenseError> {
+        self.require_dtype(DenseDType::F32, "DenseTensor::into_f32_vec")?;
         match self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => {
@@ -117,6 +138,7 @@ impl DenseTensor {
 
     /// Consume a host-backed tensor and transfer its `Complex32` buffer.
     pub fn into_c32_vec(self) -> Result<Vec<Complex32>, DenseError> {
+        self.require_dtype(DenseDType::C32, "DenseTensor::into_c32_vec")?;
         match self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => {
@@ -131,6 +153,7 @@ impl DenseTensor {
 
     /// Consume a host-backed tensor and transfer its `Complex64` buffer.
     pub fn into_c64_vec(self) -> Result<Vec<Complex64>, DenseError> {
+        self.require_dtype(DenseDType::C64, "DenseTensor::into_c64_vec")?;
         match self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => {

@@ -1366,7 +1366,7 @@ where
         let _host_pool = source.runtime.enter_host_pool();
         let space = source.space.space();
         if space.homspace().codomain() != space.homspace().domain() {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "eigh requires an endomorphism (codomain == domain)",
             }
             .into());
@@ -1378,7 +1378,7 @@ where
                 message: "a prepared eigh needs packed coupled-sector regions",
             })?;
         if regions.iter().any(|region| region.rows() != region.cols()) {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "eigh requires square coupled-sector matrices",
             }
             .into());
@@ -1656,9 +1656,9 @@ where
                 Ok(out) => out.into_parts(),
                 // The eager rejection of a non-finite eigenvalue; every
                 // other member is still solved so all of them are named.
-                Err(OperationError::InvalidArgument {
-                    message: "eigenvalues must be finite",
-                }) => {
+                Err(OperationError::Dense(tenet_dense::DenseError::NumericalFailure {
+                    ..
+                })) => {
                     faults.push((member, MemberFault::NonFiniteEigenvalue));
                     spectra.push(Vec::new());
                     continue;

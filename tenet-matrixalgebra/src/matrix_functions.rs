@@ -97,7 +97,7 @@ fn require_endomorphism<R, D>(
     // names `exp` rather than whichever helper would notice first.
     let homspace = input.space().space().homspace();
     if homspace.codomain() != homspace.domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "exp requires an endomorphism (codomain == domain)",
         });
     }

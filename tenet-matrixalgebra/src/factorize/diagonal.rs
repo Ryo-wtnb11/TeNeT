@@ -163,7 +163,7 @@ fn require_one_leg_endomorphism(space: &DynamicFusionMapSpace) -> Result<(), Ope
         || space.nin() != 1
         || homspace.codomain().legs() != homspace.domain().legs()
     {
-        return Err(OperationError::InvalidArgument {
+        return Err(OperationError::SpaceMismatch {
             message: "compact diagonal input must be a one-leg endomorphism V <- V",
         });
     }

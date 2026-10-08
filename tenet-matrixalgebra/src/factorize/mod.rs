@@ -20,8 +20,8 @@ use tenet_core::{
 #[cfg(test)]
 use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseFactorization, DenseOwned,
-    DenseTensor, DenseView, DenseViewMut,
+    arity_mismatch, check_contiguous_output, DenseBackend, DenseDotConfig, DenseError,
+    DenseExecutor, DenseFactorization, DenseOwned, DenseTensor, DenseView, DenseViewMut,
 };
 
 use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};

@@ -584,16 +584,21 @@ pub(super) fn exp_spectrum<D: TensorScalar>(
 /// Why `== 0` and not a tolerance: the dense arm has none either (the solve
 /// either fails or it does not), and a compact arm that refused near-zero
 /// entries would let storage change the answer. Exact zero is singular and
-/// reported as [`Error::InvalidArgument`]; NaN and infinity map through the
+/// reported as the dense arm's singular-solve failure,
+/// `DenseError::NumericalFailure`; NaN and infinity map through the
 /// reciprocal without an error.
 pub(super) fn inv_spectrum<D: TensorScalar>(
     spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
 ) -> Result<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, Error> {
     map_spectrum(spectrum, |value| {
         if value.abs_value() == 0.0 {
-            Err(Error::InvalidArgument(
-                "inv of a singular diagonal (zero entry)".to_string(),
-            ))
+            Err(Error::from(tenet_tensors::OperationError::Dense(
+                tenet_dense::DenseError::NumericalFailure {
+                    backend: tenet_dense::DenseBackend::Tenferro,
+                    op: "solve_into",
+                    message: "inv of a singular diagonal (zero entry)".to_string(),
+                },
+            )))
         } else {
             Ok(value.recip_value())
         }

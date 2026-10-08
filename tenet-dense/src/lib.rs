@@ -41,8 +41,9 @@ pub use dot::DenseDotConfig;
 pub use dtype::{DenseBackend, DenseDType};
 pub use error::DenseError;
 pub use executor::{
-    strided_batch_runs, strided_batch_runs_into, DenseExecutor, DenseFactorization,
-    DenseGemmBatchJob, DenseLinalgScopeBody, DenseOwned, MatrixOp,
+    arity_mismatch, check_contiguous_output, strided_batch_runs, strided_batch_runs_into,
+    DenseExecutor, DenseFactorization, DenseGemmBatchJob, DenseLinalgScopeBody, DenseOwned,
+    MatrixOp,
 };
 pub use scalar::DenseScalar;
 pub use tensor::DenseTensor;

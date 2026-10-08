@@ -950,11 +950,11 @@ pub(super) fn compact_qr_outputs<D: FactorScalar>(
 ) -> Result<(Vec<D>, Vec<D>), OperationError> {
     let rank = rows.min(cols);
     if outputs.len() != 2 {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "qr_into",
-            message: "dense QR must return exactly (Q, R)".to_string(),
-        }));
+        return Err(OperationError::Dense(arity_mismatch(
+            "qr_into",
+            2,
+            outputs.len(),
+        )));
     }
     let q = compact_factor_output_owned::<D>(outputs.remove(0), &[rows, rank], "qr_into")?;
     let r = compact_factor_output_owned::<D>(outputs.remove(0), &[rank, cols], "qr_into")?;

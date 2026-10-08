@@ -230,12 +230,11 @@ where
         }
     });
     for pair in pairs.iter() {
-        let route =
-            routes
-                .get_mut(&pair.sector)
-                .ok_or(OperationError::UnsupportedTensorContractScope {
-                    message: "factor sector absent from the source tensor",
-                })?;
+        let route = routes
+            .get_mut(&pair.sector)
+            .ok_or(OperationError::SpaceMismatch {
+                message: "factor sector absent from the source tensor",
+            })?;
         *route = Some(pair);
     }
     let (nout, nin) = match side {
@@ -272,7 +271,7 @@ where
             FactorSide::Right => (coupled_of(key.domain_tree()), 0),
         };
         if let Some(&route) = routes.get(&sector) {
-            let pair = route.ok_or(OperationError::UnsupportedTensorContractScope {
+            let pair = route.ok_or(OperationError::SpaceMismatch {
                 message: "factor rank absent for a populated source sector",
             })?;
             let tree = match side {
@@ -297,12 +296,11 @@ where
             );
             continue;
         }
-        let dimension =
-            *dimensions
-                .get(&sector)
-                .ok_or(OperationError::UnsupportedTensorContractScope {
-                    message: "factor sector absent from the source tensor",
-                })?;
+        let dimension = *dimensions
+            .get(&sector)
+            .ok_or(OperationError::SpaceMismatch {
+                message: "factor sector absent from the source tensor",
+            })?;
         let side_offset = missing_offsets.entry(sector).or_default();
         let extent = block
             .shape()
@@ -538,14 +536,15 @@ impl<'a> PlacementIndex<'a> {
             value.lookups += 1;
             probe.set(value);
         });
-        self.by_tree.get(&(sector, side, tree)).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
+        self.by_tree
+            .get(&(sector, side, tree))
+            .copied()
+            .ok_or(OperationError::SpaceMismatch {
                 message: match side {
                     FactorSide::Left => "factor codomain tree absent from the source matricization",
                     FactorSide::Right => "factor domain tree absent from the source matricization",
                 },
-            },
-        )
+            })
     }
 }
 

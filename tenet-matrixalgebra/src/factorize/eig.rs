@@ -144,7 +144,7 @@ where
 {
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
@@ -514,7 +514,7 @@ where
 {
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
@@ -857,7 +857,7 @@ where
     // is stable, so equal-magnitude ties keep LAPACK order — bit-for-bit the
     // ordering `eigh_full_dyn` produces (it breaks ties by original index).
     if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
@@ -902,7 +902,7 @@ where
     // iteration yields the same eigenvalues regardless of `jobvr`, and the sort
     // is stable, so this matches `eig_full_dyn`'s ordering bit-for-bit.
     if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
@@ -996,9 +996,11 @@ where
         .eig(D::dense_read(view))
         .map_err(OperationError::Dense)?;
     if outputs.len() != 2 {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "dense eig must return exactly (values, vectors)",
-        });
+        return Err(OperationError::Dense(arity_mismatch(
+            "eig",
+            2,
+            outputs.len(),
+        )));
     }
     validate_dense_shape(outputs[0].shape(), &[n])?;
     validate_dense_shape(outputs[1].shape(), &[n, n])?;
@@ -1110,11 +1112,11 @@ where
         .eigh(D::dense_read(input))
         .map_err(OperationError::Dense)?;
     if outputs.len() != 2 {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "dense EIGH must return exactly (values, vectors)".to_string(),
-        }));
+        return Err(OperationError::Dense(arity_mismatch(
+            "eigh_into",
+            2,
+            outputs.len(),
+        )));
     }
     let values = compact_real_spectrum_owned::<D>(outputs.remove(0), &[order], "eigh_into")?;
     let vectors =
@@ -1265,7 +1267,7 @@ pub(super) fn validate_hermitian_matrix_shape<D>(
         });
     }
     if rows != cols {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eigh requires square coupled-sector matrices",
         });
     }
@@ -1369,7 +1371,7 @@ where
 {
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
@@ -1405,17 +1407,22 @@ where
         .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows, exp_route_tol)))
 }
 
-pub(super) fn invalid_eigenvalues() -> OperationError {
-    OperationError::InvalidArgument {
-        message: "eigenvalues must be finite",
-    }
+/// A nonfinite eigenvalue of an admitted finite input is the eigensolver's
+/// numerical failure, not a misuse: the input already passed
+/// [`require_finite_factor_input`].
+pub(super) fn invalid_eigenvalues(op: &'static str) -> OperationError {
+    OperationError::Dense(DenseError::NumericalFailure {
+        backend: DenseBackend::Tenferro,
+        op,
+        message: "eigenvalues must be finite".to_string(),
+    })
 }
 
 pub(crate) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
-        Err(invalid_eigenvalues())
+        Err(invalid_eigenvalues("eigh"))
     }
 }
 
@@ -1431,7 +1438,7 @@ pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), O
     {
         Ok(())
     } else {
-        Err(invalid_eigenvalues())
+        Err(invalid_eigenvalues("eig"))
     }
 }
 
@@ -1452,7 +1459,7 @@ where
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "eigh requires an endomorphism (codomain == domain)",
             },
         ));
@@ -1533,7 +1540,7 @@ where
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "eig requires an endomorphism (codomain == domain)",
             },
         ));
@@ -1694,7 +1701,7 @@ fn validate_diagonal_eigenvalues<R, D: FactorScalar>(
         for &value in &bond.entry(region).values {
             let value = value.widen_complex();
             if !(value.re.is_finite() && value.im.is_finite() && value.norm().is_finite()) {
-                return Err(invalid_eigenvalues());
+                return Err(invalid_eigenvalues("eig"));
             }
         }
     }
