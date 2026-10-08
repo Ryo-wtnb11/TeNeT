@@ -39,9 +39,10 @@ use tenet_operations::TreeTransformStructure;
 
 use crate::contract::{rhs_contract_twist_factor_oriented, FusionOperandLayout};
 use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan, publishable, resolve,
-    CompletedTransformerKey, OrientedBasisOrder, TransformerMode, TreeTransformPlanning,
-    TreeTransformScope,
+    build_checked_generic_tree_pair_transform_group_plan_validated, publishable, resolve,
+    validate_checked_generic_tree_pair_plan_preflight, CheckedPendingCoefficients,
+    CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
+    TreeTransformPlanning, TreeTransformScope,
 };
 use crate::{
     adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic_checked, BoundDynamicFusionMapSpace,
@@ -186,8 +187,11 @@ pub(crate) enum TreeStructureSource<'a> {
 pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     type Scalar;
     type Error: From<OperationError>;
-    /// The per-context planning state a structure resolution reads (the
-    /// completed transformers themselves are process-global).
+    /// The caller-owned planning state of one resolution scope (completed
+    /// transformers and composed coefficients themselves are
+    /// process-global): per context for multiplicity-free resolution, per
+    /// contraction call for checked Generic, whose pending coefficients
+    /// publish only after that call's commit.
     type StructureCache;
     type Structure;
 
@@ -224,7 +228,7 @@ where
 {
     type Scalar = R::Scalar;
     type Error = OperationError;
-    type StructureCache = TreeTransformPlanning<R::Scalar>;
+    type StructureCache = TreeTransformPlanning;
     type Structure = TreeTransformStructure<R::Scalar>;
 
     /// Unit unless fermionic; a fermionic twist that varies within the
@@ -289,9 +293,10 @@ where
 {
     type Scalar = f64;
     type Error = CheckedGenericPlanError<R::Error>;
-    /// Checked Generic contraction reads no per-context planning state; it
-    /// resolves through the process-global completed-transformer cache.
-    type StructureCache = ();
+    /// The contraction call's composed coefficients, flushed only after its
+    /// destination commit; completed transformers resolve through the
+    /// process-global cache.
+    type StructureCache = CheckedPendingCoefficients;
     type Structure = TreeTransformStructure<f64>;
 
     /// Unit for Bosonic braiding, independent of the trees; the checked
@@ -314,7 +319,7 @@ where
     }
 
     fn tree_structure(
-        _cache: &mut (),
+        coefficients: &mut CheckedPendingCoefficients,
         rule: &R,
         operation: &TreeTransformOperation,
         dst: &Arc<BlockStructure>,
@@ -333,8 +338,9 @@ where
         // Staged and core intermediates are uncommitted, hence not
         // canonical: their keys are lookup-only until #2014-3c commits them.
         let epoch = tenet_core::core_reset_epoch();
+        let identity = rule.rule_identity();
         let key = CompletedTransformerKey::new::<f64>(
-            rule.rule_identity(),
+            identity.clone(),
             TransformerMode::CheckedGeneric,
             TreeTransformScope::TreePair,
             operation,
@@ -347,11 +353,24 @@ where
         );
         let may_publish = publishable([dst.as_ref(), structure.as_ref()]);
         resolve(key, may_publish, epoch, dst, structure, || {
-            let plan = build_checked_generic_tree_pair_transform_group_plan(
-                rule,
+            // Admission precedes any composed-coefficient lookup. Why the
+            // uncommitted intermediates still reuse coefficients: their keys
+            // hold sectors and trees, never content ids.
+            let source_proof =
+                validate_checked_generic_tree_pair_plan_preflight(rule, operation, structure)?;
+            let reuse = CoefficientGroupReuse::<f64>::new(
+                identity,
+                TransformerMode::CheckedGeneric,
+                TreeTransformScope::TreePair,
+                operation,
+                tenet_core::FusionTreePairOrientation::Direct,
+            );
+            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
                 operation.clone(),
-                structure,
+                &source_proof,
+                &reuse,
             )?;
+            coefficients.stage(reuse.into_pending());
             Ok(plan.compile_shared_structures_with_storage_conjugation(
                 Arc::clone(dst),
                 Arc::clone(structure),

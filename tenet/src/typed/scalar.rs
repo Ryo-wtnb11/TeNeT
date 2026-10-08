@@ -42,9 +42,9 @@ use super::*;
 /// — `f32::EPSILON` is about `1.2e-7` — as TensorKit's `rtoldefault` does.
 ///
 /// Execution state is per payload dtype, but the structural caches are not:
-/// completed transformers are process-global ([`crate::cache`]) and a
-/// Runtime's categorical plans live in one store, so single- and
-/// double-precision activity is reported and cleared together.
+/// completed transformers and composed coefficients are process-global
+/// ([`crate::cache`]), so single- and double-precision activity is reported
+/// and cleared together.
 ///
 /// # Annotate the payload dtype
 ///

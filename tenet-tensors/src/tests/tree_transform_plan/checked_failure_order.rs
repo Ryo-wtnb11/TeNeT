@@ -267,10 +267,10 @@ fn checked_group_compiler_reports_step_major_first_provider_error() {
     }
 }
 
-/// What: the Runtime checked path reports the same first provider error as
+/// What: the cached checked path reports the same first provider error as
 /// the standalone compiler on the same source, cold and repeated, and a
-/// failed build leaves the completed-transformer owner and both Runtime
-/// coefficient tiers untouched.
+/// failed build leaves the completed-transformer and composed-coefficient
+/// caches untouched.
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
@@ -304,12 +304,9 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
         "{standalone:?}"
     );
     assert_eq!(standalone_r, vec![[a, a, v], [a, a, a]]);
-
-    let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    context.bind_runtime_coefficient_store(Arc::downgrade(&store));
-    let tiers = (store.plan_info(), store.group_info());
     owner_activity();
+    crate::tree_transform::take_coefficient_group_activity();
     for _attempt in 0..2 {
         provider.r_calls.borrow_mut().clear();
         provider.f_calls.set(0);
@@ -325,14 +322,9 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
         assert_eq!(*provider.r_calls.borrow(), standalone_r);
         assert_eq!(provider.f_calls.get(), 0);
         assert_owner_untouched(owner_activity());
-        let (plan, group) = (store.plan_info(), store.group_info());
-        assert_eq!(
-            (plan.entries(), plan.charged_payload_bytes()),
-            (tiers.0.entries(), tiers.0.charged_payload_bytes())
-        );
-        assert_eq!(
-            (group.entries(), group.charged_payload_bytes()),
-            (tiers.1.entries(), tiers.1.charged_payload_bytes())
-        );
+        // The failing group was looked up and missed both times: nothing was
+        // staged for publication.
+        let groups = crate::tree_transform::take_coefficient_group_activity();
+        assert_eq!((groups.hits, groups.publications), (0, 0));
     }
 }

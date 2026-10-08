@@ -1,17 +1,14 @@
-//! The per-group categorical tree-transform tier (#1570).
+//! The per-group composed-coefficient cache (cache 4 of #2014; #1570).
 //!
-//! A sector change misses the whole-structure plan tier. For non-Unique
-//! fusion the rebuild must then recompute only the source fusion-tree groups
+//! A sector change misses the completed-transformer cache. The rebuild must
+//! then recompose only the source fusion-tree groups
 //! whose external sectors are new, as TensorKit's `fsbraid`/`fstranspose`
 //! caches do per `FusionTreeBlock`, and the result must equal a cold
-//! Runtime's. Unique fusion never uses the tier.
-
-//! The group tier is per Runtime until #2014-4 and observable only through
-//! the deprecated `Runtime::tree_transform_cache_info`.
-#![allow(deprecated)]
+//! build's. Unique fusion uses the cache too (one tree per group).
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
 use tenet::sector::{
     FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
 };
@@ -20,15 +17,21 @@ use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-/// Completed transformers are process-global: a test that counts one
-/// Runtime's coefficient-tier activity clears them first and must not race
-/// another test publishing the same keys.
+/// The caches are process-global: a test that counts their activity clears
+/// them first and must not race another test publishing the same keys.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn groups() -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == StructureCacheKind::TreeTransformCoefficients)
+        .unwrap()
 }
 
 fn bits(data: &[f64]) -> Vec<u64> {
@@ -65,9 +68,9 @@ macro_rules! tensor {
     }};
 }
 
-/// `a` warms both categorical tiers and `c` adds one sector. On the warm
-/// Runtime, the plan for `c` must build exactly the groups that `c` adds and
-/// reuse every other one. `$exact` asks for bit equality with a cold Runtime.
+/// `a` warms the caches and `c` adds one sector. The transform of `c` must
+/// compose exactly the groups that `c` adds and reuse every other one.
+/// `$exact` asks for bit equality with a cold build.
 macro_rules! check_rule {
     ($label:literal, $a:expr, $c:expr, exact: $exact:expr) => {{
         let (a, c) = ($a, $c);
@@ -97,31 +100,26 @@ macro_rules! check_rule {
             tenet::cache::clear();
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
-            let groups_before = warm.tree_transform_cache_info().groups;
+            let groups_before = groups();
             assert_eq!(
                 groups_before.misses(),
-                before.len(),
-                "{what}: the cold plan builds every source group once"
+                before.len() as u64,
+                "{what}: the cold transform composes every source group once"
             );
-            let plans_before = warm.tree_transform_cache_info().plans;
 
             let sector_change = operation(&tensor!(&warm, &c));
-            let groups = warm.tree_transform_cache_info().groups;
-            assert!(
-                warm.tree_transform_cache_info().plans.misses() > plans_before.misses(),
-                "{what}: a sector change must miss the whole-structure plan"
-            );
+            let groups = groups();
             assert_eq!(
                 groups.misses() - groups_before.misses(),
-                changed,
+                changed as u64,
                 "{what}: rebuilt groups must equal changed groups"
             );
             assert_eq!(
                 groups.hits() - groups_before.hits(),
-                after.len() - changed,
+                (after.len() - changed) as u64,
                 "{what}: every unchanged group must hit"
             );
-            assert_eq!(groups.evictions(), 0, "{what}: fixture exceeds the tier");
+            assert_eq!(groups.evictions(), 0, "{what}: fixture exceeds the cache");
 
             tenet::cache::clear();
             let cold = Runtime::builder().dense_threads(1).build().unwrap();
@@ -196,9 +194,12 @@ fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
     );
 }
 
+/// Unique fusion is cached per group as well (a deliberate deviation from
+/// TensorKit's `NoCache`): a degeneracy-only change hits every group.
 #[test]
-fn unique_fusion_never_uses_the_group_tier() {
+fn unique_fusion_reuses_its_groups_across_a_degeneracy_change() {
     let _serial = serial();
+    tenet::cache::clear();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
@@ -207,46 +208,45 @@ fn unique_fusion_never_uses_the_group_tier() {
         )
         .unwrap()
     };
-    for space in [
-        leg(&[(-1, 2), (0, 1), (1, 2)]),
-        leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
-    ] {
-        let t = tensor!(&runtime, &space);
+    let transform = |space: &GradedSpace<U1FusionRule>| {
+        let t = tensor!(&runtime, space);
         let _ = t.permute(&[2, 0], &[3, 1]).unwrap();
         let _ = t.adjoint().unwrap().permute(&[2, 0], &[3, 1]).unwrap();
-    }
-    assert!(runtime.tree_transform_cache_info().plans.misses() > 0);
-    let info = runtime.tree_transform_cache_info().groups;
+    };
+    transform(&leg(&[(-1, 2), (0, 1), (1, 2)]));
+    let cold = groups();
+    assert!(cold.misses() > 0 && cold.entries() > 0);
+    assert_eq!(cold.hits(), 0);
+    transform(&leg(&[(-1, 3), (0, 2), (1, 1)]));
+    let warm = groups();
     assert_eq!(
-        (info.hits(), info.misses(), info.entries()),
-        (0, 0, 0),
-        "Unique fusion must not use the group tier"
+        (warm.misses(), warm.entries()),
+        (cold.misses(), cold.entries()),
+        "a degeneracy-only change must compose no group"
     );
+    assert!(warm.hits() > 0);
 }
 
 #[test]
-fn clear_resets_the_group_tier() {
+fn clear_resets_the_coefficient_cache() {
     let _serial = serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = su2_leg(&[(0, 1), (1, 1)]);
     let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
-    let before = runtime.tree_transform_cache_info().groups;
-    assert!(before.entries() > 0 && before.charged_payload_bytes() > 0);
-    assert!(before.entries() <= before.entry_capacity());
-    // The group tier counts groups, not structures, so its cap is larger.
-    assert!(before.entry_capacity() > runtime.tree_transform_cache_info().plans.entry_capacity());
-    assert!(before.charged_payload_bytes() <= before.byte_budget());
+    let before = groups();
+    assert!(before.entries() > 0 && before.charged_bytes() > 0);
+    assert!(before.charged_bytes() <= before.byte_budget());
 
-    runtime.clear_tree_transform_cache();
-    let after = runtime.tree_transform_cache_info().groups;
+    tenet::cache::clear();
+    let after = groups();
     assert_eq!(after.entries(), 0);
-    assert_eq!(after.charged_payload_bytes(), 0);
+    assert_eq!(after.charged_bytes(), 0);
     assert_eq!((after.hits(), after.misses()), (0, 0));
 }
 
-/// Many operations on one Runtime keep far more groups than the 256
-/// structures the other tiers hold. Every unchanged group must still hit:
-/// the group tier's entry cap is per group, and the byte budget binds.
+/// Many operations keep far more groups than the 256 structures the former
+/// per-Runtime plan tier held. Every unchanged group must still hit: only
+/// the byte budget binds.
 #[test]
 fn shared_runtime_keeps_every_unchanged_group_across_operations() {
     let _serial = serial();
@@ -272,34 +272,35 @@ fn shared_runtime_keeps_every_unchanged_group_across_operations() {
     for operation in operations {
         let _ = operation(&tensor!(&runtime, &a));
     }
-    let warm = runtime.tree_transform_cache_info().groups;
+    let warm = groups();
     for operation in operations {
         let _ = operation(&tensor!(&runtime, &c));
     }
-    let info = runtime.tree_transform_cache_info().groups;
+    let info = groups();
     let n = operations.len();
     assert_eq!(
         info.hits() - warm.hits(),
-        n * before,
+        (n * before) as u64,
         "every unchanged group must hit"
     );
-    assert_eq!(info.misses() - warm.misses(), n * (after - before));
+    assert_eq!(info.misses() - warm.misses(), (n * (after - before)) as u64);
     assert_eq!(info.evictions(), 0);
     assert!(
         info.entries() > 256,
-        "fixture must exceed the per-structure tiers' 256 entries"
+        "fixture must exceed the former plan tier's 256 entries"
     );
 }
 
 /// Operations that share a source structure but differ in the permutation,
 /// the braid levels, or the orientation together with storage conjugation
-/// must not share groups: each result on one shared Runtime equals a cold
-/// Runtime's bit for bit. Orientation is never varied alone: every reachable
-/// adjoint-oriented caller also conjugates storage, so this covers the two
-/// key fields jointly, not orientation in isolation.
+/// must not share groups: each result after the others warmed the caches
+/// equals a cold build bit for bit. Orientation is never varied alone: every
+/// reachable adjoint-oriented caller also conjugates storage, so this covers
+/// the key's orientation jointly with the conjugated binding.
 #[test]
 fn shared_runtime_distinguishes_operations_on_the_same_groups() {
     let _serial = serial();
+    tenet::cache::clear();
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 1)]);
     let operations: [(&str, &Su2Operation); 5] = [
         ("permute p1", &|t| t.permute(&[2, 0], &[3, 1]).unwrap()),
@@ -311,8 +312,9 @@ fn shared_runtime_distinguishes_operations_on_the_same_groups() {
         }),
     ];
     let shared = Runtime::builder().dense_threads(1).build().unwrap();
-    for (name, operation) in operations {
-        let warm = operation(&tensor!(&shared, &leg));
+    let warm_results = operations.map(|(_, operation)| operation(&tensor!(&shared, &leg)));
+    for ((name, operation), warm) in operations.into_iter().zip(warm_results) {
+        tenet::cache::clear();
         let cold_runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let cold = operation(&tensor!(&cold_runtime, &leg));
         assert_eq!(warm.codomain(), cold.codomain(), "{name}");
@@ -342,6 +344,7 @@ fn shared_runtime_distinguishes_operations_on_the_same_groups() {
             .flat_map(|z| [z.re.to_bits(), z.im.to_bits()])
             .collect::<Vec<_>>()
     };
+    tenet::cache::clear();
     let shared = Runtime::builder().dense_threads(1).build().unwrap();
     let under = fib_tensor(&shared)
         .braid(&[1, 3], &[0, 2], &[0, 1, 2, 3])
@@ -354,6 +357,7 @@ fn shared_runtime_distinguishes_operations_on_the_same_groups() {
         complex_bits(&over),
         "fixture: levels matter"
     );
+    tenet::cache::clear();
     let cold_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let cold_over = fib_tensor(&cold_runtime)
         .braid(&[1, 3], &[0, 2], &[3, 2, 1, 0])

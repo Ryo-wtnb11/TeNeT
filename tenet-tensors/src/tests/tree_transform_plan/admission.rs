@@ -316,7 +316,7 @@ fn warm_structure_aliases_are_rejected_before_owner_lookup() {
     );
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([valid_structure.as_ref(), invalid_structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     cache
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -355,7 +355,7 @@ fn warm_structure_aliases_are_rejected_before_owner_lookup() {
     assert_invalid_simple_vertex(error);
     assert_owner_untouched(owner_activity());
 
-    let independent = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let independent = crate::tree_transform::TreeTransformPlanning::default();
     let error = independent
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -388,7 +388,7 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
 
     let cold = cache
         .resolve_tree_pair(&rule, &operation, &structure, &structure, false)
@@ -431,7 +431,7 @@ fn completed_structure_miss_and_hit_validate_capability_once() {
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
 
     reset_multiplicity_free_capability_validations();
     cache
@@ -467,7 +467,7 @@ fn prelowered_same_content_roles_share_one_local_admission() {
     let destination = Arc::new((*logical).clone());
     assert_eq!(logical.content_id(), storage.content_id());
     assert_eq!(logical.content_id(), destination.content_id());
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
 
     cache
         .get_or_compile_tree_pair_prelowered(
@@ -505,18 +505,17 @@ fn expert_layout_tree_transform_paths_compile_without_publishing() {
             .unwrap();
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
 
-    let assert_uncached =
-        |f: &mut dyn FnMut(&mut crate::tree_transform::TreeTransformPlanning<f64>)| {
-            let mut cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
-            owner_activity();
-            owner_activity();
-            f(&mut cache);
+    let assert_uncached = |f: &mut dyn FnMut(&mut crate::tree_transform::TreeTransformPlanning)| {
+        let mut cache = crate::tree_transform::TreeTransformPlanning::default();
+        owner_activity();
+        owner_activity();
+        f(&mut cache);
 
-            // What: an expert (never admitted) layout compiles eagerly; its
-            // keys are lookup-only, so nothing is published or hit.
-            let activity = owner_activity();
-            assert_eq!((activity.hits, activity.publications), (0, 0));
-        };
+        // What: an expert (never admitted) layout compiles eagerly; its
+        // keys are lookup-only, so nothing is published or hit.
+        let activity = owner_activity();
+        assert_eq!((activity.hits, activity.publications), (0, 0));
+    };
 
     assert_uncached(&mut |cache| {
         cache
@@ -637,7 +636,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
     let storage_indices = [1, 0];
     let storage_axes = [2, 3, 0, 1];
 
-    let old_cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let old_cache = crate::tree_transform::TreeTransformPlanning::default();
     let old = old_cache
         .get_or_compile_tree_pair_prelowered(
             &SU2FusionRule,
@@ -650,7 +649,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
             |axis| Ok(storage_axes[axis]),
         )
         .unwrap();
-    let oriented_cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let oriented_cache = crate::tree_transform::TreeTransformPlanning::default();
     let oriented = oriented_cache
         .resolve_tree_pair_oriented(
             &SU2FusionRule,
@@ -712,7 +711,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
 }
 
 #[test]
-fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
+fn adjoint_oriented_transformer_is_reused_and_keyed_by_orientation() {
     // Both trees carry sectors [1, 1], so the parent block set is closed under
     // the adjoint and the ordinary and oriented compilers accept the same
     // destination and parent structures: only the key separates their plans.
@@ -755,7 +754,7 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
     let storage_axes = [2, 3, 0, 1];
     let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
     let other_operation = TreeTransformOperation::braid([0, 1], [3, 2], [0, 1], [2, 3]);
-    let oriented = |cache: &mut crate::tree_transform::TreeTransformPlanning<f64>,
+    let oriented = |cache: &mut crate::tree_transform::TreeTransformPlanning,
                     operation: &TreeTransformOperation,
                     orientation: tenet_core::FusionTreePairOrientation| {
         let direct = orientation == tenet_core::FusionTreePairOrientation::Direct;
@@ -779,23 +778,24 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     mark_canonical([storage.as_ref(), destination.as_ref()]);
-    let store = Arc::new(RuntimeCoefficientStore::<f64>::default());
-    let mut cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
-    owner_activity();
-    cache.bind_coefficient_store(Arc::downgrade(&store));
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     crate::tree_transform::take_oriented_tree_pair_compiles();
     owner_activity();
+    crate::tree_transform::take_coefficient_group_activity();
 
     let first = oriented(&mut cache, &operation, adjoint);
     let second = oriented(&mut cache, &operation, adjoint);
 
     // What: the second call hits the published adjoint transformer, keyed by
-    // the parent content, orientation and basis order.
+    // the parent content, orientation and basis order; only the first looks
+    // up its one source group's coefficients.
     assert_eq!(crate::tree_transform::take_oriented_tree_pair_compiles(), 1);
     assert!(same_core(&first, &second));
     let activity = owner_activity();
     assert_eq!((activity.hits, activity.builds), (1, 1));
-    assert_eq!(store.plan_info().misses(), 1);
+    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!(groups.hits + groups.misses, 1);
+    assert_eq!(groups.publications, groups.misses);
     // What: the retained transformer equals a fresh compile of equal
     // (never-admitted) layouts.
     let fresh = {
@@ -849,7 +849,7 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
     let activity = owner_activity();
     assert_eq!((activity.hits, activity.publications), (0, 0));
 
-    let storage_ordered = |cache: &mut crate::tree_transform::TreeTransformPlanning<f64>| {
+    let storage_ordered = |cache: &mut crate::tree_transform::TreeTransformPlanning| {
         cache
             .resolve_tree_pair_oriented(
                 &SU2FusionRule,
@@ -872,21 +872,16 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
         &first,
         &oriented(&mut cache, &operation, adjoint)
     ));
-
-    // What: a context whose Runtime died keeps resolving through the global
-    // owner; only the coefficient store is gone.
-    drop(store);
-    assert!(same_core(&storage_first, &storage_ordered(&mut cache)));
 }
 
 #[test]
-fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
+fn adjoint_oriented_degeneracy_change_reuses_the_composed_coefficients() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // What: a new parent layout with the same sectors misses the completed-
-    // structure tier but rebuilds no categorical plan, and binding the cached
-    // plan equals a fresh uncached compile of that layout.
+    // transformer cache but recomposes no source group, and the result
+    // equals the uncached eager producer on that layout bit for bit.
     let tree = |coupled: usize| {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
@@ -919,7 +914,7 @@ fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
         )
     };
     let oriented =
-        |cache: &mut crate::tree_transform::TreeTransformPlanning<f64>,
+        |cache: &mut crate::tree_transform::TreeTransformPlanning,
          (storage, destination): &(Arc<BlockStructure>, Arc<BlockStructure>)| {
             cache
                 .resolve_tree_pair_oriented(
@@ -936,10 +931,7 @@ fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
                 )
                 .unwrap()
         };
-    let store = Arc::new(RuntimeCoefficientStore::<f64>::default());
-    let mut cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
-    owner_activity();
-    cache.bind_coefficient_store(Arc::downgrade(&store));
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     let narrow = layouts(1);
     let wider = layouts(2);
     mark_canonical(
@@ -950,17 +942,45 @@ fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
     owner_activity();
 
     oriented(&mut cache, &narrow);
-    assert_eq!(store.plan_info().misses(), 1);
+    crate::tree_transform::take_coefficient_group_activity();
     let warm = oriented(&mut cache, &wider);
 
     assert_eq!(owner_activity().builds, 2);
-    assert_eq!(
-        (store.plan_info().hits(), store.plan_info().misses()),
-        (1, 1)
-    );
-    let mut uncached = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!((groups.hits, groups.misses, groups.publications), (1, 0, 0));
+    let mut uncached = crate::tree_transform::TreeTransformPlanning::default();
     let expert = (expert_copy(&wider.0), expert_copy(&wider.1));
-    assert_eq!(warm, oriented(&mut uncached, &expert));
+    let rebuilt = oriented(&mut uncached, &expert);
+    assert_eq!(warm, rebuilt);
+    // The uncached eager producer on the same layout: no owner, no cache 4.
+    let projection = logical_keys
+        .iter()
+        .zip(storage_indices)
+        .collect::<rustc_hash::FxHashMap<_, _>>();
+    let eager =
+        crate::tree_transform::build_oriented_tree_pair_transform_group_plan_capability_validated(
+            &SU2FusionRule,
+            operation.clone(),
+            &logical_keys,
+            &wider.0,
+            tenet_core::FusionTreePairOrientation::Adjoint,
+            crate::tree_transform::OrientedBasisOrder::Canonical,
+            4,
+            &projection,
+            1,
+            None,
+        )
+        .unwrap()
+        .compile_shared_structures_with_source_projection(
+            Arc::clone(&wider.1),
+            Arc::clone(&wider.0),
+            4,
+            |key| Ok(projection[key]),
+            |axis| Ok(storage_axes[axis]),
+            true,
+        )
+        .unwrap();
+    assert_eq!(warm, eager);
 }
 
 #[test]
@@ -990,10 +1010,10 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
     let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
     let duplicate = [keys[0].clone(), keys[0].clone()];
     owner_activity();
-    let store = Arc::new(RuntimeCoefficientStore::<f64>::default());
-    let mut bound = crate::tree_transform::TreeTransformPlanning::<f64>::default();
-    bound.bind_coefficient_store(Arc::downgrade(&store));
-    let mut local = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    crate::tree_transform::take_coefficient_group_activity();
+    let mut bound = crate::tree_transform::TreeTransformPlanning::default();
+    bound.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
+    let mut local = crate::tree_transform::TreeTransformPlanning::default();
     let malformed: [(&[FusionTreePairKey], &[usize]); 4] = [
         (&keys, &[1]),
         (&keys, &[1, 2]),
@@ -1001,7 +1021,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
         (&duplicate, &[1, 2]),
     ];
     for (logical_keys, storage_indices) in malformed {
-        let compile = |cache: &mut crate::tree_transform::TreeTransformPlanning<f64>| {
+        let compile = |cache: &mut crate::tree_transform::TreeTransformPlanning| {
             let error = cache
                 .resolve_tree_pair_oriented(
                     &SU2FusionRule,
@@ -1019,14 +1039,19 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
             format!("{error:?}")
         };
 
-        // What: a runtime-bound miss reports the same first projection error
-        // as the context-local path and admits nothing.
+        // What: a multi-threaded miss reports the same first projection
+        // error as a serial one and admits nothing.
         assert_eq!(compile(&mut bound), compile(&mut local));
     }
     // What: every malformed projection is read only after an owner miss, so
-    // each one counts a build and publishes nothing.
+    // each one counts a build and publishes nothing; no coefficient group is
+    // looked up before the projection is proved.
     let activity = owner_activity();
     assert_eq!((activity.builds, activity.publications), (8, 0));
+    assert_eq!(
+        crate::tree_transform::take_coefficient_group_activity(),
+        Default::default()
+    );
 }
 
 #[test]
@@ -1039,7 +1064,7 @@ fn prelowered_compile_does_not_enter_the_completed_transformer_cache() {
     let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let first_a = cache
@@ -1108,7 +1133,7 @@ fn failed_structure_compile_publishes_nothing() {
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
     mark_canonical([structure.as_ref(), wrong_destination.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     cache
@@ -1158,7 +1183,7 @@ fn warm_prelowered_raw_arc_aliases_do_not_observe_or_mutate_cache_state() {
     assert_ne!(valid.content_id(), invalid.content_id());
     assert!(!Arc::ptr_eq(&valid, &invalid));
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
     cache
         .get_or_compile_tree_pair_prelowered(
@@ -1208,7 +1233,7 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
     // retained completed-structure state change under either execution policy.
     for _ in 0..2 {
         let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-        let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+        let cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
         owner_activity();
 
@@ -1245,7 +1270,7 @@ fn malformed_source_precedes_noncategorical_destination_without_cache_mutation()
         dst_structure,
     )
     .unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let error = cache
@@ -1281,7 +1306,7 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
     let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     reset_tree_pair_operation_preparations();
@@ -1328,7 +1353,7 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
         .unwrap();
         let src =
             TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
-        let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+        let cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
 
         let error = cache
@@ -1398,7 +1423,7 @@ fn invalid_unique_source_does_not_count_eager_compile_misses() {
             .unwrap();
     let src =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let error = cache
@@ -1535,7 +1560,7 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
             .unwrap();
     let dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
         .unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let error = cache
@@ -1611,18 +1636,14 @@ fn oriented_cold_and_warm_admission_rejects_equal_key_capability_changes() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for runtime_bound in [false, true] {
+    for _pass in 0..2 {
         // A fresh canonical parent per pass: the second pass must start cold.
         let storage = expert_copy(&storage);
         let destination = expert_copy(&destination);
         mark_canonical([storage.as_ref(), destination.as_ref()]);
-        let store = Arc::new(RuntimeCoefficientStore::<f64>::default());
-        let mut cache = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+        let mut cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
-        if runtime_bound {
-            cache.bind_coefficient_store(Arc::downgrade(&store));
-        }
-        let compile = |cache: &mut crate::tree_transform::TreeTransformPlanning<f64>,
+        let compile = |cache: &mut crate::tree_transform::TreeTransformPlanning,
                        rule: &AdmissionCountingSu2Rule| {
             cache.resolve_tree_pair_oriented(
                 rule,

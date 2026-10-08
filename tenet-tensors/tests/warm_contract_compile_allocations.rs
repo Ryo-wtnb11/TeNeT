@@ -7,8 +7,7 @@ use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, try_compile_storage_contract_core_route,
     BoundDynamicFusionMapSpace, DirectCoreExecutor, FusionOperand, OutputAxisOrder, RuleIdentity,
-    RuntimeCoefficientStore, StorageContractResolution, TensorContractFusionExecutionContext,
-    TensorContractSpec,
+    StorageContractResolution, TensorContractFusionExecutionContext, TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -73,20 +72,18 @@ fn space_of(
     .unwrap()
 }
 
-/// Runtime-configured context: categorical coefficients from one shared
-/// store; completed transformers from the process-global cache.
-fn runtime_like_context(
-    store: &Arc<RuntimeCoefficientStore<f64>>,
-) -> TensorContractFusionExecutionContext<f64, RuleIdentity> {
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .tree_context_mut()
-        .bind_runtime_coefficient_store(Arc::downgrade(store));
-    context
+/// Completed transformers and composed coefficients both come from the
+/// process-global caches, so every context is configured alike.
+fn runtime_like_context() -> TensorContractFusionExecutionContext<f64, RuleIdentity> {
+    TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
 }
 
 fn completed_transformers() -> tenet_core::StructureCacheInfo {
     tenet_core::structure_cache_info(tenet_core::StructureCacheKind::CompletedTreeTransformer)
+}
+
+fn coefficient_groups() -> tenet_core::StructureCacheInfo {
+    tenet_core::structure_cache_info(tenet_core::StructureCacheKind::TreeTransformCoefficients)
 }
 
 /// The storage ladder these rows pin: the lock-free canonical core, then the
@@ -156,10 +153,7 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
         OutputAxisOrder::from_axes(&swapped),
     )
     .unwrap();
-    let store = Arc::new(RuntimeCoefficientStore::new(
-        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
-    ));
-    let mut context = runtime_like_context(&store);
+    let mut context = runtime_like_context();
     let dynamic_tree = warm_allocations(|| {
         let resolution = storage_ladder(
             &mut context,
@@ -220,10 +214,7 @@ fn crossing_compile_allocations(
         OutputAxisOrder::from_axes(&open),
     )
     .unwrap();
-    let store = Arc::new(RuntimeCoefficientStore::new(
-        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
-    ));
-    let mut context = runtime_like_context(&store);
+    let mut context = runtime_like_context();
     warm_allocations(|| {
         storage_ladder(
             &mut context,
@@ -306,11 +297,9 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
         rank,
     )
     .unwrap();
-    let store = Arc::new(RuntimeCoefficientStore::new(
-        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
-    ));
-    let mut context = runtime_like_context(&store);
+    let mut context = runtime_like_context();
     let rejections = completed_transformers().rejections();
+    let group_rejections = coefficient_groups().rejections();
     let copy_c = warm_allocations(|| {
         let resolution = context
             .plan_contract::<DirectCoreExecutor, _>(
@@ -338,9 +327,11 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
     });
     // #1993: every structure this fixture builds is retained; the old 8 MiB
     // per-entry limit bypassed the rank-5 transform and recompiled it per call.
-    for info in [store.plan_info(), store.group_info()] {
-        assert_eq!(info.admission_bypasses(), 0, "rank {rank}: {info:?}");
-    }
+    assert_eq!(
+        coefficient_groups().rejections(),
+        group_rejections,
+        "rank {rank}: a coefficient group was rejected"
+    );
     assert_eq!(
         completed_transformers().rejections(),
         rejections,
@@ -439,10 +430,7 @@ fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
         rank,
     )
     .unwrap();
-    let store = Arc::new(RuntimeCoefficientStore::new(
-        RuntimeCoefficientStore::<f64>::DEFAULT_BYTE_BUDGET,
-    ));
-    let mut context = runtime_like_context(&store);
+    let mut context = runtime_like_context();
     let mut run = |copy_c: bool| -> usize {
         counting_alloc::start();
         let resolution = if copy_c {
