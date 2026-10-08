@@ -963,11 +963,11 @@ fn recoupling_threads_do_not_change_cached_tree_transform_result() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     mark_canonical([dst.structure().as_ref(), src.structure().as_ref()]);
     let mut planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
-    planning.set_recoupling_threads(1);
+    planning.set_recoupling_threads(std::num::NonZeroUsize::new(1).unwrap());
     let serial = planning
         .resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false)
         .unwrap();
-    planning.set_recoupling_threads(4);
+    planning.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     let cached = planning
         .resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false)
         .unwrap();

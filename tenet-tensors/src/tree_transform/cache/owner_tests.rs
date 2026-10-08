@@ -529,7 +529,7 @@ fn concurrent_cold_misses_build_without_waiting_and_admit_once() {
                 let (dst, src, operation) = (&dst, &src, &operation);
                 scope.spawn(move || {
                     let mut planning = TreeTransformPlanning::<f64>::default();
-                    planning.set_recoupling_threads(4);
+                    planning.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
                     barrier.wait();
                     let built = planning
                         .resolve_tree_pair(&U1FusionRule, operation, dst, src, false)

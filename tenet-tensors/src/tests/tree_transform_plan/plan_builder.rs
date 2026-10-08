@@ -720,7 +720,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
     );
 
     dst.data_mut().fill(f64::NAN);
-    backend.set_recoupling_threads(4);
+    backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
     tree_transform_overwrite_execute_with(
         &mut backend,
@@ -1451,7 +1451,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     assert_eq!(dst.data(), &[17.0, 22.0, 27.0, 32.0]);
 
     dst.data_mut().fill(f64::NAN);
-    backend.set_recoupling_threads(4);
+    backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
     tree_transform_overwrite_execute_with(
         &mut backend,
