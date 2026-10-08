@@ -1474,9 +1474,10 @@ impl std::fmt::Debug for Runtime {
     }
 }
 
-/// Selects the CPU linear-algebra provider for dense per-coupled-sector
-/// factorizations (SVD / QR / eigh / eig / inv / exp), chosen via
-/// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
+/// Names a CPU linear-algebra provider. [`RuntimeBuilder::linalg_backend`]
+/// uses it for the dense per-coupled-sector factorizations (SVD / QR / eigh /
+/// eig / inv / exp); [`RuntimeBuilder::gemm_backend`] uses it, independently,
+/// for contraction GEMM. Backend choice changes performance
 /// only — results stay TensorKit-equivalent across providers.
 ///
 /// The *specific* BLAS/LAPACK behind [`LinalgBackend::Blas`] (OpenBLAS, MKL,
