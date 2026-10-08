@@ -295,6 +295,10 @@ impl PreparedCheckedGenericDynamicSpace {
         self.structure.required_len()
     }
 
+    pub(crate) fn shared_structure(&self) -> Arc<BlockStructure> {
+        self.structure.shared_structure()
+    }
+
     pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
         &self.homspace
     }

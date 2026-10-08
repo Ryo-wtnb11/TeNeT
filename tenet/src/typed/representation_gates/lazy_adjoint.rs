@@ -1550,3 +1550,41 @@ fn lazy_cat_reads_parent_storage_without_publishing_adjoint_caches() {
             .unwrap();
     upper.cat(&lower, Side::Codomain).unwrap();
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_trace_nonselfdual_multiblock_lazy_matches_hand_weighted_trace() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
+        Complex64::new(
+            (1 + ij[0] + 4 * ij[1]) as f64,
+            0.5 + ij[0] as f64 - 2.0 * ij[1] as f64,
+        )
+    })
+    .unwrap();
+    assert_eq!(source.subblock_count(), 2);
+    let direct = source.trace_pairs(&[(0, 1)]).unwrap();
+    // Vacuum: 1+6. Fundamental: 3*(1+6+11), with the same
+    // dimension weights on the imaginary diagonal components.
+    let expected = Complex64::new(61.0, -4.5);
+    assert!((direct.dense_data().unwrap()[0] - expected).norm() < 1e-12);
+    let lazy = source.adjoint().unwrap();
+    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+        panic!("expected lazy source")
+    };
+    let parent = Arc::clone(&view.parent);
+    let result = lazy.trace_pairs(&[(0, 1)]).unwrap();
+    assert!((result.dense_data().unwrap()[0] - expected.conj()).norm() < 1e-12);
+    assert!(Arc::ptr_eq(
+        result.logical_space().provider_arc(),
+        &provider
+    ));
+    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+        panic!("trace changed source representation")
+    };
+    assert!(Arc::ptr_eq(&view.parent, &parent));
+}
+

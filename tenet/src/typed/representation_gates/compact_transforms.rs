@@ -1125,3 +1125,41 @@ fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
     assert_eq!(values[offset(0, 1)].to_bits(), 0.0f64.to_bits());
     assert_eq!(values[offset(1, 0)].to_bits(), 0.0f64.to_bits());
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_trace_defers_compact_materialization_until_admission() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let diagonal = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    Complex64::new(2.0, 1.0),
+                    Complex64::new(-1.0, 2.0),
+                    Complex64::new(4.0, -2.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert!(diagonal.trace_pairs(&[(0, 0)]).is_err());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    let result = diagonal.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    // SU(3) fundamental quantum dimension is 3; vacuum dimension is 1.
+    assert!((result.dense_data().unwrap()[0] - Complex64::new(19.0, 4.0)).norm() < 1e-12);
+    assert!(matches!(
+        owned(&diagonal).data.as_ref(),
+        TypedData::Diagonal(_)
+    ));
+}

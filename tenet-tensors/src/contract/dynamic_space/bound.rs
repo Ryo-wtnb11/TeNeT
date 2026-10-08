@@ -359,12 +359,10 @@ where
         })
     }
 
-    /// Commits a checked Generic final HomSpace under the source provider allocation.
-    #[doc(hidden)]
-    pub fn commit_final_homspace_generic_bound_checked(
+    pub(crate) fn validate_prepared_final_homspace_generic_checked(
         &self,
-        prepared: PreparedCheckedGenericDynamicSpace,
-    ) -> Result<Self, OperationError> {
+        prepared: &PreparedCheckedGenericDynamicSpace,
+    ) -> Result<(), OperationError> {
         if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
             return Err(OperationError::StructureMismatch {
                 tensor: "checked Generic provider binding",
@@ -376,6 +374,16 @@ where
             [self.provider.fusion_style()],
         )
         .map_err(OperationError::from_core_preserving_context)?;
+        Ok(())
+    }
+
+    /// Commits a checked Generic final HomSpace under the source provider allocation.
+    #[doc(hidden)]
+    pub fn commit_final_homspace_generic_bound_checked(
+        &self,
+        prepared: PreparedCheckedGenericDynamicSpace,
+    ) -> Result<Self, OperationError> {
+        self.validate_prepared_final_homspace_generic_checked(&prepared)?;
         Ok(Self {
             space: prepared.commit(),
             provider: Arc::clone(&self.provider),

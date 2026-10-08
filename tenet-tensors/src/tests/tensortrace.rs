@@ -6,12 +6,16 @@ use tenet_core::Trivial;
 struct CheckedTraceToy(tenet_core::BraidingStyleKind);
 
 impl tenet_core::CheckedGenericFusion for CheckedTraceToy {
-    type Error = std::convert::Infallible;
+    type Error = std::io::Error;
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
         tenet_core::RuleIdentity::of_type::<Self>()
     }
     fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
+        if TRACE_TEST_WRONG_STYLE.get() {
+            FusionStyleKind::Unique
+        } else {
+            FusionStyleKind::Generic
+        }
     }
     fn braiding_style(&self) -> tenet_core::BraidingStyleKind {
         self.0
@@ -80,6 +84,10 @@ impl tenet_core::CheckedGenericRigidSymbols for CheckedTraceToy {
 
 impl tenet_core::CheckedGenericPivotal for CheckedTraceToy {
     fn try_twist_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+        TRACE_TEST_TWIST_CALLS.set(TRACE_TEST_TWIST_CALLS.get() + 1);
+        if TRACE_TEST_FAIL_TWIST.get() {
+            return Err(std::io::Error::other("trace pivotal failure"));
+        }
         Ok(1.0)
     }
 }
@@ -3053,3 +3061,10 @@ fn structure_executors_reject_terms_compiled_for_other_spaces() {
     )
     .is_ok());
 }
+
+thread_local! {
+    static TRACE_TEST_WRONG_STYLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TRACE_TEST_FAIL_TWIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TRACE_TEST_TWIST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+mod staged_publication;
