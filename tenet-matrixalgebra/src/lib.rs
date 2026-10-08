@@ -62,9 +62,8 @@ pub mod seam {
     #[cfg(feature = "diagnostics")]
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
     pub use crate::matrix_functions::{
-        exp_direct_into_dyn, exp_dyn, inv_direct_dyn, inv_direct_into_dyn,
-        pinv_adjoint_parent_direct_into_dyn, pinv_adjoint_parent_dyn, pinv_direct_into_dyn,
-        pinv_dyn, solve_left_direct_dyn, solve_left_direct_into_dyn,
+        exp_direct_into_dyn, inv_direct_into_dyn, pinv_adjoint_parent_direct_into_dyn,
+        pinv_direct_into_dyn, solve_left_direct_into_dyn,
     };
     pub use crate::truncation::rescaled_power_norm;
 }
@@ -89,7 +88,10 @@ use factorize::{
     svd_compact_factors_with_spectrum_dyn_checked_generic,
 };
 #[cfg(test)]
-use matrix_functions::{exp, inv, inv_dyn, pinv};
+use matrix_functions::{
+    exp, exp_into_mf, inv, inv_into_mf, pinv, pinv_adjoint_parent_into_mf, pinv_into_mf,
+    solve_left_into_mf,
+};
 #[cfg(test)]
 use seam::*;
 

@@ -574,6 +574,7 @@ fn spectrum_leg<V>(spectrum: &[SectorSpectrum<V>]) -> SectorLeg {
 /// layout authority.
 pub(super) struct MfAuthority<'a, R>(pub(super) &'a BoundDynamicFusionMapSpace<R>);
 
+#[cfg(test)]
 /// The multiplicity-free derived layout of `homspace` on `space`'s provider:
 /// the output of a per-sector kernel whose input layout may be packed.
 pub(crate) fn multiplicity_free_output_space<R>(
@@ -702,19 +703,6 @@ where
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
         Ok(space.clone())
     }
-}
-
-/// `domain <- codomain` of `homspace`: the space of its inverse.
-pub(super) fn inverse_homspace(homspace: &FusionTreeHomSpace) -> FusionTreeHomSpace {
-    FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone())
-}
-
-/// `domain(divisor) <- domain(rhs)`: the space of `divisor \ rhs`.
-pub(super) fn solve_homspace(
-    divisor: &FusionTreeHomSpace,
-    rhs: &FusionTreeHomSpace,
-) -> FusionTreeHomSpace {
-    FusionTreeHomSpace::new(divisor.domain().clone(), rhs.domain().clone())
 }
 
 #[cfg(test)]

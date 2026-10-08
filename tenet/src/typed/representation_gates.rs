@@ -21,6 +21,7 @@ mod lazy_adjoint_factorize;
 mod lazy_adjoint_spectral;
 mod network_restriction;
 mod overwrite;
+mod preflight_order;
 
 impl<T: ScalarOps> ChainCoefficient for T {
     fn real(value: f64) -> Self {

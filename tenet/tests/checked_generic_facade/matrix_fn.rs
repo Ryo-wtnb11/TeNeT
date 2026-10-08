@@ -679,8 +679,11 @@ fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing(
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    // Unequal sides, so the isomorphism is a provider question: equal sides
+    // are isomorphic without one (#1995).
+    let dual = leg.try_dual().unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&dual], |_, _| 2.0).unwrap();
     let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     assert!(matches!(
@@ -992,7 +995,8 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
             2,
         );
         // Includes the one identity query that both admits the root and keys
-        // the sector-structure cache (#2030, #2046).
-        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
+        // the sector-structure cache (#2030, #2046). The divisor's equal
+        // sides are isomorphic without a coupled-dimension query (#1995).
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 2);
     }
 }

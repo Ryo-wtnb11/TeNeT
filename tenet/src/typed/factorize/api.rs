@@ -23,24 +23,26 @@ where
     /// and this left solve with roles chosen in the adjointed axis order.
     ///
     /// Dense input uses one linear solve per coupled sector. A compact
-    /// diagonal divisor instead applies its elementwise reciprocal: a compact
-    /// right-hand side on the same bond gives a compact quotient, and a dense
-    /// one has its leading (bond) axis scaled, `O(Σ_c k_c m_c)` with no LU.
-    /// Both fusion modes admit every compact divisor, in any bond layout, through
-    /// one shared structural check; checked Generic scales a dense right-hand
-    /// side in place only when it is laid out as the destination, and
-    /// otherwise materializes both operands for the dense route. Nonfinite
-    /// divisor entries map through the reciprocal. An exact zero divisor entry is the
+    /// diagonal divisor instead applies its elementwise reciprocal (TensorKit
+    /// `D \ t`): a compact right-hand side on the same bond gives a compact
+    /// quotient on the divisor's space, and any other one — dense, in any
+    /// layout, or a lazy adjoint read in place — lands in the output space
+    /// with its leading (bond) axis scaled, `O(Σ_c k_c m_c)` with no LU, in
+    /// both fusion modes. Every compact divisor, in any bond layout, is
+    /// admitted through one shared structural check. Nonfinite divisor
+    /// entries map through the reciprocal. An exact zero divisor entry is the
     /// dense route's singular-block operation error in every mode. A compact
     /// right-hand side of a dense divisor is densified into the solve buffer.
-    /// Lazy adjoints are materialized only for this call.
+    /// On the dense route, lazy adjoints are materialized only for this call.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::RuntimeMismatch`] or [`Error::RuleMismatch`] for
-    /// incompatible operands, [`Error::InvalidArgument`] for unequal
-    /// codomains, and an operation error when the divisor is not isomorphic or
-    /// a sector is singular. If a checked provider rejects the output space,
+    /// In one order in every fusion mode (#1995), as TensorKit's `\` checks:
+    /// [`Error::RuntimeMismatch`], then [`Error::RuleMismatch`] for
+    /// incompatible operands, then [`Error::InvalidArgument`] for unequal
+    /// codomains, then an operation error when the divisor is not isomorphic,
+    /// then the borrowed-view refusal below; an operation error when a sector
+    /// is singular comes after all of them. If a checked provider rejects the output space,
     /// its original error is available as the source. If any preflight, sector
     /// solve, or output-space creation fails, no result tensor is returned.
     /// Non-identity roles also return the existing [`Self::permute`] errors
@@ -60,9 +62,12 @@ where
     /// ```
     ///
     /// An adjoint view `rhs` (`t.adjoint_view()`) is accepted by the current
-    /// split of a compact divisor, which reads it directly. A dense divisor
-    /// or either moved role pair would copy the view and returns
-    /// [`Error::Unsupported`]. Pass `&t.adjoint()?.materialize()?` instead.
+    /// split of a compact divisor, which reads it directly, in both fusion
+    /// modes. A dense divisor or either moved role pair would copy the view
+    /// and returns [`Error::Unsupported`]. Pass `&t.adjoint()?.materialize()?`
+    /// instead. Moved roles refuse the view after the runtime and rule checks
+    /// (which precede the leg roles' own [`Self::permute`] errors) but before
+    /// the shape checks, which need the permuted operands.
     pub fn solve<'a>(
         &self,
         rows: &[usize],
@@ -73,14 +78,14 @@ where
     ) -> Result<Self, TypedFacadeError<R>> {
         let rhs = rhs.into().operand()?;
         let rhs = &*rhs;
-        // Permuting a borrowed view would copy it before the solve dispatch
-        // reaches its own view guard. A moved compact divisor also becomes dense.
+        // Runtime and rule first, ahead of the leg roles: the permute cannot
+        // change them, so the first error does not depend on the roles or on
+        // the rhs's ownership. Permuting a borrowed view would copy it, so
+        // moved roles refuse it next; the shape checks need the permuted
+        // operands. A moved compact divisor also becomes dense.
+        self.require_solve_operands(rhs)?;
         if !self.axes_are_identity(rows, cols) || !rhs.axes_are_identity(rhs_rows, rhs_cols) {
-            let refusal = rhs.refuse_borrowed_view("solve");
-            if refusal.is_err() && !self.runtime.same_runtime(&rhs.runtime) {
-                return Err(Error::RuntimeMismatch.into());
-            }
-            refusal?;
+            rhs.refuse_borrowed_view("solve")?;
         }
         self.with_leg_roles(rows, cols, |lhs| {
             rhs.with_leg_roles(rhs_rows, rhs_cols, |right| lhs.factor_solve(right))
