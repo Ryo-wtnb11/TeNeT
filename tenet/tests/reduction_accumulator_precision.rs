@@ -275,8 +275,10 @@ macro_rules! dense_reductions {
     }};
 }
 
-/// Compact diagonal storage has its own reductions. The Checked-Generic mode
-/// rejects compact payloads, so this is separate from [`dense_reductions`].
+/// Compact diagonal storage has its own reductions. Its full-trace row reads
+/// the rank-0 result through the multiplicity-free `scalar`, so this is
+/// separate from [`dense_reductions`]; checked Generic compact reductions are
+/// covered by `compact_reductions_both_modes.rs`.
 macro_rules! compact_reductions {
     ($out:expr, $prefix:literal, $runtime:expr, $leg:expr, $dtype:ty, $wide:expr, $dim:expr) => {{
         let mut diagonal = stepper();
@@ -670,9 +672,9 @@ mod checked_generic {
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let adjoint = vec![2i64, 2];
         let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
-        // Compact payloads are rejected by this admission mode
-        // ("checked Generic reductions require dense payloads"), so only the
-        // dense and lazy-adjoint reductions exist to check here.
+        // Compact rows need the multiplicity-free `scalar` (see
+        // `compact_reductions`), so only the dense and lazy-adjoint
+        // reductions are checked here.
         let real = |v: f64| Complex64::new(v, 0.0);
         let complex = |v| v;
         let mut out = Vec::new();

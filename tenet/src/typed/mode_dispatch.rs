@@ -190,7 +190,6 @@ where
         + CheckedFusionAlgebra,
 {
     type FacadeError = Error;
-    const CHECKED_GENERIC: bool = false;
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         error.into()
@@ -289,7 +288,6 @@ where
         > + CheckedGenericFusion,
 {
     type FacadeError = GenericTensorError<<R as CheckedGenericFusion>::Error>;
-    const CHECKED_GENERIC: bool = true;
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))

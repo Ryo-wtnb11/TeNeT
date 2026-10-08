@@ -9,13 +9,6 @@ where
     /// Error returned by the ordinary typed facade.
     type FacadeError: std::error::Error + From<Error> + From<tenet_tensors::OperationError>;
 
-    /// Whether this is the checked Generic mode. Read only by the explicit
-    /// checked-Generic arms of the shared elementwise and reduction bodies
-    /// (compact reductions, `norm(p != 2)`, compact plus lazy `axpby`), which
-    /// #1867 and #1868 remove.
-    #[doc(hidden)]
-    const CHECKED_GENERIC: bool;
-
     /// Preserves a provider-side admission error.
     fn map_provider_error(error: R::Error) -> Self::FacadeError;
 

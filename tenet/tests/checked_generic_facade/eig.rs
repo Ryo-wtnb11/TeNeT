@@ -1495,9 +1495,9 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         );
     }
 
-    // Error precedence: space mismatch and diagonal-payload rejection come
-    // before any weight query even while `dim` is failing; then the provider
-    // failure surfaces for owned and lazy inputs on both reductions.
+    // Error precedence: a space mismatch comes before any weight query even
+    // while `dim` is failing; then the provider failure surfaces for compact,
+    // owned and lazy inputs on both reductions.
     let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let mismatched =
         TensorMap::from_subblock_fn(&runtime, [&wide, &wide], [&wide, &wide], lazy_oracle_value)
@@ -1531,17 +1531,17 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
                 if message == "tensors live on different spaces or block layouts"
         ));
     }
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+    // A compact diagonal reduces through the same weights (#1867), so it
+    // fails exactly as the dense and lazy inputs do.
     assert!(matches!(
         diagonal.inner(&diagonal).unwrap_err(),
-        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
-            if message == "checked Generic reductions require dense payloads"
+        GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
     ));
     assert!(matches!(
         diagonal.norm(2.0).unwrap_err(),
-        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
-            if message == "checked Generic reductions require dense payloads"
+        GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
     ));
-    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
     for tensor in [&lhs, &lazy_lhs] {
         assert!(matches!(
             tensor.inner(&rhs).unwrap_err(),

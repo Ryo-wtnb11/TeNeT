@@ -916,6 +916,18 @@ fn checked_generic_cat_admits_once_and_queries_only_left_before_commit() {
     // What: successful catdomain admission uses the left provider Arc once;
     // admitted identity stamps keep the equal-identity right provider cold,
     // and copy planning performs no provider query after commit.
+    //
+    // Why a fresh process: the spy commits after as many queries as `zeros`
+    // made on the same admission, which depends on the process-wide
+    // structure caches. A sibling test's `forget_cached_structures` between
+    // the two would make `cat` re-derive what `zeros` found cached, and those
+    // extra admission queries would land after the spy's commit point.
+    if run_isolated_or_return(
+        "TENET_CHECKED_CAT_ADMITS_ONCE_ISOLATED",
+        "transforms::checked_generic_cat_admits_once_and_queries_only_left_before_commit",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(0));
     let right_provider = Arc::new(CheckedOnlyToy::new(0));

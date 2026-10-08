@@ -77,12 +77,7 @@ where
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
             || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
         {
-            // Checked Generic densifies a compact operand next to a lazy one
-            // until #1867 gives it these compact arms.
-            let compact_arms = !<R::Mode as TypedTensorModeDispatch<R>>::CHECKED_GENERIC;
-            if let (true, Some(spectrum), TypedTensorRepr::Adjoint(_)) =
-                (compact_arms, self.spectrum(), &other.repr)
-            {
+            if let (Some(spectrum), TypedTensorRepr::Adjoint(_)) = (self.spectrum(), &other.repr) {
                 let (operand, dense) = other.fusion_operand_and_data();
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
@@ -96,9 +91,7 @@ where
                 add_spectrum_into(self.logical_space().space(), &mut data, spectrum, alpha)?;
                 return Ok(self.with_data(data));
             }
-            if let (true, TypedTensorRepr::Adjoint(_), Some(spectrum)) =
-                (compact_arms, &self.repr, other.spectrum())
-            {
+            if let (TypedTensorRepr::Adjoint(_), Some(spectrum)) = (&self.repr, other.spectrum()) {
                 let (operand, dense) = self.fusion_operand_and_data();
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
