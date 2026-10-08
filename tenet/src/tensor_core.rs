@@ -366,7 +366,6 @@ where
         }
     }
     let mut source_offsets = None;
-    let mut destination_offsets = None;
     let mut destination_sorted = None;
     let mut seen_source = smallvec::SmallVec::<[bool; 16]>::from_elem(false, sources.block_count());
     let mut writes = smallvec::SmallVec::<[(usize, usize, usize, f64); 16]>::new();
@@ -459,25 +458,17 @@ where
             // A braid sends sector c to its dual, which sits at another
             // ordinal whenever the sector set is not self-dual, so this path
             // is common. Canonical structures store blocks in offset order,
-            // where a binary search finds the block without allocating; the
-            // map serves only explicitly laid-out structures.
-            let target = usize::try_from(dst.offset).ok()?;
-            if *destination_sorted.get_or_insert_with(|| offsets_never_decrease(destinations)) {
-                nonempty_block_at_sorted_offset(destinations, target)?
-            } else {
-                let offsets = destination_offsets.get_or_insert_with(|| {
-                    (0..destinations.block_count())
-                        .filter_map(|index| {
-                            let block = destinations.block(index).ok()?;
-                            if block.shape().iter().product::<usize>() == 0 {
-                                return None;
-                            }
-                            Some((block.offset(), index))
-                        })
-                        .collect::<HashMap<_, _>>()
-                });
-                *offsets.get(&target)?
+            // where a binary search finds the block without allocating.
+            //
+            // Why decline instead of indexing an unordered (expert) layout:
+            // the typed caller always passes canonical layouts, and the
+            // general dense replay is correct for any layout, so an offset
+            // map here would only add an allocation no caller needs. Why not
+            // a debug assertion: an expert layout is legal input, not a bug.
+            if !*destination_sorted.get_or_insert_with(|| offsets_never_decrease(destinations)) {
+                return None;
             }
+            nonempty_block_at_sorted_offset(destinations, usize::try_from(dst.offset).ok()?)?
         };
         let destination_block = destinations.block(destination_index).ok()?;
         let [row_stride, column_stride] = destination_block.strides() else {
@@ -1930,6 +1921,124 @@ mod tests {
             ]
         );
         assert!(reordered, "the U(1) braid moves a destination ordinal");
+    }
+
+    #[test]
+    fn compact_braid_declines_an_unordered_expert_destination_for_dense_replay() {
+        // What: a destination whose block offsets are not in block order (an
+        // expert layout) leaves the compact route, and the general dense
+        // replay of the same compiled braid still writes each spectrum along
+        // its destination block's diagonal.
+        let provider = Arc::new(tenet_core::U1FusionRule);
+        let sectors = [
+            (tenet_core::U1Irrep::new(-1).sector_id(), 1),
+            (tenet_core::U1Irrep::new(1).sector_id(), 3),
+        ];
+        let leg = SectorLeg::new(sectors, false);
+        let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            tenet_core::FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg.clone()]),
+                FusionProductSpace::new([leg]),
+            ),
+            sectors.map(|(_, n)| vec![n, n]),
+        )
+        .unwrap();
+        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+        let canonical = source.transformed_multiplicity_free(&operation).unwrap();
+        let canonical_blocks = canonical.space().structure();
+        // The same blocks, stored in reverse block order.
+        let mut offset = canonical_blocks.required_len().unwrap();
+        let blocks = (0..canonical_blocks.block_count())
+            .map(|index| {
+                let block = canonical_blocks.block(index).unwrap();
+                let [rows, columns] = block.shape() else {
+                    unreachable!()
+                };
+                offset -= rows * columns;
+                tenet_core::BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    vec![1, *rows],
+                    offset,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expert_blocks = tenet_core::BlockStructure::from_blocks_with_rank(2, blocks).unwrap();
+        assert!(!super::offsets_never_decrease(&expert_blocks));
+        let expert = tenet_tensors::DynamicFusionMapSpace::from_typed(
+            &tenet_core::FusionTensorMapSpace::<1, 1>::new_unbound(
+                tenet_core::TensorMapSpace::from_dims([4], [4]).unwrap(),
+                canonical.space().homspace().clone(),
+                expert_blocks,
+            )
+            .unwrap(),
+        );
+        let sources = source.space().structure();
+        let destinations = expert.structure();
+        let targets = (0..2)
+            .map(|index| {
+                (0..2)
+                    .find(|&target| {
+                        destinations.block(target).unwrap().shape()
+                            == sources.block(index).unwrap().shape()
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let coefficients = [2.0, -0.5];
+        let specs = [0, 1].map(|index| {
+            tenet_operations::TreeTransformBlockSpec::single(
+                targets[index],
+                index,
+                coefficients[index],
+            )
+            .with_source_axes([1, 0])
+        });
+        let compiled = tenet_tensors::TreeTransformStructure::compile_structures(
+            destinations,
+            sources,
+            &specs,
+        )
+        .unwrap();
+        let spectrum = sectors.map(|(sector, n)| SectorSpectrum {
+            sector,
+            values: (0..n).map(|i| 1.0 + i as f64).collect::<Vec<f64>>(),
+        });
+
+        assert!(try_braid_rank_one_diagonal_data::<f64>(
+            source.space(),
+            &expert,
+            &compiled,
+            &spectrum,
+        )
+        .is_none());
+
+        let mut source_data = vec![0.0; sources.required_len().unwrap()];
+        let mut expected = vec![0.0; destinations.required_len().unwrap()];
+        for (index, entry) in spectrum.iter().enumerate() {
+            let from = sources.block(index).unwrap();
+            let to = destinations.block(targets[index]).unwrap();
+            for (i, value) in entry.values.iter().enumerate() {
+                source_data[from.offset() + i * (from.strides()[0] + from.strides()[1])] = *value;
+                expected[to.offset() + i * (to.strides()[0] + to.strides()[1])] =
+                    coefficients[index] * value;
+            }
+        }
+        let mut dense = vec![f64::NAN; expected.len()];
+        tenet_operations::tree_transform_structure_overwrite_with_strided_kernel_raw(
+            &mut tenet_operations::StridedHostKernelAdapter::default(),
+            &mut tenet_operations::TreeTransformWorkspace::default(),
+            &compiled,
+            destinations,
+            sources,
+            &mut dense,
+            &source_data,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(dense, expected);
     }
 
     #[test]
