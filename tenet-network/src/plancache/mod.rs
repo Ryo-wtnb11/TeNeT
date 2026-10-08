@@ -893,7 +893,6 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
 }
 
 /// Hit/miss/re-plan counters and the current entry count.
-#[allow(deprecated)]
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
     with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
@@ -936,7 +935,6 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             workspace_byte_admissions,
             workspace_byte_rejections,
             workspace_byte_evictions,
-            dynamic_aliases: 0,
         }
     })
 }

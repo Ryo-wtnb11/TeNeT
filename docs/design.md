@@ -69,8 +69,7 @@ are checked per call. Batch size may affect workspace capacity or backend
 artifacts; it does not define a structural plan's semantic identity.
 `ComposePlan` / `ComposeWorkspace` implement this split for stacked compose.
 `EighFullPlan` / `EighFullWorkspace` implement it for stacked real Hermitian
-eigendecomposition; deprecated `PreparedEighFull` is a thin compatibility
-wrapper over that pair.
+eigendecomposition.
 
 `StackedTensorMap` is an expert fixed-stride representation for homogeneous
 members. It is not a required batch type for ordinary tensor operations.

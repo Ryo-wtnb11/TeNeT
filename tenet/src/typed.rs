@@ -282,11 +282,10 @@ use crate::tensor_core::{
 };
 
 mod batched;
-#[allow(deprecated)]
 pub use batched::{
     BatchError, BatchMemberRepresentation, ComposePlan, ComposeWorkspace, ContractPlan,
     ContractWorkspace, EighFullPlan, EighFullWorkspace, EighStackOutput, MemberFault,
-    PreparedCompose, PreparedEighFull, SignatureField, StackedTensorMap, StructureSignature,
+    SignatureField, StackedTensorMap, StructureSignature,
 };
 
 #[cfg(test)]

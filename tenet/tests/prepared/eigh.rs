@@ -1,4 +1,4 @@
-//! Fixtures and the independent oracle for the `PreparedEighFull` gates
+//! Fixtures and the independent oracle for the `EighFullPlan` gates
 //! (#1499, leaf L3 of #1287).
 //!
 //! The oracle reads tensors only through the public block API. Each coupled

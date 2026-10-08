@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Warm Host compose workspace and compatibility-wrapper allocation contract:
 //! after one call at
 //! a fixed `B`, `execute` and `execute_into` allocate nothing of TeNeT's on
@@ -16,7 +15,7 @@ use std::time::Instant;
 
 #[allow(unused_imports)]
 use num_complex::{Complex32, Complex64};
-use tenet::typed::{ComposePlan, PreparedCompose, Runtime, StackedTensorMap};
+use tenet::typed::{ComposePlan, Runtime, StackedTensorMap};
 
 use prepared::{filled, members, u1_legs};
 
@@ -58,22 +57,23 @@ fn warm_host_calls_allocate_only_the_backend_grouped_validation() {
         f64::NAN,
     ))
     .unwrap();
-    let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let mut ws = plan.workspace().unwrap();
 
     let cold = allocations(|| {
-        handle.execute(&lhs, &rhs).unwrap();
+        plan.execute(&lhs, &rhs, &mut ws).unwrap();
     });
     assert!(
         cold.0 > 0,
         "the cold call allocates its output and job list"
     );
-    handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+    plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
 
     let warm = allocations(|| {
-        handle.execute(&lhs, &rhs).unwrap();
+        plan.execute(&lhs, &rhs, &mut ws).unwrap();
     });
     let warm_into = allocations(|| {
-        handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
     });
     assert!(warm.0 <= 1, "warm execute allocations: {warm:?}");
     assert_eq!(

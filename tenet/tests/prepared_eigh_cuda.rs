@@ -1,4 +1,4 @@
-//! Device gates of `EighFullPlan` and its `PreparedEighFull` forwarder.
+//! Device gates of `EighFullPlan`.
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with
@@ -12,7 +12,6 @@
 //! bit-identical (IEEE `==`) to device eager.
 
 #![cfg(feature = "cuda")]
-#![allow(deprecated)]
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -28,7 +27,7 @@ use tenet::expert::cuda_transfer_stats;
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::Error;
 use tenet::typed::{
-    BatchError, Eigh, EighFullPlan, GradedSpace, MemberFault, PreparedEighFull, Runtime,
+    BatchError, Eigh, EighFullPlan, EighFullWorkspace, GradedSpace, MemberFault, Runtime,
     StackedTensorMap, TensorMap,
 };
 
@@ -318,15 +317,16 @@ fn non_hermitian_members_are_named_before_any_solver_launch() {
         inputs[1] = x.clone();
         inputs[count - 1] = x;
         let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-        let mut handle = PreparedEighFull::new(
+        let plan = EighFullPlan::new(
             &stack,
             &codomain_axes(&inputs[0]),
             &domain_axes(&inputs[0]),
             HermitianTol::DEFAULT,
         )
         .unwrap();
+        let mut ws = plan.workspace().unwrap();
         let before = cuda_transfer_stats();
-        let got = rejected(handle.execute(&stack).map(|_| ()));
+        let got = rejected(plan.execute(&stack, &mut ws).map(|_| ()));
         let counts = delta(cuda_transfer_stats(), before);
         let fault = MemberFault::NotHermitian;
         assert_eq!(got, vec![(1, fault), (count - 1, fault)]);
@@ -375,14 +375,18 @@ fn mixed_scale_admission_verdicts_equal_device_eager_per_member() {
         "{expected:?}"
     );
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle = PreparedEighFull::new(
+    let plan = EighFullPlan::new(
         &stack,
         &codomain_axes(&inputs[0]),
         &domain_axes(&inputs[0]),
         HermitianTol::DEFAULT,
     )
     .unwrap();
-    assert_eq!(rejected(handle.execute(&stack).map(|_| ())), expected);
+    let mut ws = plan.workspace().unwrap();
+    assert_eq!(
+        rejected(plan.execute(&stack, &mut ws).map(|_| ())),
+        expected
+    );
 }
 
 #[test]
@@ -394,15 +398,16 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
     let mut inputs = single_leg(&runtime, &leg, 5, |_, _, _| 1.0);
     inputs[1] = inputs[1].scale(f64::NAN);
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle = PreparedEighFull::new(
+    let plan = EighFullPlan::new(
         &stack,
         &codomain_axes(&inputs[0]),
         &domain_axes(&inputs[0]),
         HermitianTol::DEFAULT,
     )
     .unwrap();
+    let mut ws = plan.workspace().unwrap();
     assert_eq!(
-        rejected(handle.execute(&stack).map(|_| ())),
+        rejected(plan.execute(&stack, &mut ws).map(|_| ())),
         vec![(1, MemberFault::NotHermitian)]
     );
 
@@ -431,16 +436,17 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
         "eager rejects the overflow"
     );
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle = PreparedEighFull::new(
+    let plan = EighFullPlan::new(
         &stack,
         &codomain_axes(&inputs[0]),
         &domain_axes(&inputs[0]),
         HermitianTol::DEFAULT,
     )
     .unwrap();
+    let mut ws = plan.workspace().unwrap();
     let fault = MemberFault::NonFiniteEigenvalue;
     assert_eq!(
-        rejected(handle.execute(&stack).map(|_| ())),
+        rejected(plan.execute(&stack, &mut ws).map(|_| ())),
         vec![(0, fault), (3, fault)]
     );
 }
@@ -454,7 +460,7 @@ fn complex_device_payloads_are_unsupported() {
     let complex = members::<_, Complex64>(&runtime, &[&leg], &[&leg], 2, 1);
     let stack = StackedTensorMap::pack(&complex).unwrap().to_cuda().unwrap();
     assert!(matches!(
-        PreparedEighFull::new(&stack, &codomain_axes(&complex[0]), &domain_axes(&complex[0]), HermitianTol::DEFAULT),
+        EighFullPlan::new(&stack, &codomain_axes(&complex[0]), &domain_axes(&complex[0]), HermitianTol::DEFAULT),
         Err(Error::Operation(error)) if format!("{error:?}").contains("real payloads")
     ));
 }
@@ -506,17 +512,18 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
     skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
     let stack =
         |inputs: &[TensorMap<_, f64>]| StackedTensorMap::pack(inputs).unwrap().to_cuda().unwrap();
-    let mut handle = PreparedEighFull::new(
+    let plan = EighFullPlan::new(
         &stack(&good),
         &codomain_axes(&good[0]),
         &domain_axes(&good[0]),
         HermitianTol::DEFAULT,
     )
     .unwrap();
+    let mut ws = plan.workspace().unwrap();
     let check = |what: &str,
-                 handle: &mut PreparedEighFull<_, f64, tenet::typed::CudaStorage<f64>>,
+                 ws: &mut EighFullWorkspace<_, f64, tenet::typed::CudaStorage<f64>>,
                  inputs: &[TensorMap<_, f64>]| {
-        let output = handle.execute(&stack(inputs)).unwrap();
+        let output = plan.execute(&stack(inputs), ws).unwrap();
         assert_diagonal_only(what, &output);
         let d = output.d.to_host().unwrap();
         let v = output.v.to_host().unwrap();
@@ -550,26 +557,26 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
             }
         }
     };
-    check("first", &mut handle, &good);
+    check("first", &mut ws, &good);
     assert!(matches!(
-        handle.execute(&stack(&overflowing)).map(|_| ()),
+        plan.execute(&stack(&overflowing), &mut ws).map(|_| ()),
         Err(BatchError::MemberRejected { .. })
     ));
     assert!(
-        handle.take_output().is_none(),
+        ws.take_output().is_none(),
         "no output after a non-finite rejection"
     );
-    check("after non-finite", &mut handle, &good);
+    check("after non-finite", &mut ws, &good);
     assert!(matches!(
-        handle.execute(&stack(&skewed)).map(|_| ()),
+        plan.execute(&stack(&skewed), &mut ws).map(|_| ()),
         Err(BatchError::MemberRejected { .. })
     ));
     assert!(
-        handle.take_output().is_none(),
+        ws.take_output().is_none(),
         "no output after a non-Hermitian rejection"
     );
-    check("after non-Hermitian", &mut handle, &good);
-    assert!(handle.take_output().is_some());
-    check("after take_output", &mut handle, &good);
-    check("B change", &mut handle, &good[..1]);
+    check("after non-Hermitian", &mut ws, &good);
+    assert!(ws.take_output().is_some());
+    check("after take_output", &mut ws, &good);
+    check("B change", &mut ws, &good[..1]);
 }

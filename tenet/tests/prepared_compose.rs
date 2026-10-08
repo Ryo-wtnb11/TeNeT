@@ -1,6 +1,4 @@
-#![allow(deprecated)]
-//! Host gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
-//! `PreparedCompose` forwarding wrapper (#1498).
+//! Host gates of `ComposePlan`/`ComposeWorkspace` (#1639).
 //!
 //! Per member both public call shapes must equal eager `compose` of the same
 //! placement and the tree-keyed `mul!` oracle of `prepared/mod.rs`,
@@ -18,9 +16,7 @@ use std::fmt::Debug;
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::Error;
-use tenet::typed::{
-    ComposePlan, GradedSpace, PreparedCompose, Runtime, SignatureField, StackedTensorMap,
-};
+use tenet::typed::{ComposePlan, GradedSpace, Runtime, SignatureField, StackedTensorMap};
 
 use common::Payload;
 use prepared::{compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
@@ -137,7 +133,8 @@ where
         let b = members::<R, D>(&runtime, &[&w], &[&v], count, 2);
         let lhs = StackedTensorMap::pack(&a).unwrap();
         let rhs = StackedTensorMap::pack(&b).unwrap();
-        let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
+        let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+        let mut ws = plan.workspace().unwrap();
 
         // `terms` = len(A), an upper bound on the inner dimension of a block.
         let terms = a[0].dense_data().unwrap().len();
@@ -159,7 +156,7 @@ where
             oracles.push(oracle);
         }
 
-        let output = handle.execute(&lhs, &rhs).unwrap();
+        let output = plan.execute(&lhs, &rhs, &mut ws).unwrap();
         assert_eq!(output.len(), count);
         assert!(*output.signature() == a[0].compose(&b[0]).unwrap().structure_signature());
         for (index, oracle) in oracles.iter().enumerate() {
@@ -179,8 +176,8 @@ where
             let mut dst =
                 StackedTensorMap::pack(&filled::<R, D>(&runtime, &[&v, &v], &[&v], count, fill))
                     .unwrap();
-            assert!(*dst.signature() == *handle.output_signature());
-            handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+            assert!(*dst.signature() == *plan.output_signature());
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
             for (index, oracle) in oracles.iter().enumerate() {
                 let member = dst.member(index).unwrap();
                 numerics::assert_nonzero_slices_close(
@@ -216,29 +213,23 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
         )
     };
     let (lhs, rhs) = stacks(4);
-    let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
-    assert_eq!(
-        handle.retained_bytes(),
-        0,
-        "nothing is allocated before a call"
-    );
-    handle.execute(&lhs, &rhs).unwrap();
-    let cold = handle.retained_bytes();
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    assert_eq!(ws.retained_bytes(), 0, "nothing is allocated before a call");
+    plan.execute(&lhs, &rhs, &mut ws).unwrap();
+    let cold = ws.retained_bytes();
     assert!(cold > 0);
     for _ in 0..3 {
-        handle.execute(&lhs, &rhs).unwrap();
+        plan.execute(&lhs, &rhs, &mut ws).unwrap();
         assert_eq!(
-            handle.retained_bytes(),
+            ws.retained_bytes(),
             cold,
             "a warm replay retains nothing new"
         );
     }
     let (wide_lhs, wide_rhs) = stacks(9);
-    handle.execute(&wide_lhs, &wide_rhs).unwrap();
-    assert!(
-        handle.retained_bytes() > cold,
-        "a larger B resizes the output"
-    );
+    plan.execute(&wide_lhs, &wide_rhs, &mut ws).unwrap();
+    assert!(ws.retained_bytes() > cold, "a larger B resizes the output");
 
     // `execute_into` across a change of B on the same handle: the job list
     // is rebuilt for each B and the result stays the oracle's.
@@ -257,7 +248,7 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
             f64::NAN,
         ))
         .unwrap();
-        handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let (oracle, _) = compose_oracle(x, y, &x.compose(y).unwrap());
             numerics::assert_nonzero_slices_close(
@@ -268,12 +259,12 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
             );
         }
     }
-    handle.execute(&wide_lhs, &wide_rhs).unwrap();
+    plan.execute(&wide_lhs, &wide_rhs, &mut ws).unwrap();
 
-    let output = handle.take_output().unwrap();
+    let output = ws.take_output().unwrap();
     assert_eq!(output.len(), 9);
     assert!(
-        handle.retained_bytes() < cold,
+        ws.retained_bytes() < cold,
         "the moved output is no longer retained"
     );
 }
@@ -288,46 +279,43 @@ fn mismatched_stacks_are_typed_errors_before_any_work() {
     let short = StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], 2, 2)).unwrap();
     let foreign =
         StackedTensorMap::pack(&members::<_, f64>(&other_runtime, &[&w], &[&v], 3, 2)).unwrap();
-    let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let mut ws = plan.workspace().unwrap();
 
     assert_eq!(
-        PreparedCompose::new(&lhs, &foreign).err(),
+        ComposePlan::new(&lhs, &foreign).err(),
         Some(Error::RuntimeMismatch)
     );
     assert_eq!(
-        handle.execute(&rhs, &lhs).err(),
+        plan.execute(&rhs, &lhs, &mut ws).err(),
         Some(Error::BatchSignatureMismatch {
             member: None,
             field: SignatureField::HomSpace
         })
     );
     assert_eq!(
-        handle.execute(&lhs, &foreign).err(),
+        plan.execute(&lhs, &foreign, &mut ws).err(),
         Some(Error::BatchSignatureMismatch {
             member: None,
             field: SignatureField::Runtime
         })
     );
     assert!(matches!(
-        handle.execute(&lhs, &short),
+        plan.execute(&lhs, &short, &mut ws),
         Err(Error::InvalidArgument(_))
     ));
-    assert_eq!(
-        handle.retained_bytes(),
-        0,
-        "a rejected call allocates nothing"
-    );
+    assert_eq!(ws.retained_bytes(), 0, "a rejected call allocates nothing");
 
     let mut wrong_dst =
         StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v], &[&v], 3, 3)).unwrap();
     assert!(matches!(
-        handle.execute_into(&lhs, &rhs, &mut wrong_dst),
+        plan.execute_into(&lhs, &rhs, &mut wrong_dst, &mut ws),
         Err(Error::BatchSignatureMismatch { member: None, .. })
     ));
     let mut short_dst =
         StackedTensorMap::pack(&filled::<_, f64>(&runtime, &[&v, &v], &[&v], 2, 1.0)).unwrap();
     assert!(matches!(
-        handle.execute_into(&lhs, &rhs, &mut short_dst),
+        plan.execute_into(&lhs, &rhs, &mut short_dst, &mut ws),
         Err(Error::InvalidArgument(_))
     ));
     assert_eq!(

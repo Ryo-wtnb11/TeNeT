@@ -329,8 +329,6 @@ const TYPED: &[&str] = &[
     "PersistedScalar",
     "PhysicalDense",
     "PhysicalDenseError",
-    "PreparedCompose",
-    "PreparedEighFull",
     "Qr",
     "RecouplingCoefficientAction",
     "HermitianTol",
