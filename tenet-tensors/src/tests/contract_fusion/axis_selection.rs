@@ -569,8 +569,8 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     )
     .unwrap();
     let unsupported = OperationError::UnsupportedTensorContractScope {
-        message: "storage-direct contraction supports only the canonical fully-direct route; \
-                  this contraction needs tree transforms, which have no device kernels here",
+        message: "storage-direct contraction supports only canonical fully-direct oriented \
+                  operands",
     };
 
     for storage_first in [true, false] {
@@ -581,15 +581,15 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
                 .unwrap();
         let storage_call =
-            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+            |_context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
              storage_dst: &mut Vec<f64>| {
-                context.tensorcontract_fusion_dyn_direct_on_storage(
+                crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
                     &mut RejectingStorageGemm,
                     &dst_bound,
                     storage_dst,
-                    &lhs_bound,
+                    crate::FusionOperand::direct(lhs_bound.space()),
                     &lhs.data().to_vec(),
-                    &rhs_bound,
+                    crate::FusionOperand::direct(rhs_bound.space()),
                     &rhs.data().to_vec(),
                     axes(),
                 )

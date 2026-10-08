@@ -409,35 +409,33 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let lhs_values = vec![2.0];
     let rhs_values = vec![3.0];
     let mut direct_composed = vec![0.0; dst.required_len().unwrap()];
-    context
-        .tensorcompose_fusion_dyn_direct_on_storage(
-            &mut VecGemm::default(),
-            &dst_bound,
-            &mut direct_composed,
-            &lhs_bound,
-            &lhs_values,
-            &rhs_bound,
-            &rhs_values,
-            &[1],
-            &[0],
-        )
-        .unwrap();
+    crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+        &mut VecGemm::default(),
+        &dst_bound,
+        &mut direct_composed,
+        crate::FusionOperand::direct(lhs_bound.space()),
+        &lhs_values,
+        crate::FusionOperand::direct(rhs_bound.space()),
+        &rhs_values,
+        &[1],
+        &[0],
+    )
+    .unwrap();
     assert_eq!(direct_composed, [6.0]);
 
     let mut direct_contracted = vec![0.0; dst.required_len().unwrap()];
     let mut contract_gemm = VecGemm::default();
-    context
-        .tensorcontract_fusion_dyn_direct_on_storage(
-            &mut contract_gemm,
-            &dst_bound,
-            &mut direct_contracted,
-            &lhs_bound,
-            &lhs_values,
-            &rhs_bound,
-            &rhs_values,
-            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
-        )
-        .unwrap();
+    crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        &mut contract_gemm,
+        &dst_bound,
+        &mut direct_contracted,
+        crate::FusionOperand::direct(lhs_bound.space()),
+        &lhs_values,
+        crate::FusionOperand::direct(rhs_bound.space()),
+        &rhs_values,
+        TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+    )
+    .unwrap();
     assert_eq!(direct_contracted, [-6.0]);
     assert_eq!(contract_gemm.scaled_alphas, [-1.0]);
 
@@ -477,18 +475,17 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let mixed_lhs_values = vec![2.0, 5.0];
     let mixed_rhs_values = vec![3.0, 7.0];
     let mut mixed_gemm = VecGemm::default();
-    context
-        .tensorcontract_fusion_dyn_direct_on_storage(
-            &mut mixed_gemm,
-            &mixed_dst_bound,
-            &mut mixed_output,
-            &mixed_lhs_bound,
-            &mixed_lhs_values,
-            &mixed_rhs_bound,
-            &mixed_rhs_values,
-            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
-        )
-        .unwrap();
+    crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        &mut mixed_gemm,
+        &mixed_dst_bound,
+        &mut mixed_output,
+        crate::FusionOperand::direct(mixed_lhs_bound.space()),
+        &mixed_lhs_values,
+        crate::FusionOperand::direct(mixed_rhs_bound.space()),
+        &mixed_rhs_values,
+        TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+    )
+    .unwrap();
     assert_eq!(mixed_output, [6.0, -35.0]);
     assert_eq!(mixed_gemm.unit_calls, 1);
     assert_eq!(mixed_gemm.scaled_alphas, [-1.0]);
@@ -541,18 +538,19 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     }
 
     let mut failed = vec![0.0; dst.required_len().unwrap()];
-    assert!(context
-        .tensorcontract_fusion_dyn_direct_on_storage(
+    assert!(
+        crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut FailingGemm,
             &dst_bound,
             &mut failed,
-            &lhs_bound,
+            crate::FusionOperand::direct(lhs_bound.space()),
             &lhs_values,
-            &rhs_bound,
+            crate::FusionOperand::direct(rhs_bound.space()),
             &rhs_values,
             TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
         )
-        .is_err());
+        .is_err()
+    );
     assert_eq!(failed, [0.0]);
     assert_eq!(lhs_values, [2.0]);
     assert_eq!(rhs_values, [3.0]);

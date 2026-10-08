@@ -772,16 +772,15 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
     let len = canonical.space().required_len().unwrap();
     let values = (0..len).map(|index| index as f64 + 1.0).collect::<Vec<_>>();
     tenet_core::clear_structure_caches();
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     for (lhs, rhs) in [(&mis_stacked, &canonical), (&canonical, &mis_stacked)] {
         let mut dst = vec![0.0; len];
-        let result = context.tensorcontract_fusion_dyn_direct_on_storage(
+        let result = crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut NoGemm,
             &canonical,
             &mut dst,
-            lhs,
+            crate::FusionOperand::direct(lhs.space()),
             &values,
-            rhs,
+            crate::FusionOperand::direct(rhs.space()),
             &values,
             TensorContractSpec::new(&[2, 3], &[0, 1], crate::OutputAxisOrder::identity()),
         );
