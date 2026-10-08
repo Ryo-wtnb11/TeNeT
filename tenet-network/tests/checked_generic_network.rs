@@ -738,7 +738,7 @@ fn assert_injected_recovery(
     let mut workspace = NetworkExecutionWorkspace::default();
     // The isolated subprocess owns this global reset. Discard layouts built by
     // the fixture so `ordinal` names a query of the execution under test.
-    tenet::expert::reset_core_intern_tables();
+    tenet::cache::clear();
     provider.arm_symbol(ordinal);
     assert!(matches!(
         planned.execute(tensors, &mut workspace),
@@ -785,7 +785,7 @@ fn cold_query_count(operands: usize, permute_output: bool) -> usize {
     let refs = tensors.iter().take(operands).collect::<Vec<_>>();
     // Each spy has the same semantic identity, so measure after discarding a
     // layout an earlier fixture may legitimately have published.
-    tenet::expert::reset_core_intern_tables();
+    tenet::cache::clear();
     provider.reset_symbols();
     planned.execute(&refs, &mut Default::default()).unwrap();
     provider.symbol_calls.load(Ordering::SeqCst)

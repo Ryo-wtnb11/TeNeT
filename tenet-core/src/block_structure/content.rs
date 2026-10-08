@@ -129,6 +129,34 @@ pub struct BlockStructureContent {
     pub(crate) degeneracy: DegeneracyStructure,
     pub(crate) required_len: usize,
     pub(crate) storage_tiling: StorageTilingProof,
+    canonical: CanonicalContent,
+}
+
+/// Set when this content becomes the resident value of a complete-HomSpace
+/// cache entry (`admit_complete_hom_space_structure`). It stays set after
+/// eviction or a reset: the id is still unique, and live holders may still
+/// reuse it. Completed-transformer publication (cache 3) requires it on every
+/// keyed content, so per-call views, staged candidates and expert layouts,
+/// whose ids die with the call, never enter that bounded cache.
+#[derive(Debug, Default)]
+struct CanonicalContent(core::sync::atomic::AtomicBool);
+
+// Residency bookkeeping, never part of equality.
+impl PartialEq for CanonicalContent {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CanonicalContent {}
+
+// A clone keeps the id, so it keeps the residency fact of that id.
+impl Clone for CanonicalContent {
+    fn clone(&self) -> Self {
+        Self(core::sync::atomic::AtomicBool::new(
+            self.0.load(Ordering::Acquire),
+        ))
+    }
 }
 
 /// Set once a constructor proved that the blocks' reachable offsets partition
@@ -211,7 +239,19 @@ impl BlockStructureContent {
             degeneracy,
             required_len,
             storage_tiling: StorageTilingProof::default(),
+            canonical: CanonicalContent::default(),
         }
+    }
+
+    /// Whether this content is, or was, the resident value of a
+    /// complete-HomSpace cache entry.
+    #[inline]
+    pub(crate) fn is_canonical(&self) -> bool {
+        self.canonical.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_canonical(&self) {
+        self.canonical.0.store(true, Ordering::Release);
     }
 
     /// Process-local, monotonically assigned, never-reused content identity.

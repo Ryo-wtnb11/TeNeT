@@ -135,7 +135,6 @@ where
     // Previous behaviour: a never-adjointed space under a context that keeps
     // nothing runs the unmemoized builder.
     let mut cold = TensorContractFusionExecutionContext::<D, R::Key>::default();
-    cold.set_cache_policy(OperationCachePolicy::NoCache);
     let expected = conjugated_contract(
         &mut cold,
         &dst,

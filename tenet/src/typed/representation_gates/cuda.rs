@@ -778,6 +778,12 @@ fn device_lease_nests_with_cpu_leases_in_both_orders() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
+    if crate::test_cache::run_isolated_or_return(
+        "TENET_DEVICE_CONTRACTION_CACHE_ISOLATED",
+        "typed::representation_gates::cuda::device_contraction_leaves_the_tree_transform_cache_unchanged",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(
@@ -798,7 +804,7 @@ fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
     .to_cuda()
     .unwrap();
 
-    let before = runtime.tree_transform_cache_info().structures;
+    let before = crate::test_cache::completed();
     let product = lhs
         .contract(
             &rhs,
@@ -811,7 +817,7 @@ fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
         )
         .unwrap();
     assert_eq!(product.placement(), Placement::Cuda(0));
-    assert_eq!(runtime.tree_transform_cache_info().structures, before);
+    assert_eq!(crate::test_cache::completed(), before);
 }
 
 /// A destination whose device is not the Runtime's is rejected before any

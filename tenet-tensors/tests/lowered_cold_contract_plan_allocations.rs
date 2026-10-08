@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
-    reset_global_operation_caches, BoundDynamicFusionMapSpace, OperationCachePolicy,
-    OutputAxisOrder, RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
+    BoundDynamicFusionMapSpace, OutputAxisOrder, RuleIdentity,
+    TensorContractFusionExecutionContext, TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -35,8 +35,8 @@ fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
 }
 
 fn reset_all_caches() {
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
 }
 
 fn chain_homspace(sector_count: i32) -> FusionTreeHomSpace {
@@ -179,7 +179,6 @@ fn run_route() -> RouteRun {
     let fixture = contract_fixture();
     let axes = || TensorContractSpec::new(&[0], &[2], OutputAxisOrder::from_axes(&[2, 0, 3, 1]));
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context.set_cache_policy(OperationCachePolicy::TaskLocal);
     let mut output = vec![0.0; fixture.dst.space().required_len().unwrap()];
     // The `_lowered` context twin (a verbatim delegate) was removed by the
     // #586 sweep after E1 proved entry parity; the plain entry is the
@@ -201,20 +200,27 @@ fn run_route() -> RouteRun {
                 )
                 .unwrap();
         };
+    let completed = || {
+        let info = tenet_core::structure_cache_info(
+            tenet_core::StructureCacheKind::CompletedTreeTransformer,
+        );
+        (info.misses() as usize, info.hits() as usize)
+    };
+    let before = completed();
     let ((), cold_bytes, cold_allocations) = measured(|| run(&mut output, &mut context));
-    let cold_misses = context.dynamic_fusion_space_cache_misses();
-    let cold_hits = context.dynamic_fusion_space_cache_hits();
+    let (cold_misses, cold_hits) = completed();
     let mut warm_output = vec![0.0; output.len()];
     let ((), warm_bytes, _) = measured(|| run(&mut warm_output, &mut context));
     assert_eq!(warm_output, output);
+    let (warm_misses, warm_hits) = completed();
     RouteRun {
         cold_bytes,
         cold_allocations,
         warm_bytes,
-        cold_misses,
-        cold_hits,
-        warm_misses: context.dynamic_fusion_space_cache_misses(),
-        warm_hits: context.dynamic_fusion_space_cache_hits(),
+        cold_misses: cold_misses - before.0,
+        cold_hits: cold_hits - before.1,
+        warm_misses: warm_misses - before.0,
+        warm_hits: warm_hits - before.1,
     }
 }
 
@@ -230,8 +236,8 @@ fn cold_contract_plan_build_stays_cached_after_first_run() {
     let second = run_route();
 
     // The fixture must exercise the fusion plan-build route, not the
-    // direct-core fast path: a cold run misses the dynamic fusion space
-    // cache, a warm run hits it without new misses.
+    // direct-core fast path: a cold run builds and publishes its completed
+    // transformers, a warm run hits them without new builds.
     assert!(first.cold_misses >= 3, "fixture took the core fast path");
     assert_eq!(first.warm_misses, first.cold_misses);
     assert!(first.warm_hits > first.cold_hits);

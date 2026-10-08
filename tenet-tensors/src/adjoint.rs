@@ -1303,8 +1303,8 @@ mod cache_tests {
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let rule = triple_rule();
         let source = BoundDynamicFusionMapSpace::bind_multiplicity_free(
             triple_source(&rule),
@@ -1443,7 +1443,7 @@ mod cache_tests {
         let src = u1_source(1, 2);
         let first = adjoint_space_dyn(&rule, &src).unwrap();
         let second = adjoint_space_dyn(&rule, &src).unwrap();
-        crate::reset_global_operation_caches();
+        tenet_core::clear_structure_caches();
         let after_reset = adjoint_space_dyn(&rule, &src).unwrap();
 
         assert_eq!(first.homspace(), second.homspace());
@@ -1459,24 +1459,24 @@ mod cache_tests {
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let rule = triple_rule();
         let source = triple_source(&rule);
 
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
         let lowered = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
         assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 1);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let encoded_lazy = adjoint_space_dyn(&rule, &source).unwrap();
         assert_eq!(lowered, encoded_lazy);
 
         let data = (0..source.required_len().unwrap())
             .map(|index| index as f64 + 0.25)
             .collect::<Vec<_>>();
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let (lowered_space, lowered_data) = adjoint_dyn_with_primer(
             &rule,
             &source,
@@ -1484,8 +1484,8 @@ mod cache_tests {
             checked_metadata_dispatcher::<TripleRule>,
         )
         .unwrap();
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let (encoded_space, encoded_data) = adjoint_dyn(&rule, &source, &data).unwrap();
         assert_eq!(lowered_space, encoded_space);
         assert_eq!(lowered_data, encoded_data);
@@ -1498,8 +1498,8 @@ mod cache_tests {
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        tenet_core::clear_structure_caches();
         let rule = U1FusionRule;
         let one = U1Irrep::new(1).sector_id();
         let two = U1Irrep::new(2).sector_id();

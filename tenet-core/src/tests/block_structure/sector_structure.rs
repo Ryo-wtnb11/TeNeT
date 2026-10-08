@@ -217,7 +217,7 @@ fn fusion_layout_lookup_and_reset_are_concurrent_safe() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
 
     let workers = (0..4)
         .map(|worker| {
@@ -225,7 +225,7 @@ fn fusion_layout_lookup_and_reset_are_concurrent_safe() {
                 let rule = U1FusionRule;
                 for iteration in 0..64 {
                     if worker == 0 && iteration % 8 == 0 {
-                        reset_core_intern_tables();
+                        clear_structure_caches();
                     }
                     let charge = worker * 100 + iteration;
                     let hom = FusionTreeHomSpace::from_sectors(

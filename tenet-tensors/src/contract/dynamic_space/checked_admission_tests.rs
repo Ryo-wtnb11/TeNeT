@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::CACHE_TEST_LOCK;
 use tenet_core::{
-    reset_core_intern_tables, structure_cache_info, BraidingStyleKind, FusionAlgebraError,
+    clear_structure_caches, structure_cache_info, BraidingStyleKind, FusionAlgebraError,
     FusionProductSpace, FusionStyleKind, MultiplicityFreeFusionSymbols, RuleIdentity,
     SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec, StructureCacheKind,
 };
@@ -245,7 +245,7 @@ fn checked_final_root_builds_multi_block_layout_matching_the_encoded_oracle() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let unique = ExternalUniqueRule::new();
     let oracle = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         Arc::new(unique),
@@ -268,7 +268,7 @@ fn checked_final_root_builds_multi_block_layout_matching_the_encoded_oracle() {
         oracle.space().required_len().unwrap()
     );
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let simple = ExternalSimpleRule;
     let oracle = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         Arc::new(simple),
@@ -291,7 +291,7 @@ fn separately_allocated_equal_identity_providers_build_equivalent_structures() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let first = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
         Arc::new(ExternalUniqueRule::new()),
         unique_matrix_homspace(),
@@ -348,8 +348,8 @@ fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
             },
         ),
     ] {
-        crate::reset_global_operation_caches();
-        reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        clear_structure_caches();
         reset_scratch_publication_observations();
         let before = (
             structure_cache_info(StructureCacheKind::SectorStructure),
@@ -385,7 +385,7 @@ fn checked_bound_space_permute_and_contract_match_the_encoded_oracle() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
 
     let encoded = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         Arc::new(ExternalUniqueRule::new()),
@@ -454,8 +454,8 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
         CheckedFailStage::Channels,
         CheckedFailStage::Nsymbol,
     ] {
-        crate::reset_global_operation_caches();
-        reset_core_intern_tables();
+        tenet_core::clear_structure_caches();
+        clear_structure_caches();
         let good = DynamicFusionMapSpace::from_final_homspace(
             &ExternalUniqueRule::new(),
             unique_matrix_homspace(),

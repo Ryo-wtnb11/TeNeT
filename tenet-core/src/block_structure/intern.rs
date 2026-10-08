@@ -1,56 +1,5 @@
 use super::*;
 
-/// Compatibility snapshot for the removed block-content and wrapper interners.
-///
-/// Canonical complete layouts now belong only to the bounded complete-HomSpace
-/// cache. This type remains source-compatible for one release and therefore
-/// always reports the documented zero state.
-#[deprecated(
-    note = "block structures are owned by the complete-HomSpace cache; use structure_cache_info"
-)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct BlockStructureInternCacheInfo;
-
-#[allow(deprecated)]
-impl BlockStructureInternCacheInfo {
-    pub fn entries(self) -> usize {
-        0
-    }
-
-    pub fn entry_capacity(self) -> usize {
-        0
-    }
-
-    pub fn charged_key_bytes(self) -> usize {
-        0
-    }
-
-    pub fn byte_budget(self) -> usize {
-        0
-    }
-
-    pub fn max_admitted_entry_bytes(self) -> usize {
-        0
-    }
-
-    pub fn pressure_evictions(self) -> usize {
-        0
-    }
-
-    pub fn oversized_admission_bypasses(self) -> usize {
-        0
-    }
-}
-
-/// Compatibility view of the removed process-global block interner.
-#[deprecated(
-    note = "block structures are owned by the complete-HomSpace cache; use structure_cache_info"
-)]
-#[allow(deprecated)]
-pub fn block_structure_intern_cache_info() -> BlockStructureInternCacheInfo {
-    BlockStructureInternCacheInfo
-}
-
 pub(crate) fn spilled_smallvec_heap_bytes<A>(values: &SmallVec<A>) -> usize
 where
     A: smallvec::Array,
@@ -78,18 +27,23 @@ pub(super) fn new_block_structure_content(
     Arc::new(BlockStructureContent::new(sector, degeneracy, required_len))
 }
 
-/// Clears the two bounded core structure caches.
+/// Clears every process-global structure cache: sector, degeneracy and the
+/// registered completed-transformer cache. The one clear-all behind
+/// `tenet::cache::clear`.
 ///
-/// Live HomSpace identities and block-content ids remain valid. Complete-layout
-/// builds whose captured epoch straddles the reset cannot publish stale content;
-/// they may still use a current canonical hit. Identity-free prepared sector
-/// layouts retain their separate rule: commit may publish under the current epoch.
-pub fn reset_core_intern_tables() {
+/// Live HomSpace identities and block-content ids remain valid. A build whose
+/// captured epoch straddles the clear cannot publish into any of them; it may
+/// still use a current canonical hit. Identity-free prepared sector layouts
+/// retain their separate rule: commit may publish under the current epoch.
+/// Takes no lock but the reset lock and each cache's publication lock.
+#[doc(hidden)]
+pub fn clear_structure_caches() {
     let _serial = CORE_RESET_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
     crate::fusion_space::reset_structure_caches();
+    crate::cache::clear_registered_structure_caches();
     #[cfg(test)]
     MID_RESET_HOOK.with(|hook| {
         if let Some(hook) = hook.take() {
@@ -105,8 +59,10 @@ static CORE_RESET_EPOCH: AtomicUsize = AtomicUsize::new(0);
 /// Held across a whole reset, both epoch bumps included.
 pub(crate) static CORE_RESET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The epoch a complete build records before it performs admission work.
-pub(crate) fn core_reset_epoch() -> usize {
+/// The epoch a build records before it performs admission work or forms a
+/// key; pass it to `StructureCache::publish`.
+#[doc(hidden)]
+pub fn core_reset_epoch() -> usize {
     CORE_RESET_EPOCH.load(Ordering::SeqCst)
 }
 

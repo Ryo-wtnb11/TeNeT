@@ -134,9 +134,8 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             );
         }
     }
-    assert!(context.tree_context().cache().stats().structure_misses() >= 3);
-    assert!(context.dynamic_fusion_space_cache_hits() > 0);
-    assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
+    let activity = crate::tree_transform::take_completed_transformer_activity();
+    assert!(activity.builds + activity.hits >= 3);
 }
 
 #[test]
@@ -217,7 +216,8 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
             );
         }
     }
-    assert!(context.tree_context().cache().stats().structure_misses() > 0);
+    let activity = crate::tree_transform::take_completed_transformer_activity();
+    assert!(activity.builds + activity.hits > 0);
 }
 
 #[test]

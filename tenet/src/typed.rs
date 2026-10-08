@@ -455,7 +455,7 @@ mod twist_flip;
 use transform_ops::map_spectrum_dtype;
 pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
-use transform_ops::{braid_operation, tree_operation_matches_axes};
+use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
 
 /// In-module gates on the typed facade's private state.
 ///

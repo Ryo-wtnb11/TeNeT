@@ -10,10 +10,22 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use tenet::expert::{
-    reset_core_intern_tables, set_structure_cache_byte_budget, structure_cache_info,
-    StructureCacheKind,
-};
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
+
+fn clear_structure_caches() {
+    tenet::cache::clear();
+}
+
+fn set_structure_cache_byte_budget(kind: StructureCacheKind, bytes: u64) {
+    tenet::cache::configure_budgets([(kind, bytes)]);
+}
+
+fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .unwrap()
+}
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
@@ -201,11 +213,11 @@ fn runtime_identity_separates_signatures() {
 }
 
 #[test]
-fn equal_across_reset_core_intern_tables() {
+fn equal_across_clear_structure_caches() {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = u1_signature(&runtime, &u1_leg(-2..=2, 3));
-    reset_core_intern_tables();
+    clear_structure_caches();
     let after = u1_signature(&runtime, &u1_leg(-2..=2, 3));
     assert_ne!(
         format!("{before:?}"),

@@ -4,14 +4,14 @@ use tenet_core::{
     structure_cache_info, CoreError, FermionParityFusionRule, FusionProductSpace,
     FusionTreeHomSpace, SectorLeg, StructureCacheKind, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace, OperationError};
+use tenet_tensors::{BoundDynamicFusionMapSpace, OperationError};
 
 #[test]
 fn lowered_complete_cache_preflight_preserves_statistics_and_hits() {
     // What: a lowered leg-extent overflow is rejected without changing any
     // complete structure cache statistic or resource.
-    reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let vacuum = U1Irrep::new(0).sector_id();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),

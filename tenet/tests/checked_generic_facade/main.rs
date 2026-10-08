@@ -11,6 +11,15 @@ use tenet::typed::HermitianTol;
 use tenet::typed::Side;
 
 use tenet::expert::DenseBackend;
+
+fn structure_cache_info(
+    kind: tenet::cache::StructureCacheKind,
+) -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .unwrap()
+}
 use tenet::expert::{
     DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
     DenseScalar, DenseTensor, DenseWrite, MatrixOp,
@@ -37,7 +46,7 @@ fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
         return false;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_path])
+        .args(["--exact", test_path, "--include-ignored"])
         .env(isolated_env, "1")
         .output()
         .unwrap();
@@ -322,7 +331,7 @@ fn reset_provider_queries(provider: &CheckedOnlyToy) {
 /// its provider again. Tests that change a provider's answers mid-test call
 /// it, under an identity tag no other test uses.
 fn forget_cached_structures() {
-    tenet::expert::reset_core_intern_tables();
+    tenet::cache::clear();
 }
 
 fn assert_no_provider_queries(provider: &CheckedOnlyToy) {
@@ -704,3 +713,12 @@ mod qr_lq;
 mod reductions;
 mod svd;
 mod transforms;
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+#[cfg_attr(not(feature = "racah-generated"), allow(dead_code))]
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
+}

@@ -43,7 +43,7 @@ pub use contract_batch::{ContractPlan, ContractWorkspace};
 /// flags), the block structure content (fusion-tree blocks, their order and
 /// dense offsets), the placement and the Runtime are all equal. Equality
 /// never depends on process-local intern ids, so it survives interner
-/// eviction, `reset_core_intern_tables` and oversized structures that bypass
+/// eviction, `tenet::cache::clear` and oversized structures that bypass
 /// the interner.
 ///
 /// The signature describes the logical structure only. It does not record

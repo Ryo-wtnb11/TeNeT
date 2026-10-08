@@ -34,12 +34,9 @@ pub use adjoint::{
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;
-pub(crate) use cache::TreeTransformStructureCache;
-pub use cache::{reset_global_operation_caches, OperationCachePolicy};
+pub use cache::OperationCachePolicy;
 #[cfg(test)]
-pub(crate) use cache::{
-    TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCacheKey,
-};
+pub(crate) use cache::{TensorContractStructureCache, TensorContractStructureCacheKey};
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use contract::tensorcontract_structure;
@@ -178,10 +175,14 @@ pub use tree_context::{
     tree_transform_dyn_owned_checked_generic_input_in_context, CheckedTreeTransformInput,
     TreeTransformExecutionContext,
 };
+#[doc(hidden)]
+pub use tree_transform::{
+    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeCoefficientLedger,
+    RuntimeCoefficientStore, TreeTransformOperationView,
+};
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    CheckedGenericPlanError, RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger,
-    RuntimeTreeTransformStore, TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
+    CheckedGenericPlanError, RuntimeTreeTransformCacheInfo, TreeTransformBlockSpec,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };

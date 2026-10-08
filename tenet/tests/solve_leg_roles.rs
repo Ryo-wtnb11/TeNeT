@@ -9,6 +9,13 @@ use tenet::typed::{Error, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 #[test]
 fn solve_roles_equal_explicit_permutation_and_reconstruct_rhs() {
+    // Isolated: the completed-transformer counters are process-global.
+    if run_isolated_or_return(
+        "TENET_SOLVE_LEG_ROLES_ISOLATED",
+        "solve_roles_equal_explicit_permutation_and_reconstruct_rhs",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let a: TensorMap<_, f64> =
@@ -72,7 +79,7 @@ fn solve_roles_equal_explicit_permutation_and_reconstruct_rhs() {
         Err(Error::Operation(_))
     ));
 
-    let before = runtime.tree_transform_cache_info().structures;
+    let before = completed_transformers();
     assert!(matches!(
         a.solve(a_rows, a_cols, b.adjoint_view(), b_rows, b_cols),
         Err(Error::Unsupported {
@@ -80,7 +87,7 @@ fn solve_roles_equal_explicit_permutation_and_reconstruct_rhs() {
             ..
         })
     ));
-    let after = runtime.tree_transform_cache_info().structures;
+    let after = completed_transformers();
     assert_eq!(
         before.hits() + before.misses(),
         after.hits() + after.misses()
@@ -156,4 +163,34 @@ fn nonabelian_and_fermionic_dual_roles_match_composition() {
         .try_dual()
         .unwrap();
     check!(v, w);
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
+}
+
+/// Re-executes exactly one global-cache probe in a fresh process. This binary
+/// also contains ordinary tests that mutate the same caches without a shared
+/// lock, so test-thread serialization inside one probe is insufficient.
+fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+    if std::env::var_os(isolated_env).is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_path, "--include-ignored"])
+        .env(isolated_env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    true
 }

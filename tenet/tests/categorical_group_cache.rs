@@ -6,6 +6,10 @@
 //! caches do per `FusionTreeBlock`, and the result must equal a cold
 //! Runtime's. Unique fusion never uses the tier.
 
+//! The group tier is per Runtime until #2014-4 and observable only through
+//! the deprecated `Runtime::tree_transform_cache_info`.
+#![allow(deprecated)]
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use tenet::sector::{
@@ -15,6 +19,17 @@ use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
+
+/// Completed transformers are process-global: a test that counts one
+/// Runtime's coefficient-tier activity clears them first and must not race
+/// another test publishing the same keys.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn bits(data: &[f64]) -> Vec<u64> {
     data.iter().map(|value| value.to_bits()).collect()
@@ -79,6 +94,7 @@ macro_rules! check_rule {
         ];
         for (name, operation) in operations {
             let what = format!("{} {name}", $label);
+            tenet::cache::clear();
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
             let groups_before = warm.tree_transform_cache_info().groups;
@@ -107,6 +123,7 @@ macro_rules! check_rule {
             );
             assert_eq!(groups.evictions(), 0, "{what}: fixture exceeds the tier");
 
+            tenet::cache::clear();
             let cold = Runtime::builder().dense_threads(1).build().unwrap();
             let expected = operation(&tensor!(&cold, &c));
             assert_eq!(sector_change.codomain(), expected.codomain(), "{what}");
@@ -145,6 +162,7 @@ fn su2_leg(sectors: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
 
 #[test]
 fn su2_sector_change_rebuilds_only_changed_groups() {
+    let _serial = serial();
     check_rule!(
         "SU(2)",
         su2_leg(&[(0, 2), (1, 2), (2, 1)]),
@@ -156,6 +174,7 @@ fn su2_sector_change_rebuilds_only_changed_groups() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
+    let _serial = serial();
     use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -179,6 +198,7 @@ fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
 
 #[test]
 fn unique_fusion_never_uses_the_group_tier() {
+    let _serial = serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
@@ -206,6 +226,7 @@ fn unique_fusion_never_uses_the_group_tier() {
 
 #[test]
 fn clear_resets_the_group_tier() {
+    let _serial = serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = su2_leg(&[(0, 1), (1, 1)]);
     let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
@@ -228,6 +249,7 @@ fn clear_resets_the_group_tier() {
 /// the group tier's entry cap is per group, and the byte budget binds.
 #[test]
 fn shared_runtime_keeps_every_unchanged_group_across_operations() {
+    let _serial = serial();
     let (a, c) = (
         su2_leg(&[(0, 2), (1, 2), (2, 1)]),
         su2_leg(&[(0, 2), (1, 2), (2, 1), (3, 1)]),
@@ -245,6 +267,7 @@ fn shared_runtime_keeps_every_unchanged_group_across_operations() {
         // served by the completed-structure tier without a plan lookup.
         &|t| t.adjoint().unwrap().permute(&[1, 0], &[3, 2]).unwrap(),
     ];
+    tenet::cache::clear();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for operation in operations {
         let _ = operation(&tensor!(&runtime, &a));
@@ -276,6 +299,7 @@ fn shared_runtime_keeps_every_unchanged_group_across_operations() {
 /// key fields jointly, not orientation in isolation.
 #[test]
 fn shared_runtime_distinguishes_operations_on_the_same_groups() {
+    let _serial = serial();
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 1)]);
     let operations: [(&str, &Su2Operation); 5] = [
         ("permute p1", &|t| t.permute(&[2, 0], &[3, 1]).unwrap()),

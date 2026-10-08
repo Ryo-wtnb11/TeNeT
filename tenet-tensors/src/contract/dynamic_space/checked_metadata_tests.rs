@@ -124,8 +124,8 @@ where
     let expected_layout = layout_snapshot(oracle.space());
     let expected_len = oracle.space().required_len().unwrap();
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     reset_legacy_shape_path_builds();
     reset_scratch_publication_observations();
     let expected_rule = provider.rule_identity();
@@ -154,8 +154,8 @@ fn derived_factor_shapes_use_one_authority_key_build() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let rule = Arc::new(rule());
     let source = source(rule.as_ref());
     let authority = BoundDynamicFusionMapSpace::bind_multiplicity_free(source, rule)
@@ -184,8 +184,8 @@ fn final_derived_layout_selects_authority_keys_once() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let rule = Arc::new(rule());
     let authority = BoundDynamicFusionMapSpace::bind_multiplicity_free(
         source(rule.as_ref()),
@@ -273,8 +273,8 @@ fn final_homspace_normalizes_zero_degeneracy_sectors() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
 
     let vacuum = U1Irrep::new(0).sector_id();
     let absent = U1Irrep::new(1).sector_id();
@@ -316,8 +316,8 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
 
     let provider = Arc::new(U1FusionRule);
     let vacuum = U1Irrep::new(0).sector_id();
@@ -361,8 +361,8 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
         rebound.space().structure()
     ));
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     reset_legacy_shape_path_builds();
     reset_scratch_publication_observations();
     let shapes = shapes_from_tree_keys(provider.as_ref(), &root_homspace);
@@ -382,8 +382,8 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let rule = rule();
     reset_primer_calls();
     reset_legacy_shape_path_builds();
@@ -394,13 +394,13 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
     assert_eq!(primer_calls(), 1);
     assert_eq!(legacy_shape_path_builds(), 0);
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded = DynamicFusionMapSpace::from_final_homspace(&rule, homspace()).unwrap();
     assert_eq!(lowered, encoded);
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let vacuum = U1Irrep::new(0).sector_id();
     let overflowing = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
@@ -428,8 +428,8 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let rule = rule();
     let source = source(&rule);
 
@@ -438,12 +438,12 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
         DynamicFusionMapSpace::from_final_homspace_with_primer(&rule, homspace(), counting_primer)
             .unwrap();
     assert_eq!(primer_calls(), 1);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded_final = DynamicFusionMapSpace::from_final_homspace(&rule, homspace()).unwrap();
     assert_eq!(final_space, encoded_final);
 
-    crate::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     reset_primer_calls();
     let operation = TreeTransformOperation::permute([1, 0], [3, 2]);
     let transformed = source
@@ -454,12 +454,12 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
         .unwrap();
     assert_eq!(primer_calls(), 2);
     assert_eq!(transformed, repeated);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded_transformed = source.transformed(&rule, &operation).unwrap();
     assert_eq!(transformed, encoded_transformed);
 
-    crate::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     reset_primer_calls();
     let axes = TensorContractSpec::new(
         &[],
@@ -486,8 +486,8 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
     .unwrap();
     assert_eq!(primer_calls(), 2);
     assert_eq!(contracted, repeated);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let encoded_contracted =
         DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
     assert_eq!(contracted, encoded_contracted);
@@ -548,8 +548,8 @@ fn assert_lowered_root_failure<R>(
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     reset_scratch_publication_observations();
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         rule,
@@ -637,8 +637,8 @@ fn lowered_builder_runs_before_homspace_intern() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let overflow = FusionTreeHomSpace::new(
         FusionProductSpace::new([
             SectorLeg::new([(U1Irrep::new(i32::MAX).sector_id(), 1)], false),
@@ -674,8 +674,8 @@ fn lowered_shape_validation_runs_before_homspace_intern() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     reset_scratch_publication_observations();
@@ -706,8 +706,8 @@ fn lowered_count_failure_builds_and_admits_no_scratch() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     reset_scratch_publication_observations();
@@ -745,8 +745,8 @@ fn encoded_cold_invalid_count_does_not_publish_layouts() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let before = (
@@ -793,8 +793,8 @@ fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     DynamicFusionMapSpace::from_degeneracy_shapes(
@@ -847,8 +847,8 @@ fn encoded_cold_extent_overflow_does_not_publish_layouts() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let vacuum = U1Irrep::new(0).sector_id();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
@@ -902,8 +902,8 @@ fn encoded_and_lowered_explicit_layouts_share_checked_frozen_content() {
     let rule = rule();
     let homspace = homspace();
     let shapes = shapes_from_tree_keys(&rule, &homspace);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
 
     let encoded =
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), shapes.clone())
@@ -940,8 +940,8 @@ fn encoded_explicit_u1_and_su2_complete_layouts_are_valid() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let u1_vacuum = U1Irrep::new(0).sector_id();
     let u1 = DynamicFusionMapSpace::from_degeneracy_shapes(
         &U1FusionRule,
@@ -974,8 +974,8 @@ fn lowered_extent_overflow_precedes_identity_and_scratch_admission() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let vacuum = U1Irrep::new(0).sector_id();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
@@ -1004,8 +1004,8 @@ fn cached_layout_shape_failure_is_observationally_read_only() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     homspace
@@ -1039,8 +1039,8 @@ fn existing_id_failure_builds_and_admits_no_scratch() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let overflow = FusionTreeHomSpace::new(
         FusionProductSpace::new([
             SectorLeg::new([(U1Irrep::new(i32::MAX).sector_id(), 1)], false),
@@ -1073,8 +1073,8 @@ fn canonical_explicit_rebuilds_staged_lowered_keys_before_core_reuse() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let builds = Cell::new(0);
@@ -1116,8 +1116,8 @@ fn admission_rejects_the_excluded_u1_id_without_publication() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let min = SectorId::new(u32::MAX as usize);
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
@@ -1147,8 +1147,8 @@ fn admission_rejects_a_product_containing_the_excluded_u1_id_without_publication
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let provider = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
     let scalar = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
@@ -1219,8 +1219,8 @@ fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     let provider = Arc::new(FermionParityFusionRule);
     let odd = Z2Irrep::ODD.sector_id();
     let leg = || FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]);

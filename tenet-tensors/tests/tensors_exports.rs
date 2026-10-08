@@ -172,8 +172,14 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         // bound_tensor
         "BoundDynamicTensorRef",
         // cache
-        "reset_global_operation_caches",
         "OperationCachePolicy",
+        // tree_transform: the process-global completed-transformer owner
+        // (doc-hidden cross-crate seams, #2014-3)
+        "RuntimeCoefficientLedger",
+        "RuntimeCoefficientStore",
+        "TreeTransformOperationView",
+        "admit_exact_tree_pair_layout",
+        "exact_layout_tree_pair_hit",
         // contract
         "tensorcontract_structure",
         "compile_direct_composition_plan",
@@ -346,11 +352,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "build_tree_pair_transform_group_plan",
         "CheckedGenericPlanError",
         "RuntimeTreeTransformCacheInfo",
-        "RuntimeTreeTransformCacheLedger",
-        "RuntimeTreeTransformStore",
         "TreeTransformBlockSpec",
-        "TreeTransformCache",
-        "TreeTransformCacheStats",
         "TreeTransformGroupBlockSpec",
         "TreeTransformGroupPlan",
         "TreeTransformKeyBlockSpec",

@@ -167,7 +167,7 @@ fn resetting_structure_caches_preserves_standalone_semantic_identity() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_core_intern_tables();
+    clear_structure_caches();
     let build = || {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([u1_leg(23, 2, false)]),
@@ -175,7 +175,7 @@ fn resetting_structure_caches_preserves_standalone_semantic_identity() {
         )
     };
     let before = build().id();
-    reset_core_intern_tables();
+    clear_structure_caches();
     let after = build().id();
     assert_eq!(before, after);
     assert!(!Arc::ptr_eq(&before.content, &after.content));

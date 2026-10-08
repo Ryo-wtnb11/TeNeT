@@ -274,10 +274,10 @@ fn checked_generic_public_transform_measurement() {
             TensorMap::rand_with_seed(&runtime, [&half_leg, &half_leg], [&coupled_leg], 783)
                 .unwrap();
         assert_eq!(source.subblock_count(), 2);
-        let runtime_before = runtime.tree_transform_cache_info().structures;
+        let runtime_before = completed_transformers();
         let (first, first_allocations, first_bytes, first_ns) =
             measure_value(|| source.permute(&[1, 0], &[2]).unwrap());
-        let runtime_after_first = runtime.tree_transform_cache_info().structures;
+        let runtime_after_first = completed_transformers();
         let mut repeat_ns = Vec::with_capacity(7);
         let mut repeat_allocations = Vec::with_capacity(7);
         let mut repeat_bytes = Vec::with_capacity(7);
@@ -289,7 +289,7 @@ fn checked_generic_public_transform_measurement() {
             repeat_allocations.push(allocations);
             repeat_bytes.push(bytes);
         }
-        let runtime_after_repeat = runtime.tree_transform_cache_info().structures;
+        let runtime_after_repeat = completed_transformers();
         let mut sorted_ns = repeat_ns.clone();
         sorted_ns.sort_unstable();
         println!(
@@ -328,9 +328,9 @@ fn checked_generic_public_transform_measurement() {
         _ => unreachable!(),
     };
 
-    let runtime_before = runtime.tree_transform_cache_info().structures;
+    let runtime_before = completed_transformers();
     let (first, first_allocations, first_bytes, first_ns) = measure_value(|| apply(&source));
-    let runtime_after_first = runtime.tree_transform_cache_info().structures;
+    let runtime_after_first = completed_transformers();
     let mut repeat_ns = Vec::with_capacity(7);
     let mut repeat_allocations = Vec::with_capacity(7);
     let mut repeat_bytes = Vec::with_capacity(7);
@@ -342,7 +342,7 @@ fn checked_generic_public_transform_measurement() {
         repeat_allocations.push(allocations);
         repeat_bytes.push(bytes);
     }
-    let runtime_after_repeat = runtime.tree_transform_cache_info().structures;
+    let runtime_after_repeat = completed_transformers();
     let mut sorted_ns = repeat_ns.clone();
     sorted_ns.sort_unstable();
     println!(
@@ -355,4 +355,13 @@ fn checked_generic_public_transform_measurement() {
     assert!(runtime_after_first.entries() > runtime_before.entries());
     assert!(runtime_after_repeat.hits() > runtime_after_first.hits());
     assert!(std::ptr::eq(first.provider(), provider.as_ref()));
+}
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+#[cfg_attr(not(feature = "racah-generated"), allow(dead_code))]
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
 }

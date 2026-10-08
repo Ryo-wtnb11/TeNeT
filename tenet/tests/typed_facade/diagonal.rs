@@ -276,6 +276,13 @@ const DIAGONAL_CONTRACT_CASES: &[(&str, bool, ContractSpec<'static>)] = &[
 
 #[test]
 fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
+    // Isolated: the completed-transformer counters are process-global.
+    if crate::run_isolated_or_return(
+        "TENET_TYPED_FACADE_COMPACT_CONTRACT_IDENTITY_OUTPUT_DOES_NO",
+        "diagonal::compact_contract_identity_output_does_not_publish_a_transform_cache_entry",
+    ) {
+        return;
+    }
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::sector::U1FusionRule);
@@ -287,8 +294,8 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
         .svd_compact(&[0], &[1])
         .unwrap()
         .s;
-    runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info().structures;
+    tenet::cache::clear();
+    let before = crate::completed_transformers();
 
     let result = tensor
         .contract(
@@ -306,7 +313,7 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
         result.dense_data().unwrap().len(),
         tensor.dense_data().unwrap().len()
     );
-    assert_eq!(runtime.tree_transform_cache_info().structures, before);
+    assert_eq!(crate::completed_transformers(), before);
 }
 
 #[test]

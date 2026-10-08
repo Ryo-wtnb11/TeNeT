@@ -13,7 +13,7 @@
 //!   suite exists to catch.
 //!
 //! So: one process-wide `Mutex`, taken by every test that either mutates
-//! shared cache state (`reset_global_operation_caches`, LRU-cap floods) or
+//! shared cache state (`tenet_core::clear_structure_caches`, LRU-cap floods) or
 //! asserts on it (`Arc::ptr_eq` of cached values, intern-table lengths/ids).
 //! Both species must serialize against each other, not just against their
 //! own kind — a reader racing an unlocked resetter is exactly the bug class
@@ -42,7 +42,7 @@ pub(crate) fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> boo
         return false;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_path])
+        .args(["--exact", test_path, "--include-ignored"])
         .env(isolated_env, "1")
         .output()
         .unwrap();

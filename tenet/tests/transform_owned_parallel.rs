@@ -41,7 +41,7 @@ fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
         return false;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_path])
+        .args(["--exact", test_path, "--include-ignored"])
         .env(isolated_env, "1")
         .output()
         .unwrap();

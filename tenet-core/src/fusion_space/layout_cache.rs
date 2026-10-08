@@ -134,8 +134,10 @@ impl FusionTreeHomSpaceCacheKey {
 }
 
 /// The budgets of the caches these replace (#1993).
-pub(crate) const SECTOR_STRUCTURE_CACHE_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
-pub(crate) const DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
+pub(crate) const SECTOR_STRUCTURE_CACHE_BYTE_BUDGET: u64 =
+    crate::cache::DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET;
+pub(crate) const DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET: u64 =
+    crate::cache::DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET;
 /// One shard: entries are heavy-tailed, and the largest must fit one shard.
 /// The U(1) `V^6 <- V^6` sector and degeneracy structures charge about
 /// 44 and 46 MB (`warm_contract_compile_allocations`, rank 6), so two shards
@@ -281,7 +283,7 @@ pub(crate) fn complete_hom_space_miss_observations() -> usize {
 
 /// Admits a structure whose build began at reset epoch `epoch`. A build that
 /// straddles a reset returns its result unpublished (the reset contract at
-/// `reset_core_intern_tables`).
+/// [`crate::clear_structure_caches`]). Resident content is marked canonical.
 pub(crate) fn admit_complete_hom_space_structure(
     key: CompleteHomSpaceStructureCacheKey,
     structure: Arc<BlockStructure>,
@@ -295,7 +297,14 @@ pub(crate) fn admit_complete_hom_space_structure(
     structure.link_region_owner(&entry);
     let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key())
         .saturating_add(structure.materialized_region_bytes());
-    let published = degeneracy_structure_cache().publish(&key, entry, charged_bytes, epoch);
+    let (published, resident) =
+        degeneracy_structure_cache().publish(&key, entry, charged_bytes, epoch);
+    // Only real residency makes content canonical: an oversize, reset-refused
+    // or zero-budget build gets a fresh id on every call, and keys over it
+    // must not take completed-transformer slots (#2014-3).
+    if resident {
+        published.structure.content_key().mark_canonical();
+    }
     let canonical = published.structure();
     (published, canonical)
 }

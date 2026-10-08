@@ -1,8 +1,8 @@
 use super::*;
 use std::cell::Cell;
 use tenet_core::{
-    BlockKey, BlockSpec, FusionProductSpace, FusionRule, FusionTensorMapSpace, SU2FusionRule,
-    SectorLeg, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    FusionProductSpace, FusionRule, FusionTensorMapSpace, SU2FusionRule, SectorLeg, TensorMapSpace,
+    U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_operations::TensorContractSpec;
 
@@ -30,16 +30,6 @@ fn reset_execution_primer_calls() {
 
 fn execution_primer_calls() -> usize {
     EXECUTION_PRIMER_CALLS.with(Cell::get)
-}
-
-fn one_block_structure() -> Arc<BlockStructure> {
-    Arc::new(
-        BlockStructure::from_blocks_with_rank(
-            1,
-            vec![BlockSpec::column_major_with_key(BlockKey::opaque([0]), vec![2], 0).unwrap()],
-        )
-        .unwrap(),
-    )
 }
 
 fn run_nan_poisoned_destination_case(
@@ -100,10 +90,8 @@ fn run_nan_poisoned_destination_case(
 
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let mut cache = DynamicFusionSpaceCache::default();
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, f64, _, false>(
         &mut tree_context,
-        &mut cache,
         provider.as_ref(),
         encoded_layout_primer::<U1FusionRule>,
         &plan,
@@ -198,25 +186,6 @@ fn dynamic_core_strong_zero_overwrites_nan_scratch_after_shape_change() {
 }
 
 #[test]
-fn dynamic_fusion_space_cache_default_is_bounded() {
-    let cache = DynamicFusionSpaceCache::<crate::RuleIdentity>::default();
-
-    assert_eq!(
-        cache.policy(),
-        OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES)
-    );
-}
-
-#[test]
-fn dynamic_fusion_space_cache_explicit_task_local_stays_unbounded() {
-    let mut cache = DynamicFusionSpaceCache::<crate::RuleIdentity>::default();
-
-    cache.set_policy(OperationCachePolicy::TaskLocal);
-
-    assert_eq!(cache.policy(), OperationCachePolicy::TaskLocal);
-}
-
-#[test]
 fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     let rule = U1FusionRule;
     let charges = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
@@ -267,21 +236,22 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     let operation = TreeTransformOperation::transpose([1], [0]);
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let mut cache = DynamicFusionSpaceCache::default();
-    let ordinary_cold = cache
-        .get_or_compile_transformed_source::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            source.structure(),
-            &operation,
-            false,
-            super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
-        )
-        .unwrap();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tenet_core::testing::mark_structure_canonical(source.structure());
+    let ordinary_cold = compile_transformed_source::<_, f64, _, _, _>(
+        &mut tree_context,
+        &rule,
+        &source,
+        source.structure(),
+        &operation,
+        false,
+        super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
+    )
+    .unwrap();
     let direct_hit = compile_prelowered_source_transform(
         &mut tree_context,
-        &mut cache,
         &rule,
         &layout,
         &operation,
@@ -292,17 +262,16 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     // What: the Direct side of a mixed prelowered contraction uses the
     // ordinary parent-storage compiler and therefore the exact same entry.
     assert!(Arc::ptr_eq(
-        &ordinary_cold.transform_structure,
-        &direct_hit.transform_structure
+        ordinary_cold.transform_structure.replay_core(),
+        direct_hit.transform_structure.replay_core()
     ));
-    assert!(Arc::ptr_eq(&ordinary_cold.space, &direct_hit.space));
+    assert_eq!(ordinary_cold.space, direct_hit.space);
 }
 
 #[test]
-fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
+fn execution_layout_primer_runs_once_per_derivation() {
     // What: transformed-source and nonidentity-output core spaces invoke
-    // the selected primer on a cold miss, while a task-local replay hit
-    // returns the shared entry without invoking it again.
+    // the selected primer once per derivation.
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -345,90 +314,59 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
     .unwrap();
     assert!(!plan.output_transform_is_identity());
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let mut cache = DynamicFusionSpaceCache::default();
     reset_execution_primer_calls();
-    let cold_transform = cache
-        .get_or_compile_transformed_source::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            source.structure(),
-            &operation,
-            false,
-            counting_su2_primer,
-        )
-        .unwrap();
+    let derive_source =
+        |tree_context: &mut TreeTransformExecutionContext<f64, crate::RuleIdentity>| {
+            compile_transformed_source::<_, f64, _, _, _>(
+                tree_context,
+                &rule,
+                &source,
+                source.structure(),
+                &operation,
+                false,
+                counting_su2_primer,
+            )
+            .unwrap()
+        };
+    let cold_transform = derive_source(&mut tree_context);
     assert_eq!(execution_primer_calls(), 1);
-    let warm_transform = cache
-        .get_or_compile_transformed_source::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            source.structure(),
-            &operation,
-            false,
-            counting_su2_primer,
-        )
-        .unwrap();
-    assert_eq!(execution_primer_calls(), 1);
+    let warm_transform = derive_source(&mut tree_context);
+    // What: no context retains the derivation (as under a Runtime before
+    // #2014-3), so the warm call primes its layout key again; the transformer
+    // itself is the published one.
+    assert_eq!(execution_primer_calls(), 2);
     assert_eq!(cold_transform.space, warm_transform.space);
+    assert!(Arc::ptr_eq(
+        cold_transform.transform_structure.replay_core(),
+        warm_transform.transform_structure.replay_core()
+    ));
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
     reset_execution_primer_calls();
-    let cold_core = cache
-        .get_or_compile_core_dst::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            &scalar,
-            &plan,
-            &output,
-            counting_su2_primer,
-        )
-        .unwrap();
+    let derive_core =
+        |tree_context: &mut TreeTransformExecutionContext<f64, crate::RuleIdentity>| {
+            compile_core_dst::<_, f64, _, _, _>(
+                tree_context,
+                &rule,
+                &source,
+                &scalar,
+                &plan,
+                &output,
+                counting_su2_primer,
+            )
+            .unwrap()
+        };
+    let cold_core = derive_core(&mut tree_context);
     assert_eq!(execution_primer_calls(), 1);
-    let warm_core = cache
-        .get_or_compile_core_dst::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            &scalar,
-            &plan,
-            &output,
-            counting_su2_primer,
-        )
-        .unwrap();
-    assert_eq!(execution_primer_calls(), 1);
+    let warm_core = derive_core(&mut tree_context);
+    assert_eq!(execution_primer_calls(), 2);
     assert_eq!(cold_core.space, warm_core.space);
-    assert!(cache.stats().hits() >= 2);
 
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
-    let mut no_cache = DynamicFusionSpaceCache::default();
-    no_cache.set_policy(OperationCachePolicy::NoCache);
-    reset_execution_primer_calls();
-    no_cache
-        .get_or_compile_transformed_source::<_, f64, _>(
-            &mut tree_context,
-            &rule,
-            &source,
-            source.structure(),
-            &TreeTransformOperation::permute([3, 1, 2, 0], []),
-            false,
-            counting_su2_primer,
-        )
-        .unwrap();
-    assert_eq!(execution_primer_calls(), 1);
-    assert_eq!(no_cache.len(), 0);
-    assert_eq!(no_cache.stats().hits(), 0);
-
-    crate::reset_global_operation_caches();
-    tenet_core::reset_core_intern_tables();
+    tenet_core::clear_structure_caches();
+    tenet_core::clear_structure_caches();
     reset_execution_primer_calls();
     // The DynamicTree artifact compile primes layouts with the destination's
     // capability (#1858). The typed route takes `copyC` for this
@@ -456,83 +394,9 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
     let cold_calls = execution_primer_calls();
     assert!(cold_calls > 0);
     compile(&mut context, &output_bound, axes);
-    assert_eq!(execution_primer_calls(), cold_calls);
-
-    let mut no_cache_context =
-        crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
-    no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
-    reset_execution_primer_calls();
-    for expected_minimum in 1..=2 {
-        compile(&mut no_cache_context, &output_bound, axes);
-        assert!(execution_primer_calls() >= expected_minimum);
-        assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
-    }
-
-    let other_axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[1, 0, 2, 3]));
-    let other_output = super::super::dynamic_space::BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-        &source_bound,
-        &scalar_bound,
-        other_axes.lhs_contracting_axes(),
-        other_axes.rhs_contracting_axes(),
-        other_axes.output_permutation(),
-    )
-    .unwrap()
-    .with_test_layout_primer(counting_su2_primer);
-    let mut lru_context =
-        crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
-    lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
-    reset_execution_primer_calls();
-    for (output, axes) in [
-        (&output_bound, axes),
-        (&other_output, other_axes),
-        (&output_bound, axes),
-    ] {
-        compile(&mut lru_context, output, axes);
-        assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
-    }
-    assert!(execution_primer_calls() >= 3);
-}
-
-#[test]
-fn dynamic_fusion_fast_space_key_requires_shared_structure_content_identity() {
-    let first_structure = one_block_structure();
-    let second_structure = one_block_structure();
-    assert!(!Arc::ptr_eq(&first_structure, &second_structure));
-    assert_eq!(first_structure.as_ref(), second_structure.as_ref());
-    assert_ne!(first_structure.content_id(), second_structure.content_id());
-
-    let homspace = Arc::new(FusionTreeHomSpace::from_sector_ids([(0, 2)], []));
-    let first = DynamicFusionFastSpaceKey {
-        nout: 1,
-        homspace: homspace.as_ref().clone(),
-        structure_id: first_structure.content_id(),
-    };
-    let second = DynamicFusionFastSpaceKey {
-        nout: 1,
-        homspace: homspace.as_ref().clone(),
-        structure_id: second_structure.content_id(),
-    };
-
-    assert_ne!(first, second);
-
-    let operation = TreeTransformOperation::permute([0], []);
-    let first_transform = DynamicFusionTransformedSourceFastKey::<&'static str> {
-        rule: "test",
-        nout: 1,
-        homspace: homspace.as_ref().clone(),
-        replay_structure_id: first_structure.content_id(),
-        operation: operation.clone(),
-        source_conjugate: false,
-    };
-    let second_transform = DynamicFusionTransformedSourceFastKey::<&'static str> {
-        rule: "test",
-        nout: 1,
-        homspace: homspace.as_ref().clone(),
-        replay_structure_id: second_structure.content_id(),
-        operation,
-        source_conjugate: false,
-    };
-    assert_ne!(first_transform, second_transform);
+    // What: each compile derives its spaces again (nothing is retained per
+    // context), priming the same layouts.
+    assert_eq!(execution_primer_calls(), 2 * cold_calls);
 }
 
 #[test]
@@ -555,7 +419,7 @@ fn borrowable_core_layout_accepts_equal_structure_across_intern_reset() {
     let source = DynamicFusionMapSpace::from_typed(&build());
     let source_structure = Arc::clone(source.structure());
 
-    crate::cache::reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let core = DynamicFusionMapSpace::from_typed(&build());
 
     // What: equal live layouts created on opposite sides of an intern reset

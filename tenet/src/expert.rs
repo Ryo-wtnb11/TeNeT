@@ -2,20 +2,13 @@
 //! rather than what it is mathematically.
 //!
 //! This is the one module for representation queries, block views, storage
-//! and placement, the injectable dense executor, and process-wide cache and
-//! transfer observability. Every tensor operation has its single public path
-//! on [`crate::typed::TensorMap`]; nothing here is a second path to one.
+//! and placement, the injectable dense executor, and process-wide transfer
+//! observability; structure caches are controlled through [`crate::cache`].
+//! Every tensor operation has its single public path on
+//! [`crate::typed::TensorMap`]; nothing here is a second path to one.
 //! [`crate::typed::TensorMap::diagview`] is the user-layer reader of a
 //! diagonal, whatever the storage.
 
-/// Process-wide structural layout and intern caches: bounded, observable and
-/// resettable between workloads.
-#[allow(deprecated)]
-pub use tenet_core::{
-    block_structure_intern_cache_info, reset_core_intern_tables, set_structure_cache_byte_budget,
-    structure_cache_info, structure_cache_infos, BlockStructureInternCacheInfo, StructureCacheInfo,
-    StructureCacheKind,
-};
 /// Block views returned by `TensorMap::subblock(s)`, and the placement and
 /// storage contracts of a tensor's buffer.
 pub use tenet_core::{

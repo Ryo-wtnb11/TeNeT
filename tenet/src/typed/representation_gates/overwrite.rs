@@ -462,6 +462,12 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
 
 #[test]
 fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
+    if crate::test_cache::run_isolated_or_return(
+        "TENET_TREE_OVERWRITE_REUSE_ISOLATED",
+        "typed::representation_gates::overwrite::typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)]).unwrap();
@@ -506,23 +512,23 @@ fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
         .is_err());
     assert_eq!(f64_bits(&high_rank_destination), before);
 
-    runtime.clear_tree_transform_cache();
+    crate::cache::clear();
     let source = TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
     let expected = source.permute(&[1], &[2, 0]).unwrap();
-    runtime.clear_tree_transform_cache();
+    crate::cache::clear();
     let mut first = expected.zeros_like();
     source
         .permute_into(&[1], &[2, 0], &mut first, 1.0, 0.0)
         .unwrap();
-    let cold = runtime.tree_transform_cache_info().structures;
+    let cold = crate::test_cache::completed();
     let mut second = expected.zeros_like();
     source
         .permute_into(&[1], &[2, 0], &mut second, 1.0, 0.0)
         .unwrap();
-    let warm = runtime.tree_transform_cache_info().structures;
+    let warm = crate::test_cache::completed();
     assert_eq!(warm.entries(), cold.entries());
     assert!(warm.hits() > cold.hits());
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
@@ -1095,6 +1101,12 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
 
 #[test]
 fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache() {
+    if crate::test_cache::run_isolated_or_return(
+        "TENET_CONTRACT_OVERWRITE_REUSE_ISOLATED",
+        "typed::representation_gates::overwrite::typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache",
+    ) {
+        return;
+    }
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let bond = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
@@ -1145,7 +1157,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
             },
         )
         .unwrap();
-    runtime.clear_tree_transform_cache();
+    crate::cache::clear();
     let mut first = expected.zeros_like();
     poison_destination(&mut first);
     source
@@ -1162,7 +1174,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
             0.0,
         )
         .unwrap();
-    let cold = runtime.tree_transform_cache_info().structures;
+    let cold = crate::test_cache::completed();
     let mut second = expected.zeros_like();
     poison_destination(&mut second);
     source
@@ -1179,7 +1191,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
             0.0,
         )
         .unwrap();
-    let warm = runtime.tree_transform_cache_info().structures;
+    let warm = crate::test_cache::completed();
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!(warm.entries(), cold.entries());
     assert!(warm.hits() > cold.hits());

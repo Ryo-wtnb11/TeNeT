@@ -555,6 +555,16 @@ impl BlockStructure {
         Arc::clone(&self.content)
     }
 
+    /// Whether this structure's content is, or was, the resident value of a
+    /// complete-HomSpace cache entry: one atomic load. The process-global
+    /// completed-transformer cache publishes only keys whose structures all
+    /// satisfy it, so call-local contents never take a bounded slot.
+    #[doc(hidden)]
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        self.content.is_canonical()
+    }
+
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
         self.content.sector.fusion_tree_groups()
     }

@@ -24,7 +24,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tenet::typed::HermitianTol;
 use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
-use tenet::expert::{structure_cache_info, StructureCacheKind};
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
+
+fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .unwrap()
+}
 use tenet::sector::{
     BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
@@ -76,7 +83,7 @@ fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
         return false;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_path])
+        .args(["--exact", test_path, "--include-ignored"])
         .env(isolated_env, "1")
         .output()
         .unwrap();
@@ -728,7 +735,7 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
         structure_cache_info(StructureCacheKind::SectorStructure),
         structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
-    let runtime_before = runtime.tree_transform_cache_info().structures;
+    let runtime_before = completed_transformers();
 
     assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
     assert!(tensor
@@ -750,10 +757,7 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
         ),
         before
     );
-    assert_eq!(
-        runtime.tree_transform_cache_info().structures,
-        runtime_before
-    );
+    assert_eq!(completed_transformers(), runtime_before);
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,3 +1366,11 @@ mod scalar;
 mod space;
 mod transform;
 mod twist_flip;
+
+/// The process-global completed-transformer cache (`tenet::cache`).
+fn completed_transformers() -> tenet::cache::StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == tenet::cache::StructureCacheKind::CompletedTreeTransformer)
+        .expect("every structure cache kind reports")
+}

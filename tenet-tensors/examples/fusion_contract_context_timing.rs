@@ -95,19 +95,7 @@ fn bench_su2_non_core_form_source() {
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
     println!("source_transform_checksum,{source_checksum:.12}");
-    println!(
-        "tree_structure_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().structure_hits(),
-        context.tree_context().cache().stats().structure_misses(),
-        context.tree_context().cache().structure_len()
-    );
-    println!(
-        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
-        context.dynamic_fusion_space_cache_hits(),
-        context.dynamic_fusion_space_cache_fast_hits(),
-        context.dynamic_fusion_space_cache_misses(),
-        context.dynamic_fusion_space_cache_len()
-    );
+    print_completed_transformer_cache();
 }
 
 fn bench_su2_output_scratch() {
@@ -140,19 +128,7 @@ fn bench_su2_output_scratch() {
     );
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
-    println!(
-        "tree_structure_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().structure_hits(),
-        context.tree_context().cache().stats().structure_misses(),
-        context.tree_context().cache().structure_len()
-    );
-    println!(
-        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
-        context.dynamic_fusion_space_cache_hits(),
-        context.dynamic_fusion_space_cache_fast_hits(),
-        context.dynamic_fusion_space_cache_misses(),
-        context.dynamic_fusion_space_cache_len()
-    );
+    print_completed_transformer_cache();
 }
 
 fn bench_product_complex() {
@@ -185,19 +161,7 @@ fn bench_product_complex() {
     println!("context_warm_ns,{:.3}", nanos_per(warm, WARM_CONTEXT_ITERS));
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum_complex(&warm_data));
-    println!(
-        "tree_structure_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().structure_hits(),
-        context.tree_context().cache().stats().structure_misses(),
-        context.tree_context().cache().structure_len()
-    );
-    println!(
-        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
-        context.dynamic_fusion_space_cache_hits(),
-        context.dynamic_fusion_space_cache_fast_hits(),
-        context.dynamic_fusion_space_cache_misses(),
-        context.dynamic_fusion_space_cache_len()
-    );
+    print_completed_transformer_cache();
 }
 
 struct Su2NoncoreFixture {
@@ -1623,4 +1587,16 @@ where
         tenet_core::SectorStructure::from_keys(rank, keys)?,
         tenet_core::DegeneracyStructure::packed_column_major(rank, shapes)?,
     )
+}
+
+/// The process-global completed-transformer cache this process used.
+fn print_completed_transformer_cache() {
+    let info =
+        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::CompletedTreeTransformer);
+    println!(
+        "completed_transformer_cache,hits={},misses={},entries={}",
+        info.hits(),
+        info.misses(),
+        info.entries()
+    );
 }

@@ -9,15 +9,14 @@ use std::{
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{
-    Complex64, ContractSpec, Eig, Error, GradedSpace, LinalgBackend, Qr, Runtime,
-    RuntimeTreeTransformCacheInfo, TensorMap, TensorScalar,
+    Complex64, ContractSpec, Eig, Error, GradedSpace, LinalgBackend, Qr, Runtime, TensorMap,
+    TensorScalar,
 };
 
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
 use tenet::expert::CpuBackendKind;
 use tenet::expert::DefaultDenseExecutor;
-use tenet::expert::{
-    structure_cache_info, BlockRef, SectorLeg, StructureCacheInfo, StructureCacheKind,
-};
+use tenet::expert::{BlockRef, SectorLeg};
 use tenet::expert::{DenseExecutor, DenseGemmBatchJob, MatrixOp};
 use tenet::expert::{DenseView, DenseViewMut};
 use tenet::sector::SectorId;
@@ -68,14 +67,21 @@ fn measure_allocations<T, E>(
 
 #[derive(Clone, Copy)]
 struct Counters {
-    runtime: RuntimeTreeTransformCacheInfo,
+    completed: StructureCacheInfo,
     fusion_layout: StructureCacheInfo,
     complete_hom: StructureCacheInfo,
 }
 
-fn counters(runtime: &Runtime) -> Counters {
+fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .expect("every structure cache kind reports")
+}
+
+fn counters(_: &Runtime) -> Counters {
     Counters {
-        runtime: runtime.tree_transform_cache_info().structures,
+        completed: structure_cache_info(StructureCacheKind::CompletedTreeTransformer),
         fusion_layout: structure_cache_info(StructureCacheKind::SectorStructure),
         complete_hom: structure_cache_info(StructureCacheKind::DegeneracyStructure),
     }
@@ -100,8 +106,8 @@ fn print_sample(
     before: Counters,
     after: Counters,
 ) {
-    let tree_before = before.runtime;
-    let tree_after = after.runtime;
+    let tree_before = before.completed;
+    let tree_after = after.completed;
     let layout_before = before.fusion_layout;
     let layout_after = after.fusion_layout;
     let hom_before = before.complete_hom;
@@ -119,13 +125,13 @@ fn print_sample(
         tree_hits = tree_after.hits() - tree_before.hits(),
         tree_misses = tree_after.misses() - tree_before.misses(),
         tree_evictions = tree_after.evictions() - tree_before.evictions(),
-        tree_bypasses = tree_after.admission_bypasses() - tree_before.admission_bypasses(),
+        tree_bypasses = tree_after.rejections() - tree_before.rejections(),
         tree_entries_delta = delta(tree_after.entries(), tree_before.entries()),
-        tree_bytes_before = tree_before.charged_payload_bytes(),
-        tree_bytes_after = tree_after.charged_payload_bytes(),
+        tree_bytes_before = tree_before.charged_bytes(),
+        tree_bytes_after = tree_after.charged_bytes(),
         tree_bytes_delta = delta(
-            tree_after.charged_payload_bytes(),
-            tree_before.charged_payload_bytes(),
+            tree_after.charged_bytes() as usize,
+            tree_before.charged_bytes() as usize,
         ),
         layout_misses = layout_after.misses() - layout_before.misses(),
         layout_evictions = layout_after.evictions() - layout_before.evictions(),
@@ -226,9 +232,11 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
             )))
         }
     };
-    let mut builder = Runtime::builder().dense_threads(1).gemm_backend(backend);
+    let builder = Runtime::builder().dense_threads(1).gemm_backend(backend);
     if std::env::var("OP_MATRIX_CACHE").as_deref() == Ok("disabled") {
-        builder = builder.tree_transform_cache_byte_budget(0);
+        // Process-global: every build is offered and rejected. The Runtime's
+        // categorical-coefficient tiers stay active until #2014-4.
+        tenet::cache::configure_budgets([(StructureCacheKind::CompletedTreeTransformer, 0)]);
     }
     builder.build()
 }

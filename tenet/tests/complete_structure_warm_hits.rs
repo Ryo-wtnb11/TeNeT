@@ -2,7 +2,14 @@
 //! is a hit, never a miss, admission, or eviction, and returns bit-identical
 //! data. One test per process keeps the global cache statistics isolated.
 
-use tenet::expert::{structure_cache_info, StructureCacheInfo, StructureCacheKind};
+use tenet::cache::{StructureCacheInfo, StructureCacheKind};
+
+fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
+    tenet::cache::stats()
+        .into_iter()
+        .find(|info| info.kind() == kind)
+        .unwrap()
+}
 use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,

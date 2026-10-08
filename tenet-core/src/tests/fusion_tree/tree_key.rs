@@ -221,7 +221,7 @@ fn checked_enumeration_matches_infallible_for_simple_and_unique_rules() {
             >= 2
     );
 
-    reset_core_intern_tables();
+    clear_structure_caches();
     let checked = su2_space
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
         .unwrap();

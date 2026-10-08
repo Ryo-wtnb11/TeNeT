@@ -1215,6 +1215,17 @@ impl FusionTreeHomSpace {
     /// function of the rule identity and the sector signature, so a hit
     /// proves that an equal provider walk succeeded. A failed walk is not
     /// cached.
+    ///
+    /// Concurrent misses of one key build once (single-flight). That is safe
+    /// only because `build` calls nothing but the provider's fusion
+    /// enumeration (`try_coupled_sector_fold`, `try_fusion_channels`,
+    /// `try_nsymbol`): no Clebsch-Gordan solve, no linear algebra and no
+    /// Rayon region, so a thread holding the placeholder never waits inside
+    /// a pool where work-stealing could run another caller of the same key on
+    /// it. (racah 0.2.4's SU(N) multiplicities are Gelfand-Tsetlin pattern
+    /// counts, `sun.rs:shared_directproduct`, with no tenferro call.) Keep it
+    /// so: a build that parallelizes must use `publish` instead, as the
+    /// completed-transformer cache does.
     fn generic_sector_layout<E>(
         &self,
         rule: RuleIdentity,

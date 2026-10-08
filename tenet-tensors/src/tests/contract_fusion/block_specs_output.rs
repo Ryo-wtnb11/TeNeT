@@ -993,12 +993,10 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(context.tree_context().cache().structure_len(), 2);
-
     let pinned = context
         .prepare_tensorcontract_fusion(&rule, &context_dst, &lhs, &rhs, axes)
         .unwrap();
-    context.set_cache_policy(OperationCachePolicy::NoCache);
+    crate::tree_transform::take_completed_transformer_activity();
     for _ in 0..2 {
         context_dst
             .data_mut()
@@ -1018,10 +1016,12 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             assert!((actual - expected).abs() < 1.0e-10);
         }
         // What: a prepared dynamic contraction owns the complete artifact;
-        // replay does not consult or populate execution-context caches.
-        assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
+        // replay does not consult the completed-transformer cache.
+        assert_eq!(
+            crate::tree_transform::take_completed_transformer_activity(),
+            Default::default()
+        );
     }
-    context.set_cache_policy(OperationCachePolicy::TaskLocal);
 
     context_dst
         .data_mut()
@@ -1045,7 +1045,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(context.tree_context().cache().structure_len(), 2);
 
     let mut automatic_context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -1071,15 +1070,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert!(automatic_context.tree_context().cache().structure_len() > 0);
-    assert!(
-        automatic_context
-            .tree_context()
-            .cache()
-            .stats()
-            .structure_misses()
-            > 0
-    );
     let cached_contract_bits = automatic_context_dst.data().to_vec();
 
     let mut no_cache_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -1088,7 +1078,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     )
     .unwrap();
     let mut no_cache_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
     for _ in 0..2 {
         no_cache_context
             .tensorcontract_fusion_into(&rule, &mut no_cache_dst, &lhs, &rhs, axes, alpha, beta)
@@ -1099,11 +1088,10 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
                 "actual {actual} expected {expected}"
             );
         }
-        assert_eq!(no_cache_context.tree_context().cache().structure_len(), 0);
-        // What: disabling all execution caches changes reuse only, not the
+        // What: an independent context changes reuse only, not the
         // destination reduced-block values or floating-point operation order.
         assert_f64_bits_eq(
-            "cached vs NoCache SU2 non-core contraction",
+            "first vs independent-context SU2 non-core contraction",
             no_cache_dst.data(),
             &cached_contract_bits,
         );
@@ -1122,9 +1110,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     warm_policy_context
         .tensorcontract_fusion_into(&rule, &mut warm_policy_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
-    warm_policy_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
-    assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
-    assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
 
     let mut lru_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -1132,7 +1117,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     )
     .unwrap();
     let mut lru_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
     lru_context
         .tensorcontract_fusion_into(&rule, &mut lru_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
@@ -1142,10 +1126,8 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert!(lru_context.tree_context().cache().structure_len() <= 1);
-    assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
 
-    let tree_stats_after_first = automatic_context.tree_context().cache().stats();
+    crate::tree_transform::take_completed_transformer_activity();
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
@@ -1167,16 +1149,9 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         );
     }
     // What: the warm call plans its route again, as TensorKit's `contract!`
-    // does; its output permute is one tree-structure cache hit, no miss.
-    let tree_stats = automatic_context.tree_context().cache().stats();
-    assert_eq!(
-        tree_stats.structure_misses(),
-        tree_stats_after_first.structure_misses()
-    );
-    assert_eq!(
-        tree_stats.structure_hits(),
-        tree_stats_after_first.structure_hits() + 1
-    );
+    // does; its output permute is one completed-transformer hit, no build.
+    let warm = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!((warm.builds, warm.hits), (0, 1));
 
     automatic_context_dst
         .data_mut()

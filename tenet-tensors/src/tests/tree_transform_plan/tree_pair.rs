@@ -173,17 +173,16 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
         .unwrap();
     let dst = TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
         .unwrap();
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([dst.structure().as_ref(), src.structure().as_ref()]);
 
-    let first = cache
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-        .unwrap();
-    let second = cache
-        .get_or_compile_tree_pair(&rule, operation, &dst, &src)
-        .unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(cache.structure_len(), 1);
-    assert_eq!(cache.stats().structure_hits(), 1);
+    let first =
+        resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap();
+    let second =
+        resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap();
+    assert!(same_core(&first, &second));
 
     let dst_structure = Arc::new(dst.structure().clone());
     let src_structure = Arc::new(src.structure().clone());
@@ -200,56 +199,22 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
             true,
         )
         .unwrap();
-    let first_storage = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &rule,
-            TreeTransformOperation::permute([0, 2], [1]),
-            &dst_structure,
-            &src_structure,
-            true,
-        )
-        .unwrap();
-    let cached_storage = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &rule,
-            TreeTransformOperation::permute([0, 2], [1]),
-            &dst_structure,
-            &src_structure,
-            true,
-        )
-        .unwrap();
-    assert_eq!(cached_storage.as_ref(), &direct);
-    assert!(Arc::ptr_eq(&first_storage, &cached_storage));
+    let permute = TreeTransformOperation::permute([0, 2], [1]);
+    let first_storage =
+        resolve_tree_pair(&rule, &permute, &dst_structure, &src_structure, true).unwrap();
+    let cached_storage =
+        resolve_tree_pair(&rule, &permute, &dst_structure, &src_structure, true).unwrap();
+    assert_eq!(cached_storage, direct);
+    assert!(same_core(&first_storage, &cached_storage));
     assert!(cached_storage.storage_conjugate());
-    // What: the complete Unique transformer is reused, while storage
-    // conjugation remains a distinct completed-structure key.
-    assert_eq!(cache.structure_len(), 2);
-
-    let mut bounded = TreeTransformCache::<f64, RuleIdentity>::with_policy(
-        OperationCachePolicy::task_local_lru(1),
-    );
-    let evicted = bounded
-        .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &rule,
-            TreeTransformOperation::permute([0, 2], [1]),
-            &dst_structure,
-            &src_structure,
-            false,
-        )
-        .unwrap();
-    bounded
-        .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &rule,
-            TreeTransformOperation::permute([0, 2], [1]),
-            &dst_structure,
-            &src_structure,
-            true,
-        )
-        .unwrap();
-    assert_eq!(bounded.structure_len(), 1);
-    // What: the one-entry LRU never keeps an evicted compiled structure alive
-    // beyond the caller-owned Arc.
-    assert_eq!(Arc::strong_count(&evicted), 1);
+    // What: the complete Unique transformer is reused (the wrapper clones
+    // share content, hence content ids), while storage conjugation remains a
+    // distinct completed-transformer key.
+    assert!(same_core(
+        &first,
+        &resolve_tree_pair(&rule, &permute, &dst_structure, &src_structure, false).unwrap()
+    ));
+    assert!(!same_core(&first, &first_storage));
 }
 
 #[test]
@@ -263,41 +228,30 @@ fn fermionic_storage_conjugation_uses_distinct_reusable_structures() {
     let structure =
         Arc::new(packed_fixture_structure(2, [(BlockKey::from(tree), vec![1, 1])]).unwrap());
     let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([structure.as_ref()]);
+    let resolve = |conjugate| {
+        resolve_tree_pair(&rule, &operation, &structure, &structure, conjugate).unwrap()
+    };
 
-    let plain = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, false,
-        )
-        .unwrap();
-    let conjugated = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, true,
-        )
-        .unwrap();
-    let plain_warm = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, false,
-        )
-        .unwrap();
-    let conjugated_warm = cache
-        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            &rule, &operation, &structure, &structure, true,
-        )
-        .unwrap();
+    let plain = resolve(false);
+    let conjugated = resolve(true);
+    let plain_warm = resolve(false);
+    let conjugated_warm = resolve(true);
 
-    // What: fermionic storage conjugation is part of the structure key while
-    // both variants reuse one completed algebraic plan.
-    assert!(!Arc::ptr_eq(&plain, &conjugated));
-    assert!(Arc::ptr_eq(&plain, &plain_warm));
-    assert!(Arc::ptr_eq(&conjugated, &conjugated_warm));
+    // What: fermionic storage conjugation is part of the transformer key;
+    // each variant is reused.
+    assert!(!same_core(&plain, &conjugated));
+    assert!(same_core(&plain, &plain_warm));
+    assert!(same_core(&conjugated, &conjugated_warm));
     assert!(!plain.storage_conjugate());
     assert!(conjugated.storage_conjugate());
-    assert_eq!(cache.structure_len(), 2);
 }
 
 #[test]
-fn u1_unique_tree_pair_reuses_completed_transformer_but_no_cache_stays_eager() {
+fn u1_unique_tree_pair_reuses_completed_transformer_but_expert_layouts_stay_eager() {
     let positive = U1Irrep::new(1).sector_id();
     let negative = U1Irrep::new(-1).sector_id();
     let vacuum = U1FusionRule.vacuum();
@@ -325,55 +279,50 @@ fn u1_unique_tree_pair_reuses_completed_transformer_but_no_cache_stays_eager() {
         .unwrap(),
         FusionTreeKey::try_new_for_rule(&U1FusionRule, [], vacuum, [], [], []).unwrap(),
     );
-    let src_structure =
-        packed_fixture_structure(2, [(BlockKey::from(source), vec![1, 1])]).unwrap();
-    let dst_structure =
-        packed_fixture_structure(2, [(BlockKey::from(destination), vec![1, 1])]).unwrap();
-    let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![7.0], space.clone(), src_structure)
-            .unwrap();
-    let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space, dst_structure).unwrap();
+    let src_structure = Arc::new(
+        packed_fixture_structure(2, [(BlockKey::from(source.clone()), vec![1, 1])]).unwrap(),
+    );
+    let dst_structure = Arc::new(
+        packed_fixture_structure(2, [(BlockKey::from(destination.clone()), vec![1, 1])]).unwrap(),
+    );
     let operation = TreeTransformOperation::permute([1, 0], []);
-    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([dst_structure.as_ref(), src_structure.as_ref()]);
 
-    let first = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    let second = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
+    let first = resolve_tree_pair(
+        &U1FusionRule,
+        &operation,
+        &dst_structure,
+        &src_structure,
+        false,
+    )
+    .unwrap();
+    let second = resolve_tree_pair(
+        &U1FusionRule,
+        &operation,
+        &dst_structure,
+        &src_structure,
+        false,
+    )
+    .unwrap();
+    // What: U(1) reuses the completed transformer of canonical structures.
+    assert!(same_core(&first, &second));
 
-    // What: U(1) reuses the completed transformer in one explicit context.
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(cache.stats().structure_hits(), 1);
-    assert_eq!(cache.stats().structure_misses(), 1);
-    assert_eq!(cache.structure_len(), 1);
-
-    cache.set_policy(OperationCachePolicy::NoCache);
-    assert!(cache.is_empty());
-    let first_eager = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    let second_eager = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    assert!(!Arc::ptr_eq(&first_eager, &second_eager));
-    assert_eq!(first_eager.as_ref(), second_eager.as_ref());
-    assert!(cache.is_empty());
-
-    cache.set_policy(OperationCachePolicy::TaskLocal);
-    let first_unbounded = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
-        .unwrap();
-    let second_unbounded = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation, &dst, &src)
-        .unwrap();
-    // What: the explicit unbounded policy retains the same completed artifact;
-    // only its eviction bound differs from the default policy.
-    assert!(Arc::ptr_eq(&first_unbounded, &second_unbounded));
-    assert_eq!(cache.structure_len(), 1);
+    // An equal expert layout (fresh content, never admitted) is lookup-only:
+    // each resolution rebuilds an equal transformer.
+    let expert_src =
+        Arc::new(packed_fixture_structure(2, [(BlockKey::from(source), vec![1, 1])]).unwrap());
+    let expert_dst =
+        Arc::new(packed_fixture_structure(2, [(BlockKey::from(destination), vec![1, 1])]).unwrap());
+    let first_eager =
+        resolve_tree_pair(&U1FusionRule, &operation, &expert_dst, &expert_src, false).unwrap();
+    let second_eager =
+        resolve_tree_pair(&U1FusionRule, &operation, &expert_dst, &expert_src, false).unwrap();
+    assert!(!same_core(&first_eager, &second_eager));
+    assert_eq!(first_eager, second_eager);
+    assert_eq!(first_eager.blocks(), first.blocks());
 }
 
 #[test]
@@ -972,84 +921,68 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
 }
 
 #[test]
-fn product_tree_transform_reuse_is_owned_by_one_explicit_context() {
+fn product_tree_transformers_are_shared_by_independent_resolutions() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
-    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
     let dst =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([dst.structure().as_ref(), src.structure().as_ref()]);
 
-    let mut first = TreeTransformCache::<f64, RuleKey>::default();
-    let cold = first
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-        .unwrap();
-    let warm = first
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-        .unwrap();
-    assert!(Arc::ptr_eq(&cold, &warm));
-    assert_eq!(first.stats().structure_hits(), 1);
-
-    let mut fresh = TreeTransformCache::<f64, RuleKey>::default();
-    let fresh_structure = fresh
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-        .unwrap();
-    assert!(!Arc::ptr_eq(&cold, &fresh_structure));
-    assert_eq!(fresh_structure.as_ref(), cold.as_ref());
-    assert_eq!(fresh.stats().structure_hits(), 0);
-    assert_eq!(fresh.stats().structure_misses(), 1);
-
-    let mut no_cache =
-        TreeTransformCache::<f64, RuleKey>::with_policy(OperationCachePolicy::NoCache);
-    let first_eager = no_cache
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-        .unwrap();
-    let second_eager = no_cache
-        .get_or_compile_tree_pair(&rule, operation, &dst, &src)
+    let cold =
+        resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap();
+    let warm =
+        resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    let from_context = context
+        .compile_tree_pair_structure(&rule, &operation, dst.structure(), src.structure())
         .unwrap();
 
-    // What: fZ2 x U(1) x SU(2) reuses an exact compiled artifact only inside
-    // the explicit owning context; fresh and NoCache contexts rebuild it.
-    assert!(!Arc::ptr_eq(&first_eager, &second_eager));
-    assert_eq!(first_eager.as_ref(), cold.as_ref());
-    assert_eq!(second_eager.as_ref(), cold.as_ref());
-    assert_eq!(no_cache.stats().structure_hits(), 0);
-    assert_eq!(no_cache.stats().structure_misses(), 2);
-    assert_eq!(no_cache.structure_len(), 0);
+    // What: fZ2 x U(1) x SU(2) transformers are process-global: independent
+    // resolutions, a fresh context included, share one core.
+    assert!(same_core(&cold, &warm));
+    assert!(same_core(&cold, &from_context));
+    assert_eq!(cold, from_context);
 }
 
 #[test]
 fn recoupling_threads_do_not_change_cached_tree_transform_result() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
-    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
     let dst =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
 
-    let mut cache = TreeTransformCache::<f64, RuleKey>::default();
-    cache.set_recoupling_threads(1);
-    let serial = cache
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([dst.structure().as_ref(), src.structure().as_ref()]);
+    let mut planning = crate::tree_transform::TreeTransformPlanning::<f64>::default();
+    planning.set_recoupling_threads(1);
+    let serial = planning
+        .resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false)
         .unwrap();
-    cache.set_policy(OperationCachePolicy::TaskLocal);
-    cache.set_recoupling_threads(4);
-    let cached = cache
-        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+    planning.set_recoupling_threads(4);
+    let cached = planning
+        .resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false)
         .unwrap();
+    // The thread count is not a key determinant: the second call hits.
+    assert!(same_core(&serial, &cached));
 
-    assert!(Arc::ptr_eq(&serial, &cached));
-    assert_eq!(cache.stats().structure_hits(), 1);
-
-    let mut no_cache =
-        TreeTransformCache::<f64, RuleKey>::with_policy(OperationCachePolicy::NoCache);
-    no_cache.set_recoupling_threads(4);
-    let eager = no_cache
-        .get_or_compile_tree_pair(&rule, operation, &dst, &src)
+    // A build under 4 threads (an expert copy, so it cannot hit) equals it.
+    let expert_dst = expert_copy(dst.structure());
+    let expert_src = expert_copy(src.structure());
+    let eager = planning
+        .resolve_tree_pair(&rule, &operation, &expert_dst, &expert_src, false)
         .unwrap();
-    assert_eq!(eager.as_ref(), cached.as_ref());
+    assert!(!same_core(&eager, &cached));
+    assert_eq!(eager.blocks(), cached.blocks());
+    assert_eq!(eager.layouts(), cached.layouts());
 
     let mut cached_dst = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         vec![1.0, 2.0],
@@ -1122,7 +1055,7 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
     tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0).unwrap();
     let expected = dst.data().to_vec();
 
-    reset_global_operation_caches();
+    tenet_core::clear_structure_caches();
     let rebuilt_src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         src_hom,
@@ -1287,7 +1220,6 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
     tree_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0)
         .unwrap();
 
-    assert_eq!(context.cache().structure_len(), 1);
     for (actual, expected) in dst.data().iter().zip(expected) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1337,7 +1269,6 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
         .unwrap();
         assert_eq!(cached.data(), expected.data());
     }
-    assert_eq!(context.cache().structure_len(), 1);
 
     // What: the borrowed-operation overwrite entry point ignores destination bits
     // while reusing the same compiled structure on its warm invocation.
@@ -1358,7 +1289,6 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
             .unwrap();
         assert_eq!(cached.data(), expected.data());
     }
-    assert_eq!(context.cache().structure_len(), 1);
 
     // What: the borrowed-operation accumulating entry point matches the typed
     // facade without adding another completed structure.
@@ -1376,13 +1306,11 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
         )
         .unwrap();
     assert_eq!(cached.data(), expected.data());
-    assert_eq!(context.cache().structure_len(), 1);
 }
 
 #[test]
-fn tree_transform_cache_compiles_distinct_product_degeneracy_shapes() {
+fn product_resolution_compiles_distinct_degeneracy_shapes() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
-    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
@@ -1407,40 +1335,17 @@ fn tree_transform_cache_compiles_distinct_product_degeneracy_shapes() {
         dst_large_structure,
     )
     .unwrap();
-    let mut cache = TreeTransformCache::<f64, RuleKey>::new();
+    let resolve = |dst: &TensorMap<f64, 2, 1>, src: &TensorMap<f64, 2, 1>| {
+        resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap()
+    };
+    let small = resolve(&dst, &src);
+    let large = resolve(&dst_large, &src_large);
+    assert_eq!((small.block_count(), large.block_count()), (2, 2));
+    // What: a degeneracy change is a distinct layout, hence a distinct core.
+    assert!(!same_core(&small, &large));
+    assert_ne!(small.layouts(), large.layouts());
 
-    {
-        let structure = cache
-            .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-            .unwrap();
-        assert_eq!(structure.block_count(), 2);
-    }
-    assert_eq!(cache.structure_len(), 1);
-
-    {
-        let structure = cache
-            .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
-            .unwrap();
-        assert_eq!(structure.block_count(), 2);
-    }
-    assert_eq!(cache.structure_len(), 1);
-
-    {
-        let structure = cache
-            .get_or_compile_tree_pair(&rule, operation, &dst_large, &src_large)
-            .unwrap();
-        assert_eq!(structure.block_count(), 2);
-    }
-    assert_eq!(cache.structure_len(), 2);
-
-    let structure = cache
-        .get_or_compile_tree_pair(
-            &rule,
-            TreeTransformOperation::permute([1, 0], [2]),
-            &dst,
-            &src,
-        )
-        .unwrap();
+    let structure = resolve(&dst, &src);
     let plan = build_tree_pair_transform_group_plan(
         &rule,
         TreeTransformOperation::permute([1, 0], [2]),
@@ -1477,7 +1382,7 @@ fn tree_transform_cache_compiles_distinct_product_degeneracy_shapes() {
 }
 
 #[test]
-fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
+fn tree_transform_execution_context_replays_product_tree_pair_transforms() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let equivalent_rule = FpU1Su2Rule::new(
         FpU1Rule::new(FermionParityFusionRule, U1FusionRule),
@@ -1508,7 +1413,6 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
         .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0)
         .unwrap();
 
-    assert_eq!(context.cache().structure_len(), 1);
     for (actual, expected) in dst.data().iter().zip(expected_first) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1539,7 +1443,6 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
     .unwrap();
 
     assert_eq!(rule.rule_identity(), equivalent_rule.rule_identity());
-    assert_eq!(context.cache().structure_len(), 1);
     for (actual, expected) in dst.data().iter().zip(expected_second) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1549,7 +1452,7 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
 }
 
 #[test]
-fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
+fn tree_transform_execution_context_separates_tree_pair_operations() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let src =
@@ -1558,33 +1461,35 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
     let mut dst =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
             .unwrap();
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    mark_canonical([dst.structure().as_ref(), src.structure().as_ref()]);
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+    let permute = TreeTransformOperation::permute([1, 0], [2]);
+    let braid = TreeTransformOperation::braid([1, 0], [2], [1, 0], [2]);
+    for operation in [&permute, &braid] {
+        dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+        context
+            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+            .unwrap();
+    }
+    crate::tree_transform::take_completed_transformer_activity();
+    for operation in [&permute, &braid] {
+        dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+        context
+            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+            .unwrap();
+    }
 
-    context
-        .tree_transform_into(
-            &rule,
-            TreeTransformOperation::permute([1, 0], [2]),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-
-    dst.data_mut().copy_from_slice(&[1.0, 2.0]);
-    context
-        .tree_transform_into(
-            &rule,
-            TreeTransformOperation::braid([1, 0], [2], [1, 0], [2]),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-
-    assert_eq!(context.cache().structure_len(), 2);
+    // What: the operation is a key determinant: each operation has its own
+    // published transformer, and the warm round hits both.
+    let warm = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!((warm.builds, warm.hits), (0, 2));
+    let resolve = |operation| {
+        resolve_tree_pair(&rule, operation, dst.structure(), src.structure(), false).unwrap()
+    };
+    assert!(!same_core(&resolve(&permute), &resolve(&braid)));
 }
 
 // Regression (#1921): rank-5 SU(2) and Fibonacci transposes whose last

@@ -1,6 +1,3 @@
-use std::collections::VecDeque;
-
-use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -9,9 +6,6 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols,
 };
 
-use crate::cache::{
-    touch_lru_key, BlockStructureCacheKey, OperationCachePolicy, DEFAULT_OPERATION_CACHE_ENTRIES,
-};
 use crate::mode::TreeStructureSource;
 use crate::tree_context::TreeTransformExecutionContext;
 #[cfg(test)]
@@ -22,7 +16,6 @@ use crate::{
     TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
-use tenet_operations::TensorContractSpecOwned;
 
 use super::backend::TensorContractBackend;
 #[cfg(test)]
@@ -78,20 +71,20 @@ use super::{backend, dynamic_space};
 use super::{fusion, fusion_block, resolution};
 
 mod artifact;
-mod space_cache;
 #[cfg(test)]
 mod test_entry;
 #[cfg(test)]
 mod tests;
+mod transformed_spaces;
 mod twist;
 // Why test-only: the typed plan-level executor is a reference oracle for the
 // planner's DynamicTree artifact; production routes through `plan_contract`.
 #[cfg(test)]
 mod typed_eager;
 pub(crate) use artifact::*;
-pub(crate) use space_cache::*;
 #[cfg(test)]
 pub(crate) use test_entry::*;
+use transformed_spaces::*;
 pub(super) use twist::*;
 #[cfg(test)]
 pub(crate) use typed_eager::*;
