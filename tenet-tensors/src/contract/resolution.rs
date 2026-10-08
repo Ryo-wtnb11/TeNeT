@@ -167,9 +167,10 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     }
 
     /// True when the route needs the fermionic contraction twist of one
-    /// materialized operand: the Host scales it in place after its source
-    /// transform, the device folds it into that transform's destination
-    /// writes.
+    /// materialized operand: some non-empty block of that operand's
+    /// transformed source has `θ_b ≠ 1`. Host and device alike fold `θ_b`
+    /// into the source-transform move writing block `b`. A twist that falls
+    /// only on zero-element blocks scales no data and reports `false`.
     pub fn requires_source_twist(&self) -> bool {
         match &self.route {
             ContractRoute::Core { .. } | ContractRoute::CopyC(_) => false,
