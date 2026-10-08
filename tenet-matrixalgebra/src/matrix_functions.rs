@@ -56,8 +56,10 @@ where
 ///
 /// # Errors
 ///
-/// - [`OperationError::UnsupportedTensorContractScope`] for a
-///   non-endomorphism or an output whose hom space or layout differs;
+/// - [`OperationError::SpaceMismatch`] for a non-endomorphism or an output
+///   whose hom space differs, and
+///   [`OperationError::UnsupportedTensorContractScope`] for an output layout
+///   without canonical coupled-sector storage;
 /// - see [`exp_pade13_sector`] for the Padé route's value errors; nonfinite
 ///   input is never Hermitian, so it always reaches that route.
 #[doc(hidden)]

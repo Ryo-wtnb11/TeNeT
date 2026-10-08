@@ -39,10 +39,11 @@ where
     ///
     /// In one order in every fusion mode (#1995), as TensorKit's `\` checks:
     /// [`Error::RuntimeMismatch`], then [`Error::RuleMismatch`] for
-    /// incompatible operands, then [`Error::InvalidArgument`] for unequal
-    /// codomains, then an operation error when the divisor is not isomorphic,
-    /// then the borrowed-view refusal below; an operation error when a sector
-    /// is singular comes after all of them. If a checked provider rejects the output space,
+    /// incompatible operands, then an operation `SpaceMismatch` for unequal
+    /// codomains, then one when the divisor is not isomorphic,
+    /// then the borrowed-view refusal below; an operation
+    /// `Dense(NumericalFailure)` when a sector is singular comes after all of
+    /// them. If a checked provider rejects the output space,
     /// its original error is available as the source. If any preflight, sector
     /// solve, or output-space creation fails, no result tensor is returned.
     /// Non-identity roles also return the existing [`Self::permute`] errors
@@ -1009,14 +1010,12 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
-    ///   coupled-sector block is singular — the dense solve is where that
-    ///   surfaces, so it comes back as an execution error rather than an
-    ///   argument one. Never a panic.
-    /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
-    ///   entry is visible before any solve runs and is therefore reported as
-    ///   the caller mistake it is. The two storages of one singular tensor
-    ///   consequently report different variants; both are pinned by
+    /// - [`Error::Operation`] with `SpaceMismatch` when the two sides are not
+    ///   isomorphic (TensorKit `SpaceMismatch`).
+    /// - [`Error::Operation`] with `Dense(NumericalFailure)` when a
+    ///   coupled-sector block is singular, in both storages: the dense solve
+    ///   fails, and the compact arm finds a zero entry before any solve runs.
+    ///   Never a panic; pinned by
     ///   `inv_reports_a_singular_input_as_a_typed_error`.
     ///
     /// # Complexity
