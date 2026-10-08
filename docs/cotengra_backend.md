@@ -72,8 +72,7 @@ The project path is stored verbatim and resolved by `uv` against the process
 working directory at launch; TeNeT neither probes the CWD nor bakes in a
 source-tree location, so a downstream crate passes an absolute path (or one
 built from its own `CARGO_MANIFEST_DIR`). The interpreter is a config field;
-TeNeT reads
-no environment variable to choose it:
+TeNeT reads no environment variable to choose it:
 
 - `CotengraPythonConfig::python(program)` — run a specific interpreter directly.
 - `CotengraPythonConfig::uv_project(path)` — use `uv run --project <path> python`.
