@@ -906,9 +906,8 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
     reset_provider_queries(&provider);
     assert!(matches!(
         lhs.solve(&[0], &[1], &codomain_rhs, &[0], &[1]),
-        Err(GenericTensorError::Facade(
-            tenet::typed::Error::InvalidArgument(_)
-        ))
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error)))
+            if matches!(*error, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert_no_provider_queries(&provider);
 }

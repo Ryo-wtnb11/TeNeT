@@ -950,17 +950,11 @@ fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
         // no materialization or dense EIG either way.
         let before = calls.of(EIG_FULL);
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let error = input
-            .eig_full(&[0], &[1])
-            .map(drop)
-            .unwrap_err()
-            .to_string();
-        let expected = if value.re.is_finite() && value.im.is_finite() {
-            "eigenvalues must be finite"
-        } else {
-            "eig input components must be finite"
-        };
-        assert!(error.contains(expected), "{error}");
+        let error = input.eig_full(&[0], &[1]).map(drop).unwrap_err();
+        assert!(
+            is_eig_value_error(&error, value.re.is_finite() && value.im.is_finite()),
+            "{error:?}"
+        );
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
         assert_eq!(calls.of(EIG_FULL), before);
     }
@@ -1264,13 +1258,11 @@ fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
         // As `eig_full`: the shared finite-input stage, or the dense route's
         // eigenvalue check for the overflowing `MAX + MAX i`.
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let error = input.eig_vals(&[0], &[1]).unwrap_err().to_string();
-        let expected = if value.re.is_finite() && value.im.is_finite() {
-            "eigenvalues must be finite"
-        } else {
-            "eig input components must be finite"
-        };
-        assert!(error.contains(expected), "{error}");
+        let error = input.eig_vals(&[0], &[1]).unwrap_err();
+        assert!(
+            is_eig_value_error(&error, value.re.is_finite() && value.im.is_finite()),
+            "{error:?}"
+        );
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     }
     assert_eq!(calls.total(), 0);
@@ -1572,4 +1564,17 @@ fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
         assert_eq!(actual.unwrap()[0].values, expected);
     }
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+/// A finite diagonal entry whose eigenvalue overflows is the eigensolver's
+/// numerical failure; a nonfinite entry is the finite-input precondition.
+fn is_eig_value_error(error: &Error, finite_input: bool) -> bool {
+    match error {
+        Error::Operation(error) if finite_input => matches!(
+            **error,
+            OperationError::Dense(tenet_dense::DenseError::NumericalFailure { .. })
+        ),
+        Error::Operation(error) => matches!(**error, OperationError::InvalidArgument { .. }),
+        _ => false,
+    }
 }

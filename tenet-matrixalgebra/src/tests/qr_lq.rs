@@ -246,7 +246,10 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
         assert_eq!(error, OperationError::Dense(expected));
     };
 
-    check(vec![f64_qr_outputs(2, 2).remove(0)], arity_mismatch("qr_into", 2, 1));
+    check(
+        vec![f64_qr_outputs(2, 2).remove(0)],
+        arity_mismatch("qr_into", 2, 1),
+    );
     check(
         f64_qr_outputs(1, 1),
         DenseError::ShapeMismatch {

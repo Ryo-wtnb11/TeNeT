@@ -98,11 +98,23 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     ));
     let multileg: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
-    assert!(misuse(qr_diagonal(multileg.logical_space(), spectrum)));
+    let space_mismatch = |result: Result<_, tenet_tensors::OperationError>| {
+        matches!(
+            result,
+            Err(tenet_tensors::OperationError::SpaceMismatch { .. })
+        )
+    };
+    assert!(space_mismatch(qr_diagonal(
+        multileg.logical_space(),
+        spectrum
+    )));
     let dual = leg.try_dual().unwrap();
     let nonendo: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&dual], 1).unwrap();
-    assert!(misuse(qr_diagonal(nonendo.logical_space(), spectrum)));
+    assert!(space_mismatch(qr_diagonal(
+        nonendo.logical_space(),
+        spectrum
+    )));
 }
 
 #[test]

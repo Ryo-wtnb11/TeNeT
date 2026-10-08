@@ -238,11 +238,9 @@ fn checked_one_sided_reports_missing_pairs_and_full_trees() {
         .unwrap_err();
         assert!(matches!(
             error,
-            CheckedGenericFactorPlanError::Operation(
-                OperationError::SpaceMismatch {
-                    message: "factor rank absent for a populated source sector"
-                }
-            )
+            CheckedGenericFactorPlanError::Operation(OperationError::SpaceMismatch {
+                message: "factor rank absent for a populated source sector"
+            })
         ));
         // Prevalidation indexed the sole sector and looked up both keys;
         // the fallback rejected the missing pair before its own lookup.
@@ -384,11 +382,9 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
         .unwrap_err();
         assert!(matches!(
             error,
-            CheckedGenericFactorPlanError::Operation(
-                OperationError::SpaceMismatch {
-                    message: "factor sector absent from the source tensor"
-                }
-            )
+            CheckedGenericFactorPlanError::Operation(OperationError::SpaceMismatch {
+                message: "factor sector absent from the source tensor"
+            })
         ));
         let probe = one_sided_publication_probe();
         assert_eq!(

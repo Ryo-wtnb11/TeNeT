@@ -461,7 +461,10 @@ fn compact_owned_svd_preserves_svd_into_output_precedence() {
         assert_eq!(error, OperationError::Dense(expected));
     };
 
-    check(vec![f64_svd_outputs(2, 2).remove(0)], arity_mismatch("svd_into", 3, 1));
+    check(
+        vec![f64_svd_outputs(2, 2).remove(0)],
+        arity_mismatch("svd_into", 3, 1),
+    );
     check(
         f64_svd_outputs(1, 1),
         DenseError::ShapeMismatch {
