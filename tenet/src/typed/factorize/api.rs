@@ -363,9 +363,7 @@ where
     /// owned Host compact diagonals preserve `W = V` and both factors
     /// are compact, including on a dual `V`.
     /// Checked factors use the source provider instance, and a failure returns
-    /// no factors. A lazy adjoint runs QR on its owned
-    /// parent and returns detached owned factors without materializing the
-    /// receiver.
+    /// no factors. A lazy adjoint is materialized only for the operation.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -389,21 +387,11 @@ where
         cols: &[usize],
     ) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(
-                FactorOp::LqCompact,
-                |parent| {
-                    parent.factor_qr(FactorOp::QrCompact, |lease, source| {
-                        tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(
-                            lease, source,
-                        )
-                    })
-                },
-                |lease, source| {
-                    tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
-                        lease, source,
-                    )
-                },
-            )
+            t.factor_lq(FactorOp::LqCompact, |lease, source| {
+                tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
         })
     }
 }
@@ -526,21 +514,9 @@ where
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(
-                FactorOp::LqFull,
-                |parent| {
-                    parent.factor_qr(FactorOp::QrFull, |lease, source| {
-                        tenet_matrixalgebra::seam::qr_full_from_source::<R::Mode, _, _, _, _>(
-                            lease, source,
-                        )
-                    })
-                },
-                |lease, source| {
-                    tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(
-                        lease, source,
-                    )
-                },
-            )
+            t.factor_lq(FactorOp::LqFull, |lease, source| {
+                tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(lease, source)
+            })
         })
     }
 }
@@ -1118,8 +1094,8 @@ where
     /// eigendecomposition plus a composition; all general blocks, including
     /// checked-Generic, use six GEMMs, one solve and the necessary Padé
     /// squarings per sector with `O(max_c n_c²)` workspace. Coupled sectors are
-    /// never mixed. A lazy adjoint exponentiates its owned parent and returns
-    /// a detached owned adjoint, `exp(A^H) = exp(A)^H`. Compact input remains
+    /// never mixed. A dense lazy adjoint builds one operation-local logical
+    /// payload per call, released with the call. Compact input remains
     /// `O(rank)` elementwise in every fusion mode.
     ///
     /// TensorKit's diagonal implementation is the reference for the compact

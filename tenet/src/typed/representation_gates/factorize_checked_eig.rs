@@ -346,12 +346,13 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
     calls.reset();
     let lazy = dense.adjoint().unwrap();
     assert!(matches!(lazy.repr, TypedTensorRepr::Adjoint(_)));
-    assert!(matches!(
-        lazy.eig_vals(&[0], &[1]),
-        Err(GenericTensorError::Facade(Error::InvalidArgument(message)))
-            if message.contains("lazy adjoints")
-    ));
-    assert_eq!(calls.total(), 0);
+    // Materialized for the call: the values of `B^H` are `conj` of those of
+    // `B` only as a multiset, so the order follows the logical input.
+    assert_eq!(
+        lazy.eig_vals(&[0], &[1]).unwrap(),
+        lazy.materialize().unwrap().eig_vals(&[0], &[1]).unwrap()
+    );
+    assert!(matches!(lazy.repr, TypedTensorRepr::Adjoint(_)));
 }
 
 #[cfg(feature = "racah-generated")]

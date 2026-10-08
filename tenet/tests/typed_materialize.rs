@@ -587,11 +587,22 @@ mod checked_generic {
                 tenet::typed::__network::network_reuse_class(&lazy, false)
                     == NetworkReuseClass::LazyAdjoint
             );
-            // The #1545 consumer: checked-Generic factorizations reject a lazy
-            // adjoint, and materialize is the remedy.
-            assert!(lazy.qr_compact(&[0], &[1, 2]).is_err());
+            // The #1545 consumer: a lazy adjoint's QR materializes it for the
+            // call (#1755), so it factors exactly like the owned copy.
             let owned = lazy.materialize().unwrap();
-            owned.qr_compact(&[0], &[1, 2]).unwrap();
+            assert_eq!(
+                lazy.qr_compact(&[0], &[1, 2])
+                    .unwrap()
+                    .r
+                    .dense_data()
+                    .unwrap(),
+                owned
+                    .qr_compact(&[0], &[1, 2])
+                    .unwrap()
+                    .r
+                    .dense_data()
+                    .unwrap()
+            );
             let (unconjugated, entries, multiplicity) =
                 assert_swapped_tree_dagger!(tensor, owned, what);
             assert!(

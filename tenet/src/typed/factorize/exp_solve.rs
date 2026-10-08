@@ -6,14 +6,17 @@ where
     R::Mode: FusionMode<R>,
     D: AdvancedLinalgScalar,
 {
-    /// The one body of the exponential: a lazy adjoint is redirected,
-    /// `exp(A^H) = exp(A)^H`; an admitted compact diagonal exponentiates its
-    /// entries, everything else takes the mode's dense route.
+    /// The one body of the exponential: an admitted compact diagonal
+    /// exponentiates its entries, everything else takes the mode's dense
+    /// route.
     pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            const { assert!(redirects(FactorOp::Exp)) };
-            return self.adjoint_of_parent(Self::factor_exp);
-        }
+        // A lazy adjoint is never compact; `exp_dense` materializes it.
+        const {
+            assert!(matches!(
+                FactorOp::Exp.adjoint_rule(),
+                AdjointRule::Materialize
+            ))
+        };
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the
             // dense arm asks about hermiticity: the dense question picks an

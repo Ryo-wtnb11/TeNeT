@@ -316,35 +316,77 @@ fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
     };
 }
 
+/// The shared rule table (#1755) in checked Generic: what each op
+/// materializes for a lazy adjoint. `Parent` and `AdjointSeam` read the parent
+/// in place (no materialization), `Materialize` copies the input once, and
+/// `Redirect` detaches its adjointed output (one copy).
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_generic_compact_qr_lq_reject_lazy_adjoint_without_materializing() {
+fn checked_generic_lazy_adjoint_factorizations_follow_the_rule_table() {
     use tenet_core::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
-            trees.codomain_vertices()[0].get() as f64
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+            trees.codomain_vertices()[0].get() as f64 + 0.25 * indices.iter().sum::<usize>() as f64
         })
         .unwrap();
+    let lazy = source.adjoint().unwrap();
+    let materializations = |op: &dyn Fn()| {
+        UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+        op();
+        UNCACHED_ADJOINT_MATERIALIZATIONS.get()
+    };
 
-    for qr in [true, false] {
-        let lazy = source.adjoint().unwrap();
-        let result = if qr {
-            lazy.qr_compact(&[0], &[1, 2]).map(drop)
-        } else {
-            lazy.lq_compact(&[0], &[1, 2]).map(drop)
-        };
-        assert!(
-            matches!(
-                result,
-                Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
-            ),
-            "qr = {qr}: {result:?}"
-        );
-    }
+    assert_eq!(
+        materializations(&|| drop(lazy.svd_vals(&[0], &[1, 2]).unwrap())),
+        0
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.svd_compact(&[0], &[1, 2]).unwrap())),
+        0
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.svd_full(&[0], &[1, 2]).unwrap())),
+        0
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.pinv(&[0], &[1, 2], 0.0).unwrap())),
+        0
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.qr_compact(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.qr_full(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.lq_compact(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.lq_full(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.left_null(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.right_null(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    assert_eq!(
+        materializations(&|| drop(lazy.right_polar(&[0], &[1, 2]).unwrap())),
+        1
+    );
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
+        unreachable!()
+    };
 }
 
 #[cfg(feature = "racah-generated")]

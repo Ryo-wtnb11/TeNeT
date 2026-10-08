@@ -87,8 +87,8 @@ where
         rcond: f64,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
-    /// Exponential of an owned `tensor` on the dense route, including the
-    /// endomorphism check (D5, D6, D8).
+    /// Exponential on the dense route, including the endomorphism check and
+    /// the lazy-adjoint materialization (D5, D6, D8).
     fn exp_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
@@ -155,28 +155,29 @@ impl FactorOp {
             // gauges the final left factor `V`, as materialize-then-SVD
             // would; and `(A^H)^+ = U S^+ Vh` from the same parent SVD.
             Self::SvdCompact | Self::SvdFull | Self::Pinv => AdjointRule::AdjointSeam,
-            // `LQ(A^H) = QR(A)^H`, the null space of `A^H` is the adjoint of
-            // the opposite null space of `A`, `left_polar(A^H)` is the
-            // adjoint-swapped `right_polar(A)` (and vice versa), and
-            // `f(A^H) = f(A)^H` for `inv` and `exp`.
-            Self::LqCompact
-            | Self::LqFull
-            | Self::LeftNull
-            | Self::RightNull
-            | Self::LeftPolar
-            | Self::RightPolar
-            | Self::Inv
-            | Self::Exp => AdjointRule::Redirect,
+            // The null space of `A^H` is the adjoint of the opposite null
+            // space of `A`, `left_polar(A^H)` is the adjoint-swapped
+            // `right_polar(A)` (and vice versa), and `(A^H)^-1 = (A^-1)^H`.
+            Self::LeftNull | Self::RightNull | Self::LeftPolar | Self::RightPolar | Self::Inv => {
+                AdjointRule::Redirect
+            }
             // Why not redirect QR through LQ of the parent: LQ is itself the
             // QR of the adjoint, so it would form this copy anyway and add
-            // two factor adjoints.
-            Self::QrCompact | Self::QrFull => AdjointRule::Materialize,
+            // two factor adjoints. Why not redirect LQ to QR of the parent:
+            // detaching `R^H` and `Q^H` copies at least `min(m, n) (m + n)
+            // >= m n` elements per sector, never fewer than this input copy.
+            Self::QrCompact | Self::QrFull | Self::LqCompact | Self::LqFull => {
+                AdjointRule::Materialize
+            }
             // Why not read the parent: an admitted near-Hermitian input
             // differs from its adjoint and the solver reads one triangle; the
             // values of `B^H` are `conj` of those of `B` only as a multiset,
             // so the published order would change; and the right
             // eigenvectors of `B^H` are the left ones of `B`.
-            Self::EighVals | Self::EighFull | Self::EigVals | Self::EigFull => {
+            // `exp` likewise dispatches a near-Hermitian input to the
+            // spectral route. The materialization runs inside `exp_dense`,
+            // after that mode's preflight and leases (D5, D8).
+            Self::EighVals | Self::EighFull | Self::EigVals | Self::EigFull | Self::Exp => {
                 AdjointRule::Materialize
             }
         }
@@ -386,14 +387,20 @@ where
     ) -> Result<TensorMap<R, D>, Error> {
         // The seam checks the endomorphism (D8) and picks the Hermitian
         // spectral route or Padé (D6, #1799), recoupling through the context
-        // lane (D5, #1752).
+        // lane (D5, #1752); both leases precede the adjoint materialization.
         let mut dense = tensor.runtime.lease_dense();
         let mut lease = tensor.runtime.lease_context()?;
-        let (bound_space, bound_payload) = tensor.bound_payload()?;
+        let local = matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| tensor.materialized_tensor_uncached())
+            .transpose()?;
+        let body = local
+            .as_ref()
+            .and_then(TensorMap::owned_body)
+            .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
         let out = tenet_matrixalgebra::seam::exp_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
         )?;
         Ok(wrap_factor_on(&tensor.runtime, out))
     }
@@ -698,8 +705,8 @@ where
     fn exp_dense<D: AdvancedLinalgScalar>(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        // The endomorphism check runs here, before the dense lease (D8), and
-        // every input takes Padé [13/13] (D6, #1799).
+        // The endomorphism check runs here, before the materialization (D8),
+        // and every input takes Padé [13/13] (D6, #1799).
         if tensor.logical_space().space().homspace().codomain()
             != tensor.logical_space().space().homspace().domain()
         {
@@ -710,9 +717,14 @@ where
             )
             .into());
         }
-        let body = tensor
-            .owned_body()
-            .expect("checked Generic exp input is owned after lazy dispatch");
+        let local = matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| tensor.materialized_tensor_uncached())
+            .transpose()
+            .map_err(GenericTensorError::from)?;
+        let body = local
+            .as_ref()
+            .and_then(TensorMap::owned_body)
+            .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::seam::exp_pade13_direct_into_dyn(
             dense.dense(),

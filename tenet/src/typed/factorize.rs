@@ -172,13 +172,11 @@ where
         })
     }
 
-    /// The one body of LQ. Under [`AdjointRule::Redirect`] a lazy adjoint is
-    /// factored as `qr` of its parent with both factors adjointed back and
-    /// detached.
+    /// The one body of LQ: `stage` factors the input storage, and each factor
+    /// keeps the storage its route produced.
     fn factor_lq(
         &self,
         op: FactorOp,
-        qr: impl FnOnce(&Self) -> Result<Qr<Self>, TypedFacadeError<R>>,
         stage: impl FnOnce(
             RuntimeDense<'_>,
             tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
@@ -186,19 +184,7 @@ where
             Lq<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<Lq<Self>, TypedFacadeError<R>>
-    where
-        R::Mode: TypedAdjointSpace<R>,
-    {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
-            && op.adjoint_rule() == AdjointRule::Redirect
-        {
-            let Qr { q, r } = qr(&self.adjoint()?)?;
-            return Ok(Lq {
-                l: r.adjoint()?.materialized_tensor_uncached()?,
-                q: q.adjoint()?.materialized_tensor_uncached()?,
-            });
-        }
+    ) -> Result<Lq<Self>, TypedFacadeError<R>> {
         let mut local = None;
         let source = self.factor_input(op, &mut local)?;
         let Lq { l, q } =

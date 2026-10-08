@@ -843,10 +843,10 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     assert_all_conversions!("SU(3) dense", source.clone());
     assert_all_conversions!("SU(3) lazy adjoint", source.adjoint().unwrap());
     let (_, complex, _, _) = assert_adjoint_conversions!("SU(3) dense adjoint", source);
-    // Checked-Generic factorizations reject lazy adjoints, so the converted
-    // adjoint must come out owned: QR gets past that refusal to the
-    // finite-input stage, which refuses the fixture's NaN and infinities
-    // (#1986).
+    // The converted adjoint comes out owned (only owned dense storage lends
+    // its payload), and QR reaches the finite-input stage, which refuses the
+    // fixture's NaN and infinities (#1986).
+    complex.dense_data().unwrap();
     let error = complex.qr_compact(&[0, 1], &[2, 3]).unwrap_err();
     assert!(
         format!("{error:?}").contains("qr input components must be finite"),
