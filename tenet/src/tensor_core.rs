@@ -296,6 +296,40 @@ pub(crate) fn is_rank_one_diagonal_braid(
         && operation.domain_permutation() == [0]
 }
 
+fn offsets_never_decrease(structure: &tenet_core::BlockStructure) -> bool {
+    (1..structure.block_count()).all(|index| {
+        match (structure.block(index - 1), structure.block(index)) {
+            (Ok(previous), Ok(next)) => previous.offset() <= next.offset(),
+            _ => false,
+        }
+    })
+}
+
+/// The non-empty block at `offset` in a structure whose block offsets never
+/// decrease. Empty blocks may share that offset; at most one non-empty block
+/// owns it, because destination storage is injective.
+fn nonempty_block_at_sorted_offset(
+    structure: &tenet_core::BlockStructure,
+    offset: usize,
+) -> Option<usize> {
+    let (mut low, mut high) = (0, structure.block_count());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if structure.block(middle).ok()?.offset() < offset {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    (low..structure.block_count())
+        .map_while(|index| {
+            let block = structure.block(index).ok()?;
+            (block.offset() == offset).then_some((index, block))
+        })
+        .find(|(_, block)| block.shape().iter().product::<usize>() != 0)
+        .map(|(index, _)| index)
+}
+
 /// Returns a dense result only when the compiled braid proves a one-to-one
 /// map between all square bond blocks. A provider that declines this proof
 /// stays on the general dense replay path.
@@ -333,6 +367,7 @@ where
     }
     let mut source_offsets = None;
     let mut destination_offsets = None;
+    let mut destination_sorted = None;
     let mut seen_source = smallvec::SmallVec::<[bool; 16]>::from_elem(false, sources.block_count());
     let mut writes = smallvec::SmallVec::<[(usize, usize, usize, f64); 16]>::new();
     let layouts = compiled.layouts();
@@ -421,18 +456,28 @@ where
         let destination_index = if let Some(index) = destination_index {
             index
         } else {
-            let offsets = destination_offsets.get_or_insert_with(|| {
-                (0..destinations.block_count())
-                    .filter_map(|index| {
-                        let block = destinations.block(index).ok()?;
-                        if block.shape().iter().product::<usize>() == 0 {
-                            return None;
-                        }
-                        Some((isize::try_from(block.offset()).ok()?, index))
-                    })
-                    .collect::<HashMap<_, _>>()
-            });
-            *offsets.get(&dst.offset)?
+            // A braid sends sector c to its dual, which sits at another
+            // ordinal whenever the sector set is not self-dual, so this path
+            // is common. Canonical structures store blocks in offset order,
+            // where a binary search finds the block without allocating; the
+            // map serves only explicitly laid-out structures.
+            let target = usize::try_from(dst.offset).ok()?;
+            if *destination_sorted.get_or_insert_with(|| offsets_never_decrease(destinations)) {
+                nonempty_block_at_sorted_offset(destinations, target)?
+            } else {
+                let offsets = destination_offsets.get_or_insert_with(|| {
+                    (0..destinations.block_count())
+                        .filter_map(|index| {
+                            let block = destinations.block(index).ok()?;
+                            if block.shape().iter().product::<usize>() == 0 {
+                                return None;
+                            }
+                            Some((block.offset(), index))
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+                *offsets.get(&target)?
+            }
         };
         let destination_block = destinations.block(destination_index).ok()?;
         let [row_stride, column_stride] = destination_block.strides() else {
@@ -1784,70 +1829,107 @@ mod tests {
         }
     }
 
+    /// Compiles the rank-one braid of a two-sector bond with each source
+    /// block sent to the destination block of its shape (the degeneracies
+    /// differ, so the shape names the braided sector), runs the compact
+    /// route, and checks value i of each spectrum entry at offset +
+    /// i * (row stride + column stride) of that destination block. Returns
+    /// whether some destination sits at another ordinal than its source.
+    macro_rules! check_compact_braid_diagonal {
+        ($provider:expr, $sectors:expr) => {{
+            let provider = Arc::new($provider);
+            let sectors: [(SectorId, usize); 2] = $sectors;
+            let leg = SectorLeg::new(sectors, false);
+            let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+                Arc::clone(&provider),
+                tenet_core::FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg.clone()]),
+                    FusionProductSpace::new([leg]),
+                ),
+                sectors.map(|(_, n)| vec![n, n]),
+            )
+            .unwrap();
+            let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+            let destination = source.transformed_multiplicity_free(&operation).unwrap();
+            let sources = source.space().structure();
+            let destinations = destination.space().structure();
+            let spectrum = sectors.map(|(sector, n)| SectorSpectrum {
+                sector,
+                values: (0..n).map(|i| 1.0 + i as f64).collect::<Vec<f64>>(),
+            });
+            let coefficients = [2.0, -0.5];
+            let targets = (0..2)
+                .map(|index| {
+                    (0..2)
+                        .find(|&target| {
+                            destinations.block(target).unwrap().shape()
+                                == sources.block(index).unwrap().shape()
+                        })
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            // Reverse spec order, so the source lookup leaves the paired
+            // ordinal too.
+            let specs = [1, 0].map(|index| {
+                tenet_operations::TreeTransformBlockSpec::single(
+                    targets[index],
+                    index,
+                    coefficients[index],
+                )
+                .with_source_axes([1, 0])
+            });
+            let compiled = tenet_tensors::TreeTransformStructure::compile_structures(
+                destinations,
+                sources,
+                &specs,
+            )
+            .unwrap();
+
+            let actual = try_braid_rank_one_diagonal_data::<f64>(
+                source.space(),
+                destination.space(),
+                &compiled,
+                &spectrum,
+            )
+            .expect("a square diagonal braid takes the compact route");
+
+            let mut expected = vec![0.0; destinations.required_len().unwrap()];
+            for (index, entry) in spectrum.iter().enumerate() {
+                let block = destinations.block(targets[index]).unwrap();
+                for (i, value) in entry.values.iter().enumerate() {
+                    let offset = block.offset() + i * block.strides()[0] + i * block.strides()[1];
+                    expected[offset] = coefficients[index] * value;
+                }
+            }
+            assert_eq!(actual, expected);
+            targets
+                .iter()
+                .enumerate()
+                .any(|(index, &target)| index != target)
+        }};
+    }
+
     #[test]
     fn compact_braid_steps_along_each_destination_block_diagonal() {
-        // What: the compact braid writes value i of each sector's spectrum at
-        // offset + i * (row stride + column stride) of that sector's
-        // destination block, for a 1x1 block (whose compiled role is a single
-        // unit axis with no second stride to index) and a 3x3 block, and both
-        // with specs out of source order, so the source and destination
-        // blocks are found by offset rather than by pair ordinal.
-        let provider = Arc::new(ExternalZ2::<0>);
-        let leg = SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 3)], false);
-        let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
-            Arc::clone(&provider),
-            tenet_core::FusionTreeHomSpace::new(
-                FusionProductSpace::new([leg.clone()]),
-                FusionProductSpace::new([leg]),
-            ),
-            [vec![1, 1], vec![3, 3]],
-        )
-        .unwrap();
-        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
-        let destination = source.transformed_multiplicity_free(&operation).unwrap();
-        let spectrum = [
-            SectorSpectrum {
-                sector: SectorId::new(0),
-                values: vec![5.0f64],
-            },
-            SectorSpectrum {
-                sector: SectorId::new(1),
-                values: vec![1.0f64, 2.0, 3.0],
-            },
-        ];
-        let coefficients = [2.0, -0.5];
-        let compiled = tenet_tensors::TreeTransformStructure::compile_structures(
-            destination.space().structure(),
-            source.space().structure(),
-            &[
-                tenet_operations::TreeTransformBlockSpec::single(1, 1, coefficients[1])
-                    .with_source_axes([1, 0]),
-                tenet_operations::TreeTransformBlockSpec::single(0, 0, coefficients[0])
-                    .with_source_axes([1, 0]),
-            ],
-        )
-        .unwrap();
-
-        let actual = try_braid_rank_one_diagonal_data::<f64>(
-            source.space(),
-            destination.space(),
-            &compiled,
-            &spectrum,
-        )
-        .expect("a square diagonal braid takes the compact route");
-
-        let destinations = destination.space().structure();
-        let mut expected = vec![0.0; destinations.required_len().unwrap()];
-        for (index, entry) in spectrum.iter().enumerate() {
-            let block = destinations.block(index).unwrap();
-            let n = entry.values.len();
-            assert_eq!(block.shape(), [n, n]);
-            for (i, value) in entry.values.iter().enumerate() {
-                let offset = block.offset() + i * block.strides()[0] + i * block.strides()[1];
-                expected[offset] = coefficients[index] * value;
-            }
-        }
-        assert_eq!(actual, expected);
+        // What: the compact braid writes each spectrum along its destination
+        // block's diagonal for a 1x1 block (whose compiled role is a single
+        // unit axis with no second stride to index) and a 3x3 block. Z2 is
+        // self-dual, so each destination keeps its source's ordinal; U(1)
+        // charges ±1 swap under the braid, so the destination is found by
+        // its offset in the ordered structure.
+        let self_dual = check_compact_braid_diagonal!(
+            ExternalZ2::<0>,
+            [(SectorId::new(0), 1), (SectorId::new(1), 3)]
+        );
+        assert!(!self_dual, "Z2 destinations keep their source ordinal");
+        let reordered = check_compact_braid_diagonal!(
+            tenet_core::U1FusionRule,
+            [
+                (tenet_core::U1Irrep::new(-1).sector_id(), 1),
+                (tenet_core::U1Irrep::new(1).sector_id(), 3),
+            ]
+        );
+        assert!(reordered, "the U(1) braid moves a destination ordinal");
     }
 
     #[test]
