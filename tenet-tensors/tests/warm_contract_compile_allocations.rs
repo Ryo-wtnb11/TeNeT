@@ -402,3 +402,79 @@ fn rank_six_complete_owner_reuses_content_across_derivations() {
         bypasses
     );
 }
+
+#[test]
+fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
+    let _serial = counting_alloc::serial();
+    // What (#2011): the rank-6 C1p working set — the CopyC output transform
+    // and the DynamicTree route's transforms — fits one default 64 MiB store,
+    // so alternating the two routes evicts nothing and every warm call reuses
+    // its retained transforms. Before #2011 each 65 MB transform evicted the
+    // other and the DynamicTree call recompiled with 8.26 M allocations.
+    let rank = 6;
+    let provider = Arc::new(U1FusionRule);
+    let lhs = space(&provider, rank, rank);
+    let rhs = space(&provider, rank, rank);
+    let lhs_axes = (rank..2 * rank).rev().collect::<Vec<_>>();
+    let rhs_axes = (0..rank).rev().collect::<Vec<_>>();
+    let output = (0..rank)
+        .rev()
+        .chain((rank..2 * rank).rev())
+        .collect::<Vec<_>>();
+    let dst = Space::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &lhs_axes,
+        &rhs_axes,
+        OutputAxisOrder::from_axes(&output),
+        rank,
+    )
+    .unwrap();
+    let store = Arc::new(RuntimeTreeTransformStore::new(
+        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    ));
+    let mut context = runtime_like_context(&store);
+    let mut run = |copy_c: bool| -> usize {
+        counting_alloc::start();
+        let resolution = if copy_c {
+            context
+                .plan_contract::<DirectCoreExecutor, _>(
+                    &dst,
+                    FusionOperand::direct(lhs.space()),
+                    FusionOperand::direct(rhs.space()),
+                    &lhs_axes,
+                    &rhs_axes,
+                    &output,
+                )
+                .unwrap()
+        } else {
+            storage_ladder(
+                &mut context,
+                &dst,
+                FusionOperand::direct(lhs.space()),
+                FusionOperand::direct(rhs.space()),
+                TensorContractSpec::new(&lhs_axes, &rhs_axes, OutputAxisOrder::from_axes(&output)),
+            )
+        };
+        assert_eq!(resolution.copy_c().is_some(), copy_c);
+        assert_eq!(resolution.is_dynamic_tree(), !copy_c);
+        drop(resolution);
+        counting_alloc::stop().calls as usize
+    };
+    run(true);
+    run(false);
+    let warm = store.info();
+    let warm_calls = (0..4).map(|step| run(step % 2 == 0)).collect::<Vec<_>>();
+    let after = store.info();
+
+    assert_eq!(warm.admission_bypasses(), 0, "{warm:?}");
+    assert_eq!(warm.evictions(), 0, "{warm:?}");
+    assert_eq!(after.entries(), warm.entries(), "{after:?}");
+    assert_eq!(after.evictions(), 0, "{after:?}");
+    assert_eq!(after.misses(), warm.misses(), "no warm call recompiles");
+    for (step, &calls) in warm_calls.iter().enumerate() {
+        // The bounded warm counts of the rows above: CopyC 16, the
+        // DynamicTree ladder 37 at rank 5.
+        assert!(calls <= 40, "warm call {step}: {calls} allocations");
+    }
+}
