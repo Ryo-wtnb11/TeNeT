@@ -473,8 +473,8 @@ fn rank_six_copy_c_and_dynamic_tree_transforms_stay_co_resident() {
     assert_eq!(after.evictions(), 0, "{after:?}");
     assert_eq!(after.misses(), warm.misses(), "no warm call recompiles");
     for (step, &calls) in warm_calls.iter().enumerate() {
-        // The bounded warm counts of the rows above: CopyC 16, the
-        // DynamicTree ladder 37 at rank 5.
+        // The bounded warm counts of the rank-6 row above: CopyC 16, the
+        // DynamicTree ladder 37.
         assert!(calls <= 40, "warm call {step}: {calls} allocations");
     }
 }
