@@ -44,6 +44,7 @@ impl Near for Complex64 {
 const TOL: f64 = 1e-10;
 
 type Column<S> = Vec<(FusionTreePairKey, S)>;
+type Legs = Vec<(SectorId, bool)>;
 
 /// Every source column of a plan, keyed by source. A Multi spec stores
 /// structurally absent coefficients as zero.
@@ -280,7 +281,7 @@ fn checked_composer_matches_original_step_composition_on_sun() {
     let su4 = SUNFusionRule::new(4).unwrap();
     let su4_adjoint = (su4.encode_dynkin(&[1, 0, 1]).unwrap(), false);
     let mut multis = 0;
-    let cases: Vec<(&SUNFusionRule, Vec<(SectorId, bool)>, Vec<(SectorId, bool)>)> = vec![
+    let cases: Vec<(&SUNFusionRule, Legs, Legs)> = vec![
         (&rule, vec![a, a], vec![a]),
         (&rule, vec![a, a, a, a], vec![]),
         (&rule, vec![a, a], vec![a, a]),
@@ -605,11 +606,7 @@ fn permute_dense(tensor: &DenseTensor, permutation: &[usize]) -> DenseTensor {
 fn checked_composer_matches_sun_dense_cgc_oracle() {
     let (rule, _, _, adjoint) = sun3();
     let a = (adjoint, false);
-    let cases: Vec<(
-        Vec<(SectorId, bool)>,
-        Vec<(SectorId, bool)>,
-        Vec<TreeTransformOperation>,
-    )> = vec![
+    let cases: Vec<(Legs, Legs, Vec<TreeTransformOperation>)> = vec![
         (
             vec![a, a],
             vec![],

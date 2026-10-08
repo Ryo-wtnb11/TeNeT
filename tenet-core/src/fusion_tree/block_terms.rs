@@ -204,8 +204,8 @@ impl<S> DenseColumns<S> {
 
 /// Compose a column-batched block with one move: every basis row's move
 /// terms are spread across all source columns (`dst += step · source`). The
-/// one block composer for multiplicity-free keys, compact locals and Generic
-/// keys.
+/// dense block composer for multiplicity-free keys and compact locals; the
+/// Generic keyed block uses the sparse [`compose_generic_block`].
 pub(crate) fn compose_block_terms<K, S, E, F, I>(
     basis: &[K],
     columns: &DenseColumns<S>,
