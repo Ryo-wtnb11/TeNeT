@@ -1,6 +1,5 @@
 use super::*;
 use crate::cache::{StructureCache, StructureCacheKind};
-use std::sync::Mutex;
 
 /// Semantic identity of one multiplicity-free fusion-tree layout: the rule
 /// plus the HomSpace sector signature.
@@ -206,35 +205,34 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
 /// global interner. Bounded Arc/Weak canonical reuse and reset epochs are the
 /// Rust adaptation of that complete-geometry boundary.
 ///
-/// Why weak: the wrapper carries lazily derived region state that is not
-/// charged here; while some owner keeps it alive, every hit shares it.
+/// Why strong: the wrapper's coupled-sector region memo is immutable data
+/// derived from this key alone (part of the complete structure, as in
+/// TensorKit's `degeneracystructure`). A weak link let it die between calls,
+/// so every warm call through a derived space rebuilt the wrapper and
+/// recompiled its regions. The memo is charged here when it materializes.
 pub(crate) struct DegeneracyStructureEntry {
+    key: CompleteHomSpaceStructureCacheKey,
     homspace: HomSpaceId,
-    content: Arc<BlockStructureContent>,
-    wrapper: Mutex<Weak<BlockStructure>>,
+    structure: Arc<BlockStructure>,
 }
 
 impl DegeneracyStructureEntry {
-    fn new(key: &CompleteHomSpaceStructureCacheKey, structure: &Arc<BlockStructure>) -> Self {
+    fn new(key: &CompleteHomSpaceStructureCacheKey, structure: Arc<BlockStructure>) -> Self {
         Self {
+            key: key.clone(),
             homspace: HomSpaceId::from_content(Arc::clone(&key.homspace)),
-            content: structure.content_key(),
-            wrapper: Mutex::new(Arc::downgrade(structure)),
+            structure,
         }
     }
 
-    /// The canonical wrapper, rebuilt from the content when it died.
+    /// The canonical wrapper.
     pub(crate) fn structure(&self) -> Arc<BlockStructure> {
-        let mut wrapper = self
-            .wrapper
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(structure) = wrapper.upgrade() {
-            return structure;
-        }
-        let structure = BlockStructure::from_content(Arc::clone(&self.content)).into_shared();
-        *wrapper = Arc::downgrade(&structure);
-        structure
+        Arc::clone(&self.structure)
+    }
+
+    /// Charges a region memo of the canonical wrapper that just materialized.
+    pub(crate) fn charge_regions(self: &Arc<Self>, bytes: u64) {
+        degeneracy_structure_cache().add_charge(&self.key, self, bytes);
     }
 
     pub(crate) fn homspace_id(&self) -> HomSpaceId {
@@ -291,14 +289,14 @@ pub(crate) fn admit_complete_hom_space_structure(
 ) -> (Arc<DegeneracyStructureEntry>, Arc<BlockStructure>) {
     #[cfg(test)]
     COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.set(COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get() + 1);
-    let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
-    let entry = Arc::new(DegeneracyStructureEntry::new(&key, &structure));
+    let entry = Arc::new(DegeneracyStructureEntry::new(&key, Arc::clone(&structure)));
+    // Link before measuring: a memo that materializes after the snapshot
+    // charges itself through the link instead.
+    structure.link_region_owner(&entry);
+    let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key())
+        .saturating_add(structure.materialized_region_bytes());
     let published = degeneracy_structure_cache().publish(&key, entry, charged_bytes, epoch);
-    // Keep the offered wrapper live until the published winner is resolved.
-    // On an uncontended admission this preserves the candidate's lazy region
-    // memo; after a race this returns the actual winner instead.
     let canonical = published.structure();
-    drop(structure);
     (published, canonical)
 }
 
@@ -313,11 +311,9 @@ pub(crate) fn charged_complete_hom_space_structure_bytes(
         .saturating_add(content.charged_retained_bytes())
         // Map node and the retained Arc control allocations.
         .saturating_add(10 * std::mem::size_of::<usize>())
-        // The entry's Weak keeps the wrapper's `ArcInner` (two counters plus
-        // the dropped `BlockStructure` payload) allocated after the last strong
-        // owner dies, until the entry is evicted or refreshed.
-        .saturating_add(2 * std::mem::size_of::<usize>())
-        .saturating_add(std::mem::size_of::<BlockStructure>()) as u64
+        // The owned wrapper and its region state; the region memo itself is
+        // charged by the admission snapshot and as it materializes.
+        .saturating_add(BlockStructure::wrapper_retained_bytes(content.rank())) as u64
 }
 
 pub(crate) fn reset_structure_caches() {

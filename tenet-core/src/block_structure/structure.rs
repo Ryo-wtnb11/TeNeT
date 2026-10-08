@@ -3,6 +3,9 @@ use super::*;
 #[derive(Default)]
 pub(crate) struct BlockStructureRegionState {
     coupled_region_cache: OnceLock<CoupledRegionCache>,
+    /// The degeneracy-cache entry that owns this wrapper, charged for each
+    /// region memo as it materializes. Unset for wrappers no cache owns.
+    owner: std::sync::Mutex<Weak<crate::fusion_space::DegeneracyStructureEntry>>,
 }
 
 pub struct BlockStructure {
@@ -670,13 +673,67 @@ impl BlockStructure {
         if nout > self.rank() {
             return Ok(None);
         }
-        self.regions
+        let mut materialized = None;
+        let regions = self
+            .regions
             .coupled_region_cache
             .get_or_init(|| new_coupled_region_cache(self.rank()))[nout]
             .get_or_init(|| {
-                compile_coupled_sector_regions(self, nout).map(|regions| regions.map(Arc::from))
+                let regions = compile_coupled_sector_regions(self, nout)
+                    .map(|regions| regions.map(Arc::<[_]>::from));
+                materialized = Some(coupled_region_result_bytes(&regions));
+                regions
             })
-            .clone()
+            .clone();
+        // Charged after the slot is set, outside its initialization: the
+        // charge takes a cache shard lock.
+        if let Some(bytes) = materialized {
+            let owner = self
+                .regions
+                .owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .upgrade();
+            if let Some(owner) = owner {
+                owner.charge_regions(bytes as u64);
+            }
+        }
+        regions
+    }
+
+    /// Makes `owner` the cache entry charged for this wrapper's region memo.
+    pub(crate) fn link_region_owner(
+        &self,
+        owner: &Arc<crate::fusion_space::DegeneracyStructureEntry>,
+    ) {
+        *self
+            .regions
+            .owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(owner);
+    }
+
+    /// Heap bytes of the region memos materialized so far.
+    pub(crate) fn materialized_region_bytes(&self) -> u64 {
+        self.regions.coupled_region_cache.get().map_or(0, |slots| {
+            slots
+                .iter()
+                .filter_map(OnceLock::get)
+                .map(coupled_region_result_bytes)
+                .sum::<usize>()
+        }) as u64
+    }
+
+    /// Bytes a cache entry retains by owning a wrapper of rank `rank`: the
+    /// wrapper and region-state allocations and the per-split memo slots.
+    pub(crate) fn wrapper_retained_bytes(rank: usize) -> usize {
+        let arc_header = 2 * std::mem::size_of::<usize>();
+        (arc_header + std::mem::size_of::<Self>())
+            .saturating_add(arc_header + std::mem::size_of::<BlockStructureRegionState>())
+            .saturating_add(arc_header)
+            .saturating_add(
+                (rank + 1).saturating_mul(std::mem::size_of::<OnceLock<CoupledRegionResult>>()),
+            )
     }
 
     #[cfg(test)]
@@ -699,4 +756,29 @@ fn coupled_sector_matrix_from_validated_keys(
     let (keys, shapes): (Vec<_>, Vec<_>) = blocks.into_iter().unzip();
     let specs = coupled_sector_matrix_block_specs(nout, rank, &keys, &shapes)?;
     BlockStructure::from_blocks_with_rank(rank, specs)
+}
+
+/// Heap bytes one materialized memo slot retains: the region slice, each
+/// region's tree list, and any spilled extent shapes. Tree keys share their
+/// backings with the block content, already charged there.
+fn coupled_region_result_bytes(result: &CoupledRegionResult) -> usize {
+    let Ok(Some(regions)) = result else {
+        return 0;
+    };
+    let arc_header = 2 * std::mem::size_of::<usize>();
+    regions.iter().fold(
+        arc_header + std::mem::size_of_val(regions.as_ref()),
+        |bytes, region| {
+            region.trees.iter().fold(
+                bytes.saturating_add(std::mem::size_of_val(region.trees.as_ref())),
+                |bytes, extent| {
+                    if extent.shape.spilled() {
+                        bytes.saturating_add(extent.shape.capacity() * std::mem::size_of::<usize>())
+                    } else {
+                        bytes
+                    }
+                },
+            )
+        },
+    )
 }

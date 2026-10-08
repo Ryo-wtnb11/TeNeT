@@ -18,7 +18,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use quick_cache::sync::{Cache, GuardResult};
+use quick_cache::sync::{Cache, EntryAction, GuardResult};
 use quick_cache::{Equivalent, Lifecycle, OptionsBuilder, Weighter};
 
 use crate::block_structure::may_publish_since;
@@ -246,6 +246,33 @@ where
             }),
             GuardResult::Timeout => unreachable!("a lookup without a timeout never times out"),
         }
+    }
+
+    /// Adds `bytes` to the charge of `key` while `value` is its resident
+    /// entry: a lazily derived part of an entry joins the budget when it
+    /// materializes. Never waits; a key being admitted is left alone, and an
+    /// absent key is skipped, since no resident entry retains the part.
+    ///
+    /// Side effects of quick_cache's `entry`, all accepted:
+    /// - the touch counts as a use of the entry for eviction order;
+    /// - a weight increase does not evict by itself, so the cache may sit
+    ///   above its budget by `bytes` until the next insert evicts;
+    /// - between the residency check and `entry` the key may be evicted, and
+    ///   then a placeholder is created and dropped, which forgets that key's
+    ///   ghost (recently evicted) record. Rare and harmless: no value is
+    ///   charged or retained.
+    pub(crate) fn add_charge(&self, key: &K, value: &Arc<V>, bytes: u64) {
+        if !self.entries.contains_key(key) {
+            return;
+        }
+        let _ = self
+            .entries
+            .entry(key, Some(std::time::Duration::ZERO), |_, charged| {
+                if Arc::ptr_eq(&charged.value, value) {
+                    charged.bytes = charged.bytes.saturating_add(bytes);
+                }
+                EntryAction::Retain(())
+            });
     }
 
     /// The entry for `key`, built by `build` on a miss. Concurrent misses of

@@ -116,7 +116,7 @@ impl CoupledSectorRegion {
     }
 }
 
-type CoupledRegionResult = Result<Option<Arc<[CoupledSectorRegion]>>, CoreError>;
+pub(super) type CoupledRegionResult = Result<Option<Arc<[CoupledSectorRegion]>>, CoreError>;
 pub(super) type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 
 #[derive(Clone, Eq)]

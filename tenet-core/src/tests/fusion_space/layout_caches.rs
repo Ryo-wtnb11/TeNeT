@@ -6,20 +6,21 @@ fn degeneracy_cache_info() -> StructureCacheInfo {
 }
 
 #[test]
-fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions() {
+fn complete_homspace_layout_cache_owns_its_wrapper_and_charges_its_regions() {
     // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
     // this asserts process-global complete-structure cache counters, which
     // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
     // unlocked complete-structure builds landing between two reads (#1903).
     if test_support::run_isolated_or_return(
         "TENET_CORE_COMPLETE_HOMSPACE_REUSE_ISOLATED",
-        "tests::fusion_space::layout_caches::complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions",
+        "tests::fusion_space::layout_caches::complete_homspace_layout_cache_owns_its_wrapper_and_charges_its_regions",
     ) {
         return;
     }
     // What: independently constructed complete multiplicity-free U1,
-    // SU2, and product HomSpaces share frozen content by value; cached
-    // content never owns a wrapper-local coupled-region state.
+    // SU2, and product HomSpaces share one canonical wrapper, which the
+    // cache entry owns with its region memo; the memo joins the entry's
+    // charge when it materializes.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -44,31 +45,31 @@ fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions()
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
 
-        // Dead wrapper: content stays cached (a hit, not a miss), only the
-        // wrapper is rebuilt; region state died with the old wrapper.
-        let content = first.content_key();
+        // No caller holds the wrapper: the entry still does, so the next
+        // hit returns it with its region memo.
         let region = first.weak_region_state();
-        drop(first);
+        let first = Arc::downgrade(&first);
         drop(second);
-        assert!(region.upgrade().is_none());
+        assert!(region.upgrade().is_some());
+        let charged = degeneracy_cache_info().charged_bytes();
         let third = second_hom
             .coupled_subblock_structure_from_leg_degeneracies(rule)
             .unwrap();
-        assert!(Arc::ptr_eq(&third.content_key(), &content));
-        assert!(third.weak_region_state().upgrade().is_some());
+        assert!(Arc::ptr_eq(&third, &first.upgrade().unwrap()));
+        let regions = third.coupled_sector_regions(1).unwrap().unwrap();
+        let grown = degeneracy_cache_info().charged_bytes() - charged;
+        assert!(
+            grown >= std::mem::size_of_val(regions.as_ref()) as u64,
+            "{grown}"
+        );
+        // A repeated query reuses the memo and charges nothing more.
+        let again = third.coupled_sector_regions(1).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&regions, &again));
+        assert_eq!(degeneracy_cache_info().charged_bytes() - charged, grown);
         let after = degeneracy_cache_info();
         assert_eq!(after.hits(), info.hits() + 2);
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
-        // The entry's Weak was refreshed: the next hit is the rebuilt Arc.
-        let fourth = first_hom
-            .coupled_subblock_structure_from_leg_degeneracies(rule)
-            .unwrap();
-        assert!(Arc::ptr_eq(&third, &fourth));
-        let region = third.weak_region_state();
-        drop(third);
-        drop(fourth);
-        assert!(region.upgrade().is_none());
     }
 
     let u1_hom = || FusionTreeHomSpace::from_sectors([(u1(1), 2)], [(u1(1), 3)]);
@@ -267,13 +268,18 @@ fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
     let transient = transient_hom
         .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
         .unwrap();
-    let expired = Arc::downgrade(&transient);
+    // The cache entry owns the canonical wrapper: dropping the caller's
+    // handle keeps it, and the next build returns the same one.
+    let owned = Arc::downgrade(&transient);
     drop(transient);
-    assert!(expired.upgrade().is_none());
     let rebuilt = transient_hom
         .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
         .unwrap();
+    assert!(Arc::ptr_eq(&rebuilt, &owned.upgrade().unwrap()));
     assert_eq!(rebuilt.block(0).unwrap().shape(), &[4, 5]);
+    drop(rebuilt);
+    reset_core_intern_tables();
+    assert!(owned.upgrade().is_none(), "a clear releases the wrapper");
 }
 
 #[test]
