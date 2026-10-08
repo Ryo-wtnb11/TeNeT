@@ -108,38 +108,6 @@ impl DenseCostModel {
         }
         self.tensor_size(&labels)
     }
-
-    pub fn contraction_result_labels_with_remaining(
-        &self,
-        lhs: &[TemporaryLabel],
-        rhs: &[TemporaryLabel],
-        remaining_labels: &[Vec<TemporaryLabel>],
-        output_labels: &[TemporaryLabel],
-    ) -> Vec<TemporaryLabel> {
-        let contracted = lhs
-            .iter()
-            .filter(|label| {
-                rhs.contains(label)
-                    && !output_labels.contains(label)
-                    && !remaining_labels.iter().any(|labels| labels.contains(label))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut labels = lhs
-            .iter()
-            .filter(|label| !contracted.contains(label))
-            .cloned()
-            .collect::<Vec<_>>();
-        for label in rhs {
-            if !contracted.contains(label) && !labels.contains(label) {
-                labels.push(label.clone());
-            }
-        }
-        if remaining_labels.is_empty() {
-            return output_labels.to_vec();
-        }
-        labels
-    }
 }
 
 #[cfg(test)]

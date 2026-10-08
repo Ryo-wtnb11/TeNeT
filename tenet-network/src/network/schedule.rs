@@ -1,4 +1,5 @@
 use super::*;
+use crate::stepflow::{consumers, pair_result_labels, planned_label_orders};
 
 fn contracted_input_pairs(ir: &NetworkIR) -> Vec<InputLegPair> {
     let mut first = HashMap::new();
@@ -22,8 +23,8 @@ pub(super) fn compile_schedule(
     input_codomain_ranks: &[usize],
 ) -> Result<CompiledSchedule, Error> {
     let contracted_input_pairs = contracted_input_pairs(ir);
-    let labels_by_id = planned_label_orders(ir, plan)?;
-    let consumers = build_consumers(plan.steps());
+    let labels_by_id = planned_label_orders(ir, plan.steps()).map_err(invalid)?;
+    let consumers = consumers(plan.steps());
     let slot_count = ir.tensors().len() + plan.steps().len();
     let mut current_labels: Vec<Option<Vec<TemporaryLabel>>> = vec![None; slot_count];
     let mut current_codomain_ranks: Vec<Option<usize>> = vec![None; slot_count];
@@ -72,19 +73,7 @@ pub(super) fn compile_schedule(
                 rhs_contract_axes.push(rhs_axis);
             }
         }
-        let mut result_labels: Vec<TemporaryLabel> = lhs_labels
-            .iter()
-            .enumerate()
-            .filter(|(axis, _)| !lhs_contract_axes.contains(axis))
-            .map(|(_, label)| label.clone())
-            .collect();
-        result_labels.extend(
-            rhs_labels
-                .iter()
-                .enumerate()
-                .filter(|(axis, _)| !rhs_contract_axes.contains(axis))
-                .map(|(_, label)| label.clone()),
-        );
+        let mut result_labels = pair_result_labels(&lhs_labels, &rhs_labels);
 
         // The step's output orientation is its `ContractSpec` split (TensorOperations
         // `pAB`): the next-use orientation for an intermediate, the requested
@@ -187,46 +176,77 @@ fn label_positions(
         .collect()
 }
 
-/// Leg-label order of every input and planned intermediate, mirroring the
-/// executor's own tracking (open lhs legs then open rhs legs per step).
-fn planned_label_orders(
-    ir: &NetworkIR,
-    plan: &ContractionPlan,
-) -> Result<HashMap<TensorId, Vec<TemporaryLabel>>, Error> {
-    let mut labels_by_id: HashMap<TensorId, Vec<TemporaryLabel>> = HashMap::new();
-    let mut active: HashMap<TensorId, Vec<TemporaryLabel>> = HashMap::new();
-    for node in ir.tensors() {
-        let labels = node.labels().to_vec();
-        labels_by_id.insert(node.id(), labels.clone());
-        active.insert(node.id(), labels);
-    }
-    for step in plan.steps() {
-        let ll = active
-            .remove(&step.lhs())
-            .ok_or_else(|| invalid("lhs operand already consumed while planning labels"))?;
-        let rl = active
-            .remove(&step.rhs())
-            .ok_or_else(|| invalid("rhs operand already consumed while planning labels"))?;
-        let mut labels: Vec<TemporaryLabel> =
-            ll.iter().filter(|l| !rl.contains(l)).cloned().collect();
-        labels.extend(rl.iter().filter(|l| !ll.contains(l)).cloned());
-        labels_by_id.insert(step.result(), labels.clone());
-        active.insert(step.result(), labels);
-    }
-    Ok(labels_by_id)
-}
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use crate::cost::{DenseCostModel, DenseTensorInfo};
+    use crate::optimizer::{
+        charge_dense_orientation_costs, ContractionStep, DenseContractionOptimizer,
+        GreedyDenseOptimizer,
+    };
+    use crate::parse::parse_einsum;
 
-/// One forward pass mapping each tensor id to the single later step that
-/// consumes it and whether it is that step's lhs. In a pairwise contraction
-/// tree every operand/intermediate is consumed exactly once, so this replaces
-/// the per-step `steps[i+1..]` scan (`orient_intermediate_for_next_use`) — the
-/// whole orientation pass drops from O(steps²) to O(steps). Resolved once here,
-/// analogous to TensorKit's `@tensor` sequence being fixed at macro-expansion.
-fn build_consumers(steps: &[ContractionStep]) -> HashMap<TensorId, (usize, bool)> {
-    let mut consumers = HashMap::with_capacity(steps.len() * 2);
-    for (index, step) in steps.iter().enumerate() {
-        consumers.insert(step.lhs(), (index, true));
-        consumers.insert(step.rhs(), (index, false));
+    /// The cost the real planner path (`charge_dense_orientation_costs`, run
+    /// inside the optimizer) charges per step must equal the orientation work
+    /// the compiled schedule actually performs: one result-sized charge per
+    /// intermediate the schedule orients away from the pairwise order, plus the
+    /// final permute when the last result is not already in output order.
+    #[test]
+    fn planner_charges_match_schedule_orientation() {
+        let ir = parse_einsum("abx,xcy,ydz,zea->bcde").unwrap();
+        let infos = [(2, 3, 4), (4, 5, 6), (6, 7, 8), (8, 9, 2)]
+            .map(|(p, q, r)| DenseTensorInfo::new(vec![p, q, r]))
+            .to_vec();
+        let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
+        let steps = GreedyDenseOptimizer.optimize(&ir, &cost).unwrap();
+
+        // Uncharged baseline: re-running the charge pass on zero-cost steps
+        // yields exactly the orientation charges.
+        let mut charged: Vec<_> = steps
+            .iter()
+            .map(|s| {
+                ContractionStep::new(s.lhs(), s.rhs(), s.result(), 0, s.result_labels().to_vec())
+            })
+            .collect();
+        charge_dense_orientation_costs(&ir, &cost, &mut charged).unwrap();
+
+        let plan = ContractionPlan::from_steps(&ir, steps).unwrap();
+        let schedule = compile_schedule(&ir, &plan, None, &[1; 4]).unwrap();
+
+        let mut labels: HashMap<usize, Vec<TemporaryLabel>> = ir
+            .tensors()
+            .iter()
+            .enumerate()
+            .map(|(slot, node)| (slot, node.labels().to_vec()))
+            .collect();
+        let mut oriented_any = false;
+        let last = schedule.steps.len() - 1;
+        for (index, compiled) in schedule.steps.iter().enumerate() {
+            let lhs = labels.remove(&compiled.lhs_slot).unwrap();
+            let rhs = labels.remove(&compiled.rhs_slot).unwrap();
+            let raw = pair_result_labels(&lhs, &rhs);
+            let oriented: Vec<_> = compiled
+                .codomain
+                .iter()
+                .chain(&compiled.domain)
+                .map(|&axis| raw[axis].clone())
+                .collect();
+            let mut expected = 0;
+            if index < last {
+                if oriented != raw {
+                    oriented_any = true;
+                    expected += cost.tensor_size(&raw);
+                }
+            } else if raw != ir.output_labels() {
+                expected += cost.tensor_size(&raw);
+            }
+            assert_eq!(charged[index].cost(), expected, "step {index}");
+            labels.insert(compiled.result_slot, oriented);
+        }
+        assert!(schedule.steps.len() >= 3);
+        assert!(
+            oriented_any,
+            "fixture must exercise a non-trivial orientation"
+        );
     }
-    consumers
 }
