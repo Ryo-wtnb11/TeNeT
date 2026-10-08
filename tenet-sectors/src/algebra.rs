@@ -761,6 +761,10 @@ impl<Scalar> GenericFArray<Scalar> {
     }
 
     /// `F[mu,nu,kappa,lambda]`, row-major over the shape tuple.
+    ///
+    /// Only the flat index is bounds-checked; an out-of-axis label reads a
+    /// neighbouring entry. Callers compare labels with the categorical shape
+    /// first, which a per-axis check here could not report as a typed error.
     pub fn get(&self, mu: usize, nu: usize, kappa: usize, lambda: usize) -> &Scalar {
         let (_, n_nu, n_kappa, n_lambda) = self.shape;
         let idx = ((mu * n_nu + nu) * n_kappa + kappa) * n_lambda + lambda;
