@@ -129,9 +129,9 @@ fn product_subblock_by_sectors_handles_simple_fusion_channels_without_manual_tre
     type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
-    let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+    let left_sector = |parity, charge| left_rule.encode_component_ids(parity, u1(charge));
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        rule.encode_component_ids(left_sector(parity, charge), su2(twice_spin))
     };
 
     let a = sector(z2_odd(), 1, 1);

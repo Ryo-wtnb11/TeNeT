@@ -179,9 +179,9 @@ fn checked_revalidation_preserves_complete_admission() {
     type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     type Triple = ProductFusionRule<Fz2U1, SU2FusionRule>;
     let pair = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-    let pair_sector = pair.encode_sector(z2_odd(), u1(2));
+    let pair_sector = pair.encode_component_ids(z2_odd(), u1(2));
     let triple = Triple::new(pair, SU2FusionRule);
-    let triple_sector = triple.encode_sector(pair_sector, su2(1));
+    let triple_sector = triple.encode_component_ids(pair_sector, su2(1));
     assert_rule(&triple, triple_sector);
 }
 
@@ -420,7 +420,7 @@ fn packed_and_tensorkit_codecs_remain_distinct_compatible_options() {
 fn product_external_domain_sector_is_dualized_componentwise() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     let rule = FpU1Rule::default();
-    let a = rule.encode_sector(z2_odd(), u1(2));
+    let a = rule.encode_component_ids(z2_odd(), u1(2));
     let external_domain = rule.dual(a);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(a, 1)], false)]),

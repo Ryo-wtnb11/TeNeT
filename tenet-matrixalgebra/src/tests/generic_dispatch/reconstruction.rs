@@ -150,8 +150,8 @@ fn tsvd_fusion_reconstructs_product_rule_tensor() {
     // What: direct sector spans are keyed by the encoded product SectorId.
     let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let sectors = [
-        rule.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
-        rule.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        rule.encode_component_ids(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        rule.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
     ];
     run_tsvd_reconstruction_case(&rule, &sectors);
 }
@@ -238,7 +238,7 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     // What: product-sector factors inherit the no-relabel contract for compact SVD, QR, LQ, and full EIGH.
     let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let minimum = rule
-        .try_encode_sector(SectorId::new(1), U1Irrep::new(i32::MIN + 1).sector_id())
+        .try_encode_component_ids(SectorId::new(1), U1Irrep::new(i32::MIN + 1).sector_id())
         .unwrap();
     let matrix = |rows: usize, cols: usize, data: Vec<f64>| {
         let homspace = FusionTreeHomSpace::new(
@@ -661,8 +661,8 @@ fn value_region_paths_match_packed_oracles_across_supported_rules() {
 
     let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let product_sectors = [
-        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
-        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        product.encode_component_ids(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
     ];
     assert_value_region_paths_match(
         Arc::new(product.clone()),

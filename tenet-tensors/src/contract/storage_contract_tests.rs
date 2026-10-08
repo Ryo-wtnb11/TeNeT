@@ -860,10 +860,10 @@ fn fermion_u1_leg(rule: &FermionU1, dual: bool) -> SectorLeg {
     let charge = |q: i32| U1Irrep::new(if dual { -q } else { q }).sector_id();
     SectorLeg::new(
         [
-            (rule.encode_sector(EVEN, charge(0)), 2),
-            (rule.encode_sector(ODD, charge(1)), 2),
-            (rule.encode_sector(ODD, charge(-1)), 1),
-            (rule.encode_sector(EVEN, charge(1)), 1),
+            (rule.encode_component_ids(EVEN, charge(0)), 2),
+            (rule.encode_component_ids(ODD, charge(1)), 2),
+            (rule.encode_component_ids(ODD, charge(-1)), 1),
+            (rule.encode_component_ids(EVEN, charge(1)), 1),
         ],
         dual,
     )
@@ -874,15 +874,15 @@ fn fermion_su2_leg(rule: &FermionSu2, dual: bool) -> SectorLeg {
     SectorLeg::new(
         [
             (
-                rule.encode_sector(EVEN, SU2Irrep::from_twice_spin(0).sector_id()),
+                rule.encode_component_ids(EVEN, SU2Irrep::from_twice_spin(0).sector_id()),
                 2,
             ),
             (
-                rule.encode_sector(ODD, SU2Irrep::from_twice_spin(1).sector_id()),
+                rule.encode_component_ids(ODD, SU2Irrep::from_twice_spin(1).sector_id()),
                 2,
             ),
             (
-                rule.encode_sector(EVEN, SU2Irrep::from_twice_spin(2).sector_id()),
+                rule.encode_component_ids(EVEN, SU2Irrep::from_twice_spin(2).sector_id()),
                 1,
             ),
         ],

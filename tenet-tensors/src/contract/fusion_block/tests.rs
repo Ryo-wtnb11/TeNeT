@@ -265,11 +265,11 @@ fn destination_order_join_preserves_structural_zero_for_builtin_rules() {
     assert_missing_input_group_scales_destination(
         &product,
         [
-            product.encode_sector(
+            product.encode_component_ids(
                 U1Irrep::new(0).sector_id(),
                 SU2Irrep::from_twice_spin(0).sector_id(),
             ),
-            product.encode_sector(
+            product.encode_component_ids(
                 U1Irrep::new(1).sector_id(),
                 SU2Irrep::from_twice_spin(1).sector_id(),
             ),

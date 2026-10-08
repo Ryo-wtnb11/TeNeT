@@ -422,8 +422,8 @@ fn compact_block_operators_match_fermionic_product_cohort_oracles() {
     type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left = FpU1Rule::default();
     let rule = ProductRule::default();
-    let external = rule.encode_sector(left.encode_sector(z2_odd(), u1(0)), su2(2));
-    let coupled = rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(2));
+    let external = rule.encode_component_ids(left.encode_component_ids(z2_odd(), u1(0)), su2(2));
+    let coupled = rule.encode_component_ids(left.encode_component_ids(z2_even(), u1(0)), su2(2));
     let sources = compact_operator_cohort_fixture(&rule, external, coupled);
 
     assert_compact_operator_cohorts(&rule, &sources);
@@ -485,8 +485,8 @@ fn all_codomain_compact_block_matches_fermionic_product_cohorts() {
     type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left = FpU1Rule::default();
     let rule = ProductRule::default();
-    let external = rule.encode_sector(left.encode_sector(z2_odd(), u1(0)), su2(2));
-    let coupled = rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(2));
+    let external = rule.encode_component_ids(left.encode_component_ids(z2_odd(), u1(0)), su2(2));
+    let coupled = rule.encode_component_ids(left.encode_component_ids(z2_even(), u1(0)), su2(2));
     let sources = compact_operator_cohort_fixture(&rule, external, coupled)
         .into_iter()
         .map(|source| source.codomain_tree().clone())
@@ -730,9 +730,9 @@ fn transpose_tree_pair_block_matches_full_key_fermionic_product_cycle() {
     type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left = FpU1Rule::default();
     let rule = ProductRule::default();
-    let coupled = rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(1));
-    let odd_half = rule.encode_sector(left.encode_sector(z2_odd(), u1(1)), su2(1));
-    let odd_one = rule.encode_sector(left.encode_sector(z2_odd(), u1(-1)), su2(2));
+    let coupled = rule.encode_component_ids(left.encode_component_ids(z2_even(), u1(0)), su2(1));
+    let odd_half = rule.encode_component_ids(left.encode_component_ids(z2_odd(), u1(1)), su2(1));
+    let odd_one = rule.encode_component_ids(left.encode_component_ids(z2_odd(), u1(-1)), su2(2));
     let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&rule, [coupled], coupled, [false], [], []).unwrap(),
         FusionTreeKey::try_new_for_rule(

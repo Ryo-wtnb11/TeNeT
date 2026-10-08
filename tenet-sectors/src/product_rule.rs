@@ -104,14 +104,14 @@ impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
         &self.right
     }
 
-    pub fn encode_sector(&self, left: SectorId, right: SectorId) -> SectorId
+    pub fn encode_component_ids(&self, left: SectorId, right: SectorId) -> SectorId
     where
         Codec: ProductSectorCodec,
     {
         Codec::encode(left, right)
     }
 
-    pub fn try_encode_sector(
+    pub fn try_encode_component_ids(
         &self,
         left: SectorId,
         right: SectorId,
@@ -122,18 +122,18 @@ impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
         Codec::encode_checked(left, right).map_err(FusionAlgebraError::ProductCodec)
     }
 
-    pub fn decode_sector(&self, sector: SectorId) -> Option<(SectorId, SectorId)>
+    pub fn decode_component_ids(&self, sector: SectorId) -> Option<(SectorId, SectorId)>
     where
         Codec: ProductSectorCodec,
     {
         Codec::decode(sector)
     }
 
-    fn decode_sector_or_panic(&self, sector: SectorId) -> (SectorId, SectorId)
+    fn decode_component_ids_or_panic(&self, sector: SectorId) -> (SectorId, SectorId)
     where
         Codec: ProductSectorCodec,
     {
-        self.decode_sector(sector)
+        self.decode_component_ids(sector)
             .expect("product fusion rule received an invalid product sector")
     }
 }
@@ -173,14 +173,11 @@ pub trait ProductFusionRuleExt: FusionRule + Sized {
     ///     SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
     /// };
     ///
-    /// // Two factors: fZ2 ⊠ U(1). The `SectorCodec::` prefix disambiguates
-    /// // against `ProductFusionRule`'s inherent id-level `encode_sector` /
-    /// // `decode_sector`, which speak component `SectorId`s rather than
-    /// // labels; callers of `tenet::typed` never write either by hand.
+    /// // Two factors: fZ2 ⊠ U(1).
     /// let rule = FermionParityFusionRule.product(U1FusionRule);
     /// let odd = product_sector(Z2Irrep::ODD, U1Irrep::new(1));
-    /// let id = SectorCodec::encode_sector(&rule, &odd)?;
-    /// assert_eq!(SectorCodec::decode_sector(&rule, id)?, odd);
+    /// let id = rule.encode_sector(&odd)?;
+    /// assert_eq!(rule.decode_sector(id)?, odd);
     ///
     /// // Three factors: the same call again, left-associated as
     /// // (fZ2 ⊠ U(1)) ⊠ SU(2). Nothing new is needed at the core.
@@ -188,8 +185,8 @@ pub trait ProductFusionRuleExt: FusionRule + Sized {
     ///     .product(U1FusionRule)
     ///     .product(SU2FusionRule);
     /// let label = product_sector(odd, SU2Irrep::from_twice_spin(1));
-    /// let id = SectorCodec::encode_sector(&rule, &label)?;
-    /// assert_eq!(SectorCodec::decode_sector(&rule, id)?, label);
+    /// let id = rule.encode_sector(&label)?;
+    /// assert_eq!(rule.decode_sector(id)?, label);
     ///
     /// // Factor order and association are structure, not an equivalence:
     /// // U(1) ⊠ fZ2 is a different Rust type with a different identity, and
@@ -257,7 +254,7 @@ where
     }
 
     fn vacuum(&self) -> SectorId {
-        self.encode_sector(self.left.vacuum(), self.right.vacuum())
+        self.encode_component_ids(self.left.vacuum(), self.right.vacuum())
     }
 
     fn supports_unitary_braid_dagger(&self) -> bool {
@@ -265,13 +262,13 @@ where
     }
 
     fn dual(&self, sector: SectorId) -> SectorId {
-        let (left, right) = self.decode_sector_or_panic(sector);
-        self.encode_sector(self.left.dual(left), self.right.dual(right))
+        let (left, right) = self.decode_component_ids_or_panic(sector);
+        self.encode_component_ids(self.left.dual(left), self.right.dual(right))
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        let (left_left, left_right) = self.decode_sector_or_panic(left);
-        let (right_left, right_right) = self.decode_sector_or_panic(right);
+        let (left_left, left_right) = self.decode_component_ids_or_panic(left);
+        let (right_left, right_right) = self.decode_component_ids_or_panic(right);
         let left_channels = self.left.fusion_channels(left_left, right_left);
         let right_channels = self.right.fusion_channels(left_right, right_right);
         // Cartesian product of the two sub-rules' channels, matching TensorKit's
@@ -283,16 +280,16 @@ where
         let mut channels = SectorVec::with_capacity(left_channels.len() * right_channels.len());
         for right_channel in right_channels {
             for &left_channel in &left_channels {
-                channels.push(self.encode_sector(left_channel, right_channel));
+                channels.push(self.encode_component_ids(left_channel, right_channel));
             }
         }
         channels
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        let (left_left, left_right) = self.decode_sector_or_panic(left);
-        let (right_left, right_right) = self.decode_sector_or_panic(right);
-        let (coupled_left, coupled_right) = self.decode_sector_or_panic(coupled);
+        let (left_left, left_right) = self.decode_component_ids_or_panic(left);
+        let (right_left, right_right) = self.decode_component_ids_or_panic(right);
+        let (coupled_left, coupled_right) = self.decode_component_ids_or_panic(coupled);
         self.left.nsymbol(left_left, right_left, coupled_left)
             * self.right.nsymbol(left_right, right_right, coupled_right)
     }
@@ -300,7 +297,7 @@ where
     /// Independent of `Codec`: the order is TensorKit's product order over the
     /// factors, whatever ids the codec packs them into.
     fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         SectorOrderKey::product(
             self.left.sector_order_key(left),
             self.right.sector_order_key(right),
@@ -311,11 +308,9 @@ where
 /// The product label is the component label pair; the id is whatever `Codec`
 /// packs those component ids into.
 ///
-/// Note the name clash with the inherent id-level
-/// [`ProductFusionRule::encode_sector`] / [`ProductFusionRule::decode_sector`]
-/// pair: on a concrete `ProductFusionRule` value the inherent methods win, so
-/// call these through the trait (`SectorCodec::decode_sector(&rule, id)`).
-/// Generic `R: SectorCodec` code — the facade's only caller — is unaffected.
+/// The component-id level pair is
+/// [`ProductFusionRule::encode_component_ids`] /
+/// [`ProductFusionRule::decode_component_ids`].
 impl<LeftRule, RightRule, Codec> SectorCodec for ProductFusionRule<LeftRule, RightRule, Codec>
 where
     LeftRule: SectorCodec,
@@ -370,7 +365,7 @@ where
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         let (left, right) =
             Codec::decode_checked(sector).map_err(FusionAlgebraError::ProductCodec)?;
-        self.try_encode_sector(
+        self.try_encode_component_ids(
             self.left.try_dual_sector(left)?,
             self.right.try_dual_sector(right)?,
         )
@@ -390,7 +385,7 @@ where
         let mut channels = SectorVec::new();
         for right_channel in right_channels {
             for &left_channel in &left_channels {
-                channels.push(self.try_encode_sector(left_channel, right_channel)?);
+                channels.push(self.try_encode_component_ids(left_channel, right_channel)?);
             }
         }
         Ok(channels)
@@ -449,12 +444,12 @@ where
         left_coupled: SectorId,
         right_coupled: SectorId,
     ) -> Self::Scalar {
-        let (left_l, left_r) = self.decode_sector_or_panic(left);
-        let (middle_l, middle_r) = self.decode_sector_or_panic(middle);
-        let (right_l, right_r) = self.decode_sector_or_panic(right);
-        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
-        let (left_coupled_l, left_coupled_r) = self.decode_sector_or_panic(left_coupled);
-        let (right_coupled_l, right_coupled_r) = self.decode_sector_or_panic(right_coupled);
+        let (left_l, left_r) = self.decode_component_ids_or_panic(left);
+        let (middle_l, middle_r) = self.decode_component_ids_or_panic(middle);
+        let (right_l, right_r) = self.decode_component_ids_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_component_ids_or_panic(coupled);
+        let (left_coupled_l, left_coupled_r) = self.decode_component_ids_or_panic(left_coupled);
+        let (right_coupled_l, right_coupled_r) = self.decode_component_ids_or_panic(right_coupled);
         promote_left::<LeftRule, RightRule>(self.left.f_symbol_scalar(
             left_l,
             middle_l,
@@ -473,9 +468,9 @@ where
     }
 
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
-        let (left_l, left_r) = self.decode_sector_or_panic(left);
-        let (right_l, right_r) = self.decode_sector_or_panic(right);
-        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        let (left_l, left_r) = self.decode_component_ids_or_panic(left);
+        let (right_l, right_r) = self.decode_component_ids_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_component_ids_or_panic(coupled);
         promote_left::<LeftRule, RightRule>(self.left.r_symbol_scalar(left_l, right_l, coupled_l))
             * promote_right::<LeftRule, RightRule>(
                 self.right.r_symbol_scalar(left_r, right_r, coupled_r),
@@ -497,45 +492,45 @@ where
     Codec: ProductSectorCodec + Sync + 'static,
 {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.dim_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.dim_scalar(right))
     }
 
     fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.inv_dim_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.inv_dim_scalar(right))
     }
 
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.sqrt_dim_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.sqrt_dim_scalar(right))
     }
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.inv_sqrt_dim_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.inv_sqrt_dim_scalar(right))
     }
 
     fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.twist_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.twist_scalar(right))
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
-        let (left, right) = self.decode_sector_or_panic(sector);
+        let (left, right) = self.decode_component_ids_or_panic(sector);
         promote_left::<LeftRule, RightRule>(self.left.frobenius_schur_phase_scalar(left))
             * promote_right::<LeftRule, RightRule>(self.right.frobenius_schur_phase_scalar(right))
     }
 
     fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
-        let (left_l, left_r) = self.decode_sector_or_panic(left);
-        let (right_l, right_r) = self.decode_sector_or_panic(right);
-        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        let (left_l, left_r) = self.decode_component_ids_or_panic(left);
+        let (right_l, right_r) = self.decode_component_ids_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_component_ids_or_panic(coupled);
         promote_left::<LeftRule, RightRule>(self.left.a_symbol_scalar(left_l, right_l, coupled_l))
             * promote_right::<LeftRule, RightRule>(
                 self.right.a_symbol_scalar(left_r, right_r, coupled_r),
@@ -543,9 +538,9 @@ where
     }
 
     fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
-        let (left_l, left_r) = self.decode_sector_or_panic(left);
-        let (right_l, right_r) = self.decode_sector_or_panic(right);
-        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        let (left_l, left_r) = self.decode_component_ids_or_panic(left);
+        let (right_l, right_r) = self.decode_component_ids_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_component_ids_or_panic(coupled);
         promote_left::<LeftRule, RightRule>(self.left.b_symbol_scalar(left_l, right_l, coupled_l))
             * promote_right::<LeftRule, RightRule>(
                 self.right.b_symbol_scalar(left_r, right_r, coupled_r),
@@ -565,13 +560,35 @@ mod tests {
     };
 
     #[test]
+    fn label_codec_resolves_by_method_syntax_and_component_ids_round_trip() {
+        // What: `encode_sector`/`decode_sector` on a product rule are the label-level
+        // `SectorCodec` methods; component ids use the `*_component_ids` pair.
+        use crate::{product_sector, SectorCodec};
+
+        let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+        let label = product_sector(Z2Irrep::ODD, U1Irrep::new(-3));
+        let id = rule.encode_sector(&label).unwrap();
+        assert_eq!(rule.decode_sector(id).unwrap(), label);
+        let by_ids = rule.encode_component_ids(Z2Irrep::ODD.into(), U1Irrep::new(-3).into());
+        assert_eq!(by_ids, id);
+        assert_eq!(
+            rule.decode_component_ids(id),
+            Some((Z2Irrep::ODD.into(), U1Irrep::new(-3).into()))
+        );
+        assert_eq!(
+            rule.try_encode_component_ids(Z2Irrep::ODD.into(), U1Irrep::new(-3).into()),
+            Ok(id)
+        );
+    }
+
+    #[test]
     fn product_of_canonical_unit_rules_has_canonical_unit() {
         // What: product construction preserves the unit law componentwise.
         fn accepts_canonical_unit<R: CanonicalUnitFusionRule>(_rule: &R) {}
 
         let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
         let vacuum = rule.vacuum();
-        let sector = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(-17).into());
+        let sector = rule.encode_component_ids(Z2Irrep::ODD.into(), U1Irrep::new(-17).into());
         let fused = rule.fusion_channels(sector, sector)[0];
         accepts_canonical_unit(&rule);
         assert_eq!(rule.dual(vacuum), vacuum);
@@ -597,7 +614,7 @@ mod tests {
     #[test]
     fn product_rule_composes_checked_symbols_rigidity_and_ordered_identity() {
         let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
-        let odd_zero = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
+        let odd_zero = rule.encode_component_ids(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
         let vacuum = rule.vacuum();
 
         assert_eq!(
@@ -655,9 +672,9 @@ mod tests {
         let rule = product_fusion_rule(FibonacciFusionRule, Z2FusionRule);
         let tau = SectorId::new(1);
         let vacuum_fib = SectorId::new(0);
-        let t1 = rule.encode_sector(tau, Z2Irrep::ODD.into());
-        let i0 = rule.encode_sector(vacuum_fib, Z2Irrep::EVEN.into());
-        let tau0 = rule.encode_sector(tau, Z2Irrep::EVEN.into());
+        let t1 = rule.encode_component_ids(tau, Z2Irrep::ODD.into());
+        let i0 = rule.encode_component_ids(vacuum_fib, Z2Irrep::EVEN.into());
+        let tau0 = rule.encode_component_ids(tau, Z2Irrep::EVEN.into());
 
         assert_eq!(rule.fusion_style(), FusionStyleKind::Simple);
         assert_eq!(rule.braiding_style(), BraidingStyleKind::Anyonic);
@@ -717,10 +734,10 @@ mod tests {
         let tau = SectorId::new(1);
         let vacuum_fib = SectorId::new(0);
 
-        let forward_t1 = forward.encode_sector(tau, Z2Irrep::ODD.into());
-        let forward_i0 = forward.encode_sector(vacuum_fib, Z2Irrep::EVEN.into());
-        let reversed_t1 = reversed.encode_sector(Z2Irrep::ODD.into(), tau);
-        let reversed_i0 = reversed.encode_sector(Z2Irrep::EVEN.into(), vacuum_fib);
+        let forward_t1 = forward.encode_component_ids(tau, Z2Irrep::ODD.into());
+        let forward_i0 = forward.encode_component_ids(vacuum_fib, Z2Irrep::EVEN.into());
+        let reversed_t1 = reversed.encode_component_ids(Z2Irrep::ODD.into(), tau);
+        let reversed_i0 = reversed.encode_component_ids(Z2Irrep::EVEN.into(), vacuum_fib);
 
         assert_close(
             reversed.r_symbol_scalar(reversed_t1, reversed_t1, reversed_i0),
@@ -737,7 +754,7 @@ mod tests {
         // What: promotion must not widen a product whose components are both
         // real; the existing providers keep f64 coefficients and values.
         let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
-        let odd_zero = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
+        let odd_zero = rule.encode_component_ids(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
         let vacuum = rule.vacuum();
         let one: f64 = CategoricalScalar::one();
 

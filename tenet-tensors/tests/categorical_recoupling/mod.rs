@@ -199,12 +199,12 @@ pub fn fermionic_space(
         .map(|inner| {
             let uncoupled: Vec<SectorId> = legs
                 .iter()
-                .map(|&spin| rule.encode_sector(odd, SectorId::new(spin)))
+                .map(|&spin| rule.encode_component_ids(odd, SectorId::new(spin)))
                 .collect();
             let inner_sectors: Vec<SectorId> = inner
                 .iter()
                 .enumerate()
-                .map(|(index, &spin)| rule.encode_sector(parity(index), SectorId::new(spin)))
+                .map(|(index, &spin)| rule.encode_component_ids(parity(index), SectorId::new(spin)))
                 .collect();
             BlockKey::from(FusionTreePairKey::pair(
                 FusionTreeKey::try_new_for_rule(

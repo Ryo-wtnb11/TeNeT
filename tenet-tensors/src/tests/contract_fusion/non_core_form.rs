@@ -496,9 +496,9 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let left_sector =
-        |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+        |parity, charge| left_rule.encode_component_ids(parity, U1Irrep::new(charge).sector_id());
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(
+        rule.encode_component_ids(
             left_sector(parity, charge),
             SU2Irrep::from_twice_spin(twice_spin).sector_id(),
         )
@@ -645,8 +645,8 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
 fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
-    let odd_charge = left_rule.encode_sector(SectorId::new(1), U1Irrep::new(0).sector_id());
-    let odd = rule.encode_sector(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
+    let odd_charge = left_rule.encode_component_ids(SectorId::new(1), U1Irrep::new(0).sector_id());
+    let odd = rule.encode_component_ids(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
     let matrix_hom = || {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),

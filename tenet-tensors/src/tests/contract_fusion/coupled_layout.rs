@@ -112,8 +112,8 @@ fn coupled_layout_contraction_matches_packed_layout_product() {
     let left = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
     let sector = |parity, charge, twice_spin| {
-        rule.encode_sector(
-            left.encode_sector(parity, U1Irrep::new(charge).sector_id()),
+        rule.encode_component_ids(
+            left.encode_component_ids(parity, U1Irrep::new(charge).sector_id()),
             SU2Irrep::from_twice_spin(twice_spin).sector_id(),
         )
     };

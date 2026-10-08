@@ -677,15 +677,15 @@ fn compact_qr_reconstructs_u1_fermion_parity_and_product_rules() {
     );
     let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let product_sectors = [
-        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
-        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        product.encode_component_ids(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
     ];
     assert_compact_qr_reconstructs_rule(&product, &product_sectors);
 
     let nested = product_fusion_rule(product, SU2FusionRule);
     let nested_sectors = [
-        nested.encode_sector(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
-        nested.encode_sector(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
+        nested.encode_component_ids(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
+        nested.encode_component_ids(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
     ];
     crate::factorize::reset_compact_qr_copy_probe();
     assert_compact_qr_reconstructs_rule(&nested, &nested_sectors);
@@ -735,15 +735,15 @@ fn compact_lq_reconstructs_u1_fermion_parity_and_product_rules() {
     );
     let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let product_sectors = [
-        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
-        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        product.encode_component_ids(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_component_ids(SectorId::new(1), U1Irrep::new(1).sector_id()),
     ];
     assert_compact_lq_reconstructs_rule(&product, &product_sectors);
 
     let nested = product_fusion_rule(product, SU2FusionRule);
     let nested_sectors = [
-        nested.encode_sector(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
-        nested.encode_sector(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
+        nested.encode_component_ids(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
+        nested.encode_component_ids(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
     ];
     crate::factorize::reset_compact_lq_copy_probe();
     assert_compact_lq_reconstructs_rule(&nested, &nested_sectors);

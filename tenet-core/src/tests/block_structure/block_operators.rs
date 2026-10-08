@@ -212,10 +212,10 @@ fn fibonacci_braid_then_inverse_braid_is_identity() {
 fn tree_pair_block_apis_reject_mixed_product_sector_components() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     let rule = FpU1Rule::default();
-    let sector_a = rule.encode_sector(z2_even(), u1(2)).id();
-    let sector_b = rule.encode_sector(z2_even(), u1(3)).id();
-    let coupled_a = rule.encode_sector(z2_even(), u1(4)).id();
-    let coupled_b = rule.encode_sector(z2_even(), u1(5)).id();
+    let sector_a = rule.encode_component_ids(z2_even(), u1(2)).id();
+    let sector_b = rule.encode_component_ids(z2_even(), u1(3)).id();
+    let coupled_a = rule.encode_component_ids(z2_even(), u1(4)).id();
+    let coupled_b = rule.encode_component_ids(z2_even(), u1(5)).id();
     let keys = [
         tree_pair_group_fixture(
             &[sector_a, sector_a],
@@ -487,9 +487,12 @@ fn split_only_nested_product_braid_matches_legacy_composition() {
     type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
     let left_rule = FpU1Rule::default();
     let rule = ProductRule::default();
-    let coupled = rule.encode_sector(left_rule.encode_sector(z2_even(), u1(0)), su2(1));
-    let domain_left = rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(1));
-    let domain_right = rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(-1)), su2(2));
+    let coupled =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_even(), u1(0)), su2(1));
+    let domain_left =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_odd(), u1(1)), su2(1));
+    let domain_right =
+        rule.encode_component_ids(left_rule.encode_component_ids(z2_odd(), u1(-1)), su2(2));
     let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&rule, [coupled], coupled, [false], [], []).unwrap(),
         FusionTreeKey::try_new_for_rule(
@@ -575,7 +578,7 @@ fn identity_braid_rows_are_exact_for_supported_symmetry_families_and_rank_zero()
     let left_rule = FpU1Rule::default();
     let product_rule = FpU1Su2Rule::default();
     let product_sector =
-        product_rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(2)), su2(1));
+        product_rule.encode_component_ids(left_rule.encode_component_ids(z2_odd(), u1(2)), su2(1));
     let product_source = pair(product_sector);
     assert_eq!(
         multiplicity_free_braid_tree_pair(&product_rule, &product_source, &[0], &[1], &[8], &[3],)

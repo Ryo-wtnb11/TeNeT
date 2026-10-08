@@ -156,9 +156,9 @@ fn expert_storage_admission_is_symmetry_independent() {
     type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     type Triple = ProductFusionRule<Fz2U1, SU2FusionRule>;
     let pair = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-    let pair_vacuum = pair.encode_sector(z2_even(), u1(0));
+    let pair_vacuum = pair.encode_component_ids(z2_even(), u1(0));
     let triple = Triple::new(pair, SU2FusionRule);
-    let vacuum = triple.encode_sector(pair_vacuum, su2(0));
+    let vacuum = triple.encode_component_ids(pair_vacuum, su2(0));
     assert_expert_storage_admission_for_rule(&triple, vacuum);
 }
 

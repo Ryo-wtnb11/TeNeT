@@ -173,8 +173,8 @@ fn bound_subset_is_a_structural_zero_source_across_public_operations() {
     let left_rule = FpU1Rule::default();
     let product_rule = FpU1Su2Rule::default();
     let product_sector = |parity, charge, twice_spin| {
-        product_rule.encode_sector(
-            left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id()),
+        product_rule.encode_component_ids(
+            left_rule.encode_component_ids(parity, U1Irrep::new(charge).sector_id()),
             SU2Irrep::from_twice_spin(twice_spin).sector_id(),
         )
     };

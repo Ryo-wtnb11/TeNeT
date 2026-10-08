@@ -482,8 +482,14 @@ fn direct_leg_degeneracy_layout_matches_legacy_for_supported_rules() {
 
     let product_rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let product_hom = build(&[
-        (product_rule.encode_sector(SectorId::new(0), u1(-1)), 2),
-        (product_rule.encode_sector(SectorId::new(1), u1(2)), 1),
+        (
+            product_rule.encode_component_ids(SectorId::new(0), u1(-1)),
+            2,
+        ),
+        (
+            product_rule.encode_component_ids(SectorId::new(1), u1(2)),
+            1,
+        ),
     ]);
     assert_direct_leg_degeneracy_structure_matches_legacy(&product_rule, &product_hom);
     assert_coupled_grid_layout_matches_key_reconstruction(&product_rule, &product_hom);
@@ -663,7 +669,7 @@ fn sector_leg_dual_is_shared_for_non_self_dual_self_dual_and_product_rules() {
 
         type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
         let product = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-        let sector = |parity, charge| product.encode_sector(parity, u1(charge));
+        let sector = |parity, charge| product.encode_component_ids(parity, u1(charge));
         let product_leg = SectorLeg::new(
             [
                 (sector(z2_even(), 0), 2),
