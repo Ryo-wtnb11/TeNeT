@@ -1,11 +1,10 @@
-//! Host gates of `PreparedEighFull` (#1499, leaf L3 of #1287).
+//! Host gates of `EighFullPlan` (#1499, leaf L3 of #1287).
 //!
-//! Per member the handle must equal Host eager `eigh_full` (gauge-fixed, so
+//! Per member the plan must equal Host eager `eigh_full` (gauge-fixed, so
 //! the eigenvectors themselves are compared) and the dense Jacobi oracle of
 //! `prepared/eigh.rs`, over U(1), SU(2) and fZ2xU(1) with several coupled
 //! sectors and degeneracies above one. A batch fails as a whole and names
 //! every failing member.
-#![allow(deprecated)]
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -20,7 +19,7 @@ use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCo
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::Error;
 use tenet::typed::{
-    BatchError, Eigh, EighFullPlan, GradedSpace, MemberFault, PreparedEighFull, Runtime,
+    BatchError, Eigh, EighFullPlan, EighFullWorkspace, GradedSpace, MemberFault, Runtime,
     SignatureField, StackedTensorMap, TensorMap,
 };
 
@@ -37,9 +36,9 @@ use fixtures::{codomain_axes, domain_axes};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 7];
 
-/// Runs the handle on `inputs` and checks every member against Host eager
+/// Runs the plan on `inputs` and checks every member against Host eager
 /// and the oracle. At `B = 1` the factors must equal eager bit for bit
-/// (IEEE `==`); at any `B` the Host handle runs the eager code per member,
+/// (IEEE `==`); at any `B` the Host plan runs the eager code per member,
 /// so its gauge-fixed `v` equals eager's within the numerics rule.
 fn check_batch<R>(label: &str, runtime: &Runtime, inputs: &[TensorMap<R, f64>])
 where
@@ -48,14 +47,15 @@ where
 {
     let _ = (Complex32::new(0.0, 0.0), Complex64::new(0.0, 0.0), runtime);
     let stack = StackedTensorMap::pack(inputs).unwrap();
-    let mut handle = PreparedEighFull::new(
+    let plan = EighFullPlan::new(
         &stack,
         &codomain_axes(&inputs[0]),
         &domain_axes(&inputs[0]),
         HermitianTol::DEFAULT,
     )
     .unwrap();
-    let output = handle.execute(&stack).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    let output = plan.execute(&stack, &mut ws).unwrap();
     assert_eq!(
         (output.d.len(), output.v.len()),
         (inputs.len(), inputs.len())
@@ -293,9 +293,9 @@ fn mixed_scale_admission_verdicts_equal_eager_per_member() {
     );
     assert!(expected.len() < inputs.len(), "and admits others");
     let stack = StackedTensorMap::pack(&inputs).unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
-    let got = rejected_members(handle.execute(&stack).map(|_| ()));
+    let plan = EighFullPlan::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    let got = rejected_members(plan.execute(&stack, &mut ws).map(|_| ()));
     assert_eq!(got, expected);
 }
 
@@ -309,13 +309,13 @@ fn every_non_hermitian_or_non_finite_member_is_named() {
     inputs[4] = x;
     inputs[5] = inputs[5].scale(f64::NAN);
     let stack = StackedTensorMap::pack(&inputs).unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
-    let got = rejected_members(handle.execute(&stack).map(|_| ()));
+    let plan = EighFullPlan::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    let got = rejected_members(plan.execute(&stack, &mut ws).map(|_| ()));
     let fault = MemberFault::NotHermitian;
     assert_eq!(got, vec![(1, fault), (4, fault), (5, fault)]);
     assert!(
-        handle.take_output().is_none(),
+        ws.take_output().is_none(),
         "no output after a rejected batch"
     );
 }
@@ -345,9 +345,10 @@ fn a_non_finite_eigenvalue_rejects_its_members() {
         "eager rejects the overflowing members"
     );
     let stack = StackedTensorMap::pack(&inputs).unwrap();
-    let mut handle = PreparedEighFull::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let plan = EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
     assert_eq!(
-        rejected_members(handle.execute(&stack).map(|_| ())),
+        rejected_members(plan.execute(&stack, &mut ws).map(|_| ())),
         expected
     );
 }
@@ -359,23 +360,24 @@ fn complex_payloads_and_other_signatures_are_typed_errors() {
     let complex = members::<_, Complex64>(&runtime, &[&v], &[&v], 2, 1);
     let stack = StackedTensorMap::pack(&complex).unwrap();
     assert!(matches!(
-        PreparedEighFull::new(&stack, &[0], &[1], HermitianTol::DEFAULT),
+        EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT),
         Err(Error::Operation(error)) if format!("{error:?}").contains("real payloads")
     ));
 
     let inputs = hermitian_members(&runtime, &[&v], 2, 1);
     let stack = StackedTensorMap::pack(&inputs).unwrap();
-    let mut handle = PreparedEighFull::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let plan = EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
     let other = StackedTensorMap::pack(&hermitian_members(&runtime, &[&w], 2, 1)).unwrap();
     assert!(matches!(
-        handle.execute(&other).map(|_| ()),
+        plan.execute(&other, &mut ws).map(|_| ()),
         Err(BatchError::Operation(Error::BatchSignatureMismatch {
             member: None,
             field: SignatureField::HomSpace
         }))
     ));
     let rectangular = members::<_, f64>(&runtime, &[&v], &[&w], 1, 1);
-    assert!(PreparedEighFull::new(
+    assert!(EighFullPlan::new(
         &StackedTensorMap::pack(&rectangular).unwrap(),
         &[0],
         &[1],
@@ -390,33 +392,34 @@ fn warm_calls_reuse_the_outputs() {
     let (leg, _) = fz2u1_legs();
     let inputs = hermitian_members(&runtime, &[&leg, &leg], 3, 2);
     let stack = StackedTensorMap::pack(&inputs).unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
-    let first = handle.execute(&stack).unwrap().v.member(2).unwrap();
-    let retained = handle.retained_bytes();
+    let plan = EighFullPlan::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    let first = plan.execute(&stack, &mut ws).unwrap().v.member(2).unwrap();
+    let retained = ws.retained_bytes();
     assert!(retained > 0);
-    let second = handle.execute(&stack).unwrap().v.member(2).unwrap();
+    let second = plan.execute(&stack, &mut ws).unwrap().v.member(2).unwrap();
     assert!(
         first.dense_data().unwrap() == second.dense_data().unwrap(),
         "deterministic replay"
     );
-    assert_eq!(handle.retained_bytes(), retained, "flat on a warm call");
-    let (d, v) = handle.take_output().unwrap();
+    assert_eq!(ws.retained_bytes(), retained, "flat on a warm call");
+    let (d, v) = ws.take_output().unwrap();
     assert_eq!((d.len(), v.len()), (3, 3));
-    assert!(handle.retained_bytes() < retained);
+    assert!(ws.retained_bytes() < retained);
 }
 
-/// Every member of `output` equals Host eager bit for bit (the Host handle
+/// Every member of `output` equals Host eager bit for bit (the Host plan
 /// runs the eager per-member code), so `d` is exactly zero off its diagonal.
 fn assert_equals_eager<R>(
     what: &str,
-    handle: &mut PreparedEighFull<R, f64>,
+    plan: &EighFullPlan<R, f64>,
+    ws: &mut EighFullWorkspace<R, f64>,
     inputs: &[TensorMap<R, f64>],
     stack: &StackedTensorMap<R, f64>,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let output = handle.execute(stack).unwrap();
+    let output = plan.execute(stack, ws).unwrap();
     for (member, input) in inputs.iter().enumerate() {
         let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
         assert!(
@@ -447,27 +450,27 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
     let mut skewed = good.clone();
     skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
     let stack = |inputs: &[TensorMap<_, f64>]| StackedTensorMap::pack(inputs).unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack(&good), &[0], &[1], HermitianTol::DEFAULT).unwrap();
-    assert_equals_eager("first", &mut handle, &good, &stack(&good));
+    let plan = EighFullPlan::new(&stack(&good), &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    assert_equals_eager("first", &plan, &mut ws, &good, &stack(&good));
 
-    let failed = handle.execute(&stack(&overflowing)).map(|_| ());
+    let failed = plan.execute(&stack(&overflowing), &mut ws).map(|_| ());
     assert!(matches!(failed, Err(BatchError::MemberRejected { .. })));
     assert!(
-        handle.take_output().is_none(),
+        ws.take_output().is_none(),
         "no output after a non-finite rejection"
     );
-    assert_equals_eager("after non-finite", &mut handle, &good, &stack(&good));
+    assert_equals_eager("after non-finite", &plan, &mut ws, &good, &stack(&good));
 
-    let failed = handle.execute(&stack(&skewed)).map(|_| ());
+    let failed = plan.execute(&stack(&skewed), &mut ws).map(|_| ());
     assert!(matches!(failed, Err(BatchError::MemberRejected { .. })));
     assert!(
-        handle.take_output().is_none(),
+        ws.take_output().is_none(),
         "no output after a non-Hermitian rejection"
     );
-    assert_equals_eager("after non-Hermitian", &mut handle, &good, &stack(&good));
+    assert_equals_eager("after non-Hermitian", &plan, &mut ws, &good, &stack(&good));
 
-    assert!(handle.take_output().is_some());
-    assert_equals_eager("after take_output", &mut handle, &good, &stack(&good));
-    assert_equals_eager("B change", &mut handle, &good[..2], &stack(&good[..2]));
+    assert!(ws.take_output().is_some());
+    assert_equals_eager("after take_output", &plan, &mut ws, &good, &stack(&good));
+    assert_equals_eager("B change", &plan, &mut ws, &good[..2], &stack(&good[..2]));
 }

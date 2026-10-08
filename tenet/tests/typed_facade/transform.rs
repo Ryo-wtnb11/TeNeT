@@ -788,7 +788,6 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
         )
         .unwrap_err();
     assert!(is_non_symmetric_contraction(&contract), "{contract:?}");
-    #[allow(deprecated)]
     let ordered = lhs
         .contract(
             &rhs,
@@ -814,7 +813,6 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
             0.0,
         )
         .unwrap_err();
-    #[allow(deprecated)]
     let ordered_overwrite = lhs
         .contract_into(
             &rhs,
@@ -1009,7 +1007,6 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
             },
         )
         .unwrap_err();
-    #[allow(deprecated)]
     let ordered = lhs
         .contract(
             &rhs,

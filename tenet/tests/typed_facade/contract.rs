@@ -788,7 +788,6 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
 }
 
 #[test]
-#[allow(deprecated)]
 fn contract_ordered_delegates_with_a_nonidentity_output_order() {
     let _guard = cache_lock();
     let runtime = runtime();

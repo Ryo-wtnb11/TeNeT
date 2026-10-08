@@ -1,6 +1,4 @@
-#![allow(deprecated)]
-//! Device gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
-//! `PreparedCompose` forwarding wrapper (#1498).
+//! Device gates of `ComposePlan`/`ComposeWorkspace` (#1639).
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with
@@ -20,9 +18,7 @@ use std::fmt::Debug;
 use num_complex::{Complex32, Complex64};
 use tenet::expert::cuda_transfer_stats;
 use tenet::sector::U1FusionRule;
-use tenet::typed::{
-    ComposePlan, GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap,
-};
+use tenet::typed::{ComposePlan, GradedSpace, Runtime, StackedTensorMap, TensorMap};
 
 use common::{DevicePayload, DeviceRule};
 use prepared::{
@@ -89,7 +85,8 @@ where
         let jobs = active_sectors(&a[0], &b[0]);
         let lhs = StackedTensorMap::pack(&a).unwrap().to_cuda().unwrap();
         let rhs = StackedTensorMap::pack(&b).unwrap().to_cuda().unwrap();
-        let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
+        let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+        let mut ws = plan.workspace().unwrap();
 
         // `terms` = len(A), an upper bound on the inner dimension of a block.
         let terms = a[0].dense_data().unwrap().len();
@@ -121,10 +118,10 @@ where
             }
         };
 
-        handle.execute(&lhs, &rhs).unwrap();
-        let retained = handle.retained_bytes();
+        plan.execute(&lhs, &rhs, &mut ws).unwrap();
+        let retained = ws.retained_bytes();
         let (before, plans_before) = (cuda_transfer_stats(), plans(&runtime));
-        let output = handle.execute(&lhs, &rhs).unwrap();
+        let output = plan.execute(&lhs, &rhs, &mut ws).unwrap();
         let warm = delta(cuda_transfer_stats(), before);
         let plans_after = plans(&runtime);
         assert_eq!(
@@ -147,7 +144,7 @@ where
         );
         check(output, "execute");
         assert_eq!(
-            handle.retained_bytes(),
+            ws.retained_bytes(),
             retained,
             "{label}: warm retained bytes"
         );
@@ -163,12 +160,12 @@ where
                     .unwrap()
             };
             let mut dst = poisoned();
-            handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
             check(&dst, &format!("cold execute_into over {name}"));
 
             let mut dst = poisoned();
             let (before, plans_before) = (cuda_transfer_stats(), plans(&runtime));
-            handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut ws).unwrap();
             let warm = delta(cuda_transfer_stats(), before);
             let plans_after = plans(&runtime);
             assert_eq!(
@@ -262,15 +259,17 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
 
     let reserved = |runtime: &Runtime| plans(runtime).reserved_entries;
     let r0 = reserved(&runtime);
-    let mut h1 = PreparedCompose::new(&u1_lhs, &u1_rhs).unwrap();
+    let plan1 = ComposePlan::new(&u1_lhs, &u1_rhs).unwrap();
+    let mut ws1 = plan1.workspace().unwrap();
     let r1 = reserved(&runtime);
-    let mut h2 = PreparedCompose::new(&su2_lhs, &su2_rhs).unwrap();
+    let plan2 = ComposePlan::new(&su2_lhs, &su2_rhs).unwrap();
+    let mut ws2 = plan2.workspace().unwrap();
     let r2 = reserved(&runtime);
     let (h1_entries, h2_entries) = (r1 - r0, r2 - r1);
     assert_eq!(h1_entries, u1_expected, "U(1) handle reservation");
     assert_eq!(h2_entries, su2_expected, "SU(2) handle reservation");
-    h1.execute(&u1_lhs, &u1_rhs).unwrap();
-    h2.execute(&su2_lhs, &su2_rhs).unwrap();
+    plan1.execute(&u1_lhs, &u1_rhs, &mut ws1).unwrap();
+    plan2.execute(&su2_lhs, &su2_rhs, &mut ws2).unwrap();
 
     let _ = source.permute(&[1, 0], &[3, 2]).unwrap();
     let executor = runtime
@@ -288,8 +287,8 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
     );
 
     for _ in 0..3 {
-        h1.execute(&u1_lhs, &u1_rhs).unwrap();
-        h2.execute(&su2_lhs, &su2_rhs).unwrap();
+        plan1.execute(&u1_lhs, &u1_rhs, &mut ws1).unwrap();
+        plan2.execute(&su2_lhs, &su2_rhs, &mut ws2).unwrap();
         let _ = source.permute(&[1, 0], &[3, 2]).unwrap();
     }
     let after = plans(&runtime);
@@ -310,7 +309,9 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
             wide,
             f64::NAN,
         ));
-        h1.execute_into(&device(&a), &device(&b), &mut dst).unwrap();
+        plan1
+            .execute_into(&device(&a), &device(&b), &mut dst, &mut ws1)
+            .unwrap();
         let host = dst.to_host().unwrap();
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let eager = x.compose(y).unwrap();
@@ -329,8 +330,8 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
         "a new B reserves nothing"
     );
 
-    drop(h1);
+    drop(ws1);
     assert_eq!(reserved(&runtime), before.reserved_entries - h1_entries);
-    drop(h2);
+    drop(ws2);
     assert_eq!(reserved(&runtime), r0 + executor);
 }

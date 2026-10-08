@@ -343,10 +343,6 @@ pub struct PlanCacheStats {
     pub workspace_byte_rejections: u64,
     /// Already-retained workspaces released by cache/configuration eviction.
     pub workspace_byte_evictions: u64,
-    /// Compatibility field for the removed process-local `Network` alias path.
-    #[doc(hidden)]
-    #[deprecated(note = "dynamic Network aliases were removed; this field is always zero")]
-    pub dynamic_aliases: usize,
 }
 
 #[cfg(all(test, feature = "cotengra-python"))]
