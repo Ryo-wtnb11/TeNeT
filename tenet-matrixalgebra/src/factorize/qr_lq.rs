@@ -1,45 +1,5 @@
 use super::*;
 
-/// QR of a compact diagonal, MAK `_diagonal_qr!` with `positive = true`:
-/// phases (`q`, `sign_safe`) and magnitudes (`r`, `abs`), both on the input
-/// bond `V <- V`, its dual orientation included (TensorKit keeps `W = V`,
-/// `diagonal.jl` `initialize_output(qr_full!, …)`). Full and compact QR
-/// coincide; LQ exchanges the factors.
-fn qr_diagonal_spectra<A, R, D>(
-    authority: &A,
-    space: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-    family: FactorFamily,
-) -> Result<Qr<Vec<SectorSpectrum<D>>>, A::Error>
-where
-    A: FactorSpaceAuthority<R>,
-    A::Error: From<OperationError>,
-    D: FactorScalar,
-{
-    let bond = diagonal_bond(authority, space, spectrum, family)?;
-    let mut q = Vec::with_capacity(bond.len());
-    let mut r = Vec::with_capacity(bond.len());
-    for region in bond.iter() {
-        let entry = bond.entry(region);
-        let mut phases = Vec::with_capacity(entry.values.len());
-        let mut magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (phase, magnitude) = diagonal_phase_magnitude(value);
-            phases.push(phase);
-            magnitudes.push(magnitude);
-        }
-        q.push(SectorSpectrum {
-            sector: entry.sector,
-            values: phases,
-        });
-        r.push(SectorSpectrum {
-            sector: entry.sector,
-            values: magnitudes,
-        });
-    }
-    Ok(Qr { q, r })
-}
-
 /// QR of `source` in fusion mode `M`: a compact diagonal factors directly on
 /// its bond (`family` names its finite-input error), dense storage runs
 /// `dense_qr` with a leased executor.
@@ -63,7 +23,8 @@ where
         source,
         Some(family),
         |space, spectrum| {
-            let Qr { q, r } = qr_diagonal_spectra(&M::authority(space), space, spectrum, family)?;
+            let (q, r) =
+                diagonal_phase_magnitude_spectra(&M::authority(space), space, spectrum, family)?;
             let on_input = |values| FactorOutput::Diagonal {
                 space: space.clone(),
                 values,
@@ -114,7 +75,7 @@ where
 }
 
 /// LQ of `source` in fusion mode `M`: a compact diagonal's `l` holds the
-/// magnitudes and `q` the phases (see [`qr_diagonal_spectra`]).
+/// magnitudes and `q` the phases (see [`diagonal_phase_magnitude_spectra`]).
 fn lq_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
@@ -134,8 +95,12 @@ where
         source,
         Some(FactorFamily::Lq),
         |space, spectrum| {
-            let Qr { q, r } =
-                qr_diagonal_spectra(&M::authority(space), space, spectrum, FactorFamily::Lq)?;
+            let (q, r) = diagonal_phase_magnitude_spectra(
+                &M::authority(space),
+                space,
+                spectrum,
+                FactorFamily::Lq,
+            )?;
             let on_input = |values| FactorOutput::Diagonal {
                 space: space.clone(),
                 values,
