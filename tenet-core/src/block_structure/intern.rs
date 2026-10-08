@@ -28,7 +28,8 @@ pub(super) fn new_block_structure_content(
 }
 
 /// Clears every process-global structure cache: sector, degeneracy and the
-/// registered completed-transformer cache. The one clear-all behind
+/// registered completed-transformer and composed-coefficient caches. The one
+/// clear-all behind
 /// `tenet::cache::clear`.
 ///
 /// Live HomSpace identities and block-content ids remain valid. A build whose
