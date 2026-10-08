@@ -200,6 +200,23 @@ impl PreparedBlockStructure {
         }
     }
 
+    /// Share the staged structure with a plan compiled before commit.
+    ///
+    /// A complete hit returns its live canonical wrapper, so the plan reuses
+    /// that wrapper's coupled-region memo. A fresh or missed candidate gets
+    /// one operation-local wrapper around the preview, which shares the
+    /// preview's region state with the structure published by [`Self::commit`].
+    #[doc(hidden)]
+    pub fn shared_structure(&self) -> Arc<BlockStructure> {
+        match &self.state {
+            PreparedBlockStructureState::CompleteHit { structure, .. } => Arc::clone(structure),
+            PreparedBlockStructureState::Fresh(_)
+            | PreparedBlockStructureState::CompleteMiss { .. } => {
+                Arc::new(self.structure().clone())
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn required_len(&self) -> usize {
         self.required_len
