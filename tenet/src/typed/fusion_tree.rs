@@ -652,7 +652,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: Copy,
 {
-    let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(authority, spectrum)?;
+    let space = tenet_matrixalgebra::seam::spectrum_bond::<MultiplicityFreeAdmissionMode, _, _>(
+        authority, spectrum,
+    )?;
     Ok(diagonal_factor_on_bound(
         runtime, space, spectrum, to_scalar,
     ))
@@ -820,7 +822,7 @@ where
 /// compact-*destination* call sites it cannot fail — every
 /// [`TypedData::Diagonal`] payload this module can produce sits on a space
 /// admitted by [`TensorMap::diagonal`] or built by [`diagonal_factor_on`]
-/// through [`tenet_matrixalgebra::seam::diagonal_bond_bound_space_like`], which is a
+/// through [`tenet_matrixalgebra::seam::spectrum_bond`], which is a
 /// bond space by construction. Diagonal QR/LQ preserve that exact input space,
 /// and the operations that preserve the payload
 /// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],

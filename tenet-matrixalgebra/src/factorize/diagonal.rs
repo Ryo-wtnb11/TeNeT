@@ -98,10 +98,19 @@ where
 }
 
 /// Admits a compact diagonal `spectrum` on `space` for an elementwise
-/// matrix function in fusion mode `M`: the structural admission every
-/// compact-diagonal operation shares ([`admit_diagonal_bond`]), with no
-/// value check. The result keeps `space`, as TensorKit's `inv`/`pinv`/`exp`
-/// keep `d.domain`; compact storage does not depend on its layout.
+/// matrix function in fusion mode `M` (inv, pinv, exp, solve): the same
+/// structural admission as [`admit_diagonal_bond`] (a one-leg `V <- V` whose
+/// coupled sectors and degeneracies the spectrum covers), with no value
+/// check. The result keeps `space`, as TensorKit's `inv`/`pinv`/`exp` keep
+/// `d.domain`; compact storage does not depend on its layout.
+///
+/// Why not [`admit_diagonal_bond`] itself: an elementwise map reads no
+/// coupled-sector region, so a sector-sorted spectrum (every compact payload
+/// the facade builds) is matched against the bond's blocks directly, with no
+/// per-sector map and no canonical layout for an expert bond. A bound
+/// one-leg space has one block per coupled sector, so a count match plus
+/// a match per block covers every entry exactly once. An unsorted spectrum
+/// takes the region admission.
 #[doc(hidden)]
 pub fn admit_compact_diagonal<M, R, D>(
     space: &BoundDynamicFusionMapSpace<R>,
@@ -109,9 +118,56 @@ pub fn admit_compact_diagonal<M, R, D>(
 ) -> Result<(), M::Error>
 where
     M: FactorMode<R>,
-    D: FactorScalar,
 {
-    admit_diagonal_bond(&M::authority(space), space, spectrum).map(drop)
+    let raw = space.space();
+    require_one_leg_endomorphism(raw)?;
+    if !spectrum
+        .windows(2)
+        .all(|pair| pair[0].sector < pair[1].sector)
+    {
+        return admit_diagonal_bond(&M::authority(space), space, spectrum).map(drop);
+    }
+    let structure = raw.structure();
+    if structure.block_count() != spectrum.len() {
+        return Err(spectrum_mismatch().into());
+    }
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let entry = block.key().as_fusion_tree_pair().and_then(|pair| {
+            spectrum
+                .binary_search_by_key(&pair.codomain_tree().coupled(), |entry| entry.sector)
+                .ok()
+        });
+        let Some(entry) = entry.map(|index| &spectrum[index]) else {
+            return Err(spectrum_mismatch().into());
+        };
+        let length = entry.values.len();
+        if block.shape() != [length, length] {
+            return Err(spectrum_mismatch().into());
+        }
+    }
+    Ok(())
+}
+
+fn require_one_leg_endomorphism(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+    let homspace = space.homspace();
+    if space.nout() != 1
+        || space.nin() != 1
+        || homspace.codomain().legs() != homspace.domain().legs()
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "compact diagonal input must be a one-leg endomorphism V <- V",
+        });
+    }
+    Ok(())
+}
+
+fn spectrum_mismatch() -> OperationError {
+    OperationError::InvalidArgument {
+        message: "compact diagonal spectrum does not match its bond sectors and degeneracies",
+    }
 }
 
 /// The structural admission of a compact diagonal `spectrum` on `space`.
@@ -140,12 +196,7 @@ where
 {
     let raw = space.space();
     let homspace = raw.homspace();
-    if raw.nout() != 1 || raw.nin() != 1 || homspace.codomain().legs() != homspace.domain().legs() {
-        return Err(OperationError::InvalidArgument {
-            message: "compact diagonal input must be a one-leg endomorphism V <- V",
-        }
-        .into());
-    }
+    require_one_leg_endomorphism(raw)?;
     let (space, regions) = match checked_sector_regions(raw.structure(), 1)? {
         Some(regions) if aligned_one_tree_regions(&regions) => (BondSpace::Input(space), regions),
         _ => {
@@ -159,11 +210,8 @@ where
             (BondSpace::Normalized(canonical), regions)
         }
     };
-    let by_sector = aligned_diagonal_spectrum_by_sector(&regions, spectrum).ok_or(
-        OperationError::InvalidArgument {
-            message: "compact diagonal spectrum does not match its bond sectors and degeneracies",
-        },
-    )?;
+    let by_sector =
+        aligned_diagonal_spectrum_by_sector(&regions, spectrum).ok_or_else(spectrum_mismatch)?;
     Ok(DiagonalBond {
         space,
         regions,

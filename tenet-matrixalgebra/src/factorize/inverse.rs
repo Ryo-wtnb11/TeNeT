@@ -184,8 +184,13 @@ pub(crate) fn pinv_cutoff(
 /// zero. It is the one numeric admission of a compact pseudo-inverse in
 /// every fusion mode (#1800):
 ///
-/// - magnitudes are compared unrounded, in `f64`, as the dense route
-///   compares its singular values;
+/// - magnitudes are compared unrounded, in `f64`. The dense route compares
+///   singular values at the payload's precision, so for a single-precision
+///   payload (`f32`, `Complex32`) the two can disagree exactly at the cutoff:
+///   a magnitude that rounds up in `f32` onto or past `rcond * σ_max` is cut
+///   here and may be kept by the dense route (and conversely). Why the
+///   compact arm does not round: rounding would make the cut depend on the
+///   payload type rather than the value (#1800 A6);
 /// - a retained subnormal stays on this route and inverts to its IEEE
 ///   reciprocal (`Inf`), as TensorKit `pinv(::DiagonalTensorMap)` and dense
 ///   `LinearAlgebra.pinv` give;

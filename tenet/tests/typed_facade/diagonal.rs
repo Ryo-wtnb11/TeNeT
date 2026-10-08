@@ -513,7 +513,7 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
     // The supertrace twist `contract` applies to a **dual** contracted leg of
     // the right operand cannot be reached from this facade, so it is not
     // asserted here: a compact spectrum's bond leg is built non-dual
-    // (`diagonal_bond_bound_space_like`), the engine admits a contraction only
+    // (`seam::spectrum_bond`), the engine admits a contraction only
     // when the two contracted legs agree on their duality flag, and the arm's
     // right-operand leg is codomain-side, where external duality *is* that
     // flag. `TensorMap::try_contract_diagonal` declines rather than assumes it,

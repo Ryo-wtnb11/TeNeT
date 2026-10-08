@@ -955,3 +955,133 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         ))
     ));
 }
+
+/// `space` re-laid with one padding element before every block: an expert
+/// layout of the same hom space whose regions are not aligned diagonals.
+fn padded_layout(space: &DynamicFusionMapSpace) -> FusionTensorMapSpace<1, 1> {
+    let structure = space.structure();
+    let (mut offset, mut dimension, mut blocks) = (1usize, 0usize, Vec::new());
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+        dimension += block.shape()[0];
+    }
+    FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([dimension], [dimension]).unwrap(),
+        space.homspace().clone(),
+        BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn elementwise_compact_admission_allocates_nothing_and_queries_no_provider() {
+    // What (#1994 review P2-1): the admission of inv/pinv/exp/solve is a
+    // structural check on the bond's blocks. Warm, it allocates nothing and
+    // queries no provider, on the canonical and on an expert layout, in both
+    // fusion modes; misuse is still refused.
+    use super::super::null_space::counting_alloc;
+
+    let leg = SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let spectrum = [
+        SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![1.0, 2.0],
+        },
+        SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![3.0, 4.0, 5.0],
+        },
+    ];
+    let mut short = spectrum.to_vec();
+    short[1].values.pop();
+
+    let mf = Arc::new(U1FusionRule);
+    let mf_canonical = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::clone(&mf),
+        homspace.clone(),
+    )
+    .unwrap();
+    let mf_expert = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
+        DynamicFusionMapSpace::from_typed(
+            &padded_layout(mf_canonical.space())
+                .try_bind_rule(mf.as_ref())
+                .unwrap(),
+        ),
+        Arc::clone(&mf),
+    )
+    .unwrap();
+
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
+    });
+    let checked_canonical = bind_to_spy(&source, &provider);
+    let checked_expert = BoundDynamicFusionMapSpace::bind_generic(
+        DynamicFusionMapSpace::from_typed(
+            &padded_layout(checked_canonical.space())
+                .try_bind_rule(provider.as_ref())
+                .unwrap(),
+        ),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+
+    let mut report = Vec::new();
+    for (name, space) in [("mf canonical", &mf_canonical), ("mf expert", &mf_expert)] {
+        let admit = || {
+            admit_compact_diagonal::<tenet_core::MultiplicityFreeAdmissionMode, _, _>(
+                space, &spectrum,
+            )
+        };
+        admit().unwrap();
+        let ((), allocs) = counting_alloc::measure(|| admit().unwrap());
+        report.push((name, allocs.calls, allocs.bytes, 0));
+        assert!(
+            admit_compact_diagonal::<tenet_core::MultiplicityFreeAdmissionMode, _, _>(
+                space, &short
+            )
+            .is_err()
+        );
+    }
+    for (name, space) in [
+        ("checked canonical", &checked_canonical),
+        ("checked expert", &checked_expert),
+    ] {
+        let admit =
+            || admit_compact_diagonal::<CheckedGenericAdmissionMode, _, _>(space, &spectrum);
+        admit().unwrap();
+        provider.calls.set(0);
+        let ((), allocs) = counting_alloc::measure(|| admit().unwrap());
+        report.push((name, allocs.calls, allocs.bytes, provider.calls.get()));
+        assert!(matches!(
+            admit_compact_diagonal::<CheckedGenericAdmissionMode, _, _>(space, &short),
+            Err(CheckedGenericFactorPlanError::Operation(
+                OperationError::InvalidArgument { .. }
+            ))
+        ));
+    }
+    eprintln!("admission (calls, bytes, provider queries): {report:?}");
+    for (name, calls, bytes, queries) in report {
+        assert_eq!((calls, bytes, queries), (0, 0, 0), "{name}");
+    }
+}

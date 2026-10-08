@@ -58,30 +58,9 @@ where
 {
     #[cfg(test)]
     record_diagonal_bond_build(spectrum);
-    let space = diagonal_bond_bound_space_like(authority, spectrum)?;
+    let space = spectrum_bond::<MultiplicityFreeAdmissionMode, _, _>(authority, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
     BoundDynFactor::from_bound(space, data, 1, 1)
-}
-
-#[doc(hidden)]
-pub fn diagonal_bond_bound_space_like<R, V>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<V>],
-) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let new_leg = SectorLeg::new(
-        spectrum
-            .iter()
-            .map(|entry| (entry.sector, entry.values.len())),
-        false,
-    );
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg.clone()]),
-        FusionProductSpace::new([new_leg]),
-    );
-    MfAuthority(authority).output_space(homspace)
 }
 
 /// Fills the dense block-diagonal data of `space` from `spectrum`, mapping
@@ -2113,31 +2092,8 @@ pub(super) fn concat_compact_svd_factor_regions<D>(
 }
 
 #[doc(hidden)]
-pub fn diagonal_bond_bound_space_generic_checked<R, V>(
-    provider: Arc<R>,
-    spectrum: &[SectorSpectrum<V>],
-) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-{
-    let new_leg = SectorLeg::new(
-        spectrum
-            .iter()
-            .map(|entry| (entry.sector, entry.values.len())),
-        false,
-    );
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg.clone()]),
-        FusionProductSpace::new([new_leg]),
-    );
-    CheckedAuthority(&provider)
-        .output_space(homspace)
-        .map_err(CheckedGenericFactorPlanError::from)
-}
-
-#[doc(hidden)]
 pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
-    provider: Arc<R>,
+    source: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<V>],
     to_scalar: &dyn Fn(V) -> D,
 ) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -2146,7 +2102,7 @@ where
     D: FactorScalar,
     V: Copy,
 {
-    let space = diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
+    let space = spectrum_bond::<CheckedGenericAdmissionMode, _, _>(source, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)
         .map_err(CheckedGenericFactorPlanError::from)?;
     BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
@@ -2199,11 +2155,8 @@ where
 {
     let (u, vh, singular_values) =
         svd_compact_factors_with_spectrum_dyn_checked_generic(dense, input)?;
-    let s = diagonal_bond_svd_factor_generic_checked(
-        Arc::clone(input.space().provider_arc()),
-        &singular_values,
-        &D::from_real,
-    )?;
+    let s =
+        diagonal_bond_svd_factor_generic_checked(input.space(), &singular_values, &D::from_real)?;
     Ok(Svd { u, s, vh })
 }
 

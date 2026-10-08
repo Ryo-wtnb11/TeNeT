@@ -136,9 +136,12 @@ where
     /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
     /// one local GEMM. A Host compact diagonal input stays compact in every
     /// fusion mode and bond layout (TensorKit `pinv(::DiagonalTensorMap)`
-    /// keeps `d.domain`): its magnitudes are compared unrounded against the
-    /// same global cutoff, and a retained subnormal inverts to its IEEE
-    /// reciprocal (`Inf`). For `K` stored values and `G` sectors, its
+    /// keeps `d.domain`): its magnitudes are compared unrounded, in `f64`,
+    /// against the same global cutoff, and a retained subnormal inverts to its
+    /// IEEE reciprocal (`Inf`). The dense route compares singular values at
+    /// the payload's precision, so for `f32`/`Complex32` a value whose rounded
+    /// magnitude lands on the other side of the cutoff is cut on one route and
+    /// kept on the other. For `K` stored values and `G` sectors, its
     /// elementwise cutoff and reciprocal take `O(K + G)` time and result
     /// space.
     ///
