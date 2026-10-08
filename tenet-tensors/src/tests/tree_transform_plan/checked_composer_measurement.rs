@@ -239,6 +239,7 @@ fn measure_case(
     };
     MULS.set(0);
     ADDS.set(0);
+    tenet_core::take_generic_block_step_counts();
     let plan = build_checked_generic_tree_pair_transform_group_plan(
         &measured,
         operation.clone(),
@@ -246,6 +247,7 @@ fn measure_case(
     )
     .unwrap();
     let (muls, adds) = (MULS.get(), ADDS.get());
+    let step = tenet_core::take_generic_block_step_counts();
     let multis = plan
         .specs()
         .iter()
@@ -265,10 +267,14 @@ fn measure_case(
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "regime={regime} case={case} blocks={} groups={} max_group={max_group} specs={} multi_specs={multis} stored_coeffs={stored} calls[{calls}] muls={muls} adds={adds} build_median_ns={build_ns}",
+        "regime={regime} case={case} blocks={} groups={} max_group={max_group} specs={} multi_specs={multis} stored_coeffs={stored} calls[{calls}] muls={muls} adds={adds} steps={} moves={} per_source_moves={} spread_muls={} build_median_ns={build_ns}",
         structure.block_count(),
         groups.len(),
         plan.specs().len(),
+        step.steps,
+        step.moves,
+        step.per_source_moves,
+        step.spread_multiplies,
     );
 }
 
@@ -336,6 +342,15 @@ fn measure_checked_generic_composer_calls_and_arithmetic() {
                 rotation(codomain_rank, domain_rank, 0, split),
             );
         }
+        // Cycles over the same multiplicity-free legs: a fold recouples the
+        // coupled line, so moves emit several terms and some sharing appears.
+        measure_case(
+            "fanout",
+            &format!("r{rank}_{codomain_rank}|{domain_rank}_transpose_anticlockwise"),
+            &sym(rank),
+            codomain_rank,
+            rotation(codomain_rank, domain_rank, 1, codomain_rank),
+        );
         measure_case(
             "identity",
             &format!("r{rank}_{codomain_rank}|{domain_rank}_permute_identity"),

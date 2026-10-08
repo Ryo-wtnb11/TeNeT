@@ -100,14 +100,20 @@ fn measure_case(
     let plain = Arc::new(SUNFusionRule::new(3).unwrap());
     // Warm racah's symbol caches; TeNeT's caches are cleared per sample.
     public_cold(&plain, &space, &operation);
-    let samples = (0..3)
+    let count = std::env::var("TENET_MEASURE_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3);
+    let samples = (0..count)
         .map(|_| public_cold(&plain, &space, &operation))
         .collect::<Vec<_>>();
     let (allocs, _, blocks) = samples[0];
     assert!(samples.iter().all(|sample| sample.0.calls == allocs.calls));
     let ns = median(samples.iter().map(|sample| sample.1).collect());
+    let min = samples.iter().map(|sample| sample.1).min().unwrap();
+    let max = samples.iter().map(|sample| sample.1).max().unwrap();
     println!(
-        "regime={regime} case={case} blocks={blocks} public_cold_alloc_calls={} public_cold_alloc_bytes={} public_cold_peak_live_bytes={} public_cold_median_ns={ns}",
+        "regime={regime} case={case} blocks={blocks} public_cold_alloc_calls={} public_cold_alloc_bytes={} public_cold_peak_live_bytes={} public_cold_median_ns={ns} public_cold_min_ns={min} public_cold_max_ns={max} samples={count}",
         allocs.calls, allocs.bytes, allocs.peak_live_bytes,
     );
 }
@@ -177,6 +183,13 @@ fn measure_checked_generic_composer_sharing_regimes() {
                 rotation(codomain_rank, domain_rank, 0, split),
             );
         }
+        measure_case(
+            "fanout",
+            &format!("r{rank}_{codomain_rank}|{domain_rank}_transpose_anticlockwise"),
+            &sym(rank),
+            codomain_rank,
+            rotation(codomain_rank, domain_rank, 1, codomain_rank),
+        );
         measure_case(
             "identity",
             &format!("r{rank}_{codomain_rank}|{domain_rank}_permute_identity"),

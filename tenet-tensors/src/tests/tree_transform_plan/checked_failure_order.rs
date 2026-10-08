@@ -290,10 +290,17 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
     )
     .unwrap_err();
     let standalone_r = provider.r_calls.borrow().clone();
-    assert!(matches!(
-        standalone,
-        CheckedGenericPlanError::Provider(TwoKeyError::SourceBEarlier | TwoKeyError::SourceALater)
-    ));
+    // The canonical HomSpace order also visits a `[vac, adj]`-inner tree
+    // before an `[adj, adj]`-inner tree at the first Artin step.
+    let (v, a) = (provider.vacuum, provider.adjoint);
+    assert!(
+        matches!(
+            standalone,
+            CheckedGenericPlanError::Provider(TwoKeyError::SourceBEarlier)
+        ),
+        "{standalone:?}"
+    );
+    assert_eq!(standalone_r, vec![[a, a, v], [a, a, a]]);
 
     let store = Arc::new(crate::RuntimeCoefficientStore::<f64>::default());
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
