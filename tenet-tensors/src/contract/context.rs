@@ -512,7 +512,7 @@ where
                 message: "Host member contraction requires transformed-tree route",
             });
         };
-        let threads = self.tree_context.backend().recoupling_threads();
+        let threads = self.tree_context.backend().recoupling_threads().get();
         let (tree_backend, _) = self.tree_context.backend_workspace_mut();
         super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
             tree_backend.dense_mut(),

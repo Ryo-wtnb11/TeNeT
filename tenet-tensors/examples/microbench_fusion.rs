@@ -176,7 +176,8 @@ where
         // gate is dropped so small-degeneracy workloads exercise the parallel
         // path too (production keeps the gate).
         if let Ok(threads) = std::env::var("MICROBENCH_RECOUPLING_THREADS") {
-            let threads: usize = threads.parse().expect("MICROBENCH_RECOUPLING_THREADS");
+            let threads: std::num::NonZeroUsize =
+                threads.parse().expect("MICROBENCH_RECOUPLING_THREADS");
             let backend = context.tree_context_mut().backend_mut();
             backend.set_recoupling_threads(threads);
             backend.set_transform_parallel_min_len(0);

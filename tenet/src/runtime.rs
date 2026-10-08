@@ -3,6 +3,7 @@
 
 use std::any::Any;
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 #[cfg(feature = "cuda")]
 use std::sync::PoisonError;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -88,7 +89,7 @@ struct LaneConfig {
         Option<tenet_dense::CpuBackendKind>,
         Weak<RuntimeCoefficientStore<f64>>,
     )>,
-    recoupling_threads: Option<usize>,
+    recoupling_threads: Option<NonZeroUsize>,
 }
 
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
@@ -214,7 +215,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
         Ok(self.c32.insert(lane))
     }
 
-    pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
+    pub(crate) fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
         self.lane_config.recoupling_threads = Some(threads);
         self.f64
             .tree_context_mut()
@@ -242,18 +243,28 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .tree_context_mut()
             .backend_mut()
             .recoupling_threads()
+            .get()
             == expected
             && self
                 .c64
                 .tree_context_mut()
                 .backend_mut()
                 .recoupling_threads()
+                .get()
                 == expected
             && self.f32.as_mut().is_none_or(|lane| {
-                lane.tree_context_mut().backend_mut().recoupling_threads() == expected
+                lane.tree_context_mut()
+                    .backend_mut()
+                    .recoupling_threads()
+                    .get()
+                    == expected
             })
             && self.c32.as_mut().is_none_or(|lane| {
-                lane.tree_context_mut().backend_mut().recoupling_threads() == expected
+                lane.tree_context_mut()
+                    .backend_mut()
+                    .recoupling_threads()
+                    .get()
+                    == expected
             })
     }
 
@@ -368,7 +379,7 @@ macro_rules! define_tensor_execution_context {
                 Ok(context)
             }
 
-            fn set_recoupling_threads(&mut self, threads: usize) {
+            fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
                 $(self.$field.set_recoupling_threads(threads);)+
                 self.mf_c64_coeff_c64
                     .tree_context_mut()
@@ -421,6 +432,7 @@ macro_rules! define_tensor_execution_context {
                         .tree_context_mut()
                         .backend_mut()
                         .recoupling_threads()
+                        .get()
                         == expected
             }
 
@@ -504,7 +516,7 @@ macro_rules! define_runtime_state {
                 })
             }
 
-            fn set_recoupling_threads(&mut self, threads: usize) {
+            fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
                 $(self.$field.set_recoupling_threads(threads);)+
                 self.mf_c64_coeff_c64
                     .tree_context_mut()
@@ -520,6 +532,7 @@ macro_rules! define_runtime_state {
                         .tree_context_mut()
                         .backend_mut()
                         .recoupling_threads()
+                        .get()
                         == expected
             }
 
@@ -987,7 +1000,7 @@ impl Drop for DenseLease<'_> {
 #[derive(Clone)]
 pub(crate) struct RuntimeExecutionConfig {
     pub(crate) gemm_kind: Option<tenet_dense::CpuBackendKind>,
-    pub(crate) recoupling_threads: Option<usize>,
+    pub(crate) recoupling_threads: Option<NonZeroUsize>,
     /// CPU provider for dense factorizations (SVD/QR/eigh). Kept here so the
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses Tenferro's
@@ -1461,9 +1474,10 @@ impl std::fmt::Debug for Runtime {
     }
 }
 
-/// Selects the CPU linear-algebra provider for dense per-coupled-sector
-/// factorizations (SVD / QR / eigh / GEMM), chosen via
-/// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
+/// Names a CPU linear-algebra provider. [`RuntimeBuilder::linalg_backend`]
+/// uses it for the dense per-coupled-sector factorizations (SVD / QR / eigh /
+/// eig / inv / exp); [`RuntimeBuilder::gemm_backend`] uses it, independently,
+/// for contraction GEMM. Backend choice changes performance
 /// only — results stay TensorKit-equivalent across providers.
 ///
 /// The *specific* BLAS/LAPACK behind [`LinalgBackend::Blas`] (OpenBLAS, MKL,
@@ -1494,6 +1508,8 @@ impl LinalgBackend {
 pub enum RuntimeConfigError {
     /// [`RuntimeBuilder::dense_threads`] was given zero.
     ZeroDenseThreads,
+    /// [`RuntimeBuilder::recoupling_threads`] was given zero.
+    ZeroRecouplingThreads,
     /// Both [`RuntimeBuilder::with_dense_executor`] and
     /// [`RuntimeBuilder::linalg_backend`] select the factorization provider.
     DenseExecutorWithLinalgBackend,
@@ -1503,6 +1519,7 @@ impl std::fmt::Display for RuntimeConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ZeroDenseThreads => "dense_threads must be at least 1",
+            Self::ZeroRecouplingThreads => "recoupling_threads must be at least 1",
             Self::DenseExecutorWithLinalgBackend => {
                 "with_dense_executor and linalg_backend both select the factorization provider"
             }
@@ -1589,13 +1606,15 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
-    /// coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
+    /// Selects the CPU factorization backend (SVD / QR / eigh / eig / inv / exp
+    /// on the coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
     /// When no executor is injected, the selected built-in `linalg_backend` is
     /// used; when it is unset, the provider follows Tenferro's resolved compiled
     /// default: BLAS when its CPU build enables `cpu-blas`, otherwise faer. This
     /// is the seam for a system BLAS/LAPACK or MKL backend: implement
     /// `DenseExecutor` and pass it here — no operator or decomposition code changes.
+    /// Contraction GEMM is not delegated to the injected executor; it is
+    /// selected by [`Self::gemm_backend`].
     ///
     /// The injected executor owns its thread configuration. [`Self::dense_threads`]
     /// sizes the runtime CPU pool, which still runs this runtime's replay,
@@ -1690,7 +1709,8 @@ impl RuntimeBuilder {
     /// SU(2) workloads; **not** BLAS threads) and for tree-transform plan
     /// compile. Default is 1 (serial); values above 1 request parallelism
     /// past the backend's size gate, capped by and run on this runtime's CPU
-    /// pool ([`Self::dense_threads`]).
+    /// pool ([`Self::dense_threads`]). Zero makes [`Self::build`] fail with
+    /// [`RuntimeConfigError::ZeroRecouplingThreads`].
     pub fn recoupling_threads(mut self, threads: usize) -> Self {
         self.recoupling_threads = Some(threads);
         self
@@ -1703,6 +1723,12 @@ impl RuntimeBuilder {
         if self.dense_threads == Some(0) {
             return Err(RuntimeConfigError::ZeroDenseThreads.into());
         }
+        let recoupling_threads = self
+            .recoupling_threads
+            .map(|threads| {
+                NonZeroUsize::new(threads).ok_or(RuntimeConfigError::ZeroRecouplingThreads)
+            })
+            .transpose()?;
         if self.dense_executor.is_some() && self.linalg_backend.is_some() {
             return Err(RuntimeConfigError::DenseExecutorWithLinalgBackend.into());
         }
@@ -1742,7 +1768,7 @@ impl RuntimeBuilder {
             config: self.plan_cache,
             slot: ExtensionSlot::default(),
         };
-        if let Some(threads) = self.recoupling_threads {
+        if let Some(threads) = recoupling_threads {
             state.set_recoupling_threads(threads);
         }
         #[cfg(feature = "cuda")]
@@ -1793,7 +1819,7 @@ impl RuntimeBuilder {
                 state: Mutex::new(state),
                 execution_config: RuntimeExecutionConfig {
                     gemm_kind,
-                    recoupling_threads: self.recoupling_threads,
+                    recoupling_threads,
                     linalg_kind,
                     real_tree_transform_store,
                     complex_tree_transform_store,

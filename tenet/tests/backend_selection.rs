@@ -234,3 +234,15 @@ fn zero_dense_threads_is_a_typed_build_error() {
         Error::RuntimeConfig(RuntimeConfigError::ZeroDenseThreads)
     );
 }
+
+#[test]
+fn zero_recoupling_threads_is_a_typed_build_error() {
+    let error = Runtime::builder()
+        .recoupling_threads(0)
+        .build()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        Error::RuntimeConfig(RuntimeConfigError::ZeroRecouplingThreads)
+    );
+}

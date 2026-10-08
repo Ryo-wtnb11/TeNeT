@@ -176,7 +176,9 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
                     f64,
                     tenet_core::RuleIdentity,
                 >::default();
-                context.backend_mut().set_recoupling_threads(4);
+                context
+                    .backend_mut()
+                    .set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
                 context
                     .compile_tree_pair_structure(
                         source.provider(),
