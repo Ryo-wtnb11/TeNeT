@@ -9,8 +9,8 @@
 //! TensorKit's `GLOBAL_CACHES` (`caches.jl:1-11`, `push!` at `:160-165`):
 //! [`structure_cache_infos`], [`set_structure_cache_byte_budget`] and
 //! [`clear_structure_caches`] cover every kind, including the
-//! completed-transformer cache that `tenet-tensors` owns and registers on
-//! first use ([`register_structure_cache`]).
+//! completed-transformer and composed-coefficient caches that `tenet-tensors`
+//! owns and registers on first use ([`register_structure_cache`]).
 //!
 //! Why `quick_cache` and not one `RwLock<LruCache>` per cache: a warm hit is
 //! one shard read with a borrowed key, eviction weighs entries by their
@@ -42,14 +42,19 @@ pub enum StructureCacheKind {
     /// Completed tree transformers (TensorKit `treetransposer` /
     /// `treebraider`), shared by every Runtime of the process.
     CompletedTreeTransformer,
+    /// Composed fusion-tree transformation coefficients per source
+    /// fusion-tree group, degeneracies excluded (TensorKit `fsbraid` /
+    /// `fstranspose`), shared by every Runtime of the process.
+    TreeTransformCoefficients,
 }
 
 impl StructureCacheKind {
     /// Every structure cache, in a fixed order.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::SectorStructure,
         Self::DegeneracyStructure,
         Self::CompletedTreeTransformer,
+        Self::TreeTransformCoefficients,
     ];
 }
 
@@ -152,8 +157,8 @@ impl<K, V> Lifecycle<K, V> for CountEvictions {
 }
 
 /// One structure cache: values are `Arc<V>`, weighed by the bytes the caller
-/// charges for them. Cross-crate only for the completed-transformer cache,
-/// whose owner lives in `tenet-tensors`.
+/// charges for them. Cross-crate only for the completed-transformer and
+/// composed-coefficient caches, whose owners live in `tenet-tensors`.
 #[doc(hidden)]
 pub struct StructureCache<K, V: ?Sized> {
     kind: StructureCacheKind,
@@ -427,22 +432,30 @@ pub trait ErasedStructureCacheControl: Sync {
 /// Process default of every structure cache's byte budget (#1993, D4).
 pub(crate) const DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 
-/// The completed-transformer slot: its owner registers on first use. A
-/// budget configured earlier is held here and handed to the owner at
+/// The slot of an externally owned kind: its owner registers on first use.
+/// A budget configured earlier is held here and handed to the owner at
 /// registration.
 struct ExternalSlot {
     control: OnceLock<&'static dyn ErasedStructureCacheControl>,
     pending_budget: Mutex<Option<u64>>,
 }
 
-static COMPLETED_TREE_TRANSFORMER: ExternalSlot = ExternalSlot {
-    control: OnceLock::new(),
-    pending_budget: Mutex::new(None),
-};
+impl ExternalSlot {
+    const fn new() -> Self {
+        Self {
+            control: OnceLock::new(),
+            pending_budget: Mutex::new(None),
+        }
+    }
+}
+
+static COMPLETED_TREE_TRANSFORMER: ExternalSlot = ExternalSlot::new();
+static TREE_TRANSFORM_COEFFICIENTS: ExternalSlot = ExternalSlot::new();
 
 fn external_slot(kind: StructureCacheKind) -> Option<&'static ExternalSlot> {
     match kind {
         StructureCacheKind::CompletedTreeTransformer => Some(&COMPLETED_TREE_TRANSFORMER),
+        StructureCacheKind::TreeTransformCoefficients => Some(&TREE_TRANSFORM_COEFFICIENTS),
         StructureCacheKind::SectorStructure | StructureCacheKind::DegeneracyStructure => None,
     }
 }
@@ -486,36 +499,36 @@ pub fn register_structure_cache(
 /// reports an empty cache with its pending budget.
 #[doc(hidden)]
 pub fn structure_cache_info(kind: StructureCacheKind) -> StructureCacheInfo {
-    match kind {
-        StructureCacheKind::SectorStructure => crate::fusion_space::sector_structure_cache().info(),
+    let slot = match kind {
+        StructureCacheKind::SectorStructure => {
+            return crate::fusion_space::sector_structure_cache().info()
+        }
         StructureCacheKind::DegeneracyStructure => {
-            crate::fusion_space::degeneracy_structure_cache().info()
+            return crate::fusion_space::degeneracy_structure_cache().info()
         }
-        StructureCacheKind::CompletedTreeTransformer => {
-            let slot = &COMPLETED_TREE_TRANSFORMER;
-            if let Some(control) = slot.control.get() {
-                return control.info();
-            }
-            let budget = slot
-                .pending_budget
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .unwrap_or(DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET);
-            StructureCacheInfo {
-                kind,
-                entries: 0,
-                charged_bytes: 0,
-                byte_budget: budget,
-                // One shard, as every structure cache.
-                max_entry_bytes: ((budget as f64 * HOT_ALLOCATION) as u64)
-                    .clamp(budget.min(1), budget),
-                hits: 0,
-                misses: 0,
-                admissions: 0,
-                evictions: 0,
-                rejections: 0,
-            }
-        }
+        StructureCacheKind::CompletedTreeTransformer => &COMPLETED_TREE_TRANSFORMER,
+        StructureCacheKind::TreeTransformCoefficients => &TREE_TRANSFORM_COEFFICIENTS,
+    };
+    if let Some(control) = slot.control.get() {
+        return control.info();
+    }
+    let budget = slot
+        .pending_budget
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or(DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET);
+    StructureCacheInfo {
+        kind,
+        entries: 0,
+        charged_bytes: 0,
+        byte_budget: budget,
+        // One shard, as every structure cache.
+        max_entry_bytes: ((budget as f64 * HOT_ALLOCATION) as u64).clamp(budget.min(1), budget),
+        hits: 0,
+        misses: 0,
+        admissions: 0,
+        evictions: 0,
+        rejections: 0,
     }
 }
 
@@ -533,39 +546,40 @@ pub fn structure_cache_infos() -> Vec<StructureCacheInfo> {
 /// use starts with this budget.
 #[doc(hidden)]
 pub fn set_structure_cache_byte_budget(kind: StructureCacheKind, bytes: u64) {
-    match kind {
+    let slot = match kind {
         StructureCacheKind::SectorStructure => {
-            crate::fusion_space::sector_structure_cache().set_byte_budget(bytes)
+            return crate::fusion_space::sector_structure_cache().set_byte_budget(bytes)
         }
         StructureCacheKind::DegeneracyStructure => {
-            crate::fusion_space::degeneracy_structure_cache().set_byte_budget(bytes)
+            return crate::fusion_space::degeneracy_structure_cache().set_byte_budget(bytes)
         }
-        StructureCacheKind::CompletedTreeTransformer => {
-            let slot = &COMPLETED_TREE_TRANSFORMER;
-            let control = {
-                let mut pending = slot
-                    .pending_budget
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match slot.control.get() {
-                    Some(control) => *control,
-                    None => {
-                        *pending = Some(bytes);
-                        return;
-                    }
-                }
-            };
-            // Outside the slot lock: the owner's initializer takes it.
-            control.set_byte_budget(bytes);
+        StructureCacheKind::CompletedTreeTransformer => &COMPLETED_TREE_TRANSFORMER,
+        StructureCacheKind::TreeTransformCoefficients => &TREE_TRANSFORM_COEFFICIENTS,
+    };
+    let control = {
+        let mut pending = slot
+            .pending_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slot.control.get() {
+            Some(control) => *control,
+            None => {
+                *pending = Some(bytes);
+                return;
+            }
         }
-    }
+    };
+    // Outside the slot lock: the owner's initializer takes it.
+    control.set_byte_budget(bytes);
 }
 
 /// Clears the registered kinds; the caller holds the reset lock and has
 /// opened the odd epoch.
 pub(crate) fn clear_registered_structure_caches() {
-    if let Some(control) = COMPLETED_TREE_TRANSFORMER.control.get() {
-        control.clear();
+    for slot in [&COMPLETED_TREE_TRANSFORMER, &TREE_TRANSFORM_COEFFICIENTS] {
+        if let Some(control) = slot.control.get() {
+            control.clear();
+        }
     }
 }
 
@@ -669,6 +683,32 @@ mod tests {
         assert_eq!(cache.info().entries(), 0);
         cache.clear();
         assert_eq!(cache.info().evictions(), 0);
+    }
+
+    #[test]
+    fn every_kind_is_listed_once_and_the_tensor_owned_kinds_have_their_own_slots() {
+        assert_eq!(StructureCacheKind::ALL.len(), 4);
+        for kind in StructureCacheKind::ALL {
+            assert_eq!(
+                StructureCacheKind::ALL
+                    .iter()
+                    .filter(|listed| **listed == kind)
+                    .count(),
+                1
+            );
+        }
+        // What: the two `tenet-tensors` caches register in distinct slots;
+        // the core-owned kinds refuse registration.
+        let completed = external_slot(StructureCacheKind::CompletedTreeTransformer).unwrap();
+        let coefficients = external_slot(StructureCacheKind::TreeTransformCoefficients).unwrap();
+        assert!(!std::ptr::eq(completed, coefficients));
+        assert!(external_slot(StructureCacheKind::SectorStructure).is_none());
+        assert!(external_slot(StructureCacheKind::DegeneracyStructure).is_none());
+        let info = structure_cache_info(StructureCacheKind::TreeTransformCoefficients);
+        assert_eq!(
+            (info.kind(), info.entries()),
+            (StructureCacheKind::TreeTransformCoefficients, 0)
+        );
     }
 
     /// A stand-in for the externally owned completed-transformer cache: the

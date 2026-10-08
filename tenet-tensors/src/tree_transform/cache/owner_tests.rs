@@ -295,7 +295,7 @@ fn only_canonical_keys_publish_and_hits_rebind_the_callers_structures() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (dst, src, operation) = fixture(2);
     assert!(dst.is_canonical() && src.is_canonical());
-    let planning = TreeTransformPlanning::<f64>::default();
+    let planning = TreeTransformPlanning::default();
     take_completed_transformer_activity();
     let cold = planning
         .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)
@@ -442,7 +442,7 @@ fn a_build_straddling_a_clear_or_failing_is_not_published() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (dst, src, operation) = fixture(4);
-    let planning = TreeTransformPlanning::<f64>::default();
+    let planning = TreeTransformPlanning::default();
     take_completed_transformer_activity();
     super::before_next_completed_publication(Box::new(tenet_core::clear_structure_caches));
     let straddling = planning
@@ -501,7 +501,7 @@ fn a_zero_degeneracy_budget_admits_no_completed_transformer() {
     // content is canonical, so every transformer key is lookup-only.
     let (dst, src, operation) = fixture(6);
     assert!(!dst.is_canonical() && !src.is_canonical());
-    let planning = TreeTransformPlanning::<f64>::default();
+    let planning = TreeTransformPlanning::default();
     for _ in 0..2 {
         planning
             .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)
@@ -528,7 +528,7 @@ fn concurrent_cold_misses_build_without_waiting_and_admit_once() {
                 let barrier = Arc::clone(&barrier);
                 let (dst, src, operation) = (&dst, &src, &operation);
                 scope.spawn(move || {
-                    let mut planning = TreeTransformPlanning::<f64>::default();
+                    let mut planning = TreeTransformPlanning::default();
                     planning.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
                     barrier.wait();
                     let built = planning
@@ -545,7 +545,7 @@ fn concurrent_cold_misses_build_without_waiting_and_admit_once() {
     // What: no caller parks on another's build (no single-flight): every
     // thread finishes, all results are equal, and they converge on one
     // resident core (the first admission wins; later offers get it).
-    let resident = TreeTransformPlanning::<f64>::default()
+    let resident = TreeTransformPlanning::default()
         .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)
         .unwrap();
     for (built, activity) in &results {

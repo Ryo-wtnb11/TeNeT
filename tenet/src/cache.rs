@@ -1,7 +1,7 @@
 //! Process-global structure caches: the one public control of TeNeT's
 //! retained structural data.
 //!
-//! Three caches, each a pure function of its key and each byte-bounded on its
+//! Four caches, each a pure function of its key and each byte-bounded on its
 //! own budget (64 MiB by default), shared by every
 //! [`Runtime`](crate::typed::Runtime) of the process:
 //!
@@ -12,13 +12,23 @@
 //!   `degeneracystructure`);
 //! - completed permute/braid/transpose transformers,
 //!   [`StructureCacheKind::CompletedTreeTransformer`] (TensorKit
-//!   `treetransposer` / `treebraider`).
+//!   `treetransposer` / `treebraider`);
+//! - composed fusion-tree transformation coefficients per source fusion-tree
+//!   group, [`StructureCacheKind::TreeTransformCoefficients`] (TensorKit
+//!   `fsbraid` / `fstranspose`). Unlike TensorKit's `NoCache`, Unique
+//!   fusion (U(1), Z2, ...) is cached too: a degeneracy-only change then
+//!   rebuilds none of its destination tree keys.
 //!
 //! This mirrors TensorKit's `GLOBAL_CACHES` with `empty_globalcaches!` and
-//! `global_cache_info` (`caches.jl:1-11` @cfaa073). Each Runtime's
-//! categorical-coefficient tiers (plans and per-group recoupling) are not
-//! here yet; they stay per Runtime, at a fixed 64 MiB per tier, until
-//! #2014-4.
+//! `global_cache_info` (`caches.jl:1-11` @cfaa073).
+//!
+//! Since #2014-4 the composed coefficients are one process-global cache, so
+//! several Runtimes working on disjoint transforms share its one budget
+//! (before, each Runtime retained up to 64 MiB of per-group coefficients
+//! plus 64 MiB of per-structure plans). Its largest admissible entry is
+//! [`StructureCacheInfo::max_entry_bytes`]: 65,095,598 B at the default
+//! budget (the per-Runtime tiers admitted 67,108,864 B). Raise its budget
+//! with [`configure_budgets`] when a workload needs more.
 //!
 //! A cache hit is interchangeable with a rebuild, so clearing or sizing these
 //! changes cost, never results.
@@ -32,9 +42,9 @@ pub fn stats() -> Vec<StructureCacheInfo> {
 }
 
 /// Clears every process-global structure cache (sector, degeneracy,
-/// completed tree transformer) for all Runtimes. Semantic data only: no
-/// Runtime coefficient tier, device executor, scratch or racah symbol cache
-/// is touched. Builds in flight across the clear return their result
+/// completed tree transformer, composed coefficients) for all Runtimes.
+/// Semantic data only: no device executor, scratch or racah symbol cache is
+/// touched. Builds in flight across the clear return their result
 /// unpublished.
 ///
 /// Live tensors stay valid: their structures and transformers are held by
@@ -52,7 +62,9 @@ pub fn clear() {
 /// rejected (oversize, a zero budget, or a build that straddled a
 /// [`clear`]) gets a fresh identity on every call, so its transformers are
 /// rebuilt per call rather than cached. A `DegeneracyStructure` budget of 0
-/// therefore also disables completed-transformer caching.
+/// therefore also disables completed-transformer caching. It does not
+/// disable the [`StructureCacheKind::TreeTransformCoefficients`] cache,
+/// whose keys hold sectors and fusion trees only, never block contents.
 pub fn configure_budgets(budgets: impl IntoIterator<Item = (StructureCacheKind, u64)>) {
     for (kind, bytes) in budgets {
         tenet_core::set_structure_cache_byte_budget(kind, bytes);
