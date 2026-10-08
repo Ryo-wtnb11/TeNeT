@@ -400,12 +400,14 @@ pub struct GenericBlockStepCounts {
 #[cfg(any(test, feature = "testing"))]
 std::thread_local! {
     static GENERIC_BLOCK_STEP_COUNTS: std::cell::Cell<GenericBlockStepCounts> =
-        std::cell::Cell::new(GenericBlockStepCounts {
-            steps: 0,
-            moves: 0,
-            per_source_moves: 0,
-            spread_multiplies: 0,
-        });
+        const {
+            std::cell::Cell::new(GenericBlockStepCounts {
+                steps: 0,
+                moves: 0,
+                per_source_moves: 0,
+                spread_multiplies: 0,
+            })
+        };
 }
 
 /// This thread's composer step counts since the last call.

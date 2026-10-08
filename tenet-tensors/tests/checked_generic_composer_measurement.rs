@@ -108,12 +108,14 @@ fn measure_case(
         .map(|_| public_cold(&plain, &space, &operation))
         .collect::<Vec<_>>();
     let (allocs, _, blocks) = samples[0];
-    assert!(samples.iter().all(|sample| sample.0.calls == allocs.calls));
+    // Not asserted equal: racah's byte-budgeted symbol caches may evict and
+    // regenerate between samples, which allocates inside the provider.
+    let calls_max = samples.iter().map(|sample| sample.0.calls).max().unwrap();
     let ns = median(samples.iter().map(|sample| sample.1).collect());
     let min = samples.iter().map(|sample| sample.1).min().unwrap();
     let max = samples.iter().map(|sample| sample.1).max().unwrap();
     println!(
-        "regime={regime} case={case} blocks={blocks} public_cold_alloc_calls={} public_cold_alloc_bytes={} public_cold_peak_live_bytes={} public_cold_median_ns={ns} public_cold_min_ns={min} public_cold_max_ns={max} samples={count}",
+        "regime={regime} case={case} blocks={blocks} public_cold_alloc_calls={} public_cold_alloc_calls_max={calls_max} public_cold_alloc_bytes={} public_cold_peak_live_bytes={} public_cold_median_ns={ns} public_cold_min_ns={min} public_cold_max_ns={max} samples={count}",
         allocs.calls, allocs.bytes, allocs.peak_live_bytes,
     );
 }
