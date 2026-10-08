@@ -86,6 +86,8 @@ fn expert_copy(structure: &BlockStructure) -> Arc<BlockStructure> {
 }
 
 mod admission;
+#[cfg(feature = "racah-generated")]
+mod checked_failure_order;
 mod checked_generic;
 mod context_cache;
 mod generic;
