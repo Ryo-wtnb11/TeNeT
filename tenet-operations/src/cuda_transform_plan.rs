@@ -780,6 +780,47 @@ mod tests {
     }
 
     #[test]
+    fn padded_extent_one_and_rank_zero_inactive_layouts_keep_their_element_sets() {
+        // What: a zero region that cannot fuse to one axis keeps the gaps of
+        // its padded block — `[2, 1, 3]` with strides `[1, 1, 4]` drops the
+        // extent-1 axis and addresses 6, 7, 10, 11, 14, 15 as `[2, 3]` /
+        // `[1, 4]` — and a rank-0 block is one element, `[1]` / `[0]`.
+        let blocks = vec![
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 3, 1], vec![1, 2, 6], 0).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(1), vec![2, 1, 3], vec![1, 1, 4], 6).unwrap(),
+        ];
+        let space = Arc::new(BlockStructure::from_blocks_with_rank(3, blocks).unwrap());
+        let compiled = TreeTransformStructure::compile_structures(
+            &space,
+            &space,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+        )
+        .unwrap();
+        let plan = compile_device_plan(compiled.task_view().unwrap()).unwrap();
+        assert_eq!(plan.zeros.len(), 1);
+        assert_eq!(plan.zeros[0].dims, vec![2, 3]);
+        assert_eq!(plan.zeros[0].strides, vec![1, 4]);
+        assert_eq!(plan.zeros[0].offset, 6);
+        assert_eq!(plan.max_zero_len, 6);
+
+        let scalars = Arc::new(
+            BlockStructure::packed_column_major(0, [Vec::<usize>::new(), Vec::new()]).unwrap(),
+        );
+        let compiled = TreeTransformStructure::compile_structures(
+            &scalars,
+            &scalars,
+            &[TreeTransformBlockSpec::single(1, 0, 2.0_f64)],
+        )
+        .unwrap();
+        let plan = compile_device_plan(compiled.task_view().unwrap()).unwrap();
+        assert_eq!(plan.zeros.len(), 1);
+        assert_eq!(plan.zeros[0].dims, vec![1]);
+        assert_eq!(plan.zeros[0].strides, vec![0]);
+        assert_eq!(plan.zeros[0].offset, 0);
+        assert_eq!(plan.max_zero_len, 1);
+    }
+
+    #[test]
     fn equal_layouts_share_one_plan_signature_and_distinct_ones_do_not() {
         // What: the signature count is what the plan-cache cap is raised to, so
         // it must collapse repeated layouts and separate genuinely distinct

@@ -637,6 +637,56 @@ pub fn inactive_destination_layouts() -> Fixture {
     }
 }
 
+/// Inactive destinations whose compiled zero region does not fuse to one
+/// axis (#2011): a padded block with an extent-1 middle axis, `[2, 1, 3]`
+/// with strides `[1, 1, 4]`, which normalizes to `[2, 3]` / `[1, 4]` and
+/// leaves storage gaps that no block owns; and, in
+/// [`rank_zero_inactive_destination`], a scalar block, whose region is `[1]`.
+pub fn padded_inactive_destination_layouts() -> Fixture {
+    let dst_blocks = vec![
+        Block::packed(vec![2, 3, 1], 0),
+        Block {
+            shape: vec![2, 1, 3],
+            strides: vec![1, 1, 4],
+            offset: 6,
+        },
+    ];
+    let src_blocks = vec![Block::packed(vec![3, 2, 1], 0)];
+    Fixture {
+        name: "padded_inactive_destination_layouts",
+        rank: 3,
+        dst_blocks,
+        src_blocks,
+        pairs: vec![Pair {
+            dst_block: 0,
+            src_block: 0,
+            axes: vec![1, 0, 2],
+            coefficient: -1.5,
+        }],
+        groups: Vec::new(),
+        conjugate: false,
+    }
+}
+
+/// Rank-0 blocks, one written and one inactive: see
+/// [`padded_inactive_destination_layouts`].
+pub fn rank_zero_inactive_destination() -> Fixture {
+    Fixture {
+        name: "rank_zero_inactive_destination",
+        rank: 0,
+        dst_blocks: vec![Block::packed(Vec::new(), 0), Block::packed(Vec::new(), 1)],
+        src_blocks: vec![Block::packed(Vec::new(), 0)],
+        pairs: vec![Pair {
+            dst_block: 1,
+            src_block: 0,
+            axes: Vec::new(),
+            coefficient: 2.0,
+        }],
+        groups: Vec::new(),
+        conjugate: false,
+    }
+}
+
 /// A structure with more distinct baked layouts than Tenferro's default
 /// 64-entry cuTENSOR plan bound, so a replay that does not raise the bound
 /// evicts a plan it needs again on the next block.
@@ -1027,6 +1077,8 @@ pub fn all_fixtures() -> Vec<Fixture> {
     let mut fixtures = rank_sweep();
     fixtures.push(interleaved_multi_block());
     fixtures.push(inactive_destination_layouts());
+    fixtures.push(padded_inactive_destination_layouts());
+    fixtures.push(rank_zero_inactive_destination());
     fixtures.push(zero_extent_block());
     fixtures.extend(recoupling_fixtures());
     fixtures
