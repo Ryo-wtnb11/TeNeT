@@ -81,8 +81,8 @@ use tenet_core::{
     GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement, ProductFusionRule, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, SimilarStorage, TensorMap,
-    TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, TensorMap, TensorMapSpace,
+    TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
 

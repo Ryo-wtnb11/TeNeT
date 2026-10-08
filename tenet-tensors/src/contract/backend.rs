@@ -1,16 +1,12 @@
 use num_traits::One;
 use std::sync::Arc;
 use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
-#[cfg(test)]
-use tenet_core::{ScratchStorage, SimilarStorage};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 use tenet_operations::fusion_replay::{
     direct_slice, direct_slice_mut, MatrixOp, Rank2GemmBatchJob,
 };
 
 use crate::host_scratch::HostScratchBuffer;
-#[cfg(test)]
-use crate::storage_scratch::StorageTensorContractWorkspace;
 use tenet_operations::{scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel};
 
 use crate::{
@@ -620,73 +616,6 @@ where
             term,
             dst_data,
             workspace.output.as_mut_slice(),
-            lhs_data,
-            rhs_data,
-            alpha,
-            beta,
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_structure_with_storage_workspace_dense_executor<
-    E,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    dense: &mut E,
-    workspace: &mut StorageTensorContractWorkspace<DDst::Similar>,
-    structure: &TensorContractStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    E: DenseExecutor,
-    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-    C: Copy + One,
-    DDst: HostWritableStorage<D> + SimilarStorage<D>,
-    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    let lhs_structure = Arc::clone(lhs.structure());
-    let rhs_structure = Arc::clone(rhs.structure());
-    structure.validate_replay_structures(&dst_structure, &lhs_structure, &rhs_structure)?;
-    validate_contract_replay_storage_len(&dst_structure, dst.data().len())?;
-    validate_contract_replay_storage_len(&lhs_structure, lhs.data().len())?;
-    validate_contract_replay_storage_len(&rhs_structure, rhs.data().len())?;
-    scale_inactive_contract_destinations(structure, dst.data_mut(), beta)?;
-    let descriptor = structure.descriptor();
-    let lhs_data = lhs.data();
-    let rhs_data = rhs.data();
-    for term in descriptor.terms() {
-        workspace.prepare_from_dst_storage(dst.storage(), term.workspace_len, D::zero());
-        let (zero_strides, output_scratch) = workspace.replay_parts_mut();
-        tensorcontract_descriptor_term_with_output_scratch(
-            dense,
-            zero_strides,
-            descriptor,
-            term,
-            dst.data_mut(),
-            output_scratch.as_mut_slice(),
             lhs_data,
             rhs_data,
             alpha,

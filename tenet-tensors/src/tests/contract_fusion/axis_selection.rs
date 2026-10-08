@@ -569,71 +569,29 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     )
     .unwrap();
     let unsupported = OperationError::UnsupportedTensorContractScope {
-        message: "storage-direct contraction supports only the canonical fully-direct route; \
-                  this contraction needs tree transforms, which have no device kernels here",
+        message: "storage-direct contraction supports only canonical fully-direct oriented \
+                  operands",
     };
 
-    for storage_first in [true, false] {
-        tenet_core::clear_structure_caches();
-        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-        let mut storage_dst = vec![0.0; initial.len()];
-        let mut owned_dst =
-            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
-                .unwrap();
-        let storage_call =
-            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
-             storage_dst: &mut Vec<f64>| {
-                context.tensorcontract_fusion_dyn_direct_on_storage(
-                    &mut RejectingStorageGemm,
-                    &dst_bound,
-                    storage_dst,
-                    &lhs_bound,
-                    &lhs.data().to_vec(),
-                    &rhs_bound,
-                    &rhs.data().to_vec(),
-                    axes(),
-                )
-            };
-        if storage_first {
-            assert_eq!(
-                storage_call(&mut context, &mut storage_dst),
-                Err(unsupported.clone())
-            );
-            context
-                .tensorcontract_fusion_into(
-                    provider.as_ref(),
-                    &mut owned_dst,
-                    &lhs,
-                    &rhs,
-                    axes(),
-                    alpha,
-                    beta,
-                )
-                .unwrap();
-        } else {
-            context
-                .tensorcontract_fusion_into(
-                    provider.as_ref(),
-                    &mut owned_dst,
-                    &lhs,
-                    &rhs,
-                    axes(),
-                    alpha,
-                    beta,
-                )
-                .unwrap();
-            assert_eq!(
-                storage_call(&mut context, &mut storage_dst),
-                Err(unsupported.clone())
-            );
-        }
-        assert_eq!(storage_dst, vec![0.0; initial.len()]);
-        assert_oracle(owned_dst.data());
-        assert_eq!(
-            context.last_resolution_orientation(),
-            Some(crate::contract::FusionContractOrientation::RhsLhs)
-        );
-    }
+    // The storage-direct call is context-free, so it only needs to decline
+    // without touching its destination; ordering against the context cache
+    // is covered by the typed/dynamic loops below.
+    tenet_core::clear_structure_caches();
+    let mut storage_dst = vec![0.0; initial.len()];
+    assert_eq!(
+        crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+            &mut RejectingStorageGemm,
+            &dst_bound,
+            &mut storage_dst,
+            crate::FusionOperand::direct(lhs_bound.space()),
+            &lhs.data().to_vec(),
+            crate::FusionOperand::direct(rhs_bound.space()),
+            &rhs.data().to_vec(),
+            axes(),
+        ),
+        Err(unsupported)
+    );
+    assert_eq!(storage_dst, vec![0.0; initial.len()]);
 
     for typed_first in [true, false] {
         tenet_core::clear_structure_caches();

@@ -6,15 +6,11 @@ use tenet_core::{
     BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap, TensorStorage,
 };
-#[cfg(test)]
-use tenet_core::{ScratchStorage, SimilarStorage};
 
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::mode::TreeStructureSource;
-#[cfg(test)]
-use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
@@ -23,8 +19,6 @@ use crate::{
 };
 use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned};
 
-#[cfg(test)]
-use super::backend::tensorcontract_structure_with_storage_workspace_dense_executor;
 use super::backend::TensorContractBackend;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
@@ -368,55 +362,6 @@ where
         } = self;
         let structure = cache.get_or_compile(dst, lhs, rhs, axes)?;
         backend.tensorcontract_structure_into(workspace, structure, dst, lhs, rhs, alpha, beta)
-    }
-}
-
-impl<D> TensorContractExecutionContext<D, DenseTreeTransformOperations>
-where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tensorcontract_into_storage_workspace<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        storage_workspace: &mut StorageTensorContractWorkspace<DDst::Similar>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let structure = self.cache.get_or_compile(dst, lhs, rhs, axes)?;
-        tensorcontract_structure_with_storage_workspace_dense_executor(
-            self.backend.dense_mut(),
-            storage_workspace,
-            structure,
-            dst,
-            lhs,
-            rhs,
-            alpha,
-            beta,
-        )
     }
 }
 
@@ -1366,107 +1311,6 @@ where
             alpha,
             beta,
         )
-    }
-
-    /// Dynamic-rank contraction replayed directly on opaque storages (the
-    /// device path): the planner's canonical fully-direct core rung
-    /// ([`try_compile_storage_contract_core_route`]) only — one
-    /// [`StorageGemm`](tenet_operations::fusion_replay::StorageGemm) call
-    /// per coupled-sector matrix, a uniform fermionic twist as its alpha,
-    /// `beta = 0`. The caller must pass a zero-filled destination:
-    /// destination blocks without a contributing GEMM stay untouched
-    /// (overwrite-on-zero semantics). A contraction the core rung declines
-    /// (one needing tree transforms, or a nonuniform twist) is an explicit
-    /// [`OperationError::UnsupportedTensorContractScope`]; there is no silent
-    /// host fallback.
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_direct_on_storage<R, G, DDst, DLhs, DRhs>(
-        &mut self,
-        gemm: &mut G,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst: &mut DDst,
-        lhs_space: &BoundDynamicFusionMapSpace<R>,
-        lhs: &DLhs,
-        rhs_space: &BoundDynamicFusionMapSpace<R>,
-        rhs: &DRhs,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
-        DDst: TensorStorage<D>,
-        DLhs: TensorStorage<D>,
-        DRhs: TensorStorage<D>,
-    {
-        let resolution =
-            try_compile_storage_contract_core_route::<super::resolution::DirectCoreExecutor, R>(
-                dst_space,
-                FusionOperand::direct(lhs_space.space()),
-                FusionOperand::direct(rhs_space.space()),
-                axes,
-            )?
-            .hit()
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: "storage-direct contraction supports only the canonical fully-direct \
-                      route; this contraction needs tree transforms, which have no device \
-                      kernels here",
-            })?;
-        #[cfg(test)]
-        self.record_contract_route(&resolution);
-        // Why not the swapped B·A core: `gemm` is typed by operand position.
-        match resolution.direct_core() {
-            Some((plan, false)) => plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs),
-            _ => Err(OperationError::UnsupportedTensorContractScope {
-                message: "storage-direct contraction supports only the unswapped canonical core",
-            }),
-        }
-    }
-
-    /// Tensor-map composition replayed directly on opaque storages.
-    ///
-    /// This is deliberately separate from
-    /// [`Self::tensorcontract_fusion_dyn_direct_on_storage`]: composition is
-    /// twist-free even for fermionic rules. Only an owned, canonical,
-    /// fully-direct composition plan with identity storage operations can
-    /// execute here; every transform-bearing route remains unsupported.
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcompose_fusion_dyn_direct_on_storage<R, G, DDst, DLhs, DRhs>(
-        &mut self,
-        gemm: &mut G,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst: &mut DDst,
-        lhs_space: &BoundDynamicFusionMapSpace<R>,
-        lhs: &DLhs,
-        rhs_space: &BoundDynamicFusionMapSpace<R>,
-        rhs: &DRhs,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
-        DDst: TensorStorage<D>,
-        DLhs: TensorStorage<D>,
-        DRhs: TensorStorage<D>,
-    {
-        let rule = dst_space.provider();
-        let axes = TensorContractSpec::new(
-            lhs_axes,
-            rhs_axes,
-            tenet_operations::OutputAxisOrder::identity(),
-        );
-        let lhs_layout =
-            FusionOperand::direct(lhs_space.space()).prepare(rule, dst_space.layout_primer())?;
-        let rhs_layout =
-            FusionOperand::direct(rhs_space.space()).prepare(rule, dst_space.layout_primer())?;
-        let plan =
-            compile_composition_plan(rule, dst_space.space(), &lhs_layout, &rhs_layout, axes)?;
-        #[cfg(test)]
-        {
-            self.last_top_level_resolution_was_core = true;
-            self.last_top_level_resolution_orientation = None;
-        }
-        plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
     }
 
     /// The contraction planner: TensorKit `contract!`

@@ -107,23 +107,22 @@ fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
     let mut output = vec![9.0; dst_bound.space().required_len().unwrap()];
     let before = output.clone();
     let mut gemm = NoCallGemm::default();
-    let error = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
-        .tensorcontract_fusion_dyn_direct_on_storage(
-            &mut gemm,
-            &dst_bound,
-            &mut output,
-            &lhs_bound,
-            &lhs_values,
-            &rhs_bound,
-            &rhs_values,
-            TensorContractSpec::new(&[1, 2], &[0, 1], crate::OutputAxisOrder::identity()),
-        )
-        .unwrap_err();
+    let error = crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        &mut gemm,
+        &dst_bound,
+        &mut output,
+        crate::FusionOperand::direct(lhs_bound.space()),
+        &lhs_values,
+        crate::FusionOperand::direct(rhs_bound.space()),
+        &rhs_values,
+        TensorContractSpec::new(&[1, 2], &[0, 1], crate::OutputAxisOrder::identity()),
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         OperationError::UnsupportedTensorContractScope {
-            message: "storage-direct contraction supports only the canonical fully-direct route; \
-                      this contraction needs tree transforms, which have no device kernels here"
+            message: "storage-direct contraction supports only canonical fully-direct oriented \
+                      operands"
         }
     ));
     assert_eq!(gemm.calls, 0);
