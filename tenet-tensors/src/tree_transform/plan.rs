@@ -27,7 +27,7 @@ use super::cache::{CoefficientGroupReuse, GroupSlot, OrientedBasisOrder, SourceG
 use super::operation::{
     TreeTransformOperation, TreeTransformOperationKind, ValidateBraidingSupport,
 };
-use tenet_operations::SharedTreeTransformGroupPlan;
+use tenet_operations::transform_plan::SharedTreeTransformGroupPlan;
 
 struct OrientedGroup<'k> {
     // Storage order uses the parent's group indices directly; canonical order

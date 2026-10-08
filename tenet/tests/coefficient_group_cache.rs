@@ -208,7 +208,7 @@ fn unique_fusion_reuses_its_groups_across_a_degeneracy_change() {
         )
         .unwrap()
     };
-    let mut transform = |space: &GradedSpace<U1FusionRule>| {
+    let transform = |space: &GradedSpace<U1FusionRule>| {
         let t = tensor!(&runtime, space);
         let _ = t.permute(&[2, 0], &[3, 1]).unwrap();
         let _ = t.adjoint().unwrap().permute(&[2, 0], &[3, 1]).unwrap();

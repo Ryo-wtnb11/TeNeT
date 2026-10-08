@@ -99,8 +99,8 @@ pub use scalar::{
 pub use tensoradd::*;
 pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};
 pub use transform_plan::{
-    SharedTreeTransformGroupPlan, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
-    TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    TreeTransformKeyBlockSpec,
 };
 pub use transform_replay::*;
 pub use transform_structure::*;
