@@ -15,10 +15,9 @@
 //! Eviction is LRU; ordinary pairwise contraction routes in `tenet-tensors`
 //! are resolved eagerly instead.
 //!
-//! Storage is per-[`Runtime`]: the configuration value types live in
-//! `tenet::plancache` (set them on `Runtime::builder()` or with
-//! [`configure_plan_cache`]), and the cache state sits in the runtime's
-//! type-keyed extension slot, under this crate's own cache type. The
+//! Storage is per-[`Runtime`]: the configuration (set it with
+//! [`configure_plan_cache`]) and the cache state both sit in the runtime's
+//! opaque type-keyed extension slot, under this crate's own type. The
 //! operands' runtime is resolved per call, so different runtimes never share
 //! plans or counters.
 
@@ -39,7 +38,13 @@ use tenet::typed::TensorMap;
 use tenet::typed::{CudaPayload, CudaStorage, FusionAlgebraError};
 use tenet::typed::{Error, Runtime, TensorScalar};
 
-pub use tenet::plancache::{
+mod config;
+
+#[cfg(feature = "cotengra-python")]
+pub use config::{
+    CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
+};
+pub use config::{
     Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
     DEFAULT_REPLAN_DRIFT_FACTOR, DEFAULT_WORKSPACE_BUDGET_BYTES,
 };
@@ -49,7 +54,7 @@ use crate::network::{
     HostNetworkError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
 };
 use crate::optimizer::GreedyDenseOptimizer;
-use tenet::typed::__network::{self, ExtensionSlot, NetworkPayloadStorage};
+use tenet::typed::__network::{self, NetworkPayloadStorage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct OperandTopology {
@@ -647,7 +652,7 @@ where
     };
     let topology_optimizer = topology_optimizer(optimizer);
     let key = network_alias_hash(network, &topology_optimizer);
-    let lookup = __network::with_plan_cache(
+    let lookup = with_plan_cache(
         runtime,
         |config, slot| -> Result<Lookup, HostNetworkError<R>> {
             if !config.enabled {
@@ -787,25 +792,64 @@ fn topology_text(topology: &NetworkTopology) -> String {
 // step lists + label vectors, so this holds by construction.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
-    assert_send::<PlanCache>();
+    assert_send::<PlanCacheHome>();
 };
 
+/// What this crate keeps in the runtime's extension slot: the configuration
+/// and the lazily claimed cache, under one lock acquisition (#155) so the
+/// network hot path resolves enable/replan policy and the lookup together.
+#[derive(Default)]
+struct PlanCacheHome {
+    config: PlanCacheConfig,
+    cache: Option<PlanCache>,
+}
+
+/// Configuration and cache of `runtime` under the runtime's one extension
+/// lock. Do not run tensor operations inside `f`.
+fn with_plan_cache<T>(
+    runtime: &Runtime,
+    f: impl FnOnce(&PlanCacheConfig, &mut Option<PlanCache>) -> T,
+) -> T {
+    __network::with_extension_slot(runtime, |slot| {
+        let home = slot.get_or_insert_with(PlanCacheHome::default);
+        f(&home.config, &mut home.cache)
+    })
+}
+
+/// Stores `config` and lets `f` adapt the cache to the change from the
+/// previous configuration, atomically.
+fn replace_plan_cache_config<T>(
+    runtime: &Runtime,
+    config: PlanCacheConfig,
+    f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut Option<PlanCache>) -> T,
+) -> T {
+    __network::with_extension_slot(runtime, |slot| {
+        let home = slot.get_or_insert_with(PlanCacheHome::default);
+        let result = f(&home.config, &config, &mut home.cache);
+        home.config = config;
+        result
+    })
+}
+
+/// Snapshot of `runtime`'s contraction-plan-cache configuration.
+pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
+    with_plan_cache(runtime, |config, _| config.clone())
+}
+
 /// The runtime slot's cache, claimed (created) on first use.
-fn cache_mut(slot: &mut ExtensionSlot, workspace_budget_bytes: usize) -> &mut PlanCache {
+fn cache_mut(slot: &mut Option<PlanCache>, workspace_budget_bytes: usize) -> &mut PlanCache {
     slot.get_or_insert_with(|| PlanCache::new(workspace_budget_bytes))
 }
 
 /// Read/write access that preserves an unclaimed runtime extension slot.
 /// Rejected device plans must not make an otherwise-cold runtime own an empty
 /// cache merely by probing it.
-fn existing_cache_mut(slot: &mut ExtensionSlot) -> Option<&mut PlanCache> {
-    slot.get_mut::<PlanCache>()
+fn existing_cache_mut(slot: &mut Option<PlanCache>) -> Option<&mut PlanCache> {
+    slot.as_mut()
 }
 
-/// Replaces the runtime's plan-cache configuration after build; the only
-/// post-build setter (the builder-time equivalent is
-/// `Runtime::builder().plan_cache(config)`, the getter
-/// [`Runtime::plan_cache_config`]).
+/// Replaces the runtime's plan-cache configuration; the one setter (the getter
+/// is [`plan_cache_config`]).
 ///
 /// Retention: compiled plans survive every transition that keeps the cache
 /// enabled, so re-tuning a live runtime never forces a re-plan. Disabling
@@ -813,7 +857,7 @@ fn existing_cache_mut(slot: &mut ExtensionSlot) -> Option<&mut PlanCache> {
 /// fit; lowering `workspace_budget_bytes` releases idle workspace storage
 /// synchronously. Raising either bound retains everything.
 pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
-    __network::replace_plan_cache_config(runtime, config, |previous, next, slot| {
+    replace_plan_cache_config(runtime, config, |previous, next, slot| {
         let Some(cache) = existing_cache_mut(slot) else {
             return;
         };
@@ -851,7 +895,7 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
 /// Hit/miss/re-plan counters and the current entry count.
 #[allow(deprecated)]
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
-    __network::with_plan_cache(runtime, |config, slot| {
+    with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         let (workspaces_created, workspace_reuses, workspace_slot_grows) =
             cache
@@ -904,7 +948,7 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
 /// [`load_plan_cache`], so the next miss searches afresh. Files the
 /// application wrote from [`save_plan_cache`] are not touched.
 pub fn clear_plan_cache(runtime: &Runtime) {
-    __network::with_plan_cache(runtime, |config, slot| {
+    with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         cache.map.clear();
         cache.network_aliases.clear();
@@ -924,7 +968,7 @@ pub fn clear_plan_cache(runtime: &Runtime) {
 /// to skip the cold optimal-order search. The order is topology-only and thus
 /// dimension-independent, so one saved file serves every χ.
 pub fn save_plan_cache(runtime: &Runtime) -> String {
-    __network::with_plan_cache(runtime, |config, slot| {
+    with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         let mut text = String::from(PLAN_CACHE_FILE_VERSION);
         text.push('\n');
@@ -978,7 +1022,7 @@ pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
     if header.is_some() && header != Some(PLAN_CACHE_FILE_VERSION) {
         return 0;
     }
-    __network::with_plan_cache(runtime, |config, slot| {
+    with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         // The application opted into persistence: from now on record and reuse
         // orders through the disk map (even if this file was empty).
@@ -1212,7 +1256,7 @@ fn topology_optimizer(optimizer: &Optimizer) -> Optimizer {
         // Normal cached contractions are path-only. `optimize_sliced` consumes
         // slicing explicitly and does not go through this cache, so slicing
         // policy must not fragment ordinary plan-cache entries.
-        config.slicing = tenet::plancache::CotengraSlicingConfig::None;
+        config.slicing = crate::plancache::CotengraSlicingConfig::None;
         // The timeout supervises a cold search; it cannot change the resulting
         // plan, so it is not part of topology or persisted-plan identity.
         config.timeout = None;
@@ -1308,7 +1352,7 @@ where
         Replan,
         Miss,
     }
-    let outcome = __network::with_plan_cache(
+    let outcome = with_plan_cache(
         runtime,
         |config, slot| -> Result<Outcome, HostNetworkError<R>> {
             let Some(cache) = existing_cache_mut(slot) else {
@@ -1334,7 +1378,7 @@ where
         },
     )?;
     if let Outcome::Hit(planned, snapshot) = outcome {
-        __network::with_plan_cache(runtime, |config, slot| {
+        with_plan_cache(runtime, |config, slot| {
             install_alias(
                 cache_mut(slot, config.workspace_budget_bytes),
                 snapshot,
@@ -1354,7 +1398,7 @@ where
     // persistence is off the disk map is never touched, keeping in-memory
     // replan numerics byte-identical.
     let topo_key = topology_text(&topology);
-    let disk_plan = __network::with_extension_slot(runtime, |slot| {
+    let disk_plan = with_plan_cache(runtime, |_, slot| {
         existing_cache_mut(slot).and_then(|cache| {
             cache
                 .persist
@@ -1375,14 +1419,14 @@ where
             (fresh, plan_copy)
         }
     };
-    let workspace_budget = __network::with_plan_cache(runtime, |config, slot| {
+    let workspace_budget = with_plan_cache(runtime, |config, slot| {
         Arc::clone(&cache_mut(slot, config.workspace_budget_bytes).workspace_budget)
     });
     let candidate = CachedPlan {
         planned,
         workspaces: Arc::new(WorkspacePools::new(workspace_budget)),
     };
-    let winner = __network::with_plan_cache(
+    let winner = with_plan_cache(
         runtime,
         |config, slot| -> Result<CachedPlan, HostNetworkError<R>> {
             let cache = cache_mut(slot, config.workspace_budget_bytes);
@@ -1457,9 +1501,9 @@ mod tests {
     #[test]
     fn cotengra_timeout_does_not_fragment_cache_identity_or_mutate_runtime_config() {
         let short =
-            tenet::plancache::CotengraPythonConfig::default().timeout(Duration::from_secs(1));
-        let unbounded = tenet::plancache::CotengraPythonConfig::default().without_timeout();
-        let runtime_config = tenet::plancache::PlanCacheConfig {
+            crate::plancache::CotengraPythonConfig::default().timeout(Duration::from_secs(1));
+        let unbounded = crate::plancache::CotengraPythonConfig::default().without_timeout();
+        let runtime_config = crate::plancache::PlanCacheConfig {
             optimizer: Optimizer::CotengraPython(short),
             ..Default::default()
         };
@@ -1485,7 +1529,7 @@ mod tests {
     fn cache_state(runtime: &tenet::typed::Runtime) -> CacheState {
         CacheState {
             stats: super::plan_cache_stats(runtime),
-            aliases: super::__network::with_extension_slot(runtime, |slot| {
+            aliases: super::with_plan_cache(runtime, |_, slot| {
                 super::existing_cache_mut(slot).map(|cache| {
                     cache
                         .network_aliases
@@ -1511,7 +1555,7 @@ mod tests {
         extra: &dyn Fn() -> X,
     ) -> String {
         let clear_aliases = || {
-            super::__network::with_extension_slot(runtime, |slot| {
+            super::with_plan_cache(runtime, |_, slot| {
                 super::existing_cache_mut(slot)
                     .unwrap()
                     .network_aliases

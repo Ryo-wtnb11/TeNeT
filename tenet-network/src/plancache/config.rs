@@ -1,15 +1,10 @@
-//! Configuration of the topology-keyed contraction-plan cache owned by
-//! [`Runtime`](crate::typed::Runtime).
+//! Configuration value types of the topology-keyed contraction-plan cache
+//! (see the parent module): search choice, replan policy, capacity and
+//! workspace budget, and the diagnostic counters.
 //!
-//! The cache itself (keys and plan entries) lives in `tenet-network`, which
-//! depends on this crate; the runtime stores it in a type-keyed extension
-//! slot (see `typed::__network::with_extension_slot`) and owns only the configuration
-//! value types defined here. Set the configuration on
-//! [`RuntimeBuilder`](crate::typed::RuntimeBuilder) via
-//! `plan_cache`/`optimizer`, or later through `tenet-network`'s
-//! `configure_plan_cache`.
-//!
-//! Naming and placement of this module are subject to a later API pass.
+//! Set the configuration after building a [`Runtime`](tenet::typed::Runtime)
+//! with [`configure_plan_cache`](super::configure_plan_cache); read it with
+//! [`plan_cache_config`](super::plan_cache_config).
 
 /// Which contraction-order search to run: a hashable value type (usable as
 /// a cache-key component and as a runtime-wide default) rather than a trait
@@ -19,12 +14,12 @@
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Optimizer {
-    /// Greedy pairwise search (`tenet-network`'s `GreedyDenseOptimizer`);
+    /// Greedy pairwise search ([`GreedyDenseOptimizer`](crate::GreedyDenseOptimizer));
     /// the default.
     #[default]
     Greedy,
     /// Exhaustive optimal search (opt_einsum `"optimal"`; small networks
-    /// only). Requires `tenet-network`'s `opt-path` feature at execution.
+    /// only). Requires the `opt-path` feature.
     #[cfg(feature = "opt-path")]
     Optimal,
     /// Dynamic-programming search (opt_einsum `"dp"`): the SAME optimal
@@ -32,7 +27,7 @@ pub enum Optimizer {
     /// but polynomial-time instead of exhaustive `O(n!)`. This is the
     /// `@tensoropt` analog — optimal order without the branch-and-bound
     /// search cost that dominates the first (cold) contraction of each
-    /// topology. Requires `tenet-network`'s `opt-path` feature at execution.
+    /// topology. Requires the `opt-path` feature.
     #[cfg(feature = "opt-path")]
     DynamicProgramming,
     /// The legacy `EinsumPlan::compile` default: opt_einsum `"auto-hq"`
@@ -40,11 +35,11 @@ pub enum Optimizer {
     /// errors (upstream `opt-einsum-path` rejects some all-dim-1 networks).
     /// Near-optimal orders for the large gram / environment-body networks
     /// where plain greedy picks memory-exploding orders. Requires
-    /// `tenet-network`'s `opt-path` feature at execution.
+    /// the `opt-path` feature.
     #[cfg(feature = "opt-path")]
     AutoHq,
-    /// External Python `cotengra` path search. Requires `tenet-network`'s
-    /// `cotengra-python` feature at execution and an importable Python
+    /// External Python `cotengra` path search. Requires the
+    /// `cotengra-python` feature and an importable Python
     /// `cotengra` installation. This is intentionally a cold-path planner:
     /// the returned pairwise order is cached and warm execution stays in Rust.
     #[cfg(feature = "cotengra-python")]
@@ -252,7 +247,7 @@ pub enum ReplanPolicy {
     ///
     /// The drift is measured from the dimensions the cached order was
     /// searched at, whichever call site reaches it. With plan
-    /// persistence enabled (`tenet-network`'s `load_plan_cache`), a
+    /// persistence enabled ([`load_plan_cache`](super::load_plan_cache)), a
     /// drift-replan of a topology that has a persisted order replays that
     /// order rather than searching a new one.
     DriftFactor(f64),
@@ -282,9 +277,7 @@ pub const DEFAULT_PLAN_CACHE_CAPACITY: usize = 256;
 /// unlimited.
 pub const DEFAULT_WORKSPACE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
-/// Plan-cache behavior; set on
-/// [`RuntimeBuilder`](crate::typed::RuntimeBuilder) or with
-/// `tenet-network`'s `configure_plan_cache`.
+/// Plan-cache behavior; set with [`configure_plan_cache`](super::configure_plan_cache).
 #[derive(Clone, Debug)]
 pub struct PlanCacheConfig {
     /// Master switch; `false` makes every network contraction plan fresh.
@@ -314,8 +307,8 @@ impl Default for PlanCacheConfig {
     }
 }
 
-/// Counters for tests and diagnostics; see `tenet-network`'s
-/// `plan_cache_stats`.
+/// Counters for tests and diagnostics; see
+/// [`plan_cache_stats`](super::plan_cache_stats).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlanCacheStats {
     /// Topology hits that reused the cached order.
@@ -327,8 +320,8 @@ pub struct PlanCacheStats {
     pub replans: u64,
     /// Current number of cached plans.
     pub entries: usize,
-    /// Current number of persisted contraction orders (see `tenet-network`'s
-    /// `load_plan_cache`), bounded by [`PlanCacheConfig::capacity`].
+    /// Current number of persisted contraction orders (see
+    /// [`load_plan_cache`](super::load_plan_cache)), bounded by [`PlanCacheConfig::capacity`].
     pub persisted_orders: usize,
     /// Execution workspaces allocated because no cached lease was available.
     pub workspaces_created: u64,

@@ -25,6 +25,5 @@ The default host provider is Tenferro's resolved compiled default: BLAS when
 its CPU build enables `cpu-blas`, otherwise `cpu-faer`; see the
 [backend policy](../docs/backend_policy.md) and [`Cargo.toml`](Cargo.toml) for
 alternatives. `cuda` and `racah-generated` add
-the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
-facade markers expose optimizer configuration; the planners themselves are
-enabled in `tenet-network`.
+the typed CUDA surface and SUN providers. Contraction-order planners and their
+configuration (`opt-path`, `cotengra-python`) belong to `tenet-network`.
