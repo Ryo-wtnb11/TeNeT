@@ -213,14 +213,12 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \
              left_null_from_source \
-             left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
-             left_polar_checked_generic left_polar_dyn left_polar_of_diagonal \
+             left_polar_adjoint_from_parent left_polar_from_source left_polar_of_diagonal \
              lq_compact_from_source lq_full_from_source \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
              rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
-             right_polar_adjoint_parent_dyn \
-             right_polar_adjoint_parent_dyn_checked_generic right_polar_checked_generic \
-             right_polar_dyn right_polar_of_diagonal scale_axis_by_spectrum_mapped \
+             right_polar_adjoint_from_parent right_polar_from_source \
+             right_polar_of_diagonal scale_axis_by_spectrum_mapped \
              svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
@@ -228,7 +226,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSpaceAuthority FactorSource Routed \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
-             exp_dyn exp_pade13_direct_into_dyn inv_direct_dyn inv_direct_into_dyn \
+             exp_direct_into_dyn exp_dyn inv_direct_dyn inv_direct_into_dyn \
              pinv_adjoint_parent_direct_into_dyn pinv_adjoint_parent_dyn pinv_direct_into_dyn pinv_dyn solve_left_direct_dyn \
              solve_left_direct_into_dyn rescaled_power_norm"
         )

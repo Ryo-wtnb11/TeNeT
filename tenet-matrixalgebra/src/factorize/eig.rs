@@ -1094,7 +1094,7 @@ where
     Ok(eigenvalues)
 }
 
-pub(super) fn compact_eigh_owned<E, D>(
+pub(crate) fn compact_eigh_owned<E, D>(
     dense: &mut E,
     input: &[D],
     order: usize,
@@ -1365,7 +1365,6 @@ pub(crate) fn is_hermitian_endomorphism_dyn<R, D>(
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -1412,7 +1411,7 @@ pub(super) fn invalid_eigenvalues() -> OperationError {
     }
 }
 
-pub(super) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
+pub(crate) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {

@@ -50,12 +50,13 @@ fn checked_generic_polar_covers_scalar_maps() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs_from_fresh_outputs(
-) {
+fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_from_fresh_outputs()
+{
     // What: admission accepts any coupled-sector tiling, so a tiled source
     // whose multiplicity trees are stacked in reverse of the fresh P / pinv
-    // output order must be refused by the route proof with a typed error
-    // before any dense work, never answered in mismatched coordinates.
+    // output order lands in the fresh outputs by tree identity: every factor
+    // equals the one of the fresh-layout source, never an answer in
+    // mismatched coordinates.
     let (base, base_data) = generic_factorization_input();
     let base_structure = base.space().structure();
     let blocks = (0..base_structure.block_count())
@@ -131,37 +132,66 @@ fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs
         .zip(fresh_regions.iter())
         .any(|(source, fresh)| source.col_trees() != fresh.col_trees()));
 
-    let polar =
-        left_polar_dyn_checked_generic(&mut ScriptedExecutor::new(RejectExecutorCalls), &input)
-            .unwrap_err();
-    assert!(
-        matches!(
-            polar,
-            CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope { .. }
-            )
-        ),
-        "{polar:?}"
+    // The same values on the spy, in the fresh layout.
+    assert_eq!(fresh.space().structure(), base.space().structure());
+    let base_input = BoundDynamicTensorRef::try_new(&fresh, &base_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let expected = left_polar_dyn_checked_generic(&mut dense, &base_input).unwrap();
+    let actual = left_polar_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_blocks_close_by_key("checked W", &expected.w, &actual.w);
+    assert_blocks_close_by_key("checked P", &expected.p, &actual.p);
+
+    let swapped = || {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            FusionTreeHomSpace::new(
+                source.space().homspace().domain().clone(),
+                source.space().homspace().codomain().clone(),
+            ),
+        )
+        .unwrap()
+    };
+    let expected = pinv_direct_into_dyn(&mut dense, &base_input, swapped(), 0.0).unwrap();
+    let actual = pinv_direct_into_dyn(&mut dense, &input, swapped(), 0.0).unwrap();
+    assert_blocks_close_by_key("checked pinv", &expected, &actual);
+}
+
+/// Every block of `expected` and `actual`, matched by fusion-tree key and
+/// compared element by element, whatever either layout's block order.
+fn assert_blocks_close_by_key<R, D: FactorScalar>(
+    what: &str,
+    expected: &BoundDynFactor<R, D>,
+    actual: &BoundDynFactor<R, D>,
+) {
+    let (left, right) = (
+        expected.space().space().structure(),
+        actual.space().space().structure(),
     );
-    let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        provider,
-        FusionTreeHomSpace::new(
-            source.space().homspace().domain().clone(),
-            source.space().homspace().codomain().clone(),
-        ),
-    )
-    .unwrap();
-    let pinv = pinv_direct_into_dyn(
-        &mut ScriptedExecutor::new(RejectExecutorCalls),
-        &input,
-        output,
-        0.0,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(pinv, OperationError::UnsupportedTensorContractScope { .. }),
-        "{pinv:?}"
-    );
+    assert_eq!(left.block_count(), right.block_count(), "{what}");
+    for index in 0..left.block_count() {
+        let a = left.block(index).unwrap();
+        let b = right
+            .block(right.find_block_index_by_key(a.key()).unwrap())
+            .unwrap();
+        assert_eq!(a.shape(), b.shape(), "{what}");
+        let elements = a.shape().iter().product::<usize>();
+        for linear in 0..elements {
+            let (mut rest, mut x, mut y) = (linear, a.offset(), b.offset());
+            for (axis, &extent) in a.shape().iter().enumerate() {
+                x += (rest % extent) * a.strides()[axis];
+                y += (rest % extent) * b.strides()[axis];
+                rest /= extent;
+            }
+            let (x, y) = (
+                expected.data()[x].widen_complex(),
+                actual.data()[y].widen_complex(),
+            );
+            assert!(
+                (x - y).norm() <= 1e-12,
+                "{what} {index}/{linear}: {x} vs {y}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -182,7 +212,6 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
         p: positive,
     } = left_polar(
         &mut dense_executor,
-        &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
@@ -197,7 +226,6 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
         wh: isometry,
     } = right_polar(
         &mut dense_executor,
-        &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
@@ -212,21 +240,10 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
     for (operation, rows, cols) in [("left_polar", 2, 3), ("right_polar", 3, 2)] {
         let tensor = rectangular_svd_tensor(rows, cols);
         let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-        let mut context = default_context();
         let result = if operation == "left_polar" {
-            left_polar(
-                &mut dense,
-                &mut context,
-                &bound_tensor_ref!(Arc::new(rule), &tensor),
-            )
-            .map(drop)
+            left_polar(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).map(drop)
         } else {
-            right_polar(
-                &mut dense,
-                &mut context,
-                &bound_tensor_ref!(Arc::new(rule), &tensor),
-            )
-            .map(drop)
+            right_polar(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).map(drop)
         };
 
         assert!(matches!(
@@ -241,12 +258,11 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
 fn assert_polar_direction_error_before_dense(tensor: &TensorMap<f64, 1, 1>, left: bool) {
     let before = tensor.data().to_vec();
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-    let mut context = default_context();
     let input = bound_tensor(Arc::new(U1FusionRule), tensor);
     let error = if left {
-        left_polar(&mut dense, &mut context, &input.as_ref()).unwrap_err()
+        left_polar(&mut dense, &input.as_ref()).unwrap_err()
     } else {
-        right_polar(&mut dense, &mut context, &input.as_ref()).unwrap_err()
+        right_polar(&mut dense, &input.as_ref()).unwrap_err()
     };
     let operation = if left { "left_polar" } else { "right_polar" };
     assert!(matches!(
@@ -265,7 +281,7 @@ fn assert_valid_unmatched_left_polar(tensor: &TensorMap<f64, 1, 1>) {
     let LeftPolar {
         w: isometry,
         p: positive,
-    } = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    } = left_polar(&mut dense, &input.as_ref()).unwrap();
 
     assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
@@ -287,7 +303,7 @@ fn assert_valid_unmatched_right_polar(tensor: &TensorMap<f64, 1, 1>) {
     let RightPolar {
         p: positive,
         wh: isometry,
-    } = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    } = right_polar(&mut dense, &input.as_ref()).unwrap();
 
     assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
@@ -325,10 +341,8 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     let empty_codomain = u1_cross_space_map::<f64>(&[], &[(0, 2)]);
     assert_polar_direction_error_before_dense(&empty_codomain, true);
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-    let mut context = default_context();
     right_polar(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &empty_codomain),
     )
     .unwrap();
@@ -336,20 +350,17 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     let empty_domain = u1_cross_space_map::<f64>(&[(0, 2)], &[]);
     assert_polar_direction_error_before_dense(&empty_domain, false);
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-    let mut context = default_context();
     left_polar(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &empty_domain),
     )
     .unwrap();
 
     let empty = u1_cross_space_map::<f64>(&[], &[]);
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-    let mut context = default_context();
     let input = bound_tensor(Arc::new(U1FusionRule), &empty);
-    left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
-    right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    left_polar(&mut dense, &input.as_ref()).unwrap();
+    right_polar(&mut dense, &input.as_ref()).unwrap();
 
     let rule = U1FusionRule;
     let homspace =
@@ -364,13 +375,14 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     .unwrap();
     let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], space).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
     let input = bound_tensor(Arc::new(rule), &scalar);
-    let LeftPolar { w, p } = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    // `P = (sqrt(S) Vh)^H (sqrt(S) Vh)` (MAK `PolarViaSVD`): `sqrt(2)^2`
+    // rounds, so `P` is `2` to one ulp.
+    let LeftPolar { w, p } = left_polar(&mut dense, &input.as_ref()).unwrap();
     assert_eq!(w.data(), &[1.0]);
-    assert_eq!(p.data(), &[2.0]);
-    let RightPolar { p, wh: w } = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
-    assert_eq!(p.data(), &[2.0]);
+    numerics::assert_slices_close("left P", p.data(), &[2.0], 1);
+    let RightPolar { p, wh: w } = right_polar(&mut dense, &input.as_ref()).unwrap();
+    numerics::assert_slices_close("right P", p.data(), &[2.0], 1);
     assert_eq!(w.data(), &[1.0]);
 }
 
@@ -384,19 +396,22 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
     let input = bound_tensor(Arc::new(U1FusionRule), &tensor);
     for left in [true, false] {
         let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
-        let mut context = default_context();
         crate::factorize::reset_compact_svd_copy_probe();
+        crate::factorize::reset_input_pack_bytes();
         let result = if left {
-            left_polar(&mut dense, &mut context, &input.as_ref()).map(drop)
+            left_polar(&mut dense, &input.as_ref()).map(drop)
         } else {
-            right_polar(&mut dense, &mut context, &input.as_ref()).map(drop)
+            right_polar(&mut dense, &input.as_ref()).map(drop)
         };
         assert!(matches!(result, Err(OperationError::Dense(_))));
         assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
         assert_eq!(tensor.data(), before);
-        let probe = crate::factorize::compact_svd_copy_probe();
-        assert!(probe.input_pack_calls > 0);
-        assert!(probe.output_scatter_calls > 0);
+        // The padded input is packed once; no SVD factor is laid out.
+        assert!(crate::factorize::input_pack_bytes() > 0);
+        assert_eq!(
+            crate::factorize::compact_svd_copy_probe(),
+            Default::default()
+        );
     }
 }
 
@@ -423,27 +438,20 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
                 .is_none()
         );
         let mut direct_dense = tenet_dense::DefaultDenseExecutor::new();
-        let mut direct_context = default_context();
         let mut fallback_dense = tenet_dense::DefaultDenseExecutor::new();
-        let mut fallback_context = default_context();
         crate::factorize::reset_compact_svd_copy_probe();
+        crate::factorize::reset_input_pack_bytes();
 
         let (direct_first, direct_second, fallback_first, fallback_second) =
             if operation == "left_polar" {
                 let LeftPolar {
                     w: direct_first,
                     p: direct_second,
-                } = left_polar(
-                    &mut direct_dense,
-                    &mut direct_context,
-                    &direct_bound.as_ref(),
-                )
-                .unwrap();
+                } = left_polar(&mut direct_dense, &direct_bound.as_ref()).unwrap();
                 let LeftPolar {
                     w: fallback_first,
                     p: fallback_second,
-                } = left_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
-                    .unwrap();
+                } = left_polar_dyn(&mut fallback_dense, &fallback_input).unwrap();
                 (
                     direct_first.data().to_vec(),
                     direct_second.data().to_vec(),
@@ -454,17 +462,11 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
                 let RightPolar {
                     p: direct_first,
                     wh: direct_second,
-                } = right_polar(
-                    &mut direct_dense,
-                    &mut direct_context,
-                    &direct_bound.as_ref(),
-                )
-                .unwrap();
+                } = right_polar(&mut direct_dense, &direct_bound.as_ref()).unwrap();
                 let RightPolar {
                     p: fallback_first,
                     wh: fallback_second,
-                } = right_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
-                    .unwrap();
+                } = right_polar_dyn(&mut fallback_dense, &fallback_input).unwrap();
                 (
                     direct_first.data().to_vec(),
                     direct_second.data().to_vec(),
@@ -481,8 +483,11 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
         for (direct, fallback) in direct_second.iter().zip(&fallback_second) {
             assert!((direct - fallback).abs() < 1e-10);
         }
-        let probe = crate::factorize::compact_svd_copy_probe();
-        assert!(probe.input_pack_calls > 0);
-        assert!(probe.output_scatter_calls > 0);
+        // The padded input is packed once; no SVD factor is laid out.
+        assert!(crate::factorize::input_pack_bytes() > 0);
+        assert_eq!(
+            crate::factorize::compact_svd_copy_probe(),
+            Default::default()
+        );
     }
 }

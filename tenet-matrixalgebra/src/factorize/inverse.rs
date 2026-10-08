@@ -190,7 +190,6 @@ pub(crate) fn pinv_by_sector_dyn_into<E, R, D>(
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     pinv_oriented_by_sector_dyn_into(dense, input, output_space, rcond, FactorPlacement::Direct)
@@ -206,7 +205,6 @@ pub(crate) fn pinv_adjoint_by_sector_dyn_into<E, R, D>(
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     pinv_oriented_by_sector_dyn_into(dense, parent, output_space, rcond, FactorPlacement::Adjoint)
@@ -221,7 +219,6 @@ fn pinv_oriented_by_sector_dyn_into<E, R, D>(
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     let source_space = input.space().space();
@@ -266,10 +263,6 @@ where
             tensor: "pinv output space",
         });
     }
-    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message: "pinv requires coupled-sector input storage",
-        })?;
     let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
@@ -277,42 +270,39 @@ where
     .ok_or(OperationError::UnsupportedTensorContractScope {
         message: "pinv requires coupled-sector output storage",
     })?;
-    let routes = compile_pinv_region_routes(
-        &source_regions,
+    let output_len = output_space.space().required_len()?;
+    let matrices =
+        generic_input_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+    // `A^+` is `domain <- codomain`: its rows are the input's column trees.
+    let (rows, cols) = match placement {
+        FactorPlacement::Direct => (FactorSide::Right, FactorSide::Left),
+        FactorPlacement::Adjoint => (FactorSide::Left, FactorSide::Right),
+    };
+    let landings = with_input_geometry!(&matrices, |geometry| compile_sector_landings(
+        geometry,
         &output_regions,
-        input.data().len(),
-        output_space.space().required_len()?,
-        placement,
-    )?;
+        output_len,
+        rows,
+        cols,
+    ))?;
 
-    struct Stage<D> {
-        pub(super) route: InverseSectorRoute,
-        pub(super) rows: usize,
-        pub(super) cols: usize,
-        pub(super) rank: usize,
-        pub(super) u: Vec<D>,
-        pub(super) singular_values: Vec<f64>,
-        pub(super) vt: Vec<D>,
-    }
-
-    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
-    let mut staged = Vec::with_capacity(routes.len());
-    let data = input.data();
-    // One scope spans both passes: the staged SVDs and the per-sector
-    // reconstruction GEMMs.
+    let mut output_data = vec![D::zero(); output_len];
+    let mut scratch = Vec::new();
+    // One scope spans both passes: the staged SVDs (the cutoff is global) and
+    // the per-sector reconstruction GEMMs.
     in_linalg_scope(dense, |dense| {
-        for route in routes {
-            let source = &source_regions[route.source];
-            let rows = source.rows();
-            let cols = source.cols();
+        let mut staged = Vec::with_capacity(matrices.len());
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            let (rows, cols) = (matrix.rows, matrix.cols);
             let rank = rows.min(cols);
+            // Why no SVD gauge: the pseudo-inverse is gauge invariant.
             let (u, singular_values, vt) = if rank == 0 {
                 (Vec::new(), Vec::new(), Vec::new())
             } else {
-                compact_svd_owned(dense, &data[source.range()], rows, cols)?
+                compact_svd_owned(dense, matrix.data, rows, cols)?
             };
-            staged.push(Stage {
-                route,
+            staged.push(CompactSvdNumericalStage {
                 rows,
                 cols,
                 rank,
@@ -327,59 +317,59 @@ where
                 .flat_map(|stage| stage.singular_values.iter().copied()),
             rcond,
         )?;
-        for stage in staged {
+        for (stage, landing) in staged.iter_mut().zip(&landings) {
             if stage.rank == 0 {
                 continue;
             }
-            let mut vt = stage.vt;
-            for (row, &sigma) in stage.singular_values.iter().enumerate() {
+            let CompactSvdNumericalStage {
+                rows,
+                cols,
+                rank,
+                u,
+                singular_values,
+                vt,
+            } = stage;
+            let (rows, cols, rank) = (*rows, *cols, *rank);
+            for (row, &sigma) in singular_values.iter().enumerate() {
                 let reciprocal = D::from_real(if sigma > cutoff { 1.0 / sigma } else { 0.0 });
-                for column in 0..stage.cols {
-                    vt[row + stage.rank * column] = vt[row + stage.rank * column] * reciprocal;
+                for column in 0..cols {
+                    vt[row + rank * column] = vt[row + rank * column] * reciprocal;
                 }
             }
-            let output = &mut output_data[output_regions[stage.route.output].range()];
             // `A^+ = V S^+ U^H` reads `S^+ Vh` and `U` conjugated and
             // transposed; `(A^H)^+ = U S^+ Vh` reads them as stored.
-            let (rows, cols, left, left_strides, right, right_strides, conjugate) = match placement
-            {
-                FactorPlacement::Direct => (
-                    stage.cols,
-                    stage.rows,
-                    &vt,
-                    [stage.rank, 1],
-                    &stage.u,
-                    [stage.rows, 1],
-                    true,
-                ),
-                FactorPlacement::Adjoint => (
-                    stage.rows,
-                    stage.cols,
-                    &stage.u,
-                    [1, stage.rows],
-                    &vt,
-                    [1, stage.rank],
-                    false,
-                ),
-            };
-            let output_shape = [rows, cols];
-            let output_strides = [1, rows];
-            let left_shape = [rows, stage.rank];
-            let right_shape = [stage.rank, cols];
-            let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
-                .map_err(OperationError::Dense)?;
-            let left_view = DenseView::new(left, &left_shape, &left_strides, 0)
-                .map_err(OperationError::Dense)?;
-            let right_view = DenseView::new(right, &right_shape, &right_strides, 0)
-                .map_err(OperationError::Dense)?;
-            dense
-                .dot_general_into(
-                    D::dense_write(output_view),
-                    D::dense_read(left_view),
-                    D::dense_read(right_view),
-                    &DenseDotConfig::matmul().with_conjugation(conjugate, conjugate),
-                )
-                .map_err(OperationError::Dense)?;
+            let (out_rows, out_cols, left, left_strides, right, right_strides, conjugate) =
+                match placement {
+                    FactorPlacement::Direct => (cols, rows, &*vt, [rank, 1], &*u, [rows, 1], true),
+                    FactorPlacement::Adjoint => {
+                        (rows, cols, &*u, [1, rows], &*vt, [1, rank], false)
+                    }
+                };
+            landing.write(
+                &mut output_data,
+                &output_regions[landing.output],
+                &mut scratch,
+                |output| {
+                    let output_shape = [out_rows, out_cols];
+                    let output_strides = [1, out_rows];
+                    let left_shape = [out_rows, rank];
+                    let right_shape = [rank, out_cols];
+                    let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    let left_view = DenseView::new(left, &left_shape, &left_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    let right_view = DenseView::new(right, &right_shape, &right_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    dense
+                        .dot_general_into(
+                            D::dense_write(output_view),
+                            D::dense_read(left_view),
+                            D::dense_read(right_view),
+                            &DenseDotConfig::matmul().with_conjugation(conjugate, conjugate),
+                        )
+                        .map_err(OperationError::Dense)
+                },
+            )?;
         }
         Ok(())
     })?;
@@ -388,59 +378,6 @@ where
         FactorPlacement::Adjoint => (source_space.nout(), source_space.nin()),
     };
     BoundDynFactor::from_bound(output_space, output_data, nout, nin)
-}
-
-pub(super) fn compile_pinv_region_routes(
-    source: &[CoupledSectorRegion],
-    output: &[CoupledSectorRegion],
-    source_len: usize,
-    output_len: usize,
-    placement: FactorPlacement,
-) -> Result<Vec<InverseSectorRoute>, OperationError> {
-    let output_by_sector = sector_region_index_map(output)?;
-    let mut used = vec![false; output.len()];
-    let mut routes = Vec::with_capacity(source.len());
-    for (source_index, source_region) in source.iter().enumerate() {
-        let output_index = output_by_sector
-            .get(&source_region.coupled())
-            .copied()
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: "pinv output is missing a source coupled sector",
-            })?;
-        let output_region = &output[output_index];
-        let matches_layout = match placement {
-            FactorPlacement::Direct => {
-                output_region.rows() == source_region.cols()
-                    && output_region.cols() == source_region.rows()
-                    && source_region.col_trees() == output_region.row_trees()
-                    && source_region.row_trees() == output_region.col_trees()
-            }
-            FactorPlacement::Adjoint => {
-                output_region.rows() == source_region.rows()
-                    && output_region.cols() == source_region.cols()
-                    && source_region.row_trees() == output_region.row_trees()
-                    && source_region.col_trees() == output_region.col_trees()
-            }
-        };
-        if !matches_layout {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "pinv output does not match the source coupled-sector layout",
-            });
-        }
-        validate_region_range(source_region, source_len)?;
-        validate_region_range(output_region, output_len)?;
-        used[output_index] = true;
-        routes.push(InverseSectorRoute {
-            source: source_index,
-            output: output_index,
-        });
-    }
-    if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "pinv output contains a coupled sector absent from the source",
-        });
-    }
-    Ok(routes)
 }
 
 pub(crate) fn solve_left_by_sector_dyn<E, R, D>(
@@ -698,60 +635,31 @@ where
 }
 
 /// Walks the coupled-sector matricization of an endomorphism and replaces each
-/// square block by `apply`'s image of it, writing into a freshly derived
-/// canonical layout.
+/// square block by `apply`'s image of it, writing into `output_space`.
 ///
-/// This is the block-data half of a matrix function that is *not* a spectral
-/// function — the caller supplies only the dense `n x n -> n x n` kernel and
-/// never sees the layout. `init` is handed the largest block order once, before
-/// the loop, so a kernel can size its scratch to `O(max_c n_c²)` and allocate
-/// nothing per sector.
+/// This is the block-data half of a per-sector matrix function — the caller
+/// supplies only the dense `n x n -> n x n` kernel and never sees the layout.
+/// `init` is handed the largest block order once, before the loop, so a
+/// kernel can size its scratch to `O(max_c n_c²)` and allocate nothing per
+/// sector.
 ///
-/// That bound is the kernel's own. It is also the whole of the scratch on the
-/// canonical direct-region layout, where the blocks are read in place; the
-/// packed fallback below matricizes *every* sector up front and so costs
-/// `O(Σ_c n_c²)` on top of it, whatever the kernel does.
+/// That bound is the kernel's own. It is also the whole of the scratch on a
+/// canonical region layout whose trees the output lists in the same order:
+/// the blocks are read and written in place. A packed input matricizes
+/// *every* sector up front and so costs `O(Σ_c n_c²)` on top of it, and a
+/// sector whose tree order differs from the output's lands through one
+/// `O(max_c n_c²)` staging buffer.
 ///
-/// `apply(state, source, n, out, out_leading)` reads the column-major `n x n`
-/// block at `source` (leading dimension `n`) and writes its image into `out`
-/// with leading dimension `out_leading`.
+/// `apply(state, source, n, out)` reads the column-major `n x n` block at
+/// `source` and writes its image into the column-major `n x n` `out`.
 ///
 /// Publication is atomic: the result tensor is built only after every sector
 /// has succeeded, so a failure in the last block leaves no half-written tensor
 /// behind and never mutates the input.
 ///
-/// Why the `inverse_*` route compilers are reused rather than copied: they map
-/// source blocks onto the derived output layout under a codomain/domain swap,
-/// and on an endomorphism that swap is the identity — the two tree lists are
-/// the same list. Duplicating 80 lines to spell the identity differently would
-/// only give the two copies a chance to drift.
-///
-/// # Panics
-///
-/// Debug-asserts `codomain == domain`. Refusing a non-endomorphism is the
-/// caller's job, so that the message names the function the user called
-/// (`exp`) rather than whichever helper noticed first.
-pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    init: I,
-    apply: F,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-    I: FnOnce(usize) -> Result<S, OperationError>,
-    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
-{
-    let source_space = input.space().space();
-    debug_assert_eq!(
-        source_space.homspace().codomain(),
-        source_space.homspace().domain(),
-        "callers refuse a non-endomorphism in their own words first"
-    );
-    let output_space = MfAuthority(input.space()).output_space(source_space.homspace().clone())?;
-    map_square_sectors_dyn_into(input, output_space, init, apply)
-}
-
+/// Refusing a non-endomorphism is the caller's job, so that the message
+/// names the function the user called (`exp`) rather than whichever helper
+/// noticed first.
 pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     output_space: BoundDynamicFusionMapSpace<R>,
@@ -761,7 +669,7 @@ pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
 where
     D: FactorScalar,
     I: FnOnce(usize) -> Result<S, OperationError>,
-    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
+    F: FnMut(&mut S, &[D], usize, &mut [D]) -> Result<(), OperationError>,
 {
     let source_space = input.space().space();
     if source_space.homspace() != output_space.space().homspace() {
@@ -770,7 +678,6 @@ where
         });
     }
 
-    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
     let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
@@ -779,80 +686,38 @@ where
         message: "matrix function output requires canonical coupled-sector storage",
     })?;
     let output_len = output_space.space().required_len()?;
-    let output_data = match source_regions {
-        Some(source) => {
-            validate_endomorphism_tree_stacking(source.as_ref(), EXP_STACKING)?;
-            let routes = compile_inverse_region_routes(
-                &source,
-                &output_regions,
-                input.data().len(),
-                output_len,
-            )?;
-            let max_order = routes
-                .iter()
-                .map(|route| source[route.source].rows())
-                .max()
-                .unwrap_or(0);
-            let mut output_data = vec![D::zero(); output_len];
-            let mut state = init(max_order)?;
-            for route in routes {
-                let region = &source[route.source];
-                let order = region.rows();
-                if order == 0 {
-                    continue;
-                }
-                let output = &output_regions[route.output];
-                apply(
-                    &mut state,
-                    &input.data()[region.range()],
-                    order,
-                    &mut output_data[output.range()],
-                    output.rows(),
-                )?;
-            }
-            output_data
+    let matrices =
+        generic_input_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+    // Why stacking and not only tree identity, as `inv` needs: `f(P_R A
+    // P_C^T)` is not `P_R f(A) P_C^T` unless the row and column stackings
+    // coincide.
+    matrices.validate_endomorphism_stacking(EXP_STACKING)?;
+    let landings = with_input_geometry!(&matrices, |geometry| compile_sector_landings(
+        geometry,
+        &output_regions,
+        output_len,
+        FactorSide::Left,
+        FactorSide::Right,
+    ))?;
+    let max_order = (0..matrices.len())
+        .map(|index| matrices.get(index).map(|matrix| matrix.rows))
+        .try_fold(0, |largest, rows| rows.map(|rows| largest.max(rows)))?;
+    let mut output_data = vec![D::zero(); output_len];
+    let mut state = init(max_order)?;
+    let mut scratch = Vec::new();
+    for (index, landing) in landings.iter().enumerate() {
+        let matrix = matrices.get(index)?;
+        let order = matrix.rows;
+        if order == 0 {
+            continue;
         }
-        None => {
-            let source_matrices =
-                sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
-            // Why not rely on the tree-identity routes as `inv` does: they are
-            // right for `A^-1` of any stacking, but `f(P_R A P_C^T)` is not
-            // `P_R f(A) P_C^T` unless the row and column stackings coincide.
-            validate_endomorphism_tree_stacking(&source_matrices, EXP_STACKING)?;
-            let routes =
-                compile_inverse_matrix_routes(&source_matrices, &output_regions, output_len)?;
-            let max_order = routes
-                .iter()
-                .map(|route| source_matrices[route.source].rows)
-                .max()
-                .unwrap_or(0);
-            let mut output_data = vec![D::zero(); output_len];
-            let mut state = init(max_order)?;
-            let mut image = vec![
-                D::zero();
-                max_order
-                    .checked_mul(max_order)
-                    .ok_or(OperationError::ElementCountOverflow)?
-            ];
-            for route in routes {
-                let source = &source_matrices[route.source];
-                if source.rows == 0 {
-                    continue;
-                }
-                apply(&mut state, &source.data, source.rows, &mut image, max_order)?;
-                let output = &output_regions[route.output];
-                reorder_inverse_solution(
-                    &image,
-                    max_order,
-                    &mut output_data[output.range()],
-                    output.rows(),
-                    &route.rows,
-                    &route.cols,
-                );
-            }
-            output_data
-        }
-    };
+        landing.write(
+            &mut output_data,
+            &output_regions[landing.output],
+            &mut scratch,
+            |output| apply(&mut state, matrix.data, order, output),
+        )?;
+    }
 
     BoundDynFactor::from_bound(
         output_space,
@@ -972,9 +837,9 @@ pub(super) fn compile_inverse_matrix_routes<D>(
         }
         validate_region_range(output_region, output_len)?;
         let rows =
-            compile_inverse_basis_extents(&source_matrix.col_trees, output_region.row_trees())?;
+            compile_basis_extents(source_matrix, FactorSide::Right, output_region.row_trees())?;
         let cols =
-            compile_inverse_basis_extents(&source_matrix.row_trees, output_region.col_trees())?;
+            compile_basis_extents(source_matrix, FactorSide::Left, output_region.col_trees())?;
         used[output_index] = true;
         routes.push(InverseMatrixRoute {
             source: source_index,
@@ -989,52 +854,6 @@ pub(super) fn compile_inverse_matrix_routes<D>(
         });
     }
     Ok(routes)
-}
-
-pub(super) fn compile_inverse_basis_extents(
-    source: &[(FusionTreeKey, usize, Vec<usize>)],
-    output: &[CoupledTreeExtent],
-) -> Result<Vec<InverseBasisExtent>, OperationError> {
-    let output_by_tree = output
-        .iter()
-        .enumerate()
-        .map(|(index, extent)| (extent.tree(), index))
-        .collect::<FxHashMap<_, _>>();
-    if output_by_tree.len() != output.len() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inverse output contains a duplicate tree basis",
-        });
-    }
-    let mut used = vec![false; output.len()];
-    let mut extents = Vec::with_capacity(source.len());
-    for (tree, source_offset, source_shape) in source {
-        let output_index = output_by_tree.get(tree).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "inverse output is missing a source tree basis",
-            },
-        )?;
-        let output_extent = &output[output_index];
-        if source_shape != output_extent.shape() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "inverse output tree basis has an unexpected shape",
-            });
-        }
-        let extent = output_extent
-            .extent()
-            .map_err(OperationError::from_core_preserving_context)?;
-        used[output_index] = true;
-        extents.push(InverseBasisExtent {
-            source_offset: *source_offset,
-            output_offset: output_extent.offset(),
-            extent,
-        });
-    }
-    if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inverse output contains a tree basis absent from the source",
-        });
-    }
-    Ok(extents)
 }
 
 pub(super) fn identity_workspace<D: FactorScalar>(order: usize) -> Result<Vec<D>, OperationError> {

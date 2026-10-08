@@ -15,7 +15,7 @@ fn square_matrix_function_rejects_noncanonical_admitted_output_before_kernel() {
             called.set(true);
             unreachable!("layout rejection precedes kernel initialization")
         },
-        |_, _, _, _, _| unreachable!("layout rejection precedes dense work"),
+        |_, _, _, _| unreachable!("layout rejection precedes dense work"),
     );
     assert!(matches!(
         result,
@@ -38,7 +38,7 @@ fn generic_exp_direct_reuses_the_exact_input_provider_and_layout() {
     let data = vec![0.0; space.space().required_len().unwrap()];
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let output = exp_pade13_direct_into_dyn(&mut dense, &input).unwrap();
+    let output = exp_direct_into_dyn(&mut dense, &input, space.clone()).unwrap();
 
     assert!(Arc::ptr_eq(
         output.space().provider_arc(),
@@ -59,8 +59,7 @@ fn pinv_rejects_invalid_rcond_before_dense_execution() {
     let input = bound_tensor(Arc::new(rule), &tensor);
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
         let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
-        let mut context = default_context();
-        let error = pinv(&mut dense, &mut context, &input.as_ref(), rcond).unwrap_err();
+        let error = pinv(&mut dense, &input.as_ref(), rcond).unwrap_err();
         assert!(matches!(error, OperationError::InvalidArgument { .. }));
     }
 }
@@ -85,13 +84,11 @@ fn exp_of_a_hermitian_tensor_inverts_under_negation() {
 
     let forward = exp(
         &mut dense_executor,
-        &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
     let backward = exp(
         &mut dense_executor,
-        &mut context,
         &bound_tensor_ref!(Arc::new(rule), &negated),
     )
     .unwrap();
@@ -128,10 +125,10 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
     crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_input_pack_bytes();
 
     let plus = pinv(
         &mut dense_executor,
-        &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
         1e-12,
     )
@@ -146,9 +143,12 @@ fn pinv_satisfies_the_moore_penrose_identity() {
             "Moore-Penrose violated at raw position {index}: {lhs} != {rhs}"
         );
     }
-    let probe = crate::factorize::compact_svd_copy_probe();
-    assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // The padded input is packed once; no SVD factor is laid out.
+    assert!(crate::factorize::input_pack_bytes() > 0);
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        Default::default()
+    );
 }
 
 #[test]
@@ -1153,12 +1153,11 @@ fn pinv_keeps_its_global_rcond_cutoff() {
     let canonical = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![1e-14])]);
     let tensor = padded_copy(&U1FusionRule, &canonical);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_input_pack_bytes();
 
     let inverse = pinv(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
         1e-12,
     )
@@ -1166,9 +1165,12 @@ fn pinv_keeps_its_global_rcond_cutoff() {
 
     assert!((scalar_u1_block(inverse.tensor(), 0) - 1.0).abs() < 1e-12);
     assert_eq!(scalar_u1_block(inverse.tensor(), 1), 0.0);
-    let probe = crate::factorize::compact_svd_copy_probe();
-    assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // The padded input is packed once; no SVD factor is laid out.
+    assert!(crate::factorize::input_pack_bytes() > 0);
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        Default::default()
+    );
 }
 
 #[test]
@@ -1195,8 +1197,8 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
-    let output =
-        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0).unwrap();
+    crate::factorize::reset_input_pack_bytes();
+    let output = pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.0).unwrap();
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
     let adjoint = tenet_tensors::adjoint(provider.as_ref(), &canonical).unwrap();
     let first = crate::compose::compose(&mut context, provider.as_ref(), &adjoint, output.tensor())
@@ -1208,35 +1210,36 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     for (&actual, &expected) in reconstructed.data().iter().zip(adjoint.data()) {
         assert!((actual - expected).norm() < 1.0e-10);
     }
-    let probe = crate::factorize::compact_svd_copy_probe();
-    assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // The padded input is packed once; no SVD factor is laid out.
+    assert!(crate::factorize::input_pack_bytes() > 0);
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        Default::default()
+    );
 }
 
 #[test]
 fn pinv_adjoint_parent_discards_unpublished_output_on_recomposition_failure() {
-    // What: after a successful parent SVD and scaling, a failed final compose
-    // returns no partial output.
+    // What: after a successful parent SVD and scaling, a failed per-sector
+    // recomposition GEMM returns no partial output.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![2.0, 0.0, 0.0, 3.0])]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context: TensorContractFusionExecutionContext<
-        f64,
-        RuleIdentity,
-        DenseTreeTransformOperations,
-        DenseTreeTransformOperations<ScriptedExecutor<FailComposition>>,
-    > = TensorContractFusionExecutionContext::new(
-        DenseTreeTransformOperations::default(),
-        DenseTreeTransformOperations::new(ScriptedExecutor::new(FailComposition)),
+    let mut dense = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
+    dense.script.fail(
+        &[Op::DotGeneral],
+        None,
+        "dot_general_into",
+        "injected recomposition failure",
     );
 
     assert!(matches!(
-        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0,),
+        pinv_adjoint_parent_dyn(&mut dense, &bound.as_ref().dynamic(), 0.0),
         Err(OperationError::Dense(DenseError::Backend {
             op: "dot_general_into",
             ..
         }))
     ));
+    assert_eq!(dense.counts().svd, 1, "the parent SVD ran");
 }
 
 // ============================================================================
@@ -1379,11 +1382,9 @@ fn exp_of_a_nilpotent_jordan_block_is_the_terminating_series() {
     }
     let tensor = u1_block_endomorphism(&[(0, 4, jordan)]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
     let exponential = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -1412,11 +1413,9 @@ fn exp_of_a_real_skew_symmetric_block_is_the_analytic_rotation() {
     for angle in [0.7_f64, 20.0] {
         let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, angle, -angle, 0.0])]);
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
-        let mut context = default_context();
 
         let exponential = exp(
             &mut dense,
-            &mut context,
             &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
         )
         .unwrap();
@@ -1493,11 +1492,9 @@ fn exp_of_a_multisector_u1_endomorphism_matches_the_tensorkit_oracle() {
     ] {
         let tensor = exp_oracle_tensor::<f64>(scale);
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
-        let mut context = default_context();
 
         let exponential = exp(
             &mut dense,
-            &mut context,
             &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
         )
         .unwrap();
@@ -1526,11 +1523,9 @@ fn exp_of_a_complex_nonnormal_u1_endomorphism_matches_the_tensorkit_oracle() {
     // parts — the arm where a real-arithmetic slip in the approximant shows up.
     let tensor = exp_oracle_tensor::<Complex64>(1.0);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
 
     let exponential = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -1594,17 +1589,14 @@ fn exp_agrees_between_the_direct_region_and_packed_layouts() {
         .unwrap()
         .is_none());
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
     let direct = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
     let fallback = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &packed),
     )
     .unwrap();
@@ -1787,10 +1779,8 @@ fn exp_of_a_multi_tree_sector_matches_the_series_entrywise() {
     );
 
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = default_context();
     let exponential = exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -1823,10 +1813,8 @@ fn exp_of_a_multi_tree_sector_matches_the_series_through_the_packed_layout() {
     let sources = coupled_sector_matrices(&tensor);
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
     let exponential = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &packed),
     )
     .unwrap();
@@ -1849,18 +1837,8 @@ fn exp_of_a_general_endomorphism_inverts_under_negation() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let forward = exp(
-        &mut dense,
-        &mut context,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-    )
-    .unwrap();
-    let backward = exp(
-        &mut dense,
-        &mut context,
-        &bound_tensor_ref!(Arc::new(rule), &negated),
-    )
-    .unwrap();
+    let forward = exp(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let backward = exp(&mut dense, &bound_tensor_ref!(Arc::new(rule), &negated)).unwrap();
 
     let identity =
         crate::compose::compose(&mut context, &rule, forward.tensor(), backward.tensor()).unwrap();
@@ -1892,10 +1870,12 @@ fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
 
 #[test]
 fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
-    // What: the retained route, pinned two ways — the dispatch (one EIGH per
-    // sector, no solve, no GEMM) and the published values, which agree with
-    // `v exp(d) v^H` computed here on the same backend under the workspace
-    // rule (3 = the largest sector order).
+    // What: the retained route, pinned two ways — the dispatch (one EIGH and
+    // one recomposition GEMM per sector, no solve) and the published values,
+    // which agree with `v exp(d) v^H` recomposed here by the eigendecomposition
+    // seam and the fusion contraction engine on the same backend under the
+    // workspace rule (3 = the largest sector order). The result is exactly
+    // Hermitian, as Julia's `exp!` publishes it.
     //
     // The reference is computed rather than frozen because a frozen one is a
     // pin on the platform's LAPACK: the constants this test used to carry were
@@ -1904,11 +1884,9 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     // Pade; the values check that the route publishes `v exp(d) v^H`.
     let tensor = hermitian_exp_fixture();
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = default_context();
 
     let exponential = exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -1921,19 +1899,42 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     assert_eq!(spy.counts().solve, 0, "the Hermitian route must not solve");
     assert_eq!(
         spy.counts().dot_general,
-        0,
-        "the Hermitian route must not GEMM"
+        2,
+        "one V exp(D) V^H GEMM per coupled sector"
     );
+    for charge in [0, 1] {
+        let block = u1_block_matrix(exponential.tensor(), charge);
+        let order = (block.len() as f64).sqrt() as usize;
+        for column in 0..order {
+            for row in 0..order {
+                assert_eq!(
+                    block[row + order * column].to_bits(),
+                    block[column + order * row].to_bits(),
+                    "exactly symmetric block {charge}"
+                );
+            }
+        }
+    }
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let spectral = crate::matrix_functions::spectral_function_dyn(
-        &mut dense,
-        &mut context,
-        &bound.as_ref().dynamic(),
-        &f64::exp,
-    )
-    .unwrap();
+    let input = bound.as_ref();
+    let input = input.dynamic();
+    let eigh = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
+    let vh = crate::factorize::adjoint_bound_factor(eigh.v()).unwrap();
+    let mut vd = eigh.v().clone();
+    let exponentials = eigh
+        .eigenvalues()
+        .iter()
+        .map(|entry| SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.iter().map(|value| value.exp()).collect(),
+        })
+        .collect::<Vec<_>>();
+    let vd_space = vd.space().space().clone();
+    scale_axis_by_spectrum(&vd_space, vd.data_mut(), None, &exponentials).unwrap();
+    let spectral = crate::compose::compose_bound_dyn(&mut context, &vd, &vh).unwrap();
     let spectral: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(spectral).unwrap();
     numerics::assert_slices_close(
         "exp",
@@ -1969,11 +1970,9 @@ fn exp_of_a_hermitian_c64_endomorphism_takes_the_spectral_route() {
     ];
     let tensor = u1_block_endomorphism(&[(0, 3, charge_zero), (1, 2, charge_one)]);
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
 
     exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -2015,14 +2014,8 @@ fn exp_of_a_hermitian_su2_endomorphism_takes_the_spectral_route() {
     ];
     let tensor = block_endomorphism(&rule, &blocks);
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = default_context();
 
-    exp(
-        &mut spy,
-        &mut context,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-    )
-    .unwrap();
+    exp(&mut spy, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
     assert_eq!(
         spy.counts().of(MATRIX_FUNCTION_EIGH),
@@ -2049,19 +2042,16 @@ fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
         (2, 2, block(2)),
         (3, 2, block(3)),
     ]);
-    let mut context = default_context();
 
     let mut two_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut two_spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &two),
     )
     .unwrap();
     let mut four_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut four_spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &four),
     )
     .unwrap();
@@ -2078,7 +2068,6 @@ fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
     let mut scaled_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut scaled_spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &scaled),
     )
     .unwrap();
@@ -2098,11 +2087,9 @@ fn exp_balances_a_badly_scaled_block_before_the_pade_evaluation() {
     // is the sharpest observable there is.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, 1e-16, 1e16, 0.0])]);
     let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-    let mut context = default_context();
 
     let exponential = exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -2186,11 +2173,9 @@ fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
 
     let tensor = u1_block_endomorphism(&[(0, 3, block)]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
     let exponential = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -2390,7 +2375,6 @@ fn exp_of_a_single_precision_block_spanning_the_whole_f32_range() {
     let tensor = u1_block_endomorphism(&[(0, 2, column_major(&rows))]);
     let exponential = exp(
         &mut dense,
-        &mut TensorContractFusionExecutionContext::<f32, RuleIdentity>::default(),
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -2408,7 +2392,6 @@ fn exp_of_a_single_precision_block_spanning_the_whole_f32_range() {
     let tensor = u1_block_endomorphism(&[(0, 2, complex_block)]);
     let exponential = exp(
         &mut dense,
-        &mut TensorContractFusionExecutionContext::<Complex32, RuleIdentity>::default(),
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
@@ -2426,11 +2409,9 @@ fn exp_reports_unsupported_when_the_executor_cannot_solve() {
     // in the backend's own words, not silently routed onto the host.
     let tensor = exp_oracle_tensor::<f64>(1.0);
     let mut dense = ScriptedExecutor::<SolvelessExecutor>::default();
-    let mut context = default_context();
 
     let error = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap_err();
@@ -2474,14 +2455,8 @@ fn exp_rejects_a_non_endomorphism() {
     )
     .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
-    let error = exp(
-        &mut dense,
-        &mut context,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-    )
-    .unwrap_err();
+    let error = exp(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap_err();
 
     assert!(
         matches!(
@@ -2501,11 +2476,9 @@ fn exp_rejects_a_nonfinite_general_block() {
     // the backend as a silent NaN.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.5, f64::NAN, 2.0])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
     let error = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap_err();
@@ -2539,11 +2512,9 @@ fn exp_rejects_a_block_whose_column_norm_overflows() {
     // balanced norm on it and exponentiates it.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1e308_f64, 1e308, 2e307, 1e308])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
 
     let error = exp(
         &mut dense,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap_err();
@@ -2566,11 +2537,9 @@ fn exp_publishes_nothing_when_a_later_sector_fails() {
     let tensor = exp_oracle_tensor::<f64>(1.0);
     let before = tensor.data().to_vec();
     let mut spy = matrix_function_spy(Some(2));
-    let mut context = default_context();
 
     let error = exp(
         &mut spy,
-        &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap_err();
@@ -2632,19 +2601,16 @@ fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values
     };
     let provider = Arc::new(rule);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
     {
         let facade = scaled(hermitian_test_tensor(&rule, &sectors));
         let reordered = reversed_coupled_tree_basis_copy(&rule, &facade);
         let expected = exp(
             &mut dense,
-            &mut context,
             &bound_tensor_ref!(Arc::clone(&provider), &facade),
         )
         .unwrap();
         let actual = exp(
             &mut dense,
-            &mut context,
             &bound_tensor_ref!(Arc::clone(&provider), &reordered),
         )
         .unwrap();
@@ -2744,4 +2710,60 @@ fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
         ));
         assert_eq!(failing.provider().calls.get(), codomain_calls + 1);
     }
+}
+
+#[test]
+fn mf_pinv_exp_and_polar_publish_no_factor_layout() {
+    // What (#1752): the multiplicity-free pseudo-inverse, Hermitian exponential
+    // and polar factors recompose each coupled sector into their output by one
+    // GEMM: no factor space is staged, no SVD factor is scattered into a
+    // factor layout, and no fusion contraction runs (the seams take no
+    // contraction context). Region and packed inputs, U(1)-like Z2 and SU(2)
+    // with degeneracy 2.
+    fn check<R>(rule: R, sectors: &[SectorId])
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + Clone,
+    {
+        let provider = Arc::new(rule.clone());
+        for padded in [false, true] {
+            let general = tsvd_test_tensor(&rule, sectors);
+            let hermitian = hermitian_test_tensor(&rule, sectors);
+            let (general, hermitian) = if padded {
+                (padded_copy(&rule, &general), padded_copy(&rule, &hermitian))
+            } else {
+                (general, hermitian)
+            };
+            let general = bound_tensor(Arc::clone(&provider), &general);
+            let hermitian = bound_tensor(Arc::clone(&provider), &hermitian);
+            let (general, hermitian) = (general.as_ref(), hermitian.as_ref());
+            let (general, hermitian) = (general.dynamic(), hermitian.dynamic());
+            let mut dense = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
+            let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
+            crate::factorize::reset_compact_svd_copy_probe();
+            let before = stages();
+
+            pinv_dyn(&mut dense, &general, 1e-12).unwrap();
+            pinv_adjoint_parent_dyn(&mut dense, &general, 1e-12).unwrap();
+            left_polar_dyn(&mut dense, &general).unwrap();
+            right_polar_dyn(&mut dense, &general).unwrap();
+            let solves = dense.counts().solve;
+            exp_dyn(&mut dense, &hermitian).unwrap();
+            assert_eq!(dense.counts().solve, solves, "Hermitian exp is spectral");
+
+            assert_eq!(stages(), before, "padded={padded}: factor spaces staged");
+            assert_eq!(
+                crate::factorize::compact_svd_copy_probe(),
+                Default::default(),
+                "padded={padded}: SVD factor layout"
+            );
+        }
+    }
+    check(Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    check(
+        SU2FusionRule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
 }

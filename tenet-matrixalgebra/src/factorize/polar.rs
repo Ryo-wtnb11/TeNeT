@@ -90,9 +90,8 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub(crate) fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn left_polar<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<
     LeftPolar<BoundTensorMap<R, D, NOUT, NIN>, BoundTensorMap<R, D, NIN, NIN>>,
@@ -100,72 +99,36 @@ pub(crate) fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN:
 >
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    let LeftPolar { w, p } = left_polar_dyn(dense, context, &input.dynamic())?;
+    let LeftPolar { w, p } = left_polar_dyn(dense, &input.dynamic())?;
     Ok(LeftPolar {
         w: typed_from_bound_factor(w)?,
         p: typed_from_bound_factor(p)?,
     })
 }
 
-/// Dynamic-rank `left_polar`.
-pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
+#[cfg(test)]
+/// Multiplicity-free dynamic-rank [`left_polar`].
+pub(crate) fn left_polar_dyn<E, R, D>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<LeftPolar<BoundDynFactor<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    left_polar_dyn_reported(dense, context, input, PolarDirection::Left)
-        .map(|(w, p)| LeftPolar { w, p })
-}
-
-pub(super) fn left_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
-    dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    error_direction: PolarDirection,
-) -> Result<DynamicFactorPair<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
-    // use the S-free factors core.
-    let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
+    let authority = MfAuthority(input.space());
+    polar_dense(
         dense,
+        &authority,
         input,
-        Some((PolarDirection::Left, error_direction)),
-        CompactSvdGauge::Left,
-    )?;
-    let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
-    // P = V·S·Vh. Fold S into V as a block-local scaling of V's bond (trailing)
-    // axis — TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block
-    // GEMM against the dense diagonal S (99% zeros). `singular_values` carries S
-    // in O(rank); see #51 / #55.
-    let mut v = adjoint_bound_factor(&vh)?;
-    let v_space = v.space().space().clone();
-    scale_axis_by_spectrum(&v_space, v.data_mut(), None, &singular_values)?;
-    let positive = crate::compose::compose_bound_dyn(context, &v, &vh)?;
-    Ok((isometry, positive))
+        PolarDirection::Left,
+        PolarDirection::Left,
+    )
+    .map(|(w, p)| LeftPolar { w, p })
 }
 
 #[cfg(test)]
@@ -178,9 +141,8 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub(crate) fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn right_polar<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<
     RightPolar<BoundTensorMap<R, D, NOUT, NOUT>, BoundTensorMap<R, D, NOUT, NIN>>,
@@ -188,250 +150,261 @@ pub(crate) fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN
 >
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    let RightPolar { p, wh } = right_polar_dyn(dense, context, &input.dynamic())?;
+    let RightPolar { p, wh } = right_polar_dyn(dense, &input.dynamic())?;
     Ok(RightPolar {
         p: typed_from_bound_factor(p)?,
         wh: typed_from_bound_factor(wh)?,
     })
 }
 
-/// Dynamic-rank `right_polar`.
-pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
+#[cfg(test)]
+/// Multiplicity-free dynamic-rank [`right_polar`].
+pub(crate) fn right_polar_dyn<E, R, D>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<RightPolar<BoundDynFactor<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    right_polar_dyn_reported(dense, context, input, PolarDirection::Right)
-        .map(|(p, wh)| RightPolar { p, wh })
-}
-
-pub(super) fn right_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
-    dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    error_direction: PolarDirection,
-) -> Result<DynamicFactorPair<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
-    // use the S-free factors core.
-    let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
+    let authority = MfAuthority(input.space());
+    polar_dense(
         dense,
+        &authority,
         input,
-        Some((PolarDirection::Right, error_direction)),
-        CompactSvdGauge::Left,
-    )?;
-    let uh = adjoint_bound_factor(&u)?;
-    let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
-    // P = U·S·Uh. Fold S into U's bond (trailing) axis by block-local scaling —
-    // TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block GEMM
-    // against the dense diagonal S. U is consumed above for the isometry, so
-    // scale the moved-out copy. `singular_values` carries S in O(rank); #51/#55.
-    let mut us = u;
-    let us_space = us.space().space().clone();
-    scale_axis_by_spectrum(&us_space, us.data_mut(), None, &singular_values)?;
-    let positive = crate::compose::compose_bound_dyn(context, &us, &uh)?;
-    Ok((positive, isometry))
+        PolarDirection::Right,
+        PolarDirection::Right,
+    )
+    .map(|(wh, p)| RightPolar { p, wh })
 }
 
-/// Left polar of an adjoint view, as the *parent's* right polar factors: the
-/// view's left polar is `w = wh^H` and the returned `p`.
-#[doc(hidden)]
-pub fn left_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+#[cfg(test)]
+pub(crate) fn left_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<RightPolar<BoundDynFactor<R, D>>, OperationError>
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<LeftPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
 {
-    let (positive, wh) = right_polar_dyn_reported(dense, context, parent, PolarDirection::Left)?;
-    Ok(RightPolar { p: positive, wh })
+    let authority = CheckedAuthority(input.space().provider_arc());
+    polar_dense(
+        dense,
+        &authority,
+        input,
+        PolarDirection::Left,
+        PolarDirection::Left,
+    )
+    .map(|(w, p)| LeftPolar { w, p })
 }
 
-/// Right polar of an adjoint view, as the *parent's* left polar factors: the
-/// view's right polar is the returned `p` and `wh = w^H`.
-#[doc(hidden)]
-pub fn right_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+#[cfg(test)]
+pub(crate) fn right_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
-    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<LeftPolar<BoundDynFactor<R, D>>, OperationError>
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<RightPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    BT: tenet_tensors::TreeTransformBackend<D, f64>,
-    BC: tenet_tensors::TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
 {
-    let (w, positive) = left_polar_dyn_reported(dense, context, parent, PolarDirection::Right)?;
-    Ok(LeftPolar { w, p: positive })
+    let authority = CheckedAuthority(input.space().provider_arc());
+    polar_dense(
+        dense,
+        &authority,
+        input,
+        PolarDirection::Right,
+        PolarDirection::Right,
+    )
+    .map(|(wh, p)| RightPolar { p, wh })
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct PolarRegionRoute {
-    pub(super) source: usize,
-    pub(super) w: usize,
-    pub(super) p: usize,
-}
+/// The `(W, P)` factors of one polar decomposition.
+type PolarOutputs<R, D> = (FactorOutput<R, D>, FactorOutput<R, D>);
 
-pub(super) fn compile_polar_region_routes(
-    source: &[CoupledSectorRegion],
-    w: &[CoupledSectorRegion],
-    p: &[CoupledSectorRegion],
-    source_len: usize,
-    w_len: usize,
-    p_len: usize,
+/// Polar factors of `source` in fusion mode `M`, as `(W, P)`. A compact
+/// diagonal's phases and magnitudes stay compact on the input space.
+fn polar_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
     direction: PolarDirection,
-) -> Result<Vec<PolarRegionRoute>, OperationError> {
-    let w_by_sector = SectorRegionIndex::new(w)?;
-    let p_by_sector = SectorRegionIndex::new(p)?;
-    let mut used_w = vec![false; w.len()];
-    let mut used_p = vec![false; p.len()];
-    let mut routes = Vec::with_capacity(source.len());
-    for (source_index, source_region) in source.iter().enumerate() {
-        let sector = source_region.coupled();
-        let w_index = sector_region_index_of(&w_by_sector, sector, "polar W")?;
-        let p_index = sector_region_index_of(&p_by_sector, sector, "polar P")?;
-        let w_region = &w[w_index];
-        let p_region = &p[p_index];
-        if w_region.rows() != source_region.rows()
-            || w_region.cols() != source_region.cols()
-            || w_region.row_trees() != source_region.row_trees()
-            || w_region.col_trees() != source_region.col_trees()
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "polar W route does not preserve the source full-tree layout",
-            });
-        }
-        let (dimension, trees) = match direction {
-            PolarDirection::Left => (source_region.cols(), source_region.col_trees()),
-            PolarDirection::Right => (source_region.rows(), source_region.row_trees()),
-        };
-        if p_region.rows() != dimension
-            || p_region.cols() != dimension
-            || p_region.row_trees() != trees
-            || p_region.col_trees() != trees
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "polar P route does not preserve the source full-tree layout",
-            });
-        }
-        validate_region_range(source_region, source_len)?;
-        validate_region_range(w_region, w_len)?;
-        validate_region_range(p_region, p_len)?;
-        used_w[w_index] = true;
-        used_p[p_index] = true;
-        routes.push(PolarRegionRoute {
-            source: source_index,
-            w: w_index,
-            p: p_index,
-        });
-    }
-    if used_w.iter().any(|used| !used) || used_p.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "polar output contains a full-tree route absent from the source",
-        });
-    }
-    Ok(routes)
+) -> Result<PolarOutputs<R, D>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    // The dense route checks values after its direction admission.
+    factor_from_source(
+        lease,
+        source,
+        None,
+        |space, spectrum| {
+            left_polar_of_diagonal::<M, R, D>(space, spectrum).map(|LeftPolar { w, p }| (w, p))
+        },
+        |dense, input| {
+            polar_dense(
+                dense,
+                &M::authority(input.space()),
+                input,
+                direction,
+                direction,
+            )
+            .map(|(w, p)| (FactorOutput::Dense(w), FactorOutput::Dense(p)))
+        },
+    )
+    .map(|(factors, _)| factors)
 }
 
-struct CheckedPolarPlan<R> {
-    source_regions: Arc<[CoupledSectorRegion]>,
-    w_regions: Arc<[CoupledSectorRegion]>,
-    p_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<PolarRegionRoute>,
-    w_space: BoundDynamicFusionMapSpace<R>,
-    p_space: BoundDynamicFusionMapSpace<R>,
+/// Left polar decomposition `W * P` of `source` in fusion mode `M`
+/// (MatrixAlgebraKit `left_polar!` via `PolarViaSVD`).
+#[doc(hidden)]
+pub fn left_polar_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<LeftPolar<FactorOutput<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    polar_from_source::<M, _, _, _, _>(lease, source, PolarDirection::Left)
+        .map(|(w, p)| LeftPolar { w, p })
 }
 
-fn checked_polar_plan<R>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    source_len: usize,
+/// Right polar decomposition `P * Wh` of `source` in fusion mode `M`
+/// (MatrixAlgebraKit `right_polar!` via `PolarViaSVD`).
+#[doc(hidden)]
+pub fn right_polar_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<RightPolar<FactorOutput<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    polar_from_source::<M, _, _, _, _>(lease, source, PolarDirection::Right)
+        .map(|(wh, p)| RightPolar { p, wh })
+}
+
+/// Left polar of a lazy adjoint, as the dense *parent's* right polar
+/// factors in fusion mode `M`: the view's left polar is `w = wh^H` and the
+/// returned `p`. Direction errors name the requested left polar.
+#[doc(hidden)]
+pub fn left_polar_adjoint_from_parent<M, L, E, R, D>(
+    lease: L,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<RightPolar<BoundDynFactor<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    lease
+        .run(|dense| {
+            polar_dense(
+                dense,
+                &M::authority(parent.space()),
+                parent,
+                PolarDirection::Right,
+                PolarDirection::Left,
+            )
+        })
+        .map(|(wh, p)| RightPolar { p, wh })
+}
+
+/// Right polar of a lazy adjoint, as the dense *parent's* left polar factors
+/// in fusion mode `M`: the view's right polar is the returned `p` and `wh =
+/// w^H`. Direction errors name the requested right polar.
+#[doc(hidden)]
+pub fn right_polar_adjoint_from_parent<M, L, E, R, D>(
+    lease: L,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<LeftPolar<BoundDynFactor<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    lease
+        .run(|dense| {
+            polar_dense(
+                dense,
+                &M::authority(parent.space()),
+                parent,
+                PolarDirection::Left,
+                PolarDirection::Right,
+            )
+        })
+        .map(|(w, p)| LeftPolar { w, p })
+}
+
+/// The one dense polar kernel, `(W, P)` per coupled sector from its compact
+/// SVD (MatrixAlgebraKit 0.6.8 `implementations/polar.jl` `left_polar!` /
+/// `right_polar!(::PolarViaSVD)`): `W = U Vh` and `P = (sqrt(S) Vh)ᴴ (sqrt(S)
+/// Vh)` (left) or `(U sqrt(S)) (U sqrt(S))ᴴ` (right), projected Hermitian.
+///
+/// `authority` admits the direction over every logical coupled sector and
+/// builds `P`'s space; the GEMMs write the output regions in place (a packed
+/// input whose tree order differs from the output lands by tree extent).
+/// One scope spans the staged SVDs and the per-sector products.
+fn polar_dense<A, E, R, D>(
+    dense: &mut E,
+    authority: &A,
+    input: &BoundDynamicTensorRef<'_, R, D>,
     direction: PolarDirection,
     error_direction: PolarDirection,
-) -> Result<CheckedPolarPlan<R>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<DynamicFactorPair<R, D>, A::Error>
 where
-    R: CheckedGenericFusion,
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<A::RootError>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
 {
-    let source_space = authority.space();
-    let checked = CheckedAuthority(authority.provider_arc());
-    let rows = checked.coupled_dimensions(source_space.homspace().codomain())?;
-    let cols = checked.coupled_dimensions(source_space.homspace().domain())?;
+    let source_space = input.space().space();
+    let homspace = source_space.homspace();
+    // Stored regions omit side-only sectors, whose logical matrices are
+    // rows x 0 or 0 x columns and still constrain the isometry direction.
+    let rows = authority.coupled_dimensions(homspace.codomain())?;
+    let cols = authority.coupled_dimensions(homspace.domain())?;
     for (&sector, &row_count) in &rows {
         if !direction.accepts(row_count, cols.get(&sector).copied().unwrap_or(0)) {
-            return Err(CheckedGenericFactorPlanError::Operation(
-                error_direction.error(),
-            ));
+            return Err(error_direction.error().into());
         }
     }
     for (&sector, &col_count) in &cols {
         if !rows.contains_key(&sector) && !direction.accepts(0, col_count) {
-            return Err(CheckedGenericFactorPlanError::Operation(
-                error_direction.error(),
-            ));
+            return Err(error_direction.error().into());
         }
     }
-    let w_space = authority.clone();
-    let p_homspace = match direction {
-        PolarDirection::Left => FusionTreeHomSpace::new(
-            source_space.homspace().domain().clone(),
-            source_space.homspace().domain().clone(),
-        ),
-        PolarDirection::Right => FusionTreeHomSpace::new(
-            source_space.homspace().codomain().clone(),
-            source_space.homspace().codomain().clone(),
-        ),
+    let (p_side, p_leg) = match direction {
+        PolarDirection::Left => (FactorSide::Right, homspace.domain()),
+        PolarDirection::Right => (FactorSide::Left, homspace.codomain()),
     };
-    let p_nout = p_homspace.codomain().len();
-    let p_space = checked.output_space(p_homspace)?;
-    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
-        .ok_or(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "polar requires coupled-sector input storage",
-            },
-        ))?;
+    let p_space = authority.output_space(FusionTreeHomSpace::new(p_leg.clone(), p_leg.clone()))?;
+    let matrices =
+        generic_input_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+    let w_space = authority.same_homspace_output(input.space())?;
     let w_regions = checked_sector_regions(w_space.space().structure(), w_space.space().nout())?
-        .ok_or(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "polar requires coupled-sector W storage",
-            },
-        ))?;
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "polar requires coupled-sector W storage",
+        })?;
+    let p_nout = p_space.space().nout();
     let p_regions = checked_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
-        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
+        OperationError::UnsupportedTensorContractScope {
             message: "polar requires coupled-sector P storage",
-        }),
+        },
     )?;
     let w_len = w_space
         .space()
@@ -441,86 +414,54 @@ where
         .space()
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
-    let routes = compile_polar_region_routes(
-        &source_regions,
-        &w_regions,
-        &p_regions,
-        source_len,
-        w_len,
-        p_len,
-        direction,
-    )?;
-    Ok(CheckedPolarPlan {
-        source_regions,
-        w_regions,
-        p_regions,
-        routes,
-        w_space,
-        p_space,
-    })
-}
+    let (w_landings, p_landings) = with_input_geometry!(&matrices, |geometry| {
+        compile_sector_landings(
+            geometry,
+            &w_regions,
+            w_len,
+            FactorSide::Left,
+            FactorSide::Right,
+        )
+        .and_then(|w| {
+            Ok((
+                w,
+                compile_sector_landings(geometry, &p_regions, p_len, p_side, p_side)?,
+            ))
+        })
+    })?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
 
-/// The `(W, P)` factors of one polar decomposition.
-type PolarOutputs<R, D> = (FactorOutput<R, D>, FactorOutput<R, D>);
+    let (w_data, p_data) = in_linalg_scope(dense, |dense| {
+        let mut stages = Vec::with_capacity(matrices.len());
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            stages.push(compact_svd_numerical_stage(
+                dense,
+                matrix.data,
+                matrix.rows,
+                matrix.cols,
+            )?);
+        }
+        // Why zeroed rather than uninitialized: the GEMM destinations are
+        // safe initialized views, and every region is then overwritten once.
+        let mut w_data = vec![D::zero(); w_len];
+        let mut p_data = vec![D::zero(); p_len];
+        let mut scratch = Vec::new();
+        for ((stage, w), p) in stages.iter_mut().zip(&w_landings).zip(&p_landings) {
+            // `W` reads the unscaled factors, so it precedes `P`.
+            w.write(&mut w_data, &w_regions[w.output], &mut scratch, |w| {
+                polar_isometry(dense, stage, w)
+            })?;
+            p.write(&mut p_data, &p_regions[p.output], &mut scratch, |p| {
+                polar_positive(dense, stage, direction, p)
+            })?;
+        }
+        Ok((w_data, p_data))
+    })?;
 
-/// Checked polar factors of `source`, as `(W, P)`. A compact diagonal's
-/// phases and magnitudes stay compact on the input space.
-fn polar_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-    direction: PolarDirection,
-) -> Result<PolarOutputs<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    // The dense route checks values after its direction admission.
-    factor_from_source(
-        lease,
-        source,
-        None,
-        |space, spectrum| {
-            left_polar_of_diagonal::<CheckedGenericAdmissionMode, R, D>(space, spectrum)
-                .map(|LeftPolar { w, p }| (w, p))
-        },
-        |dense, input| {
-            polar_dyn_checked_generic_reported(dense, input, direction, direction)
-                .map(|(w, p)| (FactorOutput::Dense(w), FactorOutput::Dense(p)))
-        },
-    )
-    .map(|(factors, _)| factors)
-}
-
-/// Checked left polar decomposition `W * P` of `source`.
-#[doc(hidden)]
-pub fn left_polar_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Result<LeftPolar<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    polar_checked_generic(lease, source, PolarDirection::Left).map(|(w, p)| LeftPolar { w, p })
-}
-
-/// Checked right polar decomposition `P * Wh` of `source`.
-#[doc(hidden)]
-pub fn right_polar_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Result<RightPolar<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    polar_checked_generic(lease, source, PolarDirection::Right).map(|(wh, p)| RightPolar { p, wh })
+    let w = BoundDynFactor::from_bound(w_space, w_data, source_space.nout(), source_space.nin())?;
+    let p = BoundDynFactor::from_bound(p_space, p_data, p_nout, p_nout)?;
+    Ok((w, p))
 }
 
 pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
@@ -535,16 +476,11 @@ pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: 
     }
 }
 
-/// Writes `W = U Vh` into `w` and `P` into `p`, both column-major output
-/// regions (MatrixAlgebraKit `left_polar!`/`right_polar!` via SVD): the GEMMs
-/// target the destination and the `sqrt(S)` scaling is applied in place to the
-/// staged factor, which is not read again.
-pub(super) fn checked_generic_polar_products<E, D>(
+/// `W = U Vh` into the column-major `rows x cols` destination `w`.
+fn polar_isometry<E, D>(
     dense: &mut E,
-    stage: &mut CompactSvdNumericalStage<D>,
-    direction: PolarDirection,
+    stage: &CompactSvdNumericalStage<D>,
     w: &mut [D],
-    p: &mut [D],
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -555,10 +491,9 @@ where
         cols,
         rank,
         u,
-        singular_values,
         vt,
+        ..
     } = stage;
-    let (rows, cols, rank) = (&*rows, &*cols, &*rank);
     let w_shape = [*rows, *cols];
     let w_strides = [1, *rows];
     let u_shape = [*rows, *rank];
@@ -575,8 +510,30 @@ where
             D::dense_read(vt_view),
             &DenseDotConfig::matmul(),
         )
-        .map_err(OperationError::Dense)?;
+        .map_err(OperationError::Dense)
+}
 
+/// `P` into the column-major square destination `p`; the `sqrt(S)` scaling
+/// is applied in place to the staged factor, which is not read again.
+fn polar_positive<E, D>(
+    dense: &mut E,
+    stage: &mut CompactSvdNumericalStage<D>,
+    direction: PolarDirection,
+    p: &mut [D],
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let CompactSvdNumericalStage {
+        rows,
+        cols,
+        rank,
+        u,
+        singular_values,
+        vt,
+    } = stage;
+    let (rows, cols, rank) = (&*rows, &*cols, &*rank);
     let p_order = match direction {
         PolarDirection::Left => *cols,
         PolarDirection::Right => *rows,
@@ -645,149 +602,6 @@ where
     Ok(())
 }
 
-pub(super) fn polar_dyn_checked_generic_reported<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    direction: PolarDirection,
-    error_direction: PolarDirection,
-) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let source_space = input.space().space();
-    let CheckedPolarPlan {
-        source_regions,
-        w_regions,
-        p_regions,
-        routes,
-        w_space,
-        p_space,
-    } = checked_polar_plan(
-        input.space(),
-        input.data().len(),
-        direction,
-        error_direction,
-    )?;
-    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
-    let p_nout = p_space.space().nout();
-    let w_len = w_space
-        .space()
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let p_len = p_space
-        .space()
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-
-    let data = input.data();
-    // One scope spans the staged SVDs and the per-sector polar products.
-    let (w_data, p_data) = in_linalg_scope(dense, |dense| {
-        let mut stages = Vec::with_capacity(routes.len());
-        for route in &routes {
-            let region = &source_regions[route.source];
-            stages.push(compact_svd_numerical_stage(
-                dense,
-                &data[region.range()],
-                region.rows(),
-                region.cols(),
-            )?);
-        }
-        // Why zeroed rather than uninitialized: the GEMM destinations are
-        // safe initialized views, and every region is then overwritten once.
-        let mut w_data = vec![D::zero(); w_len];
-        let mut p_data = vec![D::zero(); p_len];
-        for (route, stage) in routes.iter().zip(&mut stages) {
-            checked_generic_polar_products(
-                dense,
-                stage,
-                direction,
-                &mut w_data[w_regions[route.w].range()],
-                &mut p_data[p_regions[route.p].range()],
-            )?;
-        }
-        Ok((w_data, p_data))
-    })
-    .map_err(CheckedGenericFactorPlanError::from)?;
-
-    let w = BoundDynFactor::from_bound(w_space, w_data, source_space.nout(), source_space.nin())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let p = BoundDynFactor::from_bound(p_space, p_data, p_nout, p_nout)
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    Ok((w, p))
-}
-
-#[cfg(test)]
-pub(crate) fn left_polar_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<LeftPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    polar_dyn_checked_generic_reported(dense, input, PolarDirection::Left, PolarDirection::Left)
-        .map(|(w, p)| LeftPolar { w, p })
-}
-
-#[cfg(test)]
-pub(crate) fn right_polar_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<RightPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let (wh, p) = polar_dyn_checked_generic_reported(
-        dense,
-        input,
-        PolarDirection::Right,
-        PolarDirection::Right,
-    )?;
-    Ok(RightPolar { p, wh })
-}
-
-/// Left polar of an adjoint view, as the *parent's* right polar factors: the
-/// view's left polar is `w = wh^H` and the returned `p`.
-#[doc(hidden)]
-pub fn left_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<RightPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let (wh, p) = polar_dyn_checked_generic_reported(
-        dense,
-        parent,
-        PolarDirection::Right,
-        PolarDirection::Left,
-    )?;
-    Ok(RightPolar { p, wh })
-}
-
-/// Right polar of an adjoint view, as the *parent's* left polar factors: the
-/// view's right polar is the returned `p` and `wh = w^H`.
-#[doc(hidden)]
-pub fn right_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    parent: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<LeftPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    polar_dyn_checked_generic_reported(dense, parent, PolarDirection::Left, PolarDirection::Right)
-        .map(|(w, p)| LeftPolar { w, p })
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum PolarDirection {
     Left,
@@ -812,29 +626,4 @@ impl PolarDirection {
             },
         }
     }
-}
-
-pub(super) fn validate_polar_direction<R>(
-    acceptance_direction: PolarDirection,
-    error_direction: PolarDirection,
-    space: &BoundDynamicFusionMapSpace<R>,
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let authority = MfAuthority(space);
-    let row_dimensions = authority.coupled_dimensions(space.space().homspace().codomain())?;
-    let col_dimensions = authority.coupled_dimensions(space.space().homspace().domain())?;
-    for (&sector, &rows) in &row_dimensions {
-        let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
-        if !acceptance_direction.accepts(rows, cols) {
-            return Err(error_direction.error());
-        }
-    }
-    for (&sector, &cols) in &col_dimensions {
-        if !row_dimensions.contains_key(&sector) && !acceptance_direction.accepts(0, cols) {
-            return Err(error_direction.error());
-        }
-    }
-    Ok(())
 }

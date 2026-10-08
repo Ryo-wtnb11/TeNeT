@@ -2,93 +2,200 @@
 //! coupled-sector linear solves, or a blockwise polynomial approximant at the
 //! dense boundary.
 
+#[cfg(test)]
 use std::hash::Hash;
 
-use tenet_core::{CheckedGenericFusion, MultiplicityFreeRigidSymbols};
-use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
+use tenet_core::MultiplicityFreeRigidSymbols;
+use tenet_dense::{DenseDotConfig, DenseExecutor, DenseView, DenseViewMut};
+use tenet_tensors::OperationError;
+#[cfg(test)]
 use tenet_tensors::{
-    OperationError, TensorContractBackend, TensorContractFusionExecutionContext,
-    TreeTransformBackend, TreeTransformRuleCacheKey,
+    TensorContractBackend, TensorContractFusionExecutionContext, TreeTransformBackend,
+    TreeTransformRuleCacheKey,
 };
 
-use crate::compose::compose_bound_dyn;
 use crate::factorize::{
-    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
-    is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
-    pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum,
-    solve_left_by_sector_dyn, solve_left_by_sector_dyn_into, svd_compact_factors_dyn,
-    BoundDynFactor, BoundDynamicTensorRef, FactorScalar, HermitianTol, SectorSpectrum,
-    SvdFactorsDyn, EXP_SPECTRAL_ROUTE_EPSILONS,
+    compact_eigh_owned, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
+    is_hermitian_endomorphism_dyn, map_square_sectors_dyn_into, multiplicity_free_output_space,
+    pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into, solve_left_by_sector_dyn,
+    solve_left_by_sector_dyn_into, validate_real_eigenvalues, BoundDynFactor,
+    BoundDynamicTensorRef, FactorScalar,
 };
 #[cfg(test)]
 use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
 
 #[cfg(test)]
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
-/// `domain == codomain`). Hermitian input takes the spectral route
-/// `exp(t) = V exp(D) V^H`; everything else takes blockwise scaling-and-squaring
-/// Padé [13/13] (Higham 2005) around LAPACK `gebal('B')` balancing, the
-/// algorithm behind the `LinearAlgebra.exp!` TensorKit calls.
-///
-/// The route is selected by EIGH's relative measure at its own fixed
-/// threshold: `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every
-/// coupled-sector block, where `real(D)` is the real component type of `D`.
-/// It is an algorithm choice, not eigh's admission tolerance, and is not
-/// user-configurable; changing it can change whether [`exp`] uses the
-/// spectral or Padé algorithm.
-pub(crate) fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
+/// `domain == codomain`); see [`exp_direct_into_dyn`] for the two routes.
+pub(crate) fn exp<E, R, D, const N: usize>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, N, N>,
 ) -> Result<BoundTensorMap<R, D, N, N>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    let out = exp_dyn(dense, context, &input.dynamic())?;
+    let out = exp_dyn(dense, &input.dynamic())?;
     typed_from_bound_factor(out)
 }
 
-/// Dynamic-rank `exp`.
-pub fn exp_dyn<E, RuleKey, BT, BC, R, D>(
+/// Multiplicity-free dynamic-rank `exp`, into the layout derived from the
+/// input's hom space.
+pub fn exp_dyn<E, R, D>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    // TensorKit's `exp!` (`linalg.jl:420-428`) checks only that the map is an
-    // endomorphism and then runs a general per-block exponential. Ask that
-    // question here, at the one point both routes pass through, instead of
-    // letting it fall to whichever helper notices first: the dispatch below
-    // reaches `is_hermitian_endomorphism_dyn`, whose refusal names `eigh` —
-    // not the function the caller called.
-    let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
+    require_endomorphism(input)?;
+    let output_space =
+        multiplicity_free_output_space(input.space(), input.space().space().homspace().clone())?;
+    exp_direct_into_dyn(dense, input, output_space)
+}
+
+/// Matrix exponential into a caller-admitted output space with the input's
+/// hom space, in every fusion mode.
+///
+/// TensorKit's `exp!` (`linalg.jl:420-428`) checks only that the map is an
+/// endomorphism and copies `LinearAlgebra.exp!` into each block; Julia's
+/// `exp!` (stdlib v1.11 `dense.jl:677`) takes `exp(Hermitian(A))` — `V
+/// exp(D) Vᴴ` from one eigendecomposition, made exactly Hermitian — when the
+/// block is Hermitian and scaling-and-squaring Padé otherwise. TeNeT asks the
+/// question once for the whole tensor, at its fixed relative threshold
+/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every coupled-sector
+/// block: every block then takes the same algorithm (issue #577, #1799).
+/// The threshold picks an algorithm, not eigh's admission tolerance, and is
+/// not user-configurable.
+///
+/// # Errors
+///
+/// - [`OperationError::UnsupportedTensorContractScope`] for a
+///   non-endomorphism or an output whose hom space or layout differs;
+/// - see [`exp_pade13_sector`] for the Padé route's value errors; nonfinite
+///   input is never Hermitian, so it always reaches that route.
+#[doc(hidden)]
+pub fn exp_direct_into_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    require_endomorphism(input)?;
+    // Asked directly rather than inferred from a failed EIGH, so a backend
+    // failure is never mistaken for non-hermiticity.
+    let spectral = is_hermitian_endomorphism_dyn(input)?;
+    map_square_sectors_dyn_into(
+        input,
+        output_space,
+        |order| ExpWorkspace::new(order, spectral),
+        |workspace, source, order, output| match workspace {
+            ExpWorkspace::Spectral { scaled } => {
+                exp_spectral_sector(dense, scaled, source, order, output)
+            }
+            ExpWorkspace::Pade(workspace) => {
+                exp_pade13_sector(dense, workspace, source, order, output)
+            }
+        },
+    )
+}
+
+fn require_endomorphism<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(), OperationError> {
+    // Asked here, at the one point both routes pass through, so the refusal
+    // names `exp` rather than whichever helper would notice first.
+    let homspace = input.space().space().homspace();
+    if homspace.codomain() != homspace.domain() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "exp requires an endomorphism (codomain == domain)",
         });
     }
-    // The Hermitian spectral route is kept for Hermitian input — it is exact,
-    // it is what the published values of this function have always been, and it
-    // costs one eigendecomposition instead of ~7 GEMMs and a solve — with
-    // blockwise Padé behind it for everything else (issue #577). The predicate
-    // is asked directly rather than inferred from a failed EIGH, so a backend
-    // failure is never mistaken for non-hermiticity.
-    if is_hermitian_endomorphism_dyn(input)? {
-        return spectral_function_dyn(dense, context, input, &f64::exp);
+    Ok(())
+}
+
+/// Scratch of the route [`exp_direct_into_dyn`] chose, sized once to the
+/// largest coupled sector.
+enum ExpWorkspace<D> {
+    /// `V exp(D)` of the sector in flight.
+    Spectral {
+        scaled: Vec<D>,
+    },
+    Pade(Box<Pade13Workspace<D>>),
+}
+
+impl<D: FactorScalar> ExpWorkspace<D> {
+    fn new(order: usize, spectral: bool) -> Result<Self, OperationError> {
+        if !spectral {
+            return Pade13Workspace::new(order).map(|workspace| Self::Pade(Box::new(workspace)));
+        }
+        let elements = order
+            .checked_mul(order)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        Ok(Self::Spectral {
+            scaled: vec![D::zero(); elements],
+        })
     }
-    exp_pade13_by_sector_dyn(dense, input)
+}
+
+/// One Hermitian coupled sector of [`exp_direct_into_dyn`]: Julia's
+/// `exp(::Hermitian)` (stdlib v1.11 `symmetric.jl:708-722`) followed by
+/// `exp!`'s `copytri!(…, 'U', true)` (`dense.jl:680`). The eigenvector order
+/// and phase gauge cancel in `V exp(D) Vᴴ`, so neither is applied.
+fn exp_spectral_sector<E, D>(
+    dense: &mut E,
+    scaled: &mut [D],
+    source: &[D],
+    order: usize,
+    output: &mut [D],
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let (values, vectors) = compact_eigh_owned(dense, &source[..order * order], order)?;
+    validate_real_eigenvalues(&values)?;
+    // Fold exp(D) into a column scaling of V rather than a diagonal GEMM
+    // operand (issue #46).
+    for (column, &value) in values.iter().enumerate() {
+        let factor = D::from_real(value.exp());
+        for row in 0..order {
+            scaled[row + order * column] = vectors[row + order * column] * factor;
+        }
+    }
+    let shape = [order, order];
+    let strides = [1usize, order];
+    let adjoint_strides = [order, 1usize];
+    let lhs = DenseView::new(&scaled[..order * order], &shape, &strides, 0)
+        .map_err(OperationError::Dense)?;
+    let rhs =
+        DenseView::new(&vectors, &shape, &adjoint_strides, 0).map_err(OperationError::Dense)?;
+    let destination =
+        DenseViewMut::new(output, &shape, &strides, 0).map_err(OperationError::Dense)?;
+    dense
+        .dot_general_into(
+            D::dense_write(destination),
+            D::dense_read(lhs),
+            D::dense_read(rhs),
+            &DenseDotConfig::matmul().with_conjugation(false, true),
+        )
+        .map_err(OperationError::Dense)?;
+    // Exactly Hermitian, as Julia publishes it: the upper triangle is kept,
+    // the lower one is its adjoint and the diagonal is real.
+    for column in 0..order {
+        let diagonal = column + order * column;
+        output[diagonal] = D::from_real(output[diagonal].widen_complex().re);
+        for row in 0..column {
+            output[column + order * row] = FactorScalar::adjoint(output[row + order * column]);
+        }
+    }
+    Ok(())
 }
 
 /// Higham's `theta_13`: the largest `||A||_1` for which the [13/13] Padé
@@ -160,9 +267,10 @@ impl<D: FactorScalar> Pade13Workspace<D> {
     }
 }
 
-/// Blockwise matrix exponential by scaling-and-squaring Padé [13/13].
+/// One coupled sector of the matrix exponential by scaling-and-squaring Padé
+/// [13/13].
 ///
-/// The general-endomorphism arm of [`exp_dyn`], and TeNeT's port of what
+/// The general-endomorphism arm of [`exp_direct_into_dyn`], and TeNeT's port of what
 /// TensorKit's `exp!` gets from `LinearAlgebra.exp!`: N. J. Higham, "The
 /// Scaling and Squaring Method for the Matrix Exponential Revisited", SIAM J.
 /// Matrix Anal. Appl. 26(4), 2005.
@@ -189,7 +297,7 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 /// allocation inside the sector loop. The Padé workspace is `O(max_c n_c²)`,
 /// sized once to the largest sector; on the canonical direct-region layout that
 /// is the whole of the scratch, while the packed fallback in
-/// [`map_square_sectors_dyn`] matricizes every sector up front and so adds
+/// [`map_square_sectors_dyn_into`] matricizes every sector up front and so adds
 /// `O(Σ_c n_c²)` of its own.
 ///
 /// # Errors
@@ -202,51 +310,12 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 /// - [`OperationError::Dense`] from the backend, including
 ///   [`tenet_dense::DenseError::Unsupported`] when the selected executor has no
 ///   dense solve. Nothing is published unless every sector succeeded.
-fn exp_pade13_by_sector_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    map_square_sectors_dyn(
-        input,
-        Pade13Workspace::<D>::new,
-        |workspace, source, order, output, output_leading| {
-            exp_pade13_sector(dense, workspace, source, order, output, output_leading)
-        },
-    )
-}
-
-#[doc(hidden)]
-pub fn exp_pade13_direct_into_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    D: FactorScalar,
-{
-    map_square_sectors_dyn_into(
-        input,
-        input.space().clone(),
-        Pade13Workspace::<D>::new,
-        |workspace, source, order, output, output_leading| {
-            exp_pade13_sector(dense, workspace, source, order, output, output_leading)
-        },
-    )
-}
-
-/// One coupled sector of [`exp_pade13_by_sector_dyn`].
 fn exp_pade13_sector<E, D>(
     dense: &mut E,
     workspace: &mut Pade13Workspace<D>,
     source: &[D],
     order: usize,
     output: &mut [D],
-    output_leading: usize,
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -385,12 +454,7 @@ where
 
     unbalance_in_place(&mut image[..elements], order, &balance[..order], ilo, ihi);
 
-    for column in 0..order {
-        let source_start = order * column;
-        let destination_start = output_leading * column;
-        output[destination_start..destination_start + order]
-            .copy_from_slice(&image[source_start..source_start + order]);
-    }
+    output[..elements].copy_from_slice(&image[..elements]);
     Ok(())
 }
 
@@ -792,48 +856,6 @@ where
         .map_err(OperationError::Dense)
 }
 
-/// Applies a scalar function to a Hermitian endomorphism through its
-/// eigendecomposition: `f(t) = V f(D) V^H`.
-///
-/// Visible to the crate so that the dispatch test can build `exp`'s reference
-/// on whichever backend is running it, instead of pinning constants that are a
-/// few ULP different on another platform's LAPACK.
-pub(crate) fn spectral_function_dyn<E, RuleKey, BT, BC, R, D>(
-    dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    function: &dyn Fn(f64) -> f64,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    // Admit at the route predicate's own tolerance, so every block the
-    // predicate sends here is admitted: `HermitianTol::DEFAULT` is stricter
-    // than the route in single precision (`eps^(3/4) < 64·eps` for f32).
-    let route = HermitianTol::relative(EXP_SPECTRAL_ROUTE_EPSILONS * D::epsilon())?;
-    let (v, eigenvalues) = eigh_full_dyn(dense, input, route)?.into_parts();
-    let mapped: Vec<SectorSpectrum> = eigenvalues
-        .iter()
-        .map(|entry| SectorSpectrum {
-            sector: entry.sector,
-            values: entry.values.iter().map(|&value| function(value)).collect(),
-        })
-        .collect();
-    // f(t) = V f(D) V^H. Fold the diagonal f(D) into a column scaling of V
-    // (bond = trailing axis) rather than materializing it and running an extra
-    // GEMM (issue #46); V^H is built before V is scaled.
-    let vh = adjoint_bound_factor(&v)?;
-    let mut vd = v;
-    let (space, data) = vd.raw_space_and_data_mut();
-    scale_axis_by_spectrum(space, data, None, &mapped)?;
-    compose_bound_dyn(context, &vd, &vh)
-}
-
 #[cfg(test)]
 /// Thresholded pseudo-inverse via the compact SVD with an
 /// `rcond * sigma_max` cutoff: `t^+ = V S^+ U^H`.
@@ -841,44 +863,39 @@ where
 /// This is the exact Moore-Penrose inverse of the hard-thresholded
 /// effective-rank tensor. It is the Moore-Penrose inverse of the original
 /// tensor only when the cutoff discards no genuinely nonzero singular value.
-pub(crate) fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn pinv<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
     rcond: f64,
 ) -> Result<BoundTensorMap<R, D, NIN, NOUT>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
-    let out = pinv_dyn(dense, context, &input.dynamic(), rcond)?;
+    let out = pinv_dyn(dense, &input.dynamic(), rcond)?;
     typed_from_bound_factor(out)
 }
 
-/// Dynamic-rank `pinv`.
-pub fn pinv_dyn<E, RuleKey, BT, BC, R, D>(
+/// Multiplicity-free dynamic-rank `pinv`, into the layout derived from the
+/// swapped hom space; see [`pinv_direct_into_dyn`].
+pub fn pinv_dyn<E, R, D>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
     rcond: f64,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
     validate_pinv_rcond(rcond)?;
-    // Only the factors and the spectrum are needed — S^+ is folded into a
-    // scaling below — so skip materializing the dense diagonal S.
-    let factors = svd_compact_factors_dyn(dense, input)?;
-    pinv_from_factors(context, factors, rcond)
+    let homspace = input.space().space().homspace();
+    let output_space = multiplicity_free_output_space(
+        input.space(),
+        tenet_core::FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone()),
+    )?;
+    pinv_by_sector_dyn_into(dense, input, output_space, rcond)
 }
 
 fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
@@ -890,97 +907,24 @@ fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
     Ok(())
 }
 
-fn inverted_pinv_spectrum(
-    singular_values: &[SectorSpectrum],
-    rcond: f64,
-) -> Result<Vec<SectorSpectrum>, OperationError> {
-    let cutoff = pinv_cutoff(
-        singular_values
-            .iter()
-            .flat_map(|entry| entry.values.iter().copied()),
-        rcond,
-    )?;
-    Ok(singular_values
-        .iter()
-        .map(|entry| SectorSpectrum {
-            sector: entry.sector,
-            values: entry
-                .values
-                .iter()
-                .map(|&sigma| if sigma > cutoff { 1.0 / sigma } else { 0.0 })
-                .collect(),
-        })
-        .collect())
-}
-
-/// Applies the public `pinv` cutoff to compact SVD factors before the
-/// factor-recomposition step shared with `inv_dyn`.
-fn pinv_from_factors<RuleKey, BT, BC, R, D>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    factors: SvdFactorsDyn<R, D>,
-    rcond: f64,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    let (u, vh, singular_values) = factors;
-    let inverted = inverted_pinv_spectrum(&singular_values, rcond)?;
-    inverse_from_factors(context, u, vh, &inverted)
-}
-
-/// Parent-native pseudo-inverse of a logical adjoint.
-///
-/// Computes the parent's compact SVD once and forms
-/// `(A^H)^+ = U S^+ V^H` directly, without a logical-adjoint input, a complete
-/// parent pseudo-inverse, or adjointed factor copies.
+/// Multiplicity-free pseudo-inverse of a logical adjoint, `(A^H)^+ = U S^+
+/// V^H` from the parent's compact SVD, into the layout derived from the
+/// parent's hom space; see [`pinv_adjoint_parent_direct_into_dyn`].
 #[doc(hidden)]
-pub fn pinv_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+pub fn pinv_adjoint_parent_dyn<E, R, D>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     parent: &BoundDynamicTensorRef<'_, R, D>,
     rcond: f64,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
 {
     validate_pinv_rcond(rcond)?;
-    let (mut u, vh, singular_values) = svd_compact_factors_dyn(dense, parent)?;
-    let inverted = inverted_pinv_spectrum(&singular_values, rcond)?;
-    let (space, data) = u.raw_space_and_data_mut();
-    scale_axis_by_spectrum(space, data, None, &inverted)?;
-    compose_bound_dyn(context, &u, &vh)
-}
-
-fn inverse_from_factors<RuleKey, BT, BC, R, D>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    u: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    inverted: &[SectorSpectrum],
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    // t^+ = V S^+ U^H. Fold S^+ into a column scaling of V (bond = trailing
-    // axis) instead of building the dense diagonal and running an extra GEMM
-    // (issue #46).
-    let mut v = adjoint_bound_factor(&vh)?;
-    let uh = adjoint_bound_factor(&u)?;
-    let v_space = v.space().space().clone();
-    scale_axis_by_spectrum(&v_space, v.data_mut(), None, inverted)?;
-    compose_bound_dyn(context, &v, &uh)
+    let output_space =
+        multiplicity_free_output_space(parent.space(), parent.space().space().homspace().clone())?;
+    pinv_adjoint_by_sector_dyn_into(dense, parent, output_space, rcond)
 }
 
 #[cfg(test)]
@@ -1034,9 +978,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    // Why not reuse pinv's SVD/recomposition path: ordinary inverse has no
-    // truncation policy, so factor tensors and a recoupling contraction are
-    // avoidable work.
     inverse_by_sector_dyn(dense, input)
 }
 
@@ -1068,7 +1009,6 @@ pub fn pinv_direct_into_dyn<E, R, D>(
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     validate_pinv_rcond(rcond)?;
@@ -1086,7 +1026,6 @@ pub fn pinv_adjoint_parent_direct_into_dyn<E, R, D>(
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     validate_pinv_rcond(rcond)?;
