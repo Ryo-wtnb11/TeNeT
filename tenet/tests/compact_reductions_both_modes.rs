@@ -273,7 +273,7 @@ fn sun2(twice: usize) -> Vec<i64> {
     vec![twice as i64]
 }
 
-fn sun2_twice(label: &Vec<i64>) -> usize {
+fn sun2_twice(label: &[i64]) -> usize {
     label[0] as usize
 }
 
@@ -367,67 +367,5 @@ fn svd_compact_spectrum_reduces_on_su3_and_on_su2_in_both_modes() {
     );
     for (p, (mf, checked)) in POWERS.iter().zip(mf[0].iter().zip(checked[0])) {
         numerics::assert_close(&format!("su2 modes norm({p})"), *mf, checked, TERMS);
-    }
-}
-
-/// The device has the Frobenius reduction only: a compact Host operand uploads
-/// dense and reduces to the Host value, and every other exponent stays an
-/// explicit `UnsupportedOnDevice`. CUDA storage is multiplicity-free only, so
-/// there is no checked Generic device row.
-#[cfg(feature = "cuda")]
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn compact_host_reductions_match_the_device_frobenius_arm() {
-    let runtime = fixtures::cuda_runtime();
-    let leg = GradedSpace::try_new(
-        Arc::new(SU2FusionRule),
-        SECTORS.map(|(twice, k)| (su2(twice), k)),
-    )
-    .unwrap();
-    let spectrum = |entry: fn(usize, usize) -> Complex64| {
-        SECTORS
-            .iter()
-            .map(|&(twice, k)| SectorSpectrum {
-                sector: su2(twice),
-                values: (0..k).map(|i| entry(twice, i)).collect(),
-            })
-            .collect::<Vec<_>>()
-    };
-    let compact_a = TensorMap::<_, Complex64>::diagonal(&runtime, &leg, spectrum(a)).unwrap();
-    let compact_b = TensorMap::<_, Complex64>::diagonal(&runtime, &leg, spectrum(b)).unwrap();
-    let want = oracle(|z| z);
-    let (device_a, device_b) = (compact_a.to_cuda().unwrap(), compact_b.to_cuda().unwrap());
-    numerics::assert_close(
-        "host compact norm(2)",
-        compact_a.norm(2.0).unwrap(),
-        want.norms_a[1],
-        TERMS,
-    );
-    numerics::assert_close(
-        "device norm(2)",
-        device_a.norm(2.0).unwrap(),
-        want.norms_a[1],
-        TERMS,
-    );
-    numerics::assert_close(
-        "host compact inner",
-        compact_a.inner(&compact_b).unwrap(),
-        want.inner_ab,
-        TERMS,
-    );
-    numerics::assert_close(
-        "device inner",
-        device_a.inner(&device_b).unwrap(),
-        want.inner_ab,
-        TERMS,
-    );
-    for p in [1.0, 3.0, f64::INFINITY] {
-        assert!(
-            matches!(
-                device_a.norm(p),
-                Err(tenet::typed::Error::UnsupportedOnDevice(_))
-            ),
-            "device norm({p})"
-        );
     }
 }

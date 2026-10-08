@@ -246,3 +246,65 @@ fn device_norm_is_the_frobenius_arm_and_rejects_other_exponents() {
         );
     }
 }
+
+/// A compact Host operand reduces in `O(Σ_c k_c)` and uploads dense; the
+/// device Frobenius arm then gives the same value as the Host compact arm and
+/// the hand oracle `Σ_c dim(c) Σ_k conj(a_k) b_k`, and every other exponent
+/// stays `UnsupportedOnDevice` on the uploaded compact operand (#1867,
+/// #1868). Device storage is multiplicity-free only, so there is no checked
+/// Generic device row.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn compact_host_reductions_match_the_device_frobenius_arm() {
+    let rt = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let (bond, _) = su2();
+    let value = |twice: usize, k: usize, shift: f64| {
+        Complex64::new(
+            1.0 + 0.5 * k as f64 - shift * twice as f64,
+            shift + 0.25 * k as f64,
+        )
+    };
+    let spectrum = |shift: f64| {
+        [(0, 2), (1, 3), (2, 4)].map(|(twice, degeneracy)| SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(twice),
+            values: (0..degeneracy).map(|k| value(twice, k, shift)).collect(),
+        })
+    };
+    let a = TensorMap::<_, Complex64>::diagonal(&rt, &bond, spectrum(0.3)).unwrap();
+    let b = TensorMap::<_, Complex64>::diagonal(&rt, &bond, spectrum(-0.2)).unwrap();
+    let (mut norm2, mut inner) = (0.0, Complex64::default());
+    for (twice, degeneracy) in [(0, 2), (1, 3), (2, 4)] {
+        let dim = (twice + 1) as f64;
+        for k in 0..degeneracy {
+            norm2 += dim * value(twice, k, 0.3).norm_sqr();
+            inner += dim * value(twice, k, 0.3).conj() * value(twice, k, -0.2);
+        }
+    }
+    let close = |what: &str, got: Complex64, want: Complex64| {
+        assert!(
+            (got - want).norm() <= 1e-13 * want.norm(),
+            "{what}: {got} against {want}"
+        );
+    };
+    let (device_a, device_b) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
+    close(
+        "host compact norm",
+        a.norm(2.0).unwrap().into(),
+        norm2.sqrt().into(),
+    );
+    close(
+        "device norm",
+        device_a.norm(2.0).unwrap().into(),
+        norm2.sqrt().into(),
+    );
+    close("host compact inner", a.inner(&b).unwrap(), inner);
+    close("device inner", device_a.inner(&device_b).unwrap(), inner);
+    for p in [1.0, 3.0, f64::INFINITY] {
+        assert!(a.norm(p).is_ok(), "host compact norm({p})");
+        assert!(
+            matches!(device_a.norm(p), Err(Error::UnsupportedOnDevice(_))),
+            "device norm({p})"
+        );
+    }
+}
