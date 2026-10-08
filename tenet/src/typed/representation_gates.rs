@@ -2,6 +2,8 @@ use super::*;
 
 include!("../../tests/common/predicate_chains.rs");
 
+#[cfg(feature = "racah-generated")]
+mod compact_admission;
 mod compact_transforms;
 mod contract;
 #[cfg(feature = "cuda")]

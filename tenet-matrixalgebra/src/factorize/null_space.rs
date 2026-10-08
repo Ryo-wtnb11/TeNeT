@@ -126,7 +126,6 @@ where
         |space, spectrum| null_diagonal(&M::authority(space), space, spectrum, side),
         |dense, input| null_dense(dense, &M::authority(input.space()), input, side),
     )
-    .map(|(factor, _)| factor)
 }
 
 /// Numerical left null space of `source` in fusion mode `M`; a compact

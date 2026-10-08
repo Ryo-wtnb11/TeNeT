@@ -126,64 +126,6 @@ where
     }
 }
 
-pub(super) fn checked_compact_spectrum_layout<R, D>(
-    source: &BoundDynamicFusionMapSpace<R>,
-    output: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-) -> bool {
-    let source_space = source.space();
-    let output_space = output.space();
-    if !is_diagonal_bond_space(source_space)
-        || !is_diagonal_bond_space(output_space)
-        || !Arc::ptr_eq(source.provider_arc(), output.provider_arc())
-        || output_space.homspace().codomain() != source_space.homspace().domain()
-        || output_space.homspace().domain() != source_space.homspace().codomain()
-    {
-        return false;
-    }
-    // Leave malformed or noncanonical layouts to the existing dense seam,
-    // which owns their typed error mapping and validation order.
-    let (Ok(Some(source_regions)), Ok(Some(output_regions))) = (
-        source_space
-            .structure()
-            .coupled_sector_regions(source_space.nout()),
-        output_space
-            .structure()
-            .coupled_sector_regions(output_space.nout()),
-    ) else {
-        return false;
-    };
-    if source_regions.len() != spectrum.len() || output_regions.len() != spectrum.len() {
-        return false;
-    }
-    let by_sector: HashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    let output_by_sector: HashMap<_, _> = output_regions
-        .iter()
-        .map(|region| (region.coupled(), region))
-        .collect();
-    if by_sector.len() != spectrum.len() || output_by_sector.len() != spectrum.len() {
-        return false;
-    }
-    source_regions.iter().all(|source_region| {
-        let Some(entry) = by_sector.get(&source_region.coupled()) else {
-            return false;
-        };
-        let Some(output_region) = output_by_sector.get(&source_region.coupled()) else {
-            return false;
-        };
-        source_region.has_aligned_diagonal()
-            && output_region.has_aligned_diagonal()
-            && source_region.rows() == source_region.cols()
-            && output_region.rows() == source_region.cols()
-            && output_region.cols() == source_region.rows()
-            && source_region.row_trees().len() == 1
-            && source_region.col_trees().len() == 1
-            && output_region.row_trees() == source_region.col_trees()
-            && output_region.col_trees() == source_region.row_trees()
-            && entry.values.len() == source_region.rows()
-    })
-}
-
 impl<R> TypedTensorModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>

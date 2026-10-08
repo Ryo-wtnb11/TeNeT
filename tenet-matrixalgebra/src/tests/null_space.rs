@@ -647,7 +647,7 @@ fn null_space_second_sector_failure_builds_no_factor() {
 // forced-pack control in the same process.
 #[allow(unsafe_code)]
 #[path = "../../../tests/support/counting_alloc.rs"]
-mod counting_alloc;
+pub(crate) mod counting_alloc;
 
 #[global_allocator]
 static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;

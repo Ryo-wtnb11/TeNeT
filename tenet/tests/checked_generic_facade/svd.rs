@@ -560,7 +560,7 @@ fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bon
 }
 
 #[test]
-fn checked_compact_diagonal_svd_full_refuses_a_provider_bond_mismatch() {
+fn checked_compact_diagonal_svd_full_is_its_compact_svd_under_a_provider_bond_mismatch() {
     let _cache = cache_shared();
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
@@ -596,21 +596,22 @@ fn checked_compact_diagonal_svd_full_refuses_a_provider_bond_mismatch() {
         assert_eq!(factor.codomain(), nondual.codomain());
     }
 
-    // A dual bond needs the fresh nondual `fuse(V)`. A provider whose coupled
-    // dimensions disagree with the diagonal's own bond is inconsistent, so
-    // the diagonal route refuses it with a typed error before computing, as
-    // MAK checks output sizes (`@check_size`); no dense SVD runs.
-    let error = dual.svd_full(&[0], &[1]).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
-                tenet::typed::OperationError::InvalidArgument { .. }
-            ))
-        ),
-        "{error:?}"
-    );
+    // A dual bond needs the fresh nondual `fuse(V)`. Full SVD of a diagonal is
+    // its compact SVD (TensorKit `svd_compact!(::DiagonalAlgorithm)` is
+    // `svd_full!`), in every fusion mode (#1994): the compact route builds
+    // `fuse(V)` and no square-full bond, so the provider's coupled-dimension
+    // report is not consulted, and no dense SVD runs.
+    let full = dual.svd_full(&[0], &[1]).unwrap();
+    let compact = dual.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert!(full.s.dense_data().is_err());
+    assert_eq!(full.s.diagview().unwrap(), compact.s.diagview().unwrap());
+    assert_eq!(full.s.codomain(), compact.s.codomain());
+    for (full, compact) in [(&full.u, &compact.u), (&full.vh, &compact.vh)] {
+        assert_eq!(full.codomain(), compact.codomain());
+        assert_eq!(full.domain(), compact.domain());
+        assert_eq!(full.dense_data().unwrap(), compact.dense_data().unwrap());
+    }
 }
 
 #[cfg(feature = "racah-generated")]

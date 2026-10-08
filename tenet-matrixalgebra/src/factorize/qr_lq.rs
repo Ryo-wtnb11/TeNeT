@@ -41,7 +41,6 @@ where
             })
         },
     )
-    .map(|(factors, _)| factors)
 }
 
 /// Compact QR of `source` in fusion mode `M`.
@@ -117,7 +116,6 @@ where
             })
         },
     )
-    .map(|(factors, _)| factors)
 }
 
 /// Compact LQ of `source` in fusion mode `M`.

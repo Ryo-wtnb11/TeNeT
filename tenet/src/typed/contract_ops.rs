@@ -857,7 +857,7 @@ where
     /// contracted leg of `other`, where [`Self::compose`] does not. Here the case
     /// cannot arise, so the arm declines instead of carrying arithmetic no test
     /// could reach: a compact payload's bond leg is built non-dual
-    /// (`diagonal_bond_bound_space_like`), the arms pair it with a *codomain*
+    /// (`seam::spectrum_bond`), the arms pair it with a *codomain*
     /// leg of `other` whose external duality is exactly its raw flag, and
     /// admissibility forces that flag to equal the bond's. The guard stays
     /// because the first constructor of a compact payload on a dual bond leg —

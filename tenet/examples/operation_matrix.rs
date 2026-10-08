@@ -3879,5 +3879,4 @@ where
         dense,
         dense_source(input),
     )
-    .map(|(eig, _)| eig)
 }

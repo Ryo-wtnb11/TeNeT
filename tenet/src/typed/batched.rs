@@ -1784,10 +1784,12 @@ where
             eigenvalues.sort_unstable_by_key(|entry| entry.sector);
             let (v_space, v_data) = v.into_parts();
             if buffers.is_none() {
-                let d_space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(
-                    &self.space,
-                    &eigenvalues,
-                )
+                // The one spectrum-bond rule of the eager factorizations.
+                let d_space = tenet_matrixalgebra::seam::spectrum_bond::<
+                    crate::sector::MultiplicityFreeAdmissionMode,
+                    _,
+                    _,
+                >(&self.space, &eigenvalues)
                 .map_err(Error::from)?;
                 let d_len = d_space.space().required_len().map_err(Error::from)?;
                 let v_len = v_data.len();

@@ -281,9 +281,7 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let space =
-        diagonal_bond_bound_space_generic_checked(Arc::clone(u.space().provider_arc()), spectrum)
-            .unwrap();
+    let space = spectrum_bond::<CheckedGenericAdmissionMode, _, _>(u.space(), spectrum).unwrap();
     let data = diagonal_bond_data(space.space(), spectrum, &D::from_real).unwrap();
     BoundDynFactor::from_bound(space, data, 1, 1).unwrap()
 }
