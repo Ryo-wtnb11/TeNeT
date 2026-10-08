@@ -360,6 +360,8 @@ impl TypedSectorAdmission for SUNFusionRule {
 impl CheckedGenericRigidSymbols for SUNFusionRule {
     type Scalar = f64;
 
+    /// The Weyl dimension, exact below `2^53`, rounded once above it, and
+    /// [`SUNFusionRuleError::DimensionNotRepresentable`] past `f64::MAX`.
     fn try_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.dim_scalar(sector)
     }

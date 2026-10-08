@@ -47,6 +47,9 @@ impl CheckedGenericFusion for RejectingTraceTwist {
 
 impl CheckedGenericRigidSymbols for RejectingTraceTwist {
     type Scalar = f64;
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.inner.try_dim_scalar(sector)
+    }
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.inner.try_sqrt_dim_scalar(sector)
     }

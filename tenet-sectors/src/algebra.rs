@@ -1017,6 +1017,10 @@ pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
     /// which can be one rounding off an integer dimension. A provider that
     /// knows `dim` exactly overrides this so that weighted budgets and exact
     /// cross-sector ties compare exactly, as TensorKit's `Int` dimensions do.
+    ///
+    /// A wrapper that forwards to another checked provider must forward this
+    /// method too: left to the default, it silently degrades the wrapped
+    /// provider's exact `dim` to `sqrt(dim)^2`.
     fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         let sqrt_dim = self.try_sqrt_dim_scalar(sector)?;
         Ok(sqrt_dim.clone() * sqrt_dim)

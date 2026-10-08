@@ -604,6 +604,12 @@ fn checked_generic_optimizer_fallback_never_retries_provider_failures() {
 impl CheckedGenericRigidSymbols for InjectedGeneric {
     type Scalar = f64;
 
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.symbol()?;
+        CheckedGenericRigidSymbols::try_dim_scalar(&self.inner, sector)
+            .map_err(|_| InjectedError::Provider)
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.symbol()?;
         CheckedGenericRigidSymbols::try_sqrt_dim_scalar(&self.inner, sector)
