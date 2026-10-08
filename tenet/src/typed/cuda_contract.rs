@@ -149,9 +149,9 @@ where
     /// canonical form with a twist uniform per coupled sector folds it into
     /// the GEMM alpha; every other case — general axes, or a twist that
     /// varies within one coupled sector — folds `θ_b` into the descriptor
-    /// alpha of the source-transform move writing core-right block `b`, where
-    /// the Host scales the transformed operand in place afterwards: the same
-    /// values, one pass fewer, and no extra upload.
+    /// alpha of the source-transform move writing core-right block `b`, as
+    /// the Host folds it into the same move: no separate scale pass and no
+    /// extra upload.
     ///
     /// # Errors
     ///

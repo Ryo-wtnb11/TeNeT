@@ -1921,6 +1921,7 @@ where
                                 dst_data,
                                 temporary.as_slice(),
                                 alpha,
+                                &[],
                             ),
                         ContractDestinationInit::Axpby(beta) => {
                             self.tree_context.tree_transform_structure_into_raw(
@@ -2600,6 +2601,7 @@ where
                 dst.data_mut(),
                 src.data(),
                 D::one(),
+                &[],
             )
     }
 }

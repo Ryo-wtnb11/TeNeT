@@ -15,9 +15,9 @@ use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
     strides_to_isize,
 };
-#[cfg(test)]
-use crate::HostKernelAdapter;
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
+#[cfg(test)]
+use tenet_operations::HostKernelAdapter;
 use tenet_operations::TensorContractSpec;
 
 #[cfg(test)]

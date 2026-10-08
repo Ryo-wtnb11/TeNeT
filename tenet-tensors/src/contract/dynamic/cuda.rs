@@ -199,9 +199,8 @@ fn grow<'a, D: CudaScalar>(
 /// The fermionic contraction twist is folded into the source transform of
 /// the operand the artifact twists (the one already materialized, as in
 /// TensorKit's `blas_contract!`): the move writing its block `b` runs with
-/// descriptor alpha `θ_b` (`replay_with_destination_scales`), where the host
-/// scales the materialized operand in place afterwards — the same values in
-/// one pass fewer. A twisted operand is never borrowed, so the transform
+/// descriptor alpha `θ_b` (`replay_with_destination_scales`), as the Host
+/// folds it into the same move. A twisted operand is never borrowed, so the transform
 /// always runs.
 ///
 /// Every check that can reject the route runs before the first device

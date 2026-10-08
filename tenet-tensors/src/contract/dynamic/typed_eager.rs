@@ -108,6 +108,24 @@ where
         .then(|| DynamicFusionScratch::<D>::zeroed(Arc::new(rhs_space.clone())))
         .transpose()?;
 
+    let twisted_space = if twist_lhs {
+        &lhs_transformed.0
+    } else {
+        &rhs_space
+    };
+    let twist = compile_contract_twist(
+        rule,
+        twisted_space,
+        core_right_homspace,
+        twist_lhs != reverse,
+        plan.core_axes().as_spec().rhs_contracting_axes(),
+    )?;
+    let (lhs_scales, rhs_scales) = if twist_lhs {
+        (&twist[..], &[][..])
+    } else {
+        (&[][..], &twist[..])
+    };
+
     if let Some(lhs_core) = lhs_core.as_mut() {
         tree_pair_transform_typed_to_dynamic(
             tree_backend,
@@ -119,19 +137,8 @@ where
             &lhs_transformed.1,
             plan.lhs_source_conjugate(),
             D::one(),
+            lhs_scales,
         )?;
-        if twist_lhs {
-            let lhs_scratch_space = lhs_core.space().clone();
-            apply_contract_twist(
-                &mut crate::StridedHostKernelAdapter::default(),
-                rule,
-                &lhs_scratch_space,
-                core_right_homspace,
-                !reverse,
-                lhs_core.data_mut(),
-                plan.core_axes().as_spec().rhs_contracting_axes(),
-            )?;
-        }
     }
     if let Some(rhs_core) = rhs_core.as_mut() {
         tree_pair_transform_typed_to_dynamic(
@@ -144,19 +151,8 @@ where
             &rhs_replay_structure,
             plan.rhs_source_conjugate(),
             D::one(),
+            rhs_scales,
         )?;
-        if !twist_lhs {
-            let rhs_scratch_space = rhs_core.space().clone();
-            apply_contract_twist(
-                &mut crate::StridedHostKernelAdapter::default(),
-                rule,
-                &rhs_scratch_space,
-                core_right_homspace,
-                reverse,
-                rhs_core.data_mut(),
-                plan.core_axes().as_spec().rhs_contracting_axes(),
-            )?;
-        }
     }
 
     let physical_lhs_core = match lhs_core.as_ref() {
@@ -281,6 +277,7 @@ fn tree_pair_transform_typed_to_dynamic<
     src_replay_structure: &std::sync::Arc<BlockStructure>,
     source_conjugate: bool,
     alpha: D,
+    destination_scales: &[(usize, R::Scalar)],
 ) -> Result<(), OperationError>
 where
     BT: TreeTransformBackend<D, R::Scalar>,
@@ -304,7 +301,7 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
-        &[],
+        destination_scales,
     )
 }
 

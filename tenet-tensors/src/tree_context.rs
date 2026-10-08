@@ -384,6 +384,7 @@ fn replay_structure_overwrite<D, C, B>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
+    destination_scales: &[(usize, C)],
     profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
 where
@@ -400,7 +401,7 @@ where
             dst_data,
             src_data,
             alpha,
-            &[],
+            destination_scales,
             profile,
         ),
         None => backend.tree_transform_structure_overwrite_into_raw(
@@ -411,7 +412,7 @@ where
             dst_data,
             src_data,
             alpha,
-            &[],
+            destination_scales,
         ),
     }
 }
@@ -956,6 +957,7 @@ where
             dst_data,
             src_data,
             alpha,
+            &[],
             None,
         )
     }
@@ -1014,6 +1016,9 @@ where
         )
     }
 
+    /// Overwrite replay; the move writing destination block `b` is scaled by
+    /// `θ_b` from `destination_scales` (see
+    /// [`TreeTransformBackend::tree_transform_structure_overwrite_into_raw`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_structure_overwrite_into_raw(
         &mut self,
@@ -1023,6 +1028,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
         let Self {
             backend, workspace, ..
@@ -1036,6 +1042,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             None,
         )
     }
@@ -1077,6 +1084,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let Self {
@@ -1091,6 +1099,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             Some(profile),
         )
     }

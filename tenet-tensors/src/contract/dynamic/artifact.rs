@@ -9,15 +9,13 @@ pub(crate) struct DynamicTreeExecutionArtifact<C = f64> {
     pub(super) rhs_borrowed: bool,
     /// The fermionic contraction twist scales the physical lhs's
     /// materialized core source (else the physical rhs's); meaningful only
-    /// when `source_twist` is non-empty.
+    /// when `source_twist_destination_scales` is non-empty.
     pub(super) twist_lhs: bool,
-    pub(super) source_twist: Arc<[RhsTwistAction<C>]>,
-    /// The same twist as `(twisted destination block offset, θ_b ≠ 1)`,
-    /// sorted by offset and without zero-element blocks, for a replay that
-    /// folds θ_b into the move writing block b instead of scaling afterwards
-    /// (the device, `replay_with_destination_scales`). Built in the loop that
-    /// builds `source_twist`, so the two cannot disagree.
-    #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
+    /// The twist as `(twisted destination block offset, θ_b ≠ 1)`, sorted by
+    /// offset and without zero-element blocks: the single representation
+    /// every executor folds into the move writing block b of the twisted
+    /// source transform (Host `tree_transform_structure_overwrite_into_raw`
+    /// and member replay, device `replay_with_destination_scales`).
     source_twist_destination_scales: Box<[(usize, C)]>,
     pub(super) core_dst: Option<DynamicFusionCoreDstEntry<C>>,
     pub(super) block_plan: Arc<FusionBlockContractPlan<C>>,
@@ -47,7 +45,7 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
     }
 
     pub(crate) fn requires_source_twist(&self) -> bool {
-        !self.source_twist.is_empty()
+        !self.source_twist_destination_scales.is_empty()
     }
 
     /// `(lhs, rhs)` in the core GEMM's operand order: swapped for an
@@ -83,10 +81,9 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
             .map_or(dst, |entry| entry.space.structure())
     }
 
-    /// The device twist folds of the lhs and rhs source stages: the twisted
-    /// stage carries [`Self::source_twist_destination_scales`], the other
-    /// none. A twisted source is never borrowed (checked at construction).
-    #[cfg(feature = "cuda")]
+    /// The twist folds of the lhs and rhs source stages: the twisted stage
+    /// carries [`Self::source_twist_destination_scales`], the other none. A
+    /// twisted source is never borrowed (checked at construction).
     pub(crate) fn stage_scales(&self) -> [&[(usize, C)]; 2] {
         let scales = &self.source_twist_destination_scales[..];
         let (lhs, rhs) = self.on_twisted((scales, &[][..]), (&[][..], scales));
@@ -126,25 +123,6 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
     #[cfg(test)]
     pub(crate) fn borrowed_sources(&self) -> (bool, bool) {
         (self.lhs_borrowed, self.rhs_borrowed)
-    }
-
-    /// The Host's in-place twist actions as `(offset, θ)` over non-empty
-    /// blocks, sorted: what the destination-scale list must equal.
-    #[cfg(test)]
-    pub(crate) fn host_twist_scales(&self) -> Vec<(usize, C)> {
-        let mut scales: Vec<(usize, C)> = self
-            .source_twist
-            .iter()
-            .filter(|action| !action.shape.contains(&0))
-            .map(|action| (usize::try_from(action.offset).unwrap(), action.factor))
-            .collect();
-        scales.sort_unstable_by_key(|&(offset, _)| offset);
-        scales
-    }
-
-    #[cfg(test)]
-    pub(crate) fn source_twist_action_count(&self) -> usize {
-        self.source_twist.len()
     }
 
     /// The destination space of the physical lhs (`true`) or rhs source
@@ -394,16 +372,13 @@ where
     } else {
         &rhs_transform
     };
-    let mut source_twist_destination_scales = Vec::new();
-    let source_twist = compile_contract_twist(
+    let source_twist_destination_scales = compile_contract_twist(
         rule,
         &twisted_transform.space,
         core_right_space.homspace(),
         borrowing.twist_lhs != reverse,
         plan.core_axes().as_spec().rhs_contracting_axes(),
-        Some(&mut source_twist_destination_scales),
     )?;
-    source_twist_destination_scales.sort_unstable_by_key(|&(offset, _)| offset);
     if !source_twist_destination_scales.is_empty() {
         validate_uniform_multi_scales(
             &twisted_transform.transform_structure,
@@ -465,14 +440,15 @@ where
             .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_BLOCK_PLAN_PHASE));
     }
     // Why not check this in every executor: Host, member and device replays
-    // all scale the twisted source in its owned scratch, and borrowing never
-    // picks the twisted side (`resolve_source_borrowing`).
+    // all fold the twist into the transform writing the twisted source's
+    // owned scratch, and borrowing never picks the twisted side
+    // (`resolve_source_borrowing`).
     let twisted_borrowed = if borrowing.twist_lhs {
         borrowing.lhs_borrowed
     } else {
         borrowing.rhs_borrowed
     };
-    if !source_twist.is_empty() && twisted_borrowed {
+    if !source_twist_destination_scales.is_empty() && twisted_borrowed {
         return Err(OperationError::InvalidArgument {
             message: "contraction twist must scale an owned source",
         });
@@ -484,7 +460,6 @@ where
         lhs_borrowed: borrowing.lhs_borrowed,
         rhs_borrowed: borrowing.rhs_borrowed,
         twist_lhs: borrowing.twist_lhs,
-        source_twist,
         source_twist_destination_scales: source_twist_destination_scales.into_boxed_slice(),
         core_dst,
         block_plan,
@@ -599,6 +574,7 @@ where
     let rhs_borrowed = artifact.rhs_borrowed;
     let lhs_core_space = lhs_transform.space.clone();
     let rhs_core_space = rhs_transform.space.clone();
+    let [lhs_scales, rhs_scales] = artifact.stage_scales();
 
     if !lhs_borrowed {
         let scratch_start = PROFILED.then(std::time::Instant::now);
@@ -622,6 +598,7 @@ where
                 lhs_scratch.data_mut(),
                 lhs_data,
                 D::one(),
+                lhs_scales,
                 &mut profile.tree_replay,
             )?;
         } else {
@@ -632,13 +609,7 @@ where
                 lhs_scratch.data_mut(),
                 lhs_data,
                 D::one(),
-            )?;
-        }
-        if artifact.twist_lhs {
-            execute_contract_twist(
-                &mut crate::StridedHostKernelAdapter::default(),
-                lhs_scratch.data_mut(),
-                &artifact.source_twist,
+                lhs_scales,
             )?;
         }
         if let Some(start) = transform_start {
@@ -671,6 +642,7 @@ where
                 rhs_scratch.data_mut(),
                 rhs_data,
                 D::one(),
+                rhs_scales,
                 &mut profile.tree_replay,
             )?;
         } else {
@@ -681,13 +653,7 @@ where
                 rhs_scratch.data_mut(),
                 rhs_data,
                 D::one(),
-            )?;
-        }
-        if !artifact.twist_lhs {
-            execute_contract_twist(
-                &mut crate::StridedHostKernelAdapter::default(),
-                rhs_scratch.data_mut(),
-                &artifact.source_twist,
+                rhs_scales,
             )?;
         }
         if let Some(start) = transform_start {
