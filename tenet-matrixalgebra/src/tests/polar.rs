@@ -389,13 +389,20 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
 #[test]
 fn polar_second_sector_failure_leaves_the_source_unchanged() {
     // What: a later dense failure publishes no factors and cannot mutate the
-    // borrowed source, in either direction.
+    // borrowed source, in either direction. Sectors stream, so the first
+    // sector's products run before the second SVD fails.
     let canonical = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
     let tensor = padded_copy(&U1FusionRule, &canonical);
     let before = tensor.data().to_vec();
     let input = bound_tensor(Arc::new(U1FusionRule), &tensor);
     for left in [true, false] {
-        let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
+        let mut dense = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
+        dense.script.fail(
+            &[Op::Svd, Op::SvdInto],
+            Some(2),
+            "svd_into",
+            "injected second-sector failure",
+        );
         crate::factorize::reset_compact_svd_copy_probe();
         crate::factorize::reset_input_pack_bytes();
         let result = if left {

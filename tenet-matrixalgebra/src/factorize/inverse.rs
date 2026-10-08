@@ -650,8 +650,9 @@ where
 /// sector whose tree order differs from the output's lands through one
 /// `O(max_c n_c²)` staging buffer.
 ///
-/// `apply(state, source, n, out)` reads the column-major `n x n` block at
-/// `source` and writes its image into the column-major `n x n` `out`.
+/// `apply(dense, state, source, n, out)` reads the column-major `n x n` block at
+/// `source` and writes its image into the column-major `n x n` `out`; one
+/// admitted dense scope spans every sector.
 ///
 /// Publication is atomic: the result tensor is built only after every sector
 /// has succeeded, so a failure in the last block leaves no half-written tensor
@@ -660,16 +661,20 @@ where
 /// Refusing a non-endomorphism is the caller's job, so that the message
 /// names the function the user called (`exp`) rather than whichever helper
 /// noticed first.
-pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
+pub(crate) fn map_square_sectors_dyn_into<E, R, D, S, I, F>(
+    dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     output_space: BoundDynamicFusionMapSpace<R>,
     init: I,
     mut apply: F,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
+    E: DenseExecutor + ?Sized,
     D: FactorScalar,
+    S: Send,
     I: FnOnce(usize) -> Result<S, OperationError>,
-    F: FnMut(&mut S, &[D], usize, &mut [D]) -> Result<(), OperationError>,
+    F: FnMut(&mut dyn DenseExecutor, &mut S, &[D], usize, &mut [D]) -> Result<(), OperationError>
+        + Send,
 {
     let source_space = input.space().space();
     if source_space.homspace() != output_space.space().homspace() {
@@ -702,22 +707,26 @@ where
     let max_order = (0..matrices.len())
         .map(|index| matrices.get(index).map(|matrix| matrix.rows))
         .try_fold(0, |largest, rows| rows.map(|rows| largest.max(rows)))?;
-    let mut output_data = vec![D::zero(); output_len];
     let mut state = init(max_order)?;
-    let mut scratch = Vec::new();
-    for (index, landing) in landings.iter().enumerate() {
-        let matrix = matrices.get(index)?;
-        let order = matrix.rows;
-        if order == 0 {
-            continue;
+    // One admitted dense scope spans every sector's kernel.
+    let output_data = in_linalg_scope(dense, |dense| {
+        let mut output_data = vec![D::zero(); output_len];
+        let mut scratch = Vec::new();
+        for (index, landing) in landings.iter().enumerate() {
+            let matrix = matrices.get(index)?;
+            let order = matrix.rows;
+            if order == 0 {
+                continue;
+            }
+            landing.write(
+                &mut output_data,
+                &output_regions[landing.output],
+                &mut scratch,
+                |output| apply(dense, &mut state, matrix.data, order, output),
+            )?;
         }
-        landing.write(
-            &mut output_data,
-            &output_regions[landing.output],
-            &mut scratch,
-            |output| apply(&mut state, matrix.data, order, output),
-        )?;
-    }
+        Ok(output_data)
+    })?;
 
     BoundDynFactor::from_bound(
         output_space,

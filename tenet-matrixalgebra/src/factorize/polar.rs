@@ -358,7 +358,7 @@ where
 /// `authority` admits the direction over every logical coupled sector and
 /// builds `P`'s space; the GEMMs write the output regions in place (a packed
 /// input whose tree order differs from the output lands by tree extent).
-/// One scope spans the staged SVDs and the per-sector products.
+/// One scope spans the per-sector SVDs and products.
 fn polar_dense<A, E, R, D>(
     dense: &mut E,
     authority: &A,
@@ -431,29 +431,26 @@ where
     })?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
 
+    // Why one sector at a time, unlike pinv: polar has no cross-sector
+    // cutoff, so only the sector in flight needs its SVD (TensorKit/MAK's
+    // working set is the largest block); the outputs are still published
+    // only after every sector succeeded.
     let (w_data, p_data) = in_linalg_scope(dense, |dense| {
-        let mut stages = Vec::with_capacity(matrices.len());
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            stages.push(compact_svd_numerical_stage(
-                dense,
-                matrix.data,
-                matrix.rows,
-                matrix.cols,
-            )?);
-        }
         // Why zeroed rather than uninitialized: the GEMM destinations are
         // safe initialized views, and every region is then overwritten once.
         let mut w_data = vec![D::zero(); w_len];
         let mut p_data = vec![D::zero(); p_len];
         let mut scratch = Vec::new();
-        for ((stage, w), p) in stages.iter_mut().zip(&w_landings).zip(&p_landings) {
+        for (index, (w, p)) in w_landings.iter().zip(&p_landings).enumerate() {
+            let matrix = matrices.get(index)?;
+            let mut stage =
+                compact_svd_numerical_stage(dense, matrix.data, matrix.rows, matrix.cols)?;
             // `W` reads the unscaled factors, so it precedes `P`.
             w.write(&mut w_data, &w_regions[w.output], &mut scratch, |w| {
-                polar_isometry(dense, stage, w)
+                polar_isometry(dense, &stage, w)
             })?;
             p.write(&mut p_data, &p_regions[p.output], &mut scratch, |p| {
-                polar_positive(dense, stage, direction, p)
+                polar_positive(dense, &mut stage, direction, p)
             })?;
         }
         Ok((w_data, p_data))

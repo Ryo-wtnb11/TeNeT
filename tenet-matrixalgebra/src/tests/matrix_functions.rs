@@ -9,13 +9,14 @@ fn square_matrix_function_rejects_noncanonical_admitted_output_before_kernel() {
     let input = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let called = Cell::new(false);
     let result = map_square_sectors_dyn_into(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
         &input,
         padded_space,
         |_| -> Result<(), OperationError> {
             called.set(true);
             unreachable!("layout rejection precedes kernel initialization")
         },
-        |_, _, _, _| unreachable!("layout rejection precedes dense work"),
+        |_, _, _, _, _| unreachable!("layout rejection precedes dense work"),
     );
     assert!(matches!(
         result,

@@ -1,7 +1,8 @@
 # Issues 1799 + 1752: per-sector pinv / exp / polar
 
 - Baseline: TeNeT `4bfb99ca5f1d2dfeb70d4a96819876aa224a7ab1`. Candidate: branch
-  `issue-1799-1752-spectral-sector` at `12a9466d` (production code from `cba4d5a0`).
+  `issue-1799-1752-spectral-sector` at `12a9466d` (production code from `cba4d5a0`); after the
+  rebase onto `d4e0a4ff` these are `80597cf0` / `71cd6b7d`, and `3ae2b6bb` adds this record.
 - Harness: [`../issue_1799_1752_matrix_functions.rs`](../issue_1799_1752_matrix_functions.rs),
   SHA-256 `7ad15a97cad8f79c6bf83b23061ed57363f498397acfdcf78bd5bab65f352135`, copied into
   `tenet/examples/` of each checkout; `Cargo.lock` unchanged
@@ -38,3 +39,20 @@ fewer provider calls is the likely cause, not measured separately. `pinv` makes 
 sector and still wins by removing the factor copies.
 Batching the per-sector GEMMs of these kernels into one provider call is the remaining constant
 factor; no CI timing gate.
+
+## Streaming polar (review follow-up)
+
+`streaming_polar/` compares the staged polar (`3ae2b6bb`, the rebased candidate above) with the
+streaming one (each sector: SVD → `W`/`P` GEMMs → landing, then dropped), same protocol on the
+harness revision with peak live bytes and a third shape, U(1)/SU(2) with 7 leg sectors, `k = 2`
+(harness SHA-256 `f98cb218b8e8c40e810e23c8eb4b3382d4a98f2dce6645b5ca7167f646ba5db6`). The
+staged working set is `outputs + Σ_c (U_c, S_c, Vh_c)`, the streaming one `outputs + max_c` of a
+sector's factors and the provider's SVD scratch. With 7 leg sectors peak live bytes fall 8–34 %
+(e.g. SU(2) f64 left polar 1 390 600 → 966 920). With 3 leg sectors (5 coupled sectors) they rise
+(e.g. U(1) f64 `k = 2` 17 560 → 21 944, SU(2) c64 `k = 6` 5 000 712 → 5 757 640): there the
+provider's transient SVD scratch, which the staged loop paid before the outputs were allocated,
+now overlaps the live outputs, and it exceeds the few staged factors it replaces. Time is
+unchanged (geomean 0.995–1.003 over the polar rows); allocation calls are equal and bytes 480 B lower.
+The SVD factors themselves remain provider-owned per call: the executor's `svd_into` has only the
+default copy-through-owned implementation, so a reused factor buffer would add a copy, not remove
+an allocation.

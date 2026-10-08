@@ -92,10 +92,11 @@ where
     // failure is never mistaken for non-hermiticity.
     let spectral = is_hermitian_endomorphism_dyn(input)?;
     map_square_sectors_dyn_into(
+        dense,
         input,
         output_space,
         |order| ExpWorkspace::new(order, spectral),
-        |workspace, source, order, output| match workspace {
+        |dense, workspace, source, order, output| match workspace {
             ExpWorkspace::Spectral { scaled } => {
                 exp_spectral_sector(dense, scaled, source, order, output)
             }
