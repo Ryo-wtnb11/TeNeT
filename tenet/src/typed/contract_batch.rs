@@ -42,7 +42,7 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     runtime: Runtime,
     binding: Arc<StorageContractResolution<f64>>,
-    output: Option<StackedTensorMap<R, D, S>>,
+    output: OutputSlot<StackedTensorMap<R, D, S>>,
     members: DynamicTreeMembersWorkspace<D>,
     replay: Option<(StackedDirectReplay, bool)>,
     copy_c: Option<CopyCWorkspace<D>>,
@@ -151,17 +151,22 @@ where
         &self.output_signature
     }
 
+    fn check_workspace(&self, workspace: &ContractWorkspace<R, D, S>) -> Result<(), Error> {
+        if Arc::ptr_eq(&self.resolution, &workspace.binding) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "contract workspace belongs to another plan".into(),
+            ))
+        }
+    }
+
+    /// Checks both operand stacks and returns their common member count.
     fn check(
         &self,
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
-        workspace: &ContractWorkspace<R, D, S>,
     ) -> Result<usize, Error> {
-        if !Arc::ptr_eq(&self.resolution, &workspace.binding) {
-            return Err(Error::InvalidArgument(
-                "contract workspace belongs to another plan".into(),
-            ));
-        }
         for (actual, expected) in [(&lhs.signature, &self.lhs), (&rhs.signature, &self.rhs)] {
             if let Some(field) = expected.first_mismatch(actual) {
                 return Err(Error::BatchSignatureMismatch {
@@ -188,6 +193,30 @@ where
         Ok(lhs.members)
     }
 
+    fn check_destination(
+        &self,
+        dst: &StackedTensorMap<R, D, S>,
+        members: usize,
+    ) -> Result<(), Error> {
+        if let Some(field) = self.output_signature.first_mismatch(&dst.signature) {
+            return Err(Error::BatchSignatureMismatch {
+                member: None,
+                field,
+            });
+        }
+        if dst.members != members {
+            return Err(Error::InvalidArgument(
+                "destination member count differs from operands".into(),
+            ));
+        }
+        if dst.storage.len() != self.total_len(self.member_len, members)? {
+            return Err(Error::InvalidArgument(
+                "destination payload length differs from its structure".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn total_len(&self, len: usize, members: usize) -> Result<usize, Error> {
         let total = len.checked_mul(members).ok_or_else(|| {
             Error::InvalidArgument("stacked payload length overflows usize".into())
@@ -205,11 +234,11 @@ where
     D: TensorScalar,
 {
     /// Creates independent mutable state; member count can change later.
-    pub fn workspace(&self) -> ContractWorkspace<R, D> {
-        ContractWorkspace {
+    pub fn workspace(&self) -> Result<ContractWorkspace<R, D>, Error> {
+        Ok(ContractWorkspace {
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.resolution),
-            output: None,
+            output: OutputSlot::default(),
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
             copy_c: self.copy_c().map(|_| CopyCWorkspace::default()),
@@ -219,7 +248,7 @@ where
             dynamic: Default::default(),
             #[cfg(feature = "cuda")]
             device: DeviceComposeState::default(),
-        }
+        })
     }
 
     fn run(
@@ -295,20 +324,24 @@ where
         Ok(())
     }
 
-    /// Overwrites the workspace-owned output and borrows it until the next call.
-    /// Validation errors preserve any previous output. After a backend error,
-    /// its payload may be partially overwritten while its metadata stays valid.
+    /// Overwrites the workspace-owned output and borrows it until the next
+    /// call. Any error follows the batched module's failure rule.
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D>,
         rhs: &StackedTensorMap<R, D>,
         workspace: &'a mut ContractWorkspace<R, D>,
     ) -> Result<&'a StackedTensorMap<R, D>, Error> {
-        let members = self.check(lhs, rhs, workspace)?;
-        let total = self.total_len(self.member_len, members)?;
-        let mut output = workspace
-            .output
-            .take()
+        self.check_workspace(workspace)?;
+        let buffers = workspace.output.take();
+        let checked = self
+            .check(lhs, rhs)
+            .and_then(|members| Ok((members, self.total_len(self.member_len, members)?)));
+        let (members, total) = match checked {
+            Ok(checked) => checked,
+            Err(error) => return Err(workspace.output.fail(buffers, error)),
+        };
+        let mut output = buffers
             .filter(|output| output.members == members)
             .unwrap_or_else(|| StackedTensorMap {
                 runtime: self.runtime.clone(),
@@ -320,13 +353,13 @@ where
                 _payload: PhantomData,
             });
         let result = self.run(lhs, rhs, &mut output.storage, members, workspace);
-        let output = workspace.output.insert(output);
-        result.map(|()| &*output)
+        workspace.output.settle(output, result)
     }
 
     /// Overwrites a checked caller destination. Validation and capability
-    /// errors leave it unchanged. After a backend error, its payload may be
-    /// partially overwritten while its metadata stays valid.
+    /// errors leave it unchanged; after a backend error its payload may be
+    /// partially overwritten while its metadata stays valid. Any error
+    /// follows the batched module's failure rule.
     pub fn execute_into(
         &self,
         lhs: &StackedTensorMap<R, D>,
@@ -334,31 +367,20 @@ where
         dst: &mut StackedTensorMap<R, D>,
         workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
-        let members = self.check(lhs, rhs, workspace)?;
-        if let Some(field) = self.output_signature.first_mismatch(&dst.signature) {
-            return Err(Error::BatchSignatureMismatch {
-                member: None,
-                field,
-            });
-        }
-        if dst.members != members {
-            return Err(Error::InvalidArgument(
-                "destination member count differs from operands".into(),
-            ));
-        }
-        if dst.storage.len() != self.total_len(self.member_len, members)? {
-            return Err(Error::InvalidArgument(
-                "destination payload length differs from its structure".into(),
-            ));
-        }
-        self.run(lhs, rhs, &mut dst.storage, members, workspace)
+        self.check_workspace(workspace)?;
+        let result = self.check(lhs, rhs).and_then(|members| {
+            self.check_destination(dst, members)?;
+            self.run(lhs, rhs, &mut dst.storage, members, workspace)
+        });
+        result.map_err(|error| workspace.output.hide(error))
     }
 }
 
 impl<R, D, S> ContractWorkspace<R, D, S> {
-    /// Moves the workspace-owned output to the caller.
+    /// Moves the output of the last successful call to the caller; `None`
+    /// after a failed call (the batched module's failure rule).
     pub fn take_output(&mut self) -> Option<StackedTensorMap<R, D, S>> {
-        self.output.take()
+        self.output.take_output()
     }
 
     fn retained_scratch_bytes(&self) -> usize {
@@ -378,12 +400,16 @@ impl<R, D> ContractWorkspace<R, D> {
     /// Retained Host payload capacity and replay scratch, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
-            + self.output.as_ref().map_or(0, |output| {
-                output
-                    .storage
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<D>())
-            })
+            + self
+                .output
+                .buffers()
+                .map(|output| {
+                    output
+                        .storage
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<D>())
+                })
+                .sum::<usize>()
     }
 }
 
@@ -396,12 +422,16 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
             + self.copy_c_temporary.as_ref().map_or(0, |(temporary, _)| {
                 TensorStorage::len(temporary).saturating_mul(std::mem::size_of::<D>())
             })
-            + self.output.as_ref().map_or(0, |output| {
-                output
-                    .members
-                    .saturating_mul(output.member_len)
-                    .saturating_mul(std::mem::size_of::<D>())
-            })
+            + self
+                .output
+                .buffers()
+                .map(|output| {
+                    output
+                        .members
+                        .saturating_mul(output.member_len)
+                        .saturating_mul(std::mem::size_of::<D>())
+                })
+                .sum::<usize>()
             + self.device.zero_regions.capacity() * std::mem::size_of::<tenet_dense::CudaRegion>()
             + self
                 .device
@@ -441,7 +471,7 @@ where
         let mut workspace = ContractWorkspace {
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.resolution),
-            output: None,
+            output: OutputSlot::default(),
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
             copy_c: None,
@@ -622,34 +652,37 @@ where
         Ok(())
     }
 
-    /// Overwrites workspace-owned device output; validation leaves it unchanged.
-    /// A new member count uploads one zeroed output buffer (#740); that
-    /// buffer already has zero inactive regions. A warm call zeroes those
-    /// regions in place and transfers no payload.
+    /// Overwrites workspace-owned device output; any error follows the
+    /// batched module's failure rule. A new member count uploads one zeroed
+    /// output buffer (#740); that buffer already has zero inactive regions.
+    /// A reused buffer, including one kept after a failed call, has its
+    /// inactive regions zeroed in place, and transfers no payload.
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         workspace: &'a mut ContractWorkspace<R, D, CudaStorage<D>>,
     ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
-        let members = self.check(lhs, rhs, workspace)?;
-        let total = self.total_len(self.member_len, members)?;
-        let fresh = workspace
-            .output
-            .as_ref()
-            .is_none_or(|output| output.members != members);
+        self.check_workspace(workspace)?;
+        let buffers = workspace.output.take();
         let runtime = self.runtime.clone();
-        let mut lease = runtime.lease_cuda()?;
         let dynamic = self.resolution.is_dynamic_tree();
-        if !dynamic {
-            self.prepare_zero_regions(workspace, &mut lease, members)?;
-            self.prepare_copy_regions(workspace, &mut lease, members)?;
-        }
-        let mut output = match workspace
-            .output
-            .take()
-            .filter(|output| output.members == members)
-        {
+        let prepared = self.check(lhs, rhs).and_then(|members| {
+            let total = self.total_len(self.member_len, members)?;
+            let mut lease = runtime.lease_cuda()?;
+            if !dynamic {
+                self.prepare_zero_regions(workspace, &mut lease, members)?;
+                self.prepare_copy_regions(workspace, &mut lease, members)?;
+            }
+            Ok((members, total, lease))
+        });
+        let (members, total, mut lease) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(workspace.output.fail(buffers, error)),
+        };
+        let reused = buffers.filter(|output| output.members == members);
+        let fresh = reused.is_none();
+        let mut output = match reused {
             Some(output) => output,
             None => StackedTensorMap {
                 runtime: self.runtime.clone(),
@@ -671,8 +704,8 @@ where
         } else {
             self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, !fresh)
         };
-        let output = workspace.output.insert(output);
-        result.map(|()| &*output)
+        drop(lease);
+        workspace.output.settle(output, result)
     }
 
     /// Overwrites a checked caller device destination. After the zero
@@ -685,28 +718,19 @@ where
         dst: &mut StackedTensorMap<R, D, CudaStorage<D>>,
         workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
     ) -> Result<(), Error> {
-        let members = self.check(lhs, rhs, workspace)?;
-        if let Some(field) = self.output_signature.first_mismatch(&dst.signature) {
-            return Err(Error::BatchSignatureMismatch {
-                member: None,
-                field,
-            });
-        }
-        if dst.members != members
-            || dst.storage.len() != self.total_len(self.member_len, members)?
-        {
-            return Err(Error::InvalidArgument(
-                "destination count or payload length differs from operands".into(),
-            ));
-        }
-        let runtime = self.runtime.clone();
-        let mut lease = runtime.lease_cuda()?;
-        if self.resolution.is_dynamic_tree() {
-            return self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut dst.storage, false);
-        }
-        self.prepare_zero_regions(workspace, &mut lease, members)?;
-        self.prepare_copy_regions(workspace, &mut lease, members)?;
-        self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+        self.check_workspace(workspace)?;
+        let result = self.check(lhs, rhs).and_then(|members| {
+            self.check_destination(dst, members)?;
+            let runtime = self.runtime.clone();
+            let mut lease = runtime.lease_cuda()?;
+            if self.resolution.is_dynamic_tree() {
+                return self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut dst.storage, false);
+            }
+            self.prepare_zero_regions(workspace, &mut lease, members)?;
+            self.prepare_copy_regions(workspace, &mut lease, members)?;
+            self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+        });
+        result.map_err(|error| workspace.output.hide(error))
     }
 
     fn run_dynamic(

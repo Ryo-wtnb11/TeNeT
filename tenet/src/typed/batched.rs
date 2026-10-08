@@ -6,6 +6,18 @@
 //! authority, the logical hom space, the fusion-tree block structure, the
 //! payload placement and the Runtime. The payload dtype is the type parameter
 //! `D` of every consumer and is therefore checked by the compiler, not here.
+//!
+//! # Failure rule of every batched plan
+//!
+//! [`ComposePlan`], [`ContractPlan`] and [`EighFullPlan`] (Host and CUDA)
+//! share one rule. A workspace created by another plan is rejected before it
+//! is touched. Otherwise a failed `execute` or `execute_into` (a validation
+//! error, a signature mismatch or a backend error) leaves no observable
+//! workspace output: `take_output` returns `None` until the next successful
+//! `execute`, which rewrites every member. The failed call's buffers stay in
+//! the workspace and are reused, so the next call allocates no more than a
+//! warm one. After a failed `execute_into` the caller's destination contents
+//! are unspecified; a validation error never writes them.
 
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -464,6 +476,68 @@ where
     }
 }
 
+/// The workspace-owned output of a batched plan under the module's failure
+/// rule: at most one of `output` and `spare` is set.
+struct OutputSlot<T> {
+    /// The output of the last successful call: the only observable one.
+    output: Option<T>,
+    /// Buffers kept for reuse after a failed call. Never observable: a failed
+    /// call may have written part of them.
+    spare: Option<T>,
+}
+
+impl<T> Default for OutputSlot<T> {
+    fn default() -> Self {
+        Self {
+            output: None,
+            spare: None,
+        }
+    }
+}
+
+impl<T> OutputSlot<T> {
+    fn take_output(&mut self) -> Option<T> {
+        self.output.take()
+    }
+
+    /// Takes the buffers for a call; the previous output stays unobservable
+    /// until the call publishes.
+    fn take(&mut self) -> Option<T> {
+        let spare = self.spare.take();
+        self.output.take().or(spare)
+    }
+
+    /// Keeps `buffers` as the unobservable spare and returns `error`.
+    fn fail<E>(&mut self, buffers: Option<T>, error: E) -> E {
+        self.spare = buffers;
+        error
+    }
+
+    /// Hides the output after a failed call that did not take the buffers.
+    fn hide<E>(&mut self, error: E) -> E {
+        let buffers = self.take();
+        self.fail(buffers, error)
+    }
+
+    /// Makes `buffers` the observable output of a successful call.
+    fn publish(&mut self, buffers: T) -> &T {
+        self.output.insert(buffers)
+    }
+
+    /// Publishes `buffers` after a successful call, or keeps them as the spare.
+    fn settle<E>(&mut self, buffers: T, result: Result<(), E>) -> Result<&T, E> {
+        match result {
+            Ok(()) => Ok(self.publish(buffers)),
+            Err(error) => Err(self.fail(Some(buffers), error)),
+        }
+    }
+
+    /// The output and the spare, for retained-byte accounting.
+    fn buffers(&self) -> impl Iterator<Item = &T> {
+        self.output.iter().chain(&self.spare)
+    }
+}
+
 /// Immutable structural plan for composing every member pair of two stacks.
 ///
 /// Per member it is the eager [`TensorMap::compose`] of the same placement:
@@ -537,7 +611,7 @@ pub struct ComposeWorkspace<R, D, S = Vec<D>> {
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     runtime: Runtime,
     binding: Arc<FusionBlockContractPlan<f64>>,
-    output: Option<StackedTensorMap<R, D, S>>,
+    output: OutputSlot<StackedTensorMap<R, D, S>>,
     /// Host only: the plan expanded over the current `B`.
     replay: Option<StackedDirectReplay>,
     #[cfg(feature = "cuda")]
@@ -627,7 +701,7 @@ where
         let mut workspace = ComposeWorkspace {
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.plan),
-            output: None,
+            output: OutputSlot::default(),
             replay: None,
             #[cfg(feature = "cuda")]
             device: DeviceComposeState::default(),
@@ -733,16 +807,20 @@ impl<R, D, S> ComposePlan<R, D, S> {
 }
 
 impl<R, D, S> ComposeWorkspace<R, D, S> {
-    /// Moves the workspace-owned output out.
+    /// Moves the output of the last successful call out; `None` after a
+    /// failed call (see the module's failure rule).
     pub fn take_output(&mut self) -> Option<StackedTensorMap<R, D, S>> {
-        self.output.take()
+        self.output.take_output()
     }
 
-    /// Bytes retained exclusively by this workspace.
+    /// Bytes retained exclusively by this workspace, including the buffers
+    /// kept after a failed call.
     pub fn retained_bytes(&self) -> usize {
-        let output = self.output.as_ref().map_or(0, |output| {
-            output.members * output.member_len * std::mem::size_of::<D>()
-        });
+        let output = self
+            .output
+            .buffers()
+            .map(|output| output.members * output.member_len * std::mem::size_of::<D>())
+            .sum::<usize>();
         let replay = self
             .replay
             .as_ref()
@@ -781,8 +859,8 @@ where
     ///
     /// [`Error::BatchSignatureMismatch`] with `member: None` for a stack of
     /// another signature, and [`Error::InvalidArgument`] for operand stacks
-    /// of different member counts, all before any work. On any error the
-    /// workspace-owned output is unspecified until the next successful call.
+    /// of different member counts, all before any work. Any error follows
+    /// the module's failure rule.
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D>,
@@ -790,19 +868,20 @@ where
         workspace: &'a mut ComposeWorkspace<R, D>,
     ) -> Result<&'a StackedTensorMap<R, D>, Error> {
         self.check_workspace(workspace)?;
-        let members = self.check_operands(lhs, rhs)?;
-        self.prepare_host_replay(workspace, members)?;
-        let mut output = match workspace
-            .output
-            .take()
-            .filter(|output| output.members == members)
-        {
+        let buffers = workspace.output.take();
+        let members = match self.check_operands(lhs, rhs).and_then(|members| {
+            self.prepare_host_replay(workspace, members)
+                .map(|()| members)
+        }) {
+            Ok(members) => members,
+            Err(error) => return Err(workspace.output.fail(buffers, error)),
+        };
+        let mut output = match buffers.filter(|output| output.members == members) {
             Some(output) => output,
             None => self.output_stack(zeroed_payload(self.payload_len(members)?), members),
         };
         let result = self.run_host(workspace, lhs, rhs, &mut output.storage, false);
-        let output = workspace.output.insert(output);
-        result.map(|()| &*output)
+        workspace.output.settle(output, result)
     }
 
     /// Composes every member pair into the caller's `dst`, overwriting it.
@@ -814,8 +893,8 @@ where
     ///
     /// # Errors
     ///
-    /// As [`Self::execute`], plus the same typed errors for `dst`. After an
-    /// error the contents of `dst` are unspecified.
+    /// As [`Self::execute`], plus the same typed errors for `dst`, before
+    /// any write; any error follows the module's failure rule.
     pub fn execute_into(
         &self,
         lhs: &StackedTensorMap<R, D>,
@@ -824,10 +903,12 @@ where
         workspace: &mut ComposeWorkspace<R, D>,
     ) -> Result<(), Error> {
         self.check_workspace(workspace)?;
-        let members = self.check_operands(lhs, rhs)?;
-        self.check_destination(dst, members)?;
-        self.prepare_host_replay(workspace, members)?;
-        self.run_host(workspace, lhs, rhs, &mut dst.storage, true)
+        let result = self.check_operands(lhs, rhs).and_then(|members| {
+            self.check_destination(dst, members)?;
+            self.prepare_host_replay(workspace, members)?;
+            self.run_host(workspace, lhs, rhs, &mut dst.storage, true)
+        });
+        result.map_err(|error| workspace.output.hide(error))
     }
 
     fn prepare_host_replay(
@@ -891,14 +972,16 @@ where
         workspace: &'a mut ComposeWorkspace<R, D, CudaStorage<D>>,
     ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
         self.check_workspace(workspace)?;
-        let members = self.check_operands(lhs, rhs)?;
-        let len = self.payload_len(members)?;
-        let mut lease = self.runtime.lease_cuda()?;
-        let mut output = match workspace
-            .output
-            .take()
-            .filter(|output| output.members == members)
-        {
+        let buffers = workspace.output.take();
+        let prepared = self.check_operands(lhs, rhs).and_then(|members| {
+            let len = self.payload_len(members)?;
+            Ok((members, len, self.runtime.lease_cuda()?))
+        });
+        let (members, len, mut lease) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(workspace.output.fail(buffers, error)),
+        };
+        let mut output = match buffers.filter(|output| output.members == members) {
             Some(output) => output,
             None => {
                 let storage = CudaStorage::upload_members(
@@ -912,8 +995,7 @@ where
         };
         let result = self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, false);
         drop(lease);
-        let output = workspace.output.insert(output);
-        result.map(|()| &*output)
+        workspace.output.settle(output, result)
     }
 
     /// The device form of the Host [`ComposePlan::execute_into`]: one
@@ -927,14 +1009,16 @@ where
         workspace: &mut ComposeWorkspace<R, D, CudaStorage<D>>,
     ) -> Result<(), Error> {
         self.check_workspace(workspace)?;
-        let members = self.check_operands(lhs, rhs)?;
-        self.check_destination(dst, members)?;
-        // A second handle to the Runtime (one reference count) so the lease
-        // does not borrow `self` while the zero regions are rebuilt.
-        let runtime = self.runtime.clone();
-        let mut lease = runtime.lease_cuda()?;
-        self.prepare_zero_regions(workspace, &mut lease, members)?;
-        self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+        let result = self.check_operands(lhs, rhs).and_then(|members| {
+            self.check_destination(dst, members)?;
+            // A second handle to the Runtime (one reference count) so the
+            // lease does not borrow `self` while the zero regions are rebuilt.
+            let runtime = self.runtime.clone();
+            let mut lease = runtime.lease_cuda()?;
+            self.prepare_zero_regions(workspace, &mut lease, members)?;
+            self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+        });
+        result.map_err(|error| workspace.output.hide(error))
     }
 
     fn prepare_zero_regions(
@@ -1308,11 +1392,7 @@ pub struct EighFullPlan<R: SectorCodec, D, S = Vec<D>> {
 /// Caller-owned mutable state for repeated execution of an [`EighFullPlan`].
 pub struct EighFullWorkspace<R: SectorCodec, D, S = Vec<D>> {
     binding: Arc<()>,
-    /// The factors of the last successful call: the only observable output.
-    output: Option<StackPair<R, D, S>>,
-    /// Buffers kept for reuse after a failed call. Never observable: a
-    /// failed call may have written part of them.
-    spare: Option<StackPair<R, D, S>>,
+    output: OutputSlot<StackPair<R, D, S>>,
     spectra: Vec<Vec<SectorSpectrum<<R as SectorCodec>::Sector>>>,
     host_spectra: Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>,
     #[cfg(feature = "cuda")]
@@ -1452,8 +1532,7 @@ where
     pub fn workspace(&self) -> Result<EighFullWorkspace<R, D, S>, Error> {
         Ok(EighFullWorkspace {
             binding: Arc::clone(&self.identity),
-            output: None,
-            spare: None,
+            output: OutputSlot::default(),
             spectra: Vec::new(),
             host_spectra: Vec::new(),
             #[cfg(feature = "cuda")]
@@ -1467,35 +1546,13 @@ impl<R: SectorCodec, D, S> EighFullWorkspace<R, D, S> {
     /// next execute allocates new ones. `None` after a failed call: a batch
     /// fails as a whole, so no partially written factor is ever handed out.
     pub fn take_output(&mut self) -> Option<StackPair<R, D, S>> {
-        self.output.take()
+        self.output.take_output()
     }
 
-    /// The output buffers for a call over `members`: the last output or the
-    /// spare, if either has that member count. Taking them also makes the
-    /// previous output unobservable until this call succeeds.
+    /// The output buffers for a call over `members`, taken after the source
+    /// is admitted so a rejected call keeps buffers of any member count.
     fn take_buffers(&mut self, members: usize) -> Option<StackPair<R, D, S>> {
-        let buffers = self.output.take().or_else(|| self.spare.take());
-        self.spare = None;
-        buffers.filter(|(d, _)| d.members == members)
-    }
-
-    /// Publishes `buffers` after a successful call, or keeps them as the
-    /// unobservable spare after a failed one.
-    fn settle<T>(
-        &mut self,
-        buffers: Option<StackPair<R, D, S>>,
-        result: Result<T, BatchError>,
-    ) -> Result<T, BatchError> {
-        match result {
-            Ok(value) => {
-                self.output = buffers;
-                Ok(value)
-            }
-            Err(error) => {
-                self.spare = buffers;
-                Err(error)
-            }
-        }
+        self.output.take().filter(|(d, _)| d.members == members)
     }
 
     /// Bytes retained exclusively by this workspace: output payloads, host
@@ -1504,8 +1561,7 @@ impl<R: SectorCodec, D, S> EighFullWorkspace<R, D, S> {
     pub fn retained_bytes(&self) -> usize {
         let payloads = self
             .output
-            .iter()
-            .chain(&self.spare)
+            .buffers()
             .map(|(d, v)| {
                 (d.members * d.member_len + v.members * v.member_len) * std::mem::size_of::<D>()
             })
@@ -1592,6 +1648,7 @@ impl<R: SectorCodec, D, S> EighFullPlan<R, D, S> {
     ) -> Result<EighStackOutput<'a, R, D, S>, Error> {
         let (d, v) = workspace
             .output
+            .output
             .as_ref()
             .ok_or_else(|| Error::InvalidArgument("eigh output is missing".into()))?;
         Ok(EighStackOutput {
@@ -1631,11 +1688,14 @@ where
         workspace: &'a mut EighFullWorkspace<R, D>,
     ) -> Result<EighStackOutput<'a, R, D>, BatchError> {
         self.check_workspace(workspace)?;
+        if let Err(error) = self.check_source(source) {
+            return Err(workspace.output.hide(error.into()));
+        }
         let mut buffers = workspace.take_buffers(source.members);
         workspace.host_spectra.clear();
         if let Err(error) = self.run_host(source, &mut buffers, &mut workspace.host_spectra) {
             workspace.host_spectra.clear();
-            return workspace.settle(buffers, Err(error));
+            return Err(workspace.output.fail(buffers, error));
         }
         if let Err(error) = publish_spectra(
             &mut workspace.spectra,
@@ -1649,10 +1709,12 @@ where
             },
         ) {
             workspace.host_spectra.clear();
-            return workspace.settle(buffers, Err(error.into()));
+            return Err(workspace.output.fail(buffers, error.into()));
         }
         workspace.host_spectra.clear();
-        workspace.settle(buffers, Ok(()))?;
+        if let Some(buffers) = buffers {
+            workspace.output.publish(buffers);
+        }
         Ok(self.output_ref(workspace)?)
     }
 
@@ -1666,7 +1728,6 @@ where
         buffers: &mut Option<StackPair<R, D, Vec<D>>>,
         spectra: &mut Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>,
     ) -> Result<(), BatchError> {
-        self.check_source(source)?;
         let members = source.members;
         let len = self.member_len;
         let runtime = self.runtime.clone();
@@ -1997,9 +2058,12 @@ where
         workspace: &'a mut EighFullWorkspace<R, D, CudaStorage<D>>,
     ) -> Result<EighStackOutput<'a, R, D, CudaStorage<D>>, BatchError> {
         self.check_workspace(workspace)?;
+        if let Err(error) = self.check_source(source) {
+            return Err(workspace.output.hide(error.into()));
+        }
         let mut buffers = workspace.take_buffers(source.members);
         if let Err(error) = self.run_cuda(source, &mut buffers, &mut workspace.device) {
-            return workspace.settle(buffers, Err(error));
+            return Err(workspace.output.fail(buffers, error));
         }
         let device = self
             .device
@@ -2023,9 +2087,11 @@ where
                     .ok_or_else(|| internal_layout_error("a coupled sector has no route"))
             },
         ) {
-            return workspace.settle(buffers, Err(error.into()));
+            return Err(workspace.output.fail(buffers, error.into()));
         }
-        workspace.settle(buffers, Ok(()))?;
+        if let Some(buffers) = buffers {
+            workspace.output.publish(buffers);
+        }
         Ok(self.output_ref(workspace)?)
     }
 
@@ -2037,7 +2103,6 @@ where
         buffers: &mut Option<StackPair<R, D, CudaStorage<D>>>,
         workspace: &mut DeviceEighWorkspace,
     ) -> Result<(), BatchError> {
-        self.check_source(source)?;
         let members = source.members;
         let runtime = self.runtime.clone();
         let device = self

@@ -202,7 +202,7 @@ mod tests {
         let right = StackedTensorMap::pack(&[&b, &b]).unwrap();
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
         assert!(plan.copy_c().is_some());
-        let mut workspace = plan.workspace();
+        let mut workspace = plan.workspace().unwrap();
         plan.execute(&left, &right, &mut workspace).unwrap();
         let copy = workspace.copy_c.as_mut().unwrap();
         assert!(copy.temporary.contains(&0.0));
@@ -361,7 +361,7 @@ mod tests {
                         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
                         plan.copy_c()
                             .unwrap_or_else(|| panic!("{name} did not choose CopyC"));
-                        let mut workspace = plan.workspace();
+                        let mut workspace = plan.workspace().unwrap();
                         plan.execute(&left, &right, &mut workspace).unwrap();
                     }
                 }
@@ -486,7 +486,7 @@ mod tests {
                 }),
                 "this selected SU2 CopyC route must contain a scaled Single move"
             );
-            let mut workspace = plan.workspace();
+            let mut workspace = plan.workspace().unwrap();
             let expected = plan
                 .execute(&lhs, &rhs, &mut workspace)
                 .unwrap()
