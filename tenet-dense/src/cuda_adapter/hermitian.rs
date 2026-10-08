@@ -208,7 +208,8 @@ impl Members {
 /// (`eigh_full!` over `foreachblock`). TeNeT keeps its approved relative
 /// tolerance instead of MAK's absolute `default_hermitian_tol` (#1987). QSpace
 /// `dd2cc7e1` `Source/wbarray_blas.cc:wbEigenS` ->
-/// `Source/wbarray.cc:wbarray::isSym_aux` checks entrywise and is not ported.
+/// `Source/wbarray.hh:isHConj` -> `Source/wbarray.cc:wbarray::isSym_aux`
+/// checks entrywise and is not ported.
 /// Neither reference has a device or member-stacked admission path: the
 /// stages, normalizers and member axis are TeNeT's.
 fn admit_regions<D: CudaScalar>(
