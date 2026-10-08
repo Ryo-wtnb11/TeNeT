@@ -456,3 +456,65 @@ fn checked_generic_single_precision_norm_accumulates_wide() {
         Complex32::new(x, 1.0)
     });
 }
+
+/// Checked Generic compact reductions read the stored spectrum: warmed, they
+/// allocate nothing, so no operation-local dense payload exists (#1867). The
+/// compact plus lazy `axpby` allocates its one dense result and never a
+/// densified copy of the compact operand.
+#[test]
+fn warmed_checked_generic_compact_reductions_do_not_densify() {
+    const K: usize = 16;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(GenericToy), [(GenericLabel::X, K)]).unwrap();
+    let compact = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: GenericLabel::X,
+            values: (0..K)
+                .map(|i| Complex64::new(1.0 + i as f64, -0.5 * i as f64))
+                .collect(),
+        }],
+    )
+    .unwrap();
+    let dense: TensorMap<GenericToy, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 1_867).unwrap();
+    let lazy = dense.adjoint().unwrap();
+    // One `K x K` complex payload: the result. A densified compact operand
+    // would be a second allocation of exactly this size.
+    let payload = K * K * std::mem::size_of::<Complex64>();
+    for (row, call) in [
+        (
+            "axpby(compact, lazy)",
+            &(|| compact.axpby(Complex64::new(0.5, 0.0), &lazy, Complex64::new(2.0, 0.0)))
+                as &dyn Fn() -> _,
+        ),
+        ("axpby(lazy, compact)", &|| {
+            lazy.axpby(Complex64::new(2.0, 0.0), &compact, Complex64::new(0.5, 0.0))
+        }),
+    ] {
+        black_box(call().unwrap());
+        let (value, allocations) = counting_alloc::measure_matching(payload..=payload, call);
+        black_box(value.unwrap());
+        assert_eq!(allocations.matched_calls, 1, "{row}");
+    }
+
+    let rows: [(&str, &dyn Fn() -> Complex64); 10] = [
+        ("compact inner", &|| compact.inner(&compact).unwrap()),
+        ("compact-dense inner", &|| compact.inner(&dense).unwrap()),
+        ("dense-compact inner", &|| dense.inner(&compact).unwrap()),
+        ("compact-lazy inner", &|| compact.inner(&lazy).unwrap()),
+        ("lazy-compact inner", &|| lazy.inner(&compact).unwrap()),
+        ("norm(1)", &|| compact.norm(1.0).unwrap().into()),
+        ("norm(2)", &|| compact.norm(2.0).unwrap().into()),
+        ("norm(3)", &|| compact.norm(3.0).unwrap().into()),
+        ("norm(Inf)", &|| compact.norm(f64::INFINITY).unwrap().into()),
+        ("tr", &|| compact.tr().unwrap()),
+    ];
+    for (row, call) in rows {
+        black_box(call());
+        let (value, allocations) = measured(call);
+        black_box(value);
+        assert_eq!(allocations, 0, "{row}");
+    }
+}

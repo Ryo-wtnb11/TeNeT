@@ -19,9 +19,19 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
     assert!(complex.norm(2.0).unwrap().is_finite());
     assert!(complex.tr().unwrap().re.is_finite());
     assert!(provider.coefficient_queries.load(Ordering::Relaxed) > 0);
-    // Checked Generic has only the Frobenius reduction: every other exponent
-    // is a typed rejection, never a silently different norm.
-    for p in [1.0, 3.0, f64::INFINITY, 0.0, f64::NAN] {
+    // Every TensorKit exponent (`linalg.jl:_norm`): the 2x2 block of `X`
+    // holds `1, 2, 2, 3`, weighted by `dim(X) = 1 + sqrt(2)`; `Inf` is not
+    // weighted. Only an exponent outside TensorKit's domain is rejected.
+    let dim_x = 1.0 + 2.0_f64.sqrt();
+    for (p, want) in [
+        (1.0, dim_x * 8.0),
+        (3.0, (dim_x * 44.0_f64).cbrt()),
+        (f64::INFINITY, 3.0),
+    ] {
+        numerics::assert_close(&format!("norm({p})"), source.norm(p).unwrap(), want, 4);
+        numerics::assert_close(&format!("c64 norm({p})"), complex.norm(p).unwrap(), want, 4);
+    }
+    for p in [0.0, f64::NAN] {
         assert!(
             matches!(
                 source.norm(p),
@@ -32,6 +42,111 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
             "checked Generic norm({p})"
         );
     }
+}
+
+#[test]
+fn checked_generic_compact_reductions_read_only_the_spectrum() {
+    // What: a checked Generic compact operand reduces from its stored values,
+    // weighted by `dim(X) = 1 + sqrt(2)`, against compact, dense and lazy
+    // partners; the dense partner's off-diagonal entries are not read.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let compact = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(2.0, 1.0), Complex64::new(-1.0, 0.5)],
+        }],
+    )
+    .unwrap();
+    let dense: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 0) => Complex64::new(1.0, -1.0),
+                (1, 1) => Complex64::new(0.5, 2.0),
+                _ => Complex64::new(f64::NAN, f64::NAN),
+            }
+        })
+        .unwrap();
+    let dim_x = 1.0 + 2.0_f64.sqrt();
+    let (a, d) = (
+        [Complex64::new(2.0, 1.0), Complex64::new(-1.0, 0.5)],
+        [Complex64::new(1.0, -1.0), Complex64::new(0.5, 2.0)],
+    );
+    let inner = dim_x * (a[0].conj() * d[0] + a[1].conj() * d[1]);
+    let terms = 4;
+    numerics::assert_close(
+        "compact.inner(dense)",
+        compact.inner(&dense).unwrap(),
+        inner,
+        terms,
+    );
+    numerics::assert_close(
+        "dense.inner(compact)",
+        dense.inner(&compact).unwrap(),
+        inner.conj(),
+        terms,
+    );
+    // `dense^H` has diagonal `conj(d)`.
+    let lazy = dense.adjoint().unwrap();
+    numerics::assert_close(
+        "compact.inner(lazy)",
+        compact.inner(&lazy).unwrap(),
+        dim_x * (a[0].conj() * d[0].conj() + a[1].conj() * d[1].conj()),
+        terms,
+    );
+    let self_inner = dim_x * (a[0].norm_sqr() + a[1].norm_sqr());
+    numerics::assert_close(
+        "compact.inner(compact)",
+        compact.inner(&compact).unwrap(),
+        Complex64::from(self_inner),
+        terms,
+    );
+    numerics::assert_close(
+        "norm(2)",
+        compact.norm(2.0).unwrap(),
+        self_inner.sqrt(),
+        terms,
+    );
+    numerics::assert_close(
+        "norm(1)",
+        compact.norm(1.0).unwrap(),
+        dim_x * (a[0].norm() + a[1].norm()),
+        terms,
+    );
+    numerics::assert_close(
+        "norm(3)",
+        compact.norm(3.0).unwrap(),
+        (dim_x * (a[0].norm().powi(3) + a[1].norm().powi(3))).cbrt(),
+        terms,
+    );
+    numerics::assert_close(
+        "norm(Inf)",
+        compact.norm(f64::INFINITY).unwrap(),
+        a[0].norm(),
+        terms,
+    );
+    numerics::assert_close("tr", compact.tr().unwrap(), dim_x * (a[0] + a[1]), terms);
+
+    // A failing `dim` surfaces as the provider's error, as on dense input.
+    provider.fail_dim.store(true, Ordering::Relaxed);
+    for result in [
+        compact.inner(&compact).map(|_| ()),
+        compact.inner(&dense).map(|_| ()),
+        compact.norm(2.0).map(|_| ()),
+        compact.norm(1.0).map(|_| ()),
+        compact.tr().map(|_| ()),
+    ] {
+        assert!(matches!(
+            result.unwrap_err(),
+            GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                ToyError::Algebra
+            ))
+        ));
+    }
+    provider.fail_dim.store(false, Ordering::Relaxed);
 }
 
 #[test]
