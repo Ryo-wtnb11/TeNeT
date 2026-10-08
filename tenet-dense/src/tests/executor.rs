@@ -1014,7 +1014,7 @@ fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
     ));
     assert!(matches!(
         executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 2, 2),
-        Err(DenseError::Backend {
+        Err(DenseError::ShapeMismatch {
             op: "svd_full_owned",
             ..
         })
@@ -1042,7 +1042,7 @@ fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
     ));
     assert!(matches!(
         executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 0, 2),
-        Err(DenseError::Backend {
+        Err(DenseError::ShapeMismatch {
             op: "svd_full_owned",
             ..
         })
@@ -2293,4 +2293,252 @@ fn identity_batch_with_malformed_single_run_falls_back_to_grouped() {
         }
     }
     assert_eq!(executor.staged_grouped_jobs(), jobs.len());
+}
+
+/// Decomposition outputs one tensor short, to reach the arity checks of the
+/// `*_into` / values-only trait defaults.
+struct DropsLastOutput(DefaultDenseExecutor);
+impl DenseExecutor for DropsLastOutput {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let mut out = self.0.svd(input)?;
+        out.pop();
+        Ok(out)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let mut out = self.0.qr(input)?;
+        out.pop();
+        Ok(out)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let mut out = self.0.eigh(input)?;
+        out.pop();
+        Ok(out)
+    }
+
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let mut out = self.0.eig(input)?;
+        out.pop();
+        Ok(out)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.0.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+#[test]
+fn default_decomposition_arity_disagreement_is_shape_mismatch() {
+    let data = [2.0_f64, 1.0, 1.0, 3.0];
+    let (shape, strides) = ([2, 2], [1, 2]);
+    let read = || DenseRead::F64(DenseView::new(&data, &shape, &strides, 0).unwrap());
+    let mut out = [[0.0_f64; 4]; 3];
+    let [o0, o1, o2] = &mut out;
+    fn write<'a>(buf: &'a mut [f64; 4]) -> DenseWrite<'a> {
+        DenseWrite::F64(DenseViewMut::new(buf, &[2, 2], &[1, 2], 0).unwrap())
+    }
+    let mut executor = DropsLastOutput(DefaultDenseExecutor::new());
+
+    let cases: [(&str, usize, usize, Result<(), DenseError>); 6] = [
+        ("svd_into", 3, 2, {
+            let (a, b, c) = (write(o0), write(o1), write(o2));
+            executor.svd_into(read(), a, b, c)
+        }),
+        ("qr_into", 2, 1, {
+            let (a, b) = (write(o0), write(o1));
+            executor.qr_into(read(), a, b)
+        }),
+        ("eigh_into", 2, 1, {
+            let (a, b) = (write(o0), write(o1));
+            executor.eigh_into(read(), a, b)
+        }),
+        ("svd_vals", 3, 2, executor.svd_vals(read()).map(drop)),
+        ("eigh_vals", 2, 1, executor.eigh_vals(read()).map(drop)),
+        ("eig_vals", 2, 1, executor.eig_vals(read()).map(drop)),
+    ];
+    for (op, expected, actual, result) in cases {
+        assert_eq!(
+            result.unwrap_err(),
+            DenseError::ShapeMismatch {
+                op,
+                expected: vec![expected],
+                actual: vec![actual],
+            }
+        );
+    }
+}
+
+#[test]
+fn default_copy_into_reports_dtype_and_shape_mismatch() {
+    let data = [2.0_f64, 1.0, 1.0, 3.0];
+    let (shape, strides) = ([2, 2], [1, 2]);
+    let read = || DenseRead::F64(DenseView::new(&data, &shape, &strides, 0).unwrap());
+    let mut executor = DefaultDenseExecutor::new();
+
+    // QR through the trait default: integer destination for Q.
+    let mut qi = [0_i32; 4];
+    let mut r = [0.0_f64; 4];
+    let error = executor
+        .qr_into(
+            read(),
+            DenseWrite::I32(DenseViewMut::new(&mut qi, &shape, &strides, 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut r, &shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::DTypeMismatch {
+            op: "qr_into",
+            expected: DenseDType::F64,
+            actual: DenseDType::I32,
+        }
+    );
+
+    // Wrong destination shape for the same tensor.
+    let mut q = [0.0_f64; 2];
+    let error = executor
+        .qr_into(
+            read(),
+            DenseWrite::F64(DenseViewMut::new(&mut q, &[2, 1], &[1, 2], 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut r, &shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::ShapeMismatch { op: "qr_into", ref expected, ref actual }
+            if expected == &[2, 1] && actual == &[2, 2]
+    ));
+}
+
+#[test]
+fn batched_matmul_mismatch_and_ops_gap_are_typed() {
+    let (a, b) = ([1.0_f64], [1.0_f32]);
+    let mut out = [0.0_f64];
+    let (shape, strides) = ([1, 1], [1, 1]);
+    fn batch_args<'a>(out: &'a mut [f64; 1], a: &'a [f64; 1]) -> (DenseWrite<'a>, DenseRead<'a>) {
+        (
+            DenseWrite::F64(DenseViewMut::new(out, &[1, 1], &[1, 1], 0).unwrap()),
+            DenseRead::F64(DenseView::new(a, &[1, 1], &[1, 1], 0).unwrap()),
+        )
+    }
+    let (alpha, beta) = (DenseScalar::F64(1.0), DenseScalar::F64(0.0));
+    let rhs_f32 = || DenseRead::F32(DenseView::new(&b, &shape, &strides, 0).unwrap());
+    let expected = DenseError::DTypeMismatch {
+        op: "matmul_batch_axpby_into",
+        expected: DenseDType::F64,
+        actual: DenseDType::F32,
+    };
+
+    // Trait default and the Tenferro adapter share one taxonomy.
+    let mut no_axpby = NoAxpby::default();
+    let (o, l) = batch_args(&mut out, &a);
+    let error = no_axpby
+        .matmul_batch_axpby_into(o, l, rhs_f32(), &[], &[], alpha, beta)
+        .unwrap_err();
+    assert_eq!(error, expected);
+
+    let mut default = DefaultDenseExecutor::new();
+    let (o, l) = batch_args(&mut out, &a);
+    let error = default
+        .matmul_batch_axpby_into(o, l, rhs_f32(), &[], &[], alpha, beta)
+        .unwrap_err();
+    assert_eq!(error, expected);
+
+    let (o, l) = batch_args(&mut out, &a);
+    let error = no_axpby
+        .matmul_batch_axpby_with_ops_into(
+            o,
+            l,
+            DenseRead::F64(DenseView::new(&a, &shape, &strides, 0).unwrap()),
+            &[],
+            &[],
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "matmul_batch_axpby_with_ops_into",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn copy_into_storage_length_disagreement_is_shape_mismatch() {
+    let mut dst = [0.0_f64; 2];
+    let view = DenseViewMut::new(&mut dst, &[2], &[1], 0).unwrap();
+    let error =
+        crate::executor::copy_contiguous_tensor_into_view(&[1.0_f64], &[2], view, "copy_probe")
+            .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::ShapeMismatch {
+            op: "copy_probe",
+            expected: vec![2],
+            actual: vec![1],
+        }
+    );
+}
+
+#[test]
+fn batched_matmul_with_ops_dtype_mismatch_and_integer_operands_are_typed() {
+    let (a, b, i) = ([1.0_f64], [1.0_f32], [1_i32]);
+    let mut out = [0.0_f64];
+    let mut out_i = [0_i32];
+    let (shape, strides) = ([1, 1], [1, 1]);
+    let (alpha, beta) = (DenseScalar::F64(1.0), DenseScalar::F64(0.0));
+
+    let mut default = DefaultDenseExecutor::new();
+    let error = default
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::F64(DenseViewMut::new(&mut out, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&a, &shape, &strides, 0).unwrap()),
+            DenseRead::F32(DenseView::new(&b, &shape, &strides, 0).unwrap()),
+            &[],
+            &[],
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::DTypeMismatch {
+            op: "matmul_batch_axpby_with_ops_into",
+            expected: DenseDType::F64,
+            actual: DenseDType::F32,
+        }
+    );
+
+    // All operands agree on a dtype the batched route does not cover.
+    let error = NoAxpby::default()
+        .matmul_batch_axpby_into(
+            DenseWrite::I32(DenseViewMut::new(&mut out_i, &shape, &strides, 0).unwrap()),
+            DenseRead::I32(DenseView::new(&i, &shape, &strides, 0).unwrap()),
+            DenseRead::I32(DenseView::new(&i, &shape, &strides, 0).unwrap()),
+            &[],
+            &[],
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "matmul_batch_axpby_into",
+            ..
+        }
+    ));
 }

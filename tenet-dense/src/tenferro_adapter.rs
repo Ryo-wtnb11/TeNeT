@@ -1105,12 +1105,10 @@ impl DenseExecutor for DefaultDenseExecutor {
                 DenseOwned::C64(data) => data.len(),
             };
             if actual != expected {
-                return Err(DenseError::Backend {
-                    backend: DenseBackend::Tenferro,
+                return Err(DenseError::ShapeMismatch {
                     op: "svd_full_owned",
-                    message: format!(
-                        "owned full SVD input storage length mismatch: source {actual}, expected {expected}",
-                    ),
+                    expected: vec![expected],
+                    actual: vec![actual],
                 });
             }
             if rows == 0 || cols == 0 {
@@ -1166,11 +1164,11 @@ impl DenseExecutor for DefaultDenseExecutor {
                 })?
                 .map_err(|err| tenferro_error("svd_full_owned", err))?;
             if outputs.len() != 3 {
-                return Err(DenseError::Backend {
-                    backend: DenseBackend::Tenferro,
-                    op: "svd_full_owned",
-                    message: "dense full SVD must return exactly (U, S, Vh)".to_string(),
-                });
+                return Err(crate::executor::arity_mismatch(
+                    "svd_full_owned",
+                    3,
+                    outputs.len(),
+                ));
             }
             outputs
                 .into_iter()
@@ -1519,6 +1517,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         alpha: DenseScalar,
         beta: DenseScalar,
     ) -> Result<(), DenseError> {
+        let (out_dtype, lhs_dtype, rhs_dtype) = (output.dtype(), lhs.dtype(), rhs.dtype());
         match (output, lhs, rhs) {
             (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => self
                 .matmul_batch_axpby_route_typed(
@@ -1568,11 +1567,12 @@ impl DenseExecutor for DefaultDenseExecutor {
                     |view: DenseViewMut<'_, Complex64>| DenseWrite::C64(view),
                     |view: DenseView<'_, Complex64>| DenseRead::C64(view),
                 ),
-            _ => Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "matmul_batch_axpby_into",
-                message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
-            }),
+            _ => Err(crate::executor::batch_operand_error(
+                "matmul_batch_axpby_into",
+                out_dtype,
+                lhs_dtype,
+                rhs_dtype,
+            )),
         }
     }
 
@@ -1592,6 +1592,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
             return self.matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta);
         }
+        let (out_dtype, lhs_dtype, rhs_dtype) = (output.dtype(), lhs.dtype(), rhs.dtype());
         match (output, lhs, rhs) {
             (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => self
                 .matmul_batch_axpby_ops_typed(
@@ -1651,11 +1652,12 @@ impl DenseExecutor for DefaultDenseExecutor {
                     |view| DenseWrite::C64(view),
                     |view| DenseRead::C64(view),
                 ),
-            _ => Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "matmul_batch_axpby_with_ops_into",
-                message: "op-bearing batch requires matching f32/f64/c32/c64 operands".to_string(),
-            }),
+            _ => Err(crate::executor::batch_operand_error(
+                "matmul_batch_axpby_with_ops_into",
+                out_dtype,
+                lhs_dtype,
+                rhs_dtype,
+            )),
         }
     }
 }
