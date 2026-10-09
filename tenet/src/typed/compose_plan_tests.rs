@@ -101,53 +101,107 @@ const CORRUPTED: [(&str, &str); 4] = [
     ("execute_into: destination shorter than structure", "Some(Operation(ElementCountMismatch { expected: 78, actual: 77 }))"),
 ];
 
-/// The inactive destination blocks of `a · b` as device zero regions over a
-/// `members`-member stack, derived from the public block API alone: a block
-/// of the eager result whose coupled sector is not a coupled sector of both
-/// operands receives no GEMM; its region is the block's shape, strides and
-/// offset with a trailing member axis of stride `member_len`.
+/// Every linear position of a strided region.
 #[cfg(feature = "cuda")]
-fn hand_regions<R, D>(
+fn positions(dims: &[usize], strides: &[usize], offset: usize, out: &mut Vec<usize>) {
+    let mut index = vec![0; dims.len()];
+    if dims.contains(&0) {
+        return;
+    }
+    loop {
+        out.push(offset + index.iter().zip(strides).map(|(i, s)| i * s).sum::<usize>());
+        let Some(axis) = (0..dims.len()).find(|&axis| index[axis] + 1 < dims[axis]) else {
+            return;
+        };
+        index[axis] += 1;
+        index[..axis].fill(0);
+    }
+}
+
+/// The payload positions, over a `members`-member stack, of the destination
+/// blocks of `a · b` that no GEMM writes, derived from the public block API
+/// alone: a block of the eager result whose coupled sector is not a coupled
+/// sector of both operands receives no product. Each position appears once.
+#[cfg(feature = "cuda")]
+fn hand_inactive_positions<R, D>(
     a: &TensorMap<R, D>,
     b: &TensorMap<R, D>,
     members: usize,
-) -> Vec<(Vec<usize>, Vec<usize>, usize)>
+) -> Vec<usize>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    let coupled = |t: &TensorMap<R, D>| {
+    let coupled = |t: &TensorMap<R, D>, i: usize| {
+        format!("{:?}", t.subblock_fusion_trees(i).unwrap().coupled())
+    };
+    let sectors = |t: &TensorMap<R, D>| {
         (0..t.subblock_count())
-            .map(|i| format!("{:?}", t.subblock_fusion_trees(i).unwrap().coupled()))
+            .map(|i| coupled(t, i))
             .collect::<HashSet<_>>()
     };
-    let active: HashSet<_> = coupled(a).intersection(&coupled(b)).cloned().collect();
+    let active: HashSet<_> = sectors(a).intersection(&sectors(b)).cloned().collect();
     let c = a.compose(b).unwrap();
     let member_len = c.dense_data().unwrap().len();
-    let mut regions: Vec<_> = (0..c.subblock_count())
-        .filter(|&i| {
-            !active.contains(&format!(
-                "{:?}",
-                c.subblock_fusion_trees(i).unwrap().coupled()
-            ))
-        })
-        .map(|i| {
-            let block = c.subblock(i).unwrap();
-            let mut dims = block.shape().to_vec();
-            dims.push(members);
-            let mut strides = block.strides().to_vec();
-            strides.push(member_len);
-            (dims, strides, block.offset())
-        })
-        .collect();
-    regions.sort();
-    assert!(!regions.is_empty(), "the fixture has inactive blocks");
-    regions
+    let mut out = Vec::new();
+    for i in (0..c.subblock_count()).filter(|&i| !active.contains(&coupled(&c, i))) {
+        let block = c.subblock(i).unwrap();
+        for member in 0..members {
+            positions(
+                block.shape(),
+                block.strides(),
+                block.offset() + member * member_len,
+                &mut out,
+            );
+        }
+    }
+    out.sort_unstable();
+    assert!(!out.is_empty(), "the fixture has inactive blocks");
+    out
+}
+
+/// The zero regions `regions` cover exactly the hand-derived inactive
+/// positions, each once.
+#[cfg(feature = "cuda")]
+fn assert_regions_cover<R, D>(
+    what: &str,
+    regions: &[tenet_dense::CudaRegion],
+    a: &TensorMap<R, D>,
+    b: &TensorMap<R, D>,
+    members: usize,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    let mut covered = Vec::new();
+    for region in regions {
+        eprintln!(
+            "{what} B={members}: dims {:?} strides {:?} offset {}",
+            region.dims(),
+            region.strides(),
+            region.offset()
+        );
+        positions(
+            region.dims(),
+            region.strides(),
+            region.offset(),
+            &mut covered,
+        );
+    }
+    covered.sort_unstable();
+    assert_eq!(
+        covered,
+        hand_inactive_positions(a, b, members),
+        "{what} B={members}"
+    );
 }
 
 #[cfg(feature = "cuda")]
-fn regions_match_hand_derivation<R>(runtime: &Runtime, (v, w): (GradedSpace<R>, GradedSpace<R>))
-where
+fn regions_match_hand_derivation<R>(
+    runtime: &Runtime,
+    what: &str,
+    (v, w): (GradedSpace<R>, GradedSpace<R>),
+) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let a = TensorMap::<_, f64>::rand_with_seed(runtime, [&v, &v], [&w], 11).unwrap();
@@ -166,20 +220,7 @@ where
         let mut lease = runtime.lease_cuda().unwrap();
         plan.prepare_zero_regions(&mut workspace, &mut lease, members)
             .unwrap();
-        let mut observed: Vec<_> = workspace
-            .device
-            .zero_regions
-            .iter()
-            .map(|region| {
-                (
-                    region.dims().to_vec(),
-                    region.strides().to_vec(),
-                    region.offset(),
-                )
-            })
-            .collect();
-        observed.sort();
-        assert_eq!(observed, hand_regions(&a, &b, members), "B={members}");
+        assert_regions_cover(what, &workspace.device.zero_regions, &a, &b, members);
     }
 }
 
@@ -188,8 +229,8 @@ where
 #[ignore = "requires a real CUDA device"]
 fn cuda_zero_regions_match_the_hand_derivation() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    regions_match_hand_derivation(&runtime, u1_legs());
-    regions_match_hand_derivation(&runtime, su2_legs());
+    regions_match_hand_derivation(&runtime, "U1", u1_legs());
+    regions_match_hand_derivation(&runtime, "SU2", su2_legs());
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
     let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
@@ -197,5 +238,5 @@ fn cuda_zero_regions_match_the_hand_derivation() {
         GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)]).unwrap(),
         GradedSpace::try_new(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
     );
-    regions_match_hand_derivation(&runtime, fz2u1);
+    regions_match_hand_derivation(&runtime, "fZ2xU1", fz2u1);
 }
