@@ -2,16 +2,17 @@
 //! corrupted stacks, and the CUDA zero regions of the inactive destination
 //! blocks against a hand derivation (#1980).
 
-#[cfg(feature = "cuda")]
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::*;
+#[cfg(feature = "cuda")]
 use crate::sector::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
-    U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, Z2Irrep,
 };
+use crate::sector::{U1FusionRule, U1Irrep};
 use crate::typed::GradedSpace;
+#[cfg(feature = "cuda")]
+use std::collections::HashSet;
 
 fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let q = U1Irrep::new;
@@ -22,31 +23,13 @@ fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     )
 }
 
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[cfg(feature = "cuda")]
 fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let j = SU2Irrep::from_twice_spin;
     let rule = Arc::new(SU2FusionRule);
     (
         GradedSpace::try_new(Arc::clone(&rule), [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap(),
         GradedSpace::try_new(rule, [(j(0), 1), (j(2), 2)]).unwrap(),
-    )
-}
-
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-fn fz2u1_legs() -> (
-    GradedSpace<
-        impl MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    >,
-    GradedSpace<
-        impl MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    >,
-) {
-    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
-    let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
-    (
-        GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)]).unwrap(),
-        GradedSpace::try_new(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
     )
 }
 
@@ -207,5 +190,12 @@ fn cuda_zero_regions_match_the_hand_derivation() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     regions_match_hand_derivation(&runtime, u1_legs());
     regions_match_hand_derivation(&runtime, su2_legs());
-    regions_match_hand_derivation(&runtime, fz2u1_legs());
+    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
+    let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
+    let fz2u1 = (
+        GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)]).unwrap(),
+        GradedSpace::try_new(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
+    );
+    regions_match_hand_derivation(&runtime, fz2u1);
 }

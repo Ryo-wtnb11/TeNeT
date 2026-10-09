@@ -106,6 +106,13 @@ fn record<R, D>(
         )
     };
     let (lhs, rhs) = stacks(1, 1);
+    // A first composition on another plan creates the Runtime's context and
+    // fills the process-wide caches, whose cold cost depends on the platform
+    // and the enabled features; the rows below count this plan's own work.
+    let warmup = ComposePlan::new(&lhs, &rhs).unwrap();
+    warmup
+        .execute(&lhs, &rhs, &mut warmup.workspace().unwrap())
+        .unwrap();
     let plan = ComposePlan::new(&lhs, &rhs).unwrap();
     let mut workspace = plan.workspace().unwrap();
     for (call, count) in [1usize, 2, 17, 1].into_iter().enumerate() {
