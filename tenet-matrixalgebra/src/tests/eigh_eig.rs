@@ -1044,7 +1044,7 @@ fn eigh_rejects_non_finite_owned_eigenvalues_before_sorting() {
             crate::factorize::validate_real_eigenvalues_for_test(&[value]),
             Err(OperationError::Dense(DenseError::NumericalFailure {
                 backend: DenseBackend::Tenferro,
-                op: "eigh",
+                op: crate::factorize::EIGH_EIGENVALUE_CHECK,
                 message: "eigenvalues must be finite".to_string(),
             }))
         );

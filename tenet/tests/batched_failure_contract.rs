@@ -205,6 +205,38 @@ fn contract_failures_leave_no_output_and_the_next_call_recovers() {
     );
 }
 
+/// An executor's own `NumericalFailure` is an operation error of the batch,
+/// not a member fault: only TeNeT's nonfinite-eigenvalue check names a
+/// member (#1765).
+#[test]
+fn an_executor_numerical_failure_is_not_a_member_fault() {
+    let (v, _) = u1_legs();
+    let counts = Arc::new(SpyCounts::default());
+    let spy = SpyExecutor::counting(&counts).failing_numerically(
+        Kernel::EIGH,
+        Some(1),
+        "injected numerical fault",
+    );
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(spy))
+        .build()
+        .unwrap();
+    let stack = StackedTensorMap::pack(&hermitian_members(&runtime, &[&v], COUNT, 7)).unwrap();
+    let plan = EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    assert!(matches!(
+        plan.execute(&stack, &mut workspace).map(|_| ()),
+        Err(BatchError::Operation(Error::Operation(error)))
+            if matches!(
+                *error,
+                tenet::typed::OperationError::Dense(DenseError::NumericalFailure { .. })
+            )
+    ));
+    assert_eq!(counts.of(Kernel::EIGH), 1, "the fault was the executor's");
+    assert!(workspace.take_output().is_none());
+}
+
 #[test]
 fn eigh_failures_leave_no_output_and_the_next_call_recovers() {
     let (v, _) = u1_legs();

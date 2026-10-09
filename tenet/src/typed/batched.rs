@@ -1655,8 +1655,10 @@ where
             ) {
                 Ok(out) => out.into_parts(),
                 // The eager rejection of a non-finite eigenvalue; every
-                // other member is still solved so all of them are named.
+                // other member is still solved so all of them are named. An
+                // executor's own numerical failure is not a member fault.
                 Err(OperationError::Dense(tenet_dense::DenseError::NumericalFailure {
+                    op: tenet_matrixalgebra::seam::EIGH_EIGENVALUE_CHECK,
                     ..
                 })) => {
                     faults.push((member, MemberFault::NonFiniteEigenvalue));

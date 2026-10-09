@@ -57,7 +57,7 @@ pub mod seam {
         validate_endomorphism_region_stacking, validate_hermitian_regions, BoundDynamicTensorRef,
         CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn, ExecutorLease, FactorMode,
         FactorOutput, FactorSource, FactorSpaceAuthority, SvdFactorsDyn, SvdFullFactorsDyn,
-        EIGH_FULL_STACKING,
+        EIGH_EIGENVALUE_CHECK, EIGH_FULL_STACKING,
     };
     #[cfg(feature = "diagnostics")]
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};

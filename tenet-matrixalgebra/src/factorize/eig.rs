@@ -1407,6 +1407,14 @@ where
         .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows, exp_route_tol)))
 }
 
+/// The `op` of TeNeT's own Hermitian eigenvalue check, so a caller can tell
+/// it from an executor's `NumericalFailure` by matching it exactly.
+#[doc(hidden)]
+pub const EIGH_EIGENVALUE_CHECK: &str = "eigh eigenvalue check";
+
+/// The `op` of TeNeT's own general eigenvalue check.
+const EIG_EIGENVALUE_CHECK: &str = "eig eigenvalue check";
+
 /// A nonfinite eigenvalue of an admitted finite input is the eigensolver's
 /// numerical failure, not a misuse: the input already passed
 /// [`require_finite_factor_input`].
@@ -1422,7 +1430,7 @@ pub(crate) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationE
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
-        Err(invalid_eigenvalues("eigh"))
+        Err(invalid_eigenvalues(EIGH_EIGENVALUE_CHECK))
     }
 }
 
@@ -1438,7 +1446,7 @@ pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), O
     {
         Ok(())
     } else {
-        Err(invalid_eigenvalues("eig"))
+        Err(invalid_eigenvalues(EIG_EIGENVALUE_CHECK))
     }
 }
 
@@ -1701,7 +1709,7 @@ fn validate_diagonal_eigenvalues<R, D: FactorScalar>(
         for &value in &bond.entry(region).values {
             let value = value.widen_complex();
             if !(value.re.is_finite() && value.im.is_finite() && value.norm().is_finite()) {
-                return Err(invalid_eigenvalues("eig"));
+                return Err(invalid_eigenvalues(EIG_EIGENVALUE_CHECK));
             }
         }
     }
