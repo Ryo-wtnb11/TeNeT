@@ -17,8 +17,18 @@ pub struct DynamicTreeMembersWorkspace<D, C = f64> {
     rhs_transform: TreeTransformWorkspace<D>,
     output_transform: TreeTransformWorkspace<D>,
     core: Option<StackedDirectReplay<C>>,
+    /// `dst`'s inactive core blocks are zero for `core`: set after a replay
+    /// with zero-fill into `dst`, cleared when `core` changes. Active GEMMs
+    /// never write inactive blocks, so a failed replay leaves it valid.
+    dst_inactive_zero: bool,
     #[cfg(test)]
     core_replay_builds: usize,
+    #[cfg(test)]
+    core_inactive_fills: usize,
+    /// Test fault point: the next replay dirties `dst` (as a previous plan's
+    /// active results would) and fails before the core replay runs.
+    #[cfg(test)]
+    pub(crate) poison_dst_then_fail: bool,
 }
 
 impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
@@ -31,8 +41,13 @@ impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
             rhs_transform: TreeTransformWorkspace::default(),
             output_transform: TreeTransformWorkspace::default(),
             core: None,
+            dst_inactive_zero: false,
             #[cfg(test)]
             core_replay_builds: 0,
+            #[cfg(test)]
+            core_inactive_fills: 0,
+            #[cfg(test)]
+            poison_dst_then_fail: false,
         }
     }
 }
@@ -53,6 +68,11 @@ impl<D, C: Copy + PartialEq + num_traits::One> DynamicTreeMembersWorkspace<D, C>
     #[cfg(test)]
     pub(crate) fn core_replay_builds(&self) -> usize {
         self.core_replay_builds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn core_inactive_fills(&self) -> usize {
+        self.core_inactive_fills
     }
 }
 
@@ -221,15 +241,29 @@ where
     if !artifact.rhs_borrowed {
         workspace.rhs.resize(rhs_core_len * members, D::zero());
     }
+    // Resize zero-fills growth, so a retained workspace dst of the right
+    // length under the same replay still has zero inactive blocks.
+    let zero_inactive = core_dst.is_none()
+        || !workspace.dst_inactive_zero
+        || new_replay.is_some()
+        || workspace.dst.len() != core_dst_len * members;
     if core_dst.is_some() {
         workspace.dst.resize(core_dst_len * members, D::zero());
     }
     if let Some(replay) = new_replay {
         workspace.core = Some(replay);
+        workspace.dst_inactive_zero = false;
         #[cfg(test)]
         {
             workspace.core_replay_builds += 1;
         }
+    }
+    #[cfg(test)]
+    if std::mem::take(&mut workspace.poison_dst_then_fail) {
+        workspace.dst.fill(D::zero() + D::one());
+        return Err(OperationError::InvalidArgument {
+            message: "injected fault before the core replay",
+        });
     }
 
     let [lhs_scales, rhs_scales] = artifact.stage_scales();
@@ -289,14 +323,21 @@ where
         StackedStorageViewMut::new::<D>(&mut output_storage, core_dst_len, members, core_dst_len)?;
     let mut gemm =
         super::super::fusion_block::BackendRank2Gemm::<_, _, C>::new(backend, backend_workspace);
+    #[cfg(test)]
+    {
+        workspace.core_inactive_fills += usize::from(zero_inactive);
+    }
     workspace.core.as_ref().unwrap().execute_host(
         &mut kernels,
         &mut gemm,
         &mut output_view,
         &left_view,
         &right_view,
-        true,
+        zero_inactive,
     )?;
+    if core_dst.is_some() {
+        workspace.dst_inactive_zero = true;
+    }
     if let Some(output) = core_dst {
         tree_transform_members_overwrite_raw(
             &mut kernels,
