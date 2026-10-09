@@ -5,6 +5,11 @@
 //! Call-count upper bounds recorded on `e6e9cac8` (before Core and CopyC
 //! joined the one Host executor); bytes are reported, not asserted.
 
+// The call budgets are measured on the faer provider; a BLAS provider owns
+// its own scratch allocations (grouped-GEMM metadata, QR/LQ workspaces), which
+// these gates do not model (#2107).
+#![cfg(feature = "cpu-faer")]
+
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};

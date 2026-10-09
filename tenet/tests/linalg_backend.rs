@@ -2,6 +2,10 @@
 //! chooses the dense SVD/QR/eigh provider. Backend choice is performance-only —
 //! results stay identical across providers to numerical precision.
 
+// Every test selects the Faer provider explicitly, so the file only exists in
+// builds that compile it (#2107).
+#![cfg(feature = "cpu-faer")]
+
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
