@@ -14,6 +14,9 @@
 //! The multiplicity-free polar rows (direct and lazy adjoint) were re-recorded
 //! when polar moved to the shared per-sector MatrixAlgebraKit `PolarViaSVD`
 //! kernel (#1752): structure unchanged, values within rounding.
+//! The `eigh_full`/`eig_full` exact rows (direct and lazy adjoint) were
+//! re-recorded when eigenvalues became ascending (#1985): structure
+//! unchanged, values and columns permuted within each sector.
 
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -367,8 +370,8 @@ const U1_F64: [u64; 20] = [
     0x370c9d660175bbe6,
     0xdd7812350a3f4ec8,
     0x82de2828bec8932a,
-    0x0427b0cbce01b22b,
-    0x9eacc20a6bb38f23,
+    0x01c8ca3cdc7a3b83,
+    0x3738cca2b66a4ebf,
     0x0ad00b9efda3ea23,
     0xc831e49eeea7726a,
     0xe21e5f8b0b12cffd,
@@ -377,8 +380,8 @@ const U1_F64: [u64; 20] = [
     0xbf80b20bedb48200,
     0x4193b71bd736fe42,
     0xbeec4a45cde9b7e2,
-    0x0427b0cbce01b22b,
-    0x36177581ad8caa62,
+    0x01c8ca3cdc7a3b83,
+    0xf84277b137b77dc8,
 ];
 const U1_C64_STRUCTURE: [u64; 20] = [
     0xd12f8de2c5e19768,
@@ -411,7 +414,7 @@ const U1_C64: [u64; 20] = [
     0xfa0e10a816a652c2,
     0xa665a8b3830d20b6,
     0xa3d5718b1e79ddd7,
-    0x64ff1514719c1a0b,
+    0xfc608dc675aea21f,
     0xda636e8c4f05356c,
     0x820e16417a86d790,
     0x9a9746665dabc567,
@@ -421,7 +424,7 @@ const U1_C64: [u64; 20] = [
     0xf375144f69a913fb,
     0xe984b22617206a21,
     0x2066150499b2ccc2,
-    0x64ff1514719c1a0b,
+    0xfc608dc675aea21f,
     0x2c9c04927fe7eacf,
 ];
 const SU2_F64_STRUCTURE: [u64; 20] = [
@@ -455,7 +458,7 @@ const SU2_F64: [u64; 20] = [
     0xec6248a2f4a04da5,
     0x2a906745aab0d71f,
     0x7815f711e939d5e2,
-    0x8d436d0f3f902d9f,
+    0xcc63c8c0a58077c3,
     0x9dc68ade90d0c1aa,
     0x7df281dbbdbeddcc,
     0x57f91b8203aa3551,
@@ -465,7 +468,7 @@ const SU2_F64: [u64; 20] = [
     0x0b91da8b7f65cf46,
     0xa99ea8cda147243c,
     0xa113f7c0313cec7b,
-    0x8d436d0f3f902d9f,
+    0xcc63c8c0a58077c3,
     0xcf22370816fae1bc,
 ];
 const SU2_C64_STRUCTURE: [u64; 20] = [
@@ -499,8 +502,8 @@ const SU2_C64: [u64; 20] = [
     0xc9ba0ed39a9500f3,
     0x34380448a178cfe2,
     0xf6bcec3540540d67,
-    0x94e02e3ffbeefe7f,
-    0x9e3d81568fb83814,
+    0xf324e4cd67bee267,
+    0x81983bb2f4cc4784,
     0x2e96bbde6011518b,
     0x0bb7cdb54edce565,
     0x4b711d0de531435d,
@@ -509,8 +512,8 @@ const SU2_C64: [u64; 20] = [
     0xb18b974b92344566,
     0xf2e6e64a0f7ea396,
     0x4da6bacd4a723b67,
-    0x94e02e3ffbeefe7f,
-    0x81607c6f30ddb487,
+    0xf324e4cd67bee267,
+    0xe91c1649ca042fd3,
 ];
 const FZ2U1_F64_STRUCTURE: [u64; 20] = [
     0x0f9538ca0ba4c87a,
@@ -543,8 +546,8 @@ const FZ2U1_F64: [u64; 20] = [
     0xcb5c92645fbc3187,
     0xe39ad4999252dfd3,
     0xc7912da1f5f89dfb,
-    0x57ef2a6423428527,
-    0xac60ab563f375af7,
+    0xe958a76be06a41ef,
+    0x89d56e1b787088cb,
     0xde7d102cdbc2a14f,
     0x8bc4f55f46d70698,
     0xb6ac73892efb1c56,
@@ -553,8 +556,8 @@ const FZ2U1_F64: [u64; 20] = [
     0xa366fac7915221b9,
     0x3f9d0caa922dfdf1,
     0x062129823edf7ccb,
-    0x57ef2a6423428527,
-    0x7edde4952a2d8c96,
+    0xe958a76be06a41ef,
+    0x75793ea961aa19a4,
 ];
 const FZ2U1_C64_STRUCTURE: [u64; 20] = [
     0x0f9538ca0ba4c87a,
@@ -587,7 +590,7 @@ const FZ2U1_C64: [u64; 20] = [
     0x597c31fbb4171f8d,
     0xb7f8b14620b066fb,
     0x26eac1f7c791210c,
-    0x57d059e9b7890eb1,
+    0x4cd5a7c2087fdc5d,
     0x923f618b3d8c920e,
     0x8d4987d64c522618,
     0x0752768af2b6c871,
@@ -597,7 +600,7 @@ const FZ2U1_C64: [u64; 20] = [
     0xc87f5382ec5a540a,
     0x7c887065cb081434,
     0x39422fd9bbf40a9f,
-    0x57d059e9b7890eb1,
+    0x4cd5a7c2087fdc5d,
     0xb86d7d84ea9dab2d,
 ];
 #[cfg(feature = "racah-generated")]
@@ -633,8 +636,8 @@ const SU3_F64: [u64; 20] = [
     0xd105725ac19f8b11,
     0xe4d5c778a5724c2e,
     0x522d7560a3f5797e,
-    0x86e7a5945e0c19f7,
-    0x153c7e86547399f3,
+    0xc6a21cbc83be0d8f,
+    0x75397cd78ecafa07,
     0x8560b56ad9ad4841,
     0xf62a7bf22ecce6e0,
     0x1cba761a682c44c8,
@@ -643,8 +646,8 @@ const SU3_F64: [u64; 20] = [
     0x0403981e078d4d34,
     0x1146fc2e2d3e9554,
     0x25ea335e3fa83b42,
-    0x86e7a5945e0c19f7,
-    0xcb5406851140e672,
+    0xc6a21cbc83be0d8f,
+    0x4a6c78ef26b1b600,
 ];
 #[cfg(feature = "racah-generated")]
 const SU3_C64_STRUCTURE: [u64; 20] = [
@@ -679,7 +682,7 @@ const SU3_C64: [u64; 20] = [
     0xa0dfb70e20f6d612,
     0x5e089b61c49000ca,
     0xae97c3bd61d46d67,
-    0x2ceb842c8bd44d19,
+    0xd3ec92264f469dc5,
     0xef1e1ecc13e24cee,
     0xa4bcebb91fad459b,
     0xb1fcb918424c6c69,
@@ -689,6 +692,6 @@ const SU3_C64: [u64; 20] = [
     0x800aaeadaf01f4ce,
     0xd116c41479a9f973,
     0x4af583bb9acb5178,
-    0x2ceb842c8bd44d19,
+    0xd3ec92264f469dc5,
     0xffe5d99128cbf21d,
 ];

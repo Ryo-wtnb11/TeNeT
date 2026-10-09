@@ -243,7 +243,7 @@ macro_rules! factor_conformance {
             .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
             .unwrap()
             .iter()
-            .all(|entry| entry.values == [4.0, 2.0]));
+            .all(|entry| entry.values == [2.0, 4.0]));
         let found = d.domain()[0]
             .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
@@ -274,7 +274,7 @@ macro_rules! factor_conformance {
             .eig_vals(&[0], &[1])
             .unwrap()
             .iter()
-            .all(|entry| entry.values == [3.0.into(), 1.0.into()]));
+            .all(|entry| entry.values == [1.0.into(), 3.0.into()]));
         let found = d.domain()[0]
             .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();

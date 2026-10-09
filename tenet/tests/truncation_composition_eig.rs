@@ -29,7 +29,9 @@ mod numerics;
 #[macro_use]
 mod truncation_oracle;
 
-use truncation_oracle::{discarded_norm, select, triangular_eigenvalues, ClosedFormDim, Offer};
+use truncation_oracle::{
+    discarded_norm, kept_values, select, triangular_eigenvalues, ClosedFormDim, Offer,
+};
 
 #[path = "../../tests/support/fixtures.rs"]
 mod fixtures;
@@ -127,7 +129,7 @@ macro_rules! assert_eig_composition {
             numerics::assert_slices_close(
                 &format!("{case}: kept eigenvalues of {:?}", entry.sector),
                 &entry.values,
-                &reference[..entry.values.len()],
+                &kept_values(&offers, &kept, &entry.sector, reference),
                 terms,
             );
         }
@@ -398,8 +400,9 @@ fn multi_tree_eig_composition_matches_the_hand_selection_for_every_policy() {
     );
 }
 
-/// Odd positions, then even: a fixed shuffle of `0..n` that turns a
-/// descending spectrum into one that is neither ascending nor descending.
+/// Odd positions, then even: a fixed shuffle of `0..n` that turns the
+/// published (ascending) spectrum into one that is neither ascending nor
+/// descending.
 fn shuffle(n: usize) -> Vec<usize> {
     (1..n).step_by(2).chain((0..n).step_by(2)).collect()
 }
@@ -447,10 +450,10 @@ macro_rules! assert_shuffled_eig_composition {
         let references: Vec<(_, Vec<Complex64>)> = sector_matrices!(source)
             .iter()
             .map(|(sector, matrix)| {
-                let descending = triangular_eigenvalues(matrix);
-                let stored = shuffle(descending.len())
+                let published = triangular_eigenvalues(matrix);
+                let stored = shuffle(published.len())
                     .into_iter()
-                    .map(|p| descending[p])
+                    .map(|p| published[p])
                     .collect();
                 (sector.clone(), stored)
             })

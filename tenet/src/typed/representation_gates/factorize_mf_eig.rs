@@ -27,8 +27,8 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
         d.diagview().unwrap()[0].values,
         vec![
             Complex64::new(-2.0, 0.0),
-            Complex64::new(2.0, 0.0),
-            Complex64::new(1.0, 0.0)
+            Complex64::new(1.0, 0.0),
+            Complex64::new(2.0, 0.0)
         ]
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
@@ -73,7 +73,7 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
             assert!(!v.domain()[0].is_dual());
             let z: $dtype = $zero;
             let o: $dtype = $one;
-            assert_eq!(v.dense_data().unwrap(), [z, o, z, o, z, z, z, z, o]);
+            assert_eq!(v.dense_data().unwrap(), [z, o, z, z, z, o, o, z, z]);
             assert_eq!(
                 input.compose(&v).unwrap().dense_data().unwrap(),
                 v.compose(&d).unwrap().dense_data().unwrap()
@@ -101,14 +101,14 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
     check!(
         f32,
         vec![2.0_f32, -2.0, 1.0],
-        vec![-2.0_f32, 2.0, 1.0],
+        vec![-2.0_f32, 1.0, 2.0],
         0.0_f32,
         1.0_f32
     );
     check!(
         f64,
         vec![2.0_f64, -2.0, 1.0],
-        vec![-2.0_f64, 2.0, 1.0],
+        vec![-2.0_f64, 1.0, 2.0],
         0.0_f64,
         1.0_f64
     );
@@ -121,8 +121,8 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
         ],
         vec![
             num_complex::Complex32::new(-2.0, 0.0),
-            num_complex::Complex32::new(2.0, 0.0),
-            num_complex::Complex32::new(1.0, 0.0)
+            num_complex::Complex32::new(1.0, 0.0),
+            num_complex::Complex32::new(2.0, 0.0)
         ],
         num_complex::Complex32::new(0.0, 0.0),
         num_complex::Complex32::new(1.0, 0.0)
@@ -136,8 +136,8 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
         ],
         vec![
             Complex64::new(-2.0, 0.0),
-            Complex64::new(2.0, 0.0),
-            Complex64::new(1.0, 0.0)
+            Complex64::new(1.0, 0.0),
+            Complex64::new(2.0, 0.0)
         ],
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0)
@@ -271,7 +271,7 @@ fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
         vec![
             SectorSpectrum {
                 sector: U1Irrep::new(0),
-                values: vec![-4.0, 1.0, 0.0]
+                values: vec![-4.0, 0.0, 1.0]
             },
             SectorSpectrum {
                 sector: U1Irrep::new(-1),
@@ -539,8 +539,8 @@ fn compact_diagonal_eig_full_skips_dense_input_and_solver() {
         d.diagview().unwrap()[0].values,
         vec![
             Complex64::new(-4.0, 0.0),
-            Complex64::new(1.0, 1.0),
-            Complex64::new(0.0, 0.0)
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 1.0)
         ]
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
@@ -579,7 +579,7 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
             assert!(!v.domain()[0].is_dual());
             let z: $eig = $zero;
             let o: $eig = $one;
-            assert_eq!(v.dense_data().unwrap(), [z, o, z, o, z, z, z, z, o]);
+            assert_eq!(v.dense_data().unwrap(), [z, o, z, z, z, o, o, z, z]);
             let promoted = ($promote)(&input);
             let av = promoted.compose(&v).unwrap();
             let vd = v.compose(&d).unwrap();
@@ -599,8 +599,8 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
         vec![1.0_f32, -4.0, 0.25],
         vec![
             num_complex::Complex32::new(-4.0, 0.0),
-            num_complex::Complex32::new(1.0, 0.0),
-            num_complex::Complex32::new(0.25, 0.0)
+            num_complex::Complex32::new(0.25, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
         ],
         num_complex::Complex32::new(0.0, 0.0),
         num_complex::Complex32::new(1.0, 0.0),
@@ -613,8 +613,8 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
         vec![1.0_f64, -4.0, 0.25],
         vec![
             Complex64::new(-4.0, 0.0),
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.25, 0.0)
+            Complex64::new(0.25, 0.0),
+            Complex64::new(1.0, 0.0)
         ],
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0),
@@ -631,8 +631,8 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
         ],
         vec![
             num_complex::Complex32::new(-4.0, 0.0),
-            num_complex::Complex32::new(1.0, 1.0),
-            num_complex::Complex32::new(0.0, 0.25)
+            num_complex::Complex32::new(0.0, 0.25),
+            num_complex::Complex32::new(1.0, 1.0)
         ],
         num_complex::Complex32::new(0.0, 0.0),
         num_complex::Complex32::new(1.0, 0.0),
@@ -649,8 +649,8 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
         ],
         vec![
             Complex64::new(-4.0, 0.0),
-            Complex64::new(1.0, 1.0),
-            Complex64::new(0.0, 0.25)
+            Complex64::new(0.0, 0.25),
+            Complex64::new(1.0, 1.0)
         ],
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0),
@@ -726,13 +726,13 @@ fn compact_diagonal_eig_full_preserves_sector_spaces_and_zero_regions() {
                 sector: U1Irrep::new(0),
                 values: vec![
                     Complex64::new(0.0, -4.0),
-                    Complex64::new(1.0, 0.0),
-                    Complex64::new(0.0, 0.0)
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(1.0, 0.0)
                 ],
             },
             SectorSpectrum {
                 sector: U1Irrep::new(-1),
-                values: vec![Complex64::new(3.0, 0.0), Complex64::new(0.0, 2.0)],
+                values: vec![Complex64::new(0.0, 2.0), Complex64::new(3.0, 0.0)],
             },
         ]
     );
@@ -754,7 +754,7 @@ fn compact_diagonal_eig_full_preserves_sector_spaces_and_zero_regions() {
         vec![
             SectorSpectrum {
                 sector: spin0,
-                values: vec![Complex64::new(2.0, 1.0), Complex64::new(1.0, 0.0)]
+                values: vec![Complex64::new(1.0, 0.0), Complex64::new(2.0, 1.0)]
             },
             SectorSpectrum {
                 sector: spin_half,
@@ -784,7 +784,7 @@ fn compact_diagonal_eig_full_preserves_sector_spaces_and_zero_regions() {
         vec![
             SectorSpectrum {
                 sector: even,
-                values: vec![Complex64::new(2.0, 1.0), Complex64::new(1.0, 0.0)]
+                values: vec![Complex64::new(1.0, 0.0), Complex64::new(2.0, 1.0)]
             },
             SectorSpectrum {
                 sector: odd,
@@ -885,9 +885,16 @@ fn compact_diagonal_eig_full_ties_and_signed_zeros_are_valid() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let values = &d.diagview().unwrap()[0].values;
     assert_eq!(values.len(), 4);
+    // Lexicographic (re, im) under IEEE total order, as MAK's `isless`:
+    // the `-0.0` real part precedes every `+0.0` one.
+    assert_eq!(values[0].re.to_bits(), (-0.0_f64).to_bits());
     assert!(values
         .windows(2)
-        .all(|pair| pair[0].norm() >= pair[1].norm()));
+        .all(|pair| pair[0]
+            .re
+            .total_cmp(&pair[1].re)
+            .then(pair[0].im.total_cmp(&pair[1].im))
+            .is_le()));
     assert_eq!(
         values
             .iter()
@@ -1024,17 +1031,13 @@ fn compact_diagonal_eig_vals_skips_dense_input_and_solver() {
         result[0].values,
         vec![
             Complex64::new(-4.0, 0.0),
-            Complex64::new(1.0, 1.0),
-            Complex64::new(0.0, 0.0)
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 1.0)
         ]
     );
     assert_eq!(
-        result[1]
-            .values
-            .iter()
-            .map(|v| v.norm())
-            .collect::<Vec<_>>(),
-        vec![2.0, 2.0]
+        result[1].values,
+        vec![Complex64::new(-2.0, 0.0), Complex64::new(0.0, 2.0)]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
@@ -1077,10 +1080,7 @@ fn compact_diagonal_eig_vals_match_hand_spectra_across_scalars_and_sectors() {
                     assert_eq!(actual, expected);
                     assert!((*actual - *dense).norm() <= $tol);
                 }
-                assert!(actual
-                    .values
-                    .windows(2)
-                    .all(|pair| pair[0].norm() >= pair[1].norm()));
+                assert_eq!(actual.values, actual_values);
             }
         }};
     }
@@ -1319,7 +1319,7 @@ fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     let result = source.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-    assert_eq!(result[0].values, vec![-4.0, 1.0, 0.0]);
+    assert_eq!(result[0].values, vec![-4.0, 0.0, 1.0]);
     assert_eq!(result[1].values, vec![-2.0, 2.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
@@ -1371,7 +1371,7 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
             },
         ],
         f32,
-        vec![vec![-4.0, 1.0, 0.0], vec![-2.0, 2.0]],
+        vec![vec![-4.0, 0.0, 1.0], vec![-2.0, 2.0]],
         1e-5
     );
     check!(
@@ -1394,7 +1394,7 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
             },
         ],
         num_complex::Complex32,
-        vec![vec![-4.0, 1.0, 0.0], vec![-2.0, 2.0]],
+        vec![vec![-4.0, 0.0, 1.0], vec![-2.0, 2.0]],
         1e-5
     );
     let dual = u1.try_dual().unwrap();
@@ -1411,7 +1411,7 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
             },
         ],
         f64,
-        vec![vec![-2.0, 2.0], vec![-4.0, 1.0, 0.0]],
+        vec![vec![-2.0, 2.0], vec![-4.0, 0.0, 1.0]],
         1e-12
     );
     let spin0 = SU2Irrep::from_twice_spin(0);
@@ -1535,7 +1535,7 @@ fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let values = [1.0000001_f32, -1.0000002_f32, 0.3_f32];
-    let expected = vec![values[1] as f64, values[0] as f64, values[2] as f64];
+    let expected = vec![values[1] as f64, values[2] as f64, values[0] as f64];
     let real: TensorMap<_, f32> = TensorMap::diagonal(
         &runtime,
         &leg,

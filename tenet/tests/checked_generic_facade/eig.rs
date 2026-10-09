@@ -734,8 +734,8 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
         })
         .unwrap();
     let Eigh { d, .. } = tied.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-    // The order of the tied magnitudes is the contract; the values carry the
-    // eigensolver's rounding (`terms` = the block size 3).
+    // The ascending order of the ±2 pair is the contract; the values carry
+    // the eigensolver's rounding (`terms` = the block size 3).
     numerics::assert_slices_close(
         "eigh_full tied spectrum",
         &[
@@ -743,7 +743,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
             d.materialize().unwrap().dense_data().unwrap()[4],
             d.materialize().unwrap().dense_data().unwrap()[8],
         ],
-        &[-2.0, 2.0, 1.0],
+        &[-2.0, 1.0, 2.0],
         3,
     );
 
@@ -815,7 +815,7 @@ fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
     assert_eq!(spectra[0].sector, Label::X);
     assert_eq!(
         spectra[0].values,
-        vec![Complex64::new(3.0, 0.0), Complex64::new(2.0, 0.0)]
+        vec![Complex64::new(2.0, 0.0), Complex64::new(3.0, 0.0)]
     );
 
     let complex = source.convert::<Complex64>();
@@ -1017,8 +1017,8 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
         ],
         &[
             Complex64::new(-2.0, 0.0),
-            Complex64::new(2.0, 0.0),
             Complex64::new(1.0, 0.0),
+            Complex64::new(2.0, 0.0),
         ],
         3,
     );

@@ -277,7 +277,8 @@ pub fn singular_values(a: &Matrix) -> Vec<f64> {
 
 /// The eigenvalues of a triangular matrix are its diagonal. Panics unless `a`
 /// is exactly upper or lower triangular, so a fixture cannot drift out of the
-/// case this answer covers. Sorted by descending magnitude.
+/// case this answer covers. Listed in TeNeT's published `eig` order,
+/// ascending lexicographic `(re, im)` (#1985), sorted here independently.
 pub fn triangular_eigenvalues(a: &Matrix) -> Vec<Complex64> {
     assert_eq!(a.rows, a.cols, "an endomorphism block");
     let zero = |strict_lower: bool| {
@@ -292,12 +293,29 @@ pub fn triangular_eigenvalues(a: &Matrix) -> Vec<Complex64> {
         "the eig fixtures must be triangular"
     );
     let mut values: Vec<Complex64> = (0..a.rows).map(|k| a.at(k, k)).collect();
-    values.sort_by(|x, y| y.norm().total_cmp(&x.norm()));
+    values.sort_by(|x, y| x.re.total_cmp(&y.re).then(x.im.total_cmp(&y.im)));
     values
+}
+
+/// The reference values at the hand selection's kept positions of `sector`.
+pub fn kept_values<S: PartialEq, V: Copy>(
+    offers: &[Offer<S>],
+    kept: &[Vec<usize>],
+    sector: &S,
+    reference: &[V],
+) -> Vec<V> {
+    let (_, positions) = offers
+        .iter()
+        .zip(kept)
+        .find(|(offer, _)| offer.sector == *sector)
+        .expect("a kept sector is an offered sector");
+    positions.iter().map(|&p| reference[p]).collect()
 }
 
 /// The kept spectrum of a restricted factor has, sector by sector, the
 /// magnitudes of the offered prefix, within the tolerance of its own dtype.
+/// The offers are descending; the kept values are compared as a multiset of
+/// magnitudes, since an `eigh` spectrum is stored ascending (#1985).
 #[track_caller]
 pub fn assert_kept_magnitudes<S, V>(
     what: &str,
@@ -316,8 +334,13 @@ pub fn assert_kept_magnitudes<S, V>(
         let want = &offer.magnitudes[..entry.values.len()];
         let bound =
             crate::numerics::tolerance::<V>(terms, want.iter().copied().fold(0.0, f64::max));
-        for (index, (&got, &want)) in entry.values.iter().zip(want).enumerate() {
-            let got = SpectrumMagnitude::magnitude(got);
+        let mut got: Vec<f64> = entry
+            .values
+            .iter()
+            .map(|&value| SpectrumMagnitude::magnitude(value))
+            .collect();
+        got.sort_by(|x, y| y.total_cmp(x));
+        for (index, (&got, &want)) in got.iter().zip(want).enumerate() {
             assert!(
                 (got - want).abs() <= bound,
                 "{what}: {:?} value {index} is {got} against the oracle {want} (bound {bound:e})",
