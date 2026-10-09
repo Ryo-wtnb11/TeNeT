@@ -13,7 +13,6 @@
 //!   SU(2) route, itself checked against the physical dense expansion
 //!   `C = Σ A B` (TensorKit `convert(Array, ·)`).
 
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -204,6 +203,7 @@ fn generic_toy_core_composition_matches_block_products() {
 #[cfg(feature = "racah-generated")]
 mod racah {
     use super::*;
+    use std::collections::BTreeMap;
     use tenet::sector::{SU2FusionRule, SU2Irrep, SUNFusionRule};
 
     #[test]
@@ -239,6 +239,7 @@ mod racah {
         )
     }
 
+    #[expect(clippy::ptr_arg, reason = "the SU(N) sector label is a `Vec<i64>`")]
     fn sun_spin(sector: &Vec<i64>) -> usize {
         sector[0] as usize
     }
