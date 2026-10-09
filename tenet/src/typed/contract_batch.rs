@@ -35,8 +35,6 @@ pub struct ContractPlan<R, D, S = Vec<D>> {
     output_signature: StructureSignature,
     space: BoundDynamicFusionMapSpace<R>,
     resolution: Arc<StorageContractResolution<f64>>,
-    #[cfg(feature = "cuda")]
-    device_plan: Option<(Arc<tenet_operations::FusionBlockContractPlan<f64>>, bool)>,
     member_len: usize,
     _payload: PhantomData<(D, S)>,
 }
@@ -48,14 +46,11 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     binding: Arc<StorageContractResolution<f64>>,
     output: OutputSlot<StackedTensorMap<R, D, S>>,
     members: HostContractMembersWorkspace<D>,
-    /// The CopyC temporary stack and the members it holds: the high-water
-    /// `B`, of which a call uses the first `B` members.
-    #[cfg(feature = "cuda")]
-    copy_c_temporary: Option<(S, usize)>,
     #[cfg(feature = "cuda")]
     members_cuda: tenet_tensors::CudaContractMembersWorkspace<S>,
+    /// Plan entries this workspace holds in the device context's ledger.
     #[cfg(feature = "cuda")]
-    device: DeviceComposeState,
+    reserved_plan_entries: usize,
 }
 
 #[allow(private_bounds)]
@@ -113,27 +108,10 @@ where
             .core_plan()
             .require_identity_signed_direct_replay()?;
         #[cfg(feature = "cuda")]
-        let direct_core = resolution.direct_core();
-        #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
-            if let Some(copy) = resolution.copy_c() {
-                tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(copy.transform())?;
-            }
+            resolution.admit_cuda_members()?;
         }
         let member_len = space.space().required_len()?;
-        #[cfg(feature = "cuda")]
-        let device_plan = match (placement, direct_core) {
-            // The exact-sign contract was required above.
-            (Placement::Cuda(_), Some((core, swapped))) => {
-                resolution.admit_cuda_inactive_regions()?;
-                Some((Arc::clone(core), swapped))
-            }
-            (Placement::Cuda(_), None) => {
-                resolution.admit_cuda_dynamic_tree_members()?;
-                None
-            }
-            _ => None,
-        };
         Ok(Self {
             runtime: lhs.runtime.clone(),
             lhs: lhs.signature.clone(),
@@ -141,14 +119,12 @@ where
             output_signature: StructureSignature::of_space(&space, placement, &lhs.runtime),
             space,
             resolution: Arc::new(resolution),
-            #[cfg(feature = "cuda")]
-            device_plan,
             member_len,
             _payload: PhantomData,
         })
     }
 
-    #[cfg(any(test, feature = "cuda"))]
+    #[cfg(test)]
     fn copy_c(&self) -> Option<&tenet_tensors::CopyCRoute<f64>> {
         self.resolution.copy_c()
     }
@@ -248,11 +224,9 @@ where
             output: OutputSlot::default(),
             members: HostContractMembersWorkspace::default(),
             #[cfg(feature = "cuda")]
-            copy_c_temporary: None,
-            #[cfg(feature = "cuda")]
             members_cuda: Default::default(),
             #[cfg(feature = "cuda")]
-            device: DeviceComposeState::default(),
+            reserved_plan_entries: 0,
         })
     }
 
@@ -366,9 +340,6 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
             + self.members_cuda.retained_bytes()
-            + self.copy_c_temporary.as_ref().map_or(0, |(temporary, _)| {
-                TensorStorage::len(temporary).saturating_mul(std::mem::size_of::<D>())
-            })
             + self
                 .output
                 .buffers()
@@ -379,25 +350,6 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
                         .saturating_mul(std::mem::size_of::<D>())
                 })
                 .sum::<usize>()
-            + self.device.zero_regions.capacity() * std::mem::size_of::<tenet_dense::CudaRegion>()
-            + self
-                .device
-                .copy_regions
-                .as_ref()
-                .map_or(0, |regions| regions.retained_bytes())
-            + self
-                .device
-                .copy_coefficients
-                .as_ref()
-                .map_or(0, |coefficients| {
-                    coefficients.len() * std::mem::size_of::<D>()
-                })
-            + self
-                .device
-                .zero_regions
-                .iter()
-                .map(|region| 2 * region.dims().len() * std::mem::size_of::<usize>())
-                .sum::<usize>()
     }
 }
 
@@ -407,12 +359,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    fn core(&self) -> &(Arc<tenet_operations::FusionBlockContractPlan<f64>>, bool) {
-        self.device_plan
-            .as_ref()
-            .expect("admitted CUDA direct core")
-    }
-
     /// Creates independent B-dependent output, zero-fill, and plan resources.
     pub fn workspace(&self) -> Result<ContractWorkspace<R, D, CudaStorage<D>>, Error> {
         let mut workspace = ContractWorkspace {
@@ -420,181 +366,16 @@ where
             binding: Arc::clone(&self.resolution),
             output: OutputSlot::default(),
             members: HostContractMembersWorkspace::default(),
-            copy_c_temporary: None,
             members_cuda: Default::default(),
-            device: DeviceComposeState::default(),
+            reserved_plan_entries: 0,
         };
-        let entries = if self.resolution.is_dynamic_tree() {
-            self.resolution.admit_cuda_dynamic_tree_members()?
-        } else {
-            self.direct_plan_entries()?
-        };
-        workspace.device.reserved_plan_entries = self
+        let entries = self.resolution.admit_cuda_members()?;
+        workspace.reserved_plan_entries = self
             .runtime
             .lease_cuda()?
             .reserve_plan_entries(entries)
             .map_err(tenet_operations::OperationError::Dense)?;
         Ok(workspace)
-    }
-
-    fn direct_plan_entries(&self) -> Result<usize, Error> {
-        let core = self.core().0.cuda_direct_plan_entries();
-        let copy_fills = self.copy_c().map_or(Ok(0), |copy| {
-            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(copy.transform())
-        })?;
-        Ok(core + copy_fills)
-    }
-
-    fn prepare_zero_regions(
-        &self,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
-        ctx: &mut tenet_dense::CudaDenseContext,
-        members: usize,
-    ) -> Result<(), Error> {
-        if workspace.device.members == members {
-            return Ok(());
-        }
-        workspace.device.copy_regions = None;
-        let core_member_len = if let Some(copy) = self.copy_c() {
-            copy.temporary_len()
-        } else {
-            self.member_len
-        };
-        self.total_len(core_member_len, members)?;
-        let zeros = tenet_operations::cuda_transform::CudaMemberZeroRegions::prepare(
-            self.core().0.inactive_destination_regions(),
-            core_member_len,
-            members,
-        )?;
-        zeros.reserve_templates::<D>(ctx, members)?;
-        let regions = zeros.into_regions();
-        workspace.device.zero_regions = regions;
-        workspace.device.members = members;
-        Ok(())
-    }
-
-    fn prepare_copy_regions(
-        &self,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
-        ctx: &mut tenet_dense::CudaDenseContext,
-        members: usize,
-    ) -> Result<(), Error> {
-        let Some(copy) = self.copy_c() else {
-            return Ok(());
-        };
-        if workspace.device.copy_regions.is_some() {
-            return Ok(());
-        }
-        let temporary_len = copy.temporary_len();
-        let regions = tenet_operations::cuda_transform::CudaSingleMemberRegions::prepare(
-            copy.transform(),
-            self.space.space().structure(),
-            copy.temporary_structure(),
-            self.member_len,
-            temporary_len,
-            self.total_len(self.member_len, members)?,
-            self.total_len(temporary_len, members)?,
-            members,
-        )?;
-        ctx.reserve_zero_template::<D>(regions.max_zero_len().checked_mul(members).ok_or_else(
-            || Error::InvalidArgument("CopyC zero template length overflows".into()),
-        )?)
-        .map_err(tenet_operations::OperationError::Dense)?;
-        if !regions.zeros().is_empty() {
-            ctx.reserve_ones_template::<D>(1)
-                .map_err(tenet_operations::OperationError::Dense)?;
-        }
-        if regions.has_scaled_moves() && workspace.device.copy_coefficients.is_none() {
-            workspace.device.copy_coefficients =
-                Some(CudaStorage::<D>::upload_owned(ctx, regions.scaled_coefficients::<D>())?.0);
-        }
-        workspace.device.copy_regions = Some(regions);
-        Ok(())
-    }
-
-    fn run_cuda(
-        &self,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
-        ctx: &mut tenet_dense::CudaDenseContext,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        dst: &mut CudaStorage<D>,
-        zero_inactive: bool,
-    ) -> Result<(), Error> {
-        let (plan, swapped) = self.core();
-        let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
-        let left = StackedStorageView::new::<D>(
-            &left.storage,
-            left.member_len,
-            lhs.members,
-            left.member_len,
-        )?;
-        let right = StackedStorageView::new::<D>(
-            &right.storage,
-            right.member_len,
-            lhs.members,
-            right.member_len,
-        )?;
-        let temporary_len = self.copy_c().map(|copy| copy.temporary_len());
-        let mut temporary = if let Some(temporary_len) = temporary_len {
-            let existing = workspace
-                .copy_c_temporary
-                .take()
-                .filter(|(_, capacity)| *capacity >= lhs.members);
-            Some(match existing {
-                Some((storage, capacity)) => (false, storage, capacity),
-                None => (
-                    true,
-                    CudaStorage::upload_members(
-                        ctx,
-                        zeroed_payload(self.total_len(temporary_len, lhs.members)?),
-                        temporary_len,
-                        lhs.members,
-                    )?,
-                    lhs.members,
-                ),
-            })
-        } else {
-            None
-        };
-        let device = &workspace.device;
-        // The temporary goes back to the workspace on every exit, so a failed
-        // call never makes the next one upload it again.
-        let result = (|| {
-            let (core_storage, core_len, zero_core) = match (&mut temporary, temporary_len) {
-                (Some((fresh, storage, _)), Some(len)) => (storage, len, !*fresh),
-                _ => (&mut *dst, self.member_len, zero_inactive),
-            };
-            let mut core_destination =
-                StackedStorageViewMut::new::<D>(core_storage, core_len, lhs.members, core_len)?;
-            if zero_core {
-                for region in &device.zero_regions {
-                    tenet_dense::cuda_region_zero::<D>(
-                        ctx,
-                        &mut core_destination.storage_mut().0,
-                        region,
-                    )
-                    .map_err(tenet_operations::OperationError::Dense)?;
-                }
-            }
-            plan.execute_direct_on_storage_prezeroed(
-                &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
-                &mut core_destination,
-                &left,
-                &right,
-            )?;
-            if let Some((_, storage, _)) = &temporary {
-                let regions = device.copy_regions.as_ref().ok_or_else(|| {
-                    Error::InvalidArgument("CopyC device regions are unprepared".into())
-                })?;
-                regions.execute_overwrite(ctx, storage, device.copy_coefficients.as_ref(), dst)?;
-            }
-            Ok(())
-        })();
-        if let Some((_, storage, capacity)) = temporary {
-            workspace.copy_c_temporary = Some((storage, capacity));
-        }
-        result
     }
 
     /// Overwrites workspace-owned device output; any error follows the
@@ -611,15 +392,9 @@ where
         self.check_workspace(workspace)?;
         let buffers = workspace.output.take();
         let runtime = self.runtime.clone();
-        let dynamic = self.resolution.is_dynamic_tree();
         let prepared = self.check(lhs, rhs).and_then(|members| {
             let total = self.total_len(self.member_len, members)?;
-            let mut lease = runtime.lease_cuda()?;
-            if !dynamic {
-                self.prepare_zero_regions(workspace, &mut lease, members)?;
-                self.prepare_copy_regions(workspace, &mut lease, members)?;
-            }
-            Ok((members, total, lease))
+            Ok((members, total, runtime.lease_cuda()?))
         });
         let (members, total, mut lease) = match prepared {
             Ok(prepared) => prepared,
@@ -644,11 +419,7 @@ where
                 _payload: PhantomData,
             },
         };
-        let result = if dynamic {
-            self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut output.storage, fresh)
-        } else {
-            self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, !fresh)
-        };
+        let result = self.run(workspace, &mut lease, lhs, rhs, &mut output.storage, fresh);
         drop(lease);
         workspace.output.settle(output, result)
     }
@@ -668,17 +439,12 @@ where
             self.check_destination(dst, members)?;
             let runtime = self.runtime.clone();
             let mut lease = runtime.lease_cuda()?;
-            if self.resolution.is_dynamic_tree() {
-                return self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut dst.storage, false);
-            }
-            self.prepare_zero_regions(workspace, &mut lease, members)?;
-            self.prepare_copy_regions(workspace, &mut lease, members)?;
-            self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+            self.run(workspace, &mut lease, lhs, rhs, &mut dst.storage, false)
         });
         result.map_err(|error| workspace.output.hide(error))
     }
 
-    fn run_dynamic(
+    fn run(
         &self,
         workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
         ctx: &mut tenet_dense::CudaDenseContext,
@@ -708,9 +474,9 @@ where
 impl<R, D, S> Drop for ContractWorkspace<R, D, S> {
     fn drop(&mut self) {
         #[cfg(feature = "cuda")]
-        if self.device.reserved_plan_entries > 0 {
+        if self.reserved_plan_entries > 0 {
             if let Some(mut lease) = self.runtime.lease_cuda_for_maintenance() {
-                lease.release_plan_entries(self.device.reserved_plan_entries);
+                lease.release_plan_entries(self.reserved_plan_entries);
             }
         }
     }
@@ -799,10 +565,12 @@ mod failure_tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_copy_c_failure_keeps_the_temporary_and_the_output() {
-        // What: on the CUDA CopyC route, a core error after the temporary
-        // and the output are taken (forced as on Host by a consistently
-        // short operand) returns both to the workspace, so the next call
-        // uploads neither and recovers.
+        // What: on the CUDA CopyC route, an error after the core GEMMs have
+        // written the temporary and before the output transform (injected:
+        // the member replay checks every operand length before its first
+        // submission, so a corrupted stack no longer reaches the device)
+        // keeps the temporary and the output in the workspace, so the next
+        // call uploads neither and recovers.
         let runtime = Runtime::builder().cuda(0).build().unwrap();
         let rule = Arc::new(U1FusionRule);
         let v = GradedSpace::try_new(
@@ -825,13 +593,6 @@ mod failure_tests {
             .unwrap()
             .to_cuda()
             .unwrap();
-        let mut host_corrupt = StackedTensorMap::pack(&[&a, &a]).unwrap();
-        host_corrupt.member_len -= 1;
-        host_corrupt
-            .storage
-            .truncate(host_corrupt.member_len * host_corrupt.members);
-        let mut corrupt = host_corrupt.to_cuda().unwrap();
-        corrupt.member_len = host_corrupt.member_len;
         let spec = super::super::super::ContractSpec {
             lhs: &[2],
             rhs: &[0],
@@ -849,19 +610,25 @@ mod failure_tests {
             .storage;
         let bytes = workspace.retained_bytes();
 
+        workspace.members_cuda.fail_next_before_output();
+        let before = tenet_dense::cuda_transfer_stats();
         let error = plan
-            .execute(&corrupt, &rhs, &mut workspace)
+            .execute(&lhs, &rhs, &mut workspace)
             .map(|_| ())
             .unwrap_err();
-        eprintln!("cuda CopyC core error: {error:?}");
+        let failed = tenet_dense::cuda_transfer_stats();
+        eprintln!("cuda CopyC error after the core: {error:?}");
         assert!(
-            workspace.copy_c_temporary.is_some(),
-            "the temporary is restored"
+            failed.gemm_calls > before.gemm_calls,
+            "the core ran before the error"
         );
+        assert_eq!(failed.copy_calls, before.copy_calls, "no output move ran");
         assert!(workspace.output.spare.is_some(), "the output is kept");
         assert!(workspace.take_output().is_none());
-        assert_eq!(workspace.retained_bytes(), bytes);
+        assert_eq!(workspace.retained_bytes(), bytes, "the temporary is kept");
         let output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let recovered = tenet_dense::cuda_transfer_stats();
+        assert_eq!(recovered.h2d_calls, failed.h2d_calls, "nothing re-uploaded");
         assert_eq!(output.to_host().unwrap().storage, expected);
     }
 }
@@ -1110,6 +877,17 @@ mod fermionic_unit_tests {
         assert!(core.require_identity_direct_replay().is_err());
         assert!(!core.inactive_destination_regions().is_empty());
         assert!(core.distinct_direct_gemm_shapes() > 0);
+        // Member Core and CopyC admit the signed core; only a DynamicTree
+        // core must be unit.
+        assert!(plan.resolution.admit_cuda_members().unwrap() > 0);
+        let reversed = super::super::super::ContractSpec {
+            codomain: &[1],
+            domain: &[0],
+            ..spec
+        };
+        let copy_c = ContractPlan::new(&left, &right, &reversed).unwrap();
+        assert!(copy_c.copy_c().is_some());
+        assert!(copy_c.resolution.admit_cuda_members().unwrap() > 0);
     }
 
     #[cfg(feature = "cuda")]
@@ -1148,7 +926,7 @@ mod fermionic_unit_tests {
         .unwrap();
         (
             plan.resolution.is_dynamic_tree(),
-            plan.resolution.admit_cuda_dynamic_tree_members(),
+            plan.resolution.admit_cuda_members(),
         )
     }
 
