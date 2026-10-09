@@ -33,6 +33,117 @@ fn cuda_route_assembly_counts(plan: &CompactFactorPlan) -> (usize, usize, usize)
     counts
 }
 
+/// The factor spaces and routes every device factorization publishes through
+/// are the Host plan's, checked without a device.
+///
+/// A device-typed tensor (a compact diagonal needs no device allocation)
+/// builds its plan through the same `compact_factor_plan` the device QR, SVD
+/// and EIGH call, and a multi-tree source with a dual leg and one-sided
+/// sectors goes through `compact_factor_routes`, `executed_routes` and the SVD
+/// diagonal validation. Every space must equal the Host eager factorization's
+/// output space, so a device-local bond, space or route rule fails here.
+#[cfg(feature = "cuda")]
+#[test]
+fn typed_cuda_factor_plan_publishes_the_host_factor_spaces_without_a_device() {
+    fn assert_host_spaces<R>(source: &TensorMap<R, f64>, plan: &CompactFactorPlan)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let space = source.logical_space();
+        let (rows, cols) = (codomain_axes(source), domain_axes(source));
+        let Qr { q, r } = source.qr_compact(&rows, &cols).unwrap();
+        let Svd { u, s, vh } = source.svd_compact(&rows, &cols).unwrap();
+        let left = plan.left_space(space).unwrap();
+        let right = plan.right_space(space).unwrap();
+        let bond = plan.bond_space(space).unwrap();
+        for (host, device, what) in [
+            (&q, &left, "qr q"),
+            (&r, &right, "qr r"),
+            (&u, &left, "svd u"),
+            (&s, &bond, "svd s"),
+            (&vh, &right, "svd vh"),
+        ] {
+            assert_eq!(host.logical_space().space(), device.space(), "{what}");
+        }
+        let bond_regions = sector_regions(bond.space().structure(), bond.space().nout()).unwrap();
+        let diagonals = validate_cuda_svd_middle_regions(plan, &bond_regions).unwrap();
+        let routes: Vec<_> = executed_routes(plan).collect();
+        assert_eq!(diagonals.len(), routes.len());
+        assert_eq!(routes.len(), bond_regions.len());
+        for ((route, left_region, right_region), diagonal) in routes.iter().zip(&diagonals) {
+            let source_region = &plan.source_regions()[route.source_region()];
+            assert_eq!(route.rank(), source_region.rows().min(source_region.cols()));
+            assert_eq!(plan.left_regions()[*left_region].coupled(), route.sector());
+            assert_eq!(
+                plan.right_regions()[*right_region].coupled(),
+                route.sector()
+            );
+            let middle = bond_regions
+                .iter()
+                .find(|region| region.coupled() == route.sector())
+                .unwrap();
+            assert_eq!(*diagonal, middle.range().start);
+        }
+        if space.space().homspace().codomain() == space.space().homspace().domain() {
+            let Eigh { d, v } = source
+                .eigh_full(&rows, &cols, HermitianTol::DEFAULT)
+                .unwrap();
+            assert_eq!(v.logical_space().space(), left.space(), "eigh v");
+            assert_eq!(d.logical_space().space(), bond.space(), "eigh d");
+        }
+    }
+
+    // Multi-tree sectors, a dual codomain leg, sectors on one side only.
+    let source = u1_lazy_fixture();
+    let plan = compact_factor_routes(source.logical_space()).unwrap();
+    assert!(executed_routes(&plan).count() > 1);
+    assert!(plan
+        .source_regions()
+        .iter()
+        .any(|region| region.row_trees().len() > 1));
+    assert_host_spaces(&source, &plan);
+
+    // The device method itself, on a device-typed compact diagonal (a valid
+    // device tensor that needs no allocation) over a multi-sector bond; its
+    // dense Host twin has the same space.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(2), 1),
+        ],
+    )
+    .unwrap();
+    let dense =
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            if index[0] == index[1] {
+                2.0 + index[0] as f64
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let spectrum = dense
+        .svd_compact(&codomain_axes(&dense), &domain_axes(&dense))
+        .unwrap()
+        .s;
+    let TypedData::Diagonal(values) = owned(&spectrum).data.as_ref() else {
+        unreachable!("SVD factor is compact")
+    };
+    let device: TensorMap<_, f64, CudaStorage> = TensorMap {
+        runtime: runtime.clone(),
+        repr: owned_repr(TypedTensorBody::new(
+            spectrum.logical_space().clone(),
+            TypedData::<f64, CudaStorage>::Diagonal(values.clone()),
+        )),
+    };
+    let host = spectrum.materialize().unwrap();
+    assert_eq!(host.logical_space().space(), device.logical_space().space());
+    assert_host_spaces(&host, &device.compact_factor_plan().unwrap());
+}
+
 #[cfg(feature = "cuda")]
 #[test]
 fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_work() {
