@@ -547,6 +547,159 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
     }
 }
 
+/// Replays `members` copies of `case` through `artifact` into a NaN-poisoned
+/// caller destination, checks every value against the eager replay, and
+/// returns how many inactive-core fills the replay performed.
+fn replay_members_checked(
+    case: &Case<U1FusionRule>,
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    workspace: &mut super::dynamic::DynamicTreeMembersWorkspace<f64>,
+    members: usize,
+    salt: usize,
+) -> usize {
+    try_replay_members_checked(case, artifact, workspace, members, salt).unwrap()
+}
+
+fn try_replay_members_checked(
+    case: &Case<U1FusionRule>,
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    workspace: &mut super::dynamic::DynamicTreeMembersWorkspace<f64>,
+    members: usize,
+    salt: usize,
+) -> Result<usize, tenet_operations::OperationError> {
+    let destination = case.dst();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let dst_len = destination.space().required_len().unwrap();
+    let lhs = (0..members)
+        .flat_map(|i| host_data(case.lhs.space(), salt + 2 * i))
+        .collect::<Vec<_>>();
+    let rhs = (0..members)
+        .flat_map(|i| host_data(case.rhs.space(), salt + 5 + 3 * i))
+        .collect::<Vec<_>>();
+    let mut actual = vec![f64::NAN; members * dst_len];
+    let before = workspace.core_inactive_fills();
+    super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        artifact,
+        destination.space().structure(),
+        workspace,
+        &mut actual,
+        &lhs,
+        &rhs,
+        members,
+        1,
+    )?;
+    for member in 0..members {
+        let expected = eager_host(
+            case,
+            &lhs[member * lhs_len..(member + 1) * lhs_len],
+            &rhs[member * rhs_len..(member + 1) * rhs_len],
+        );
+        for (&found, &want) in actual[member * dst_len..(member + 1) * dst_len]
+            .iter()
+            .zip(&expected)
+        {
+            assert!(found.is_finite());
+            assert!((found - want).abs() < 1e-9 * (1.0 + want.abs()));
+        }
+    }
+    Ok(workspace.core_inactive_fills() - before)
+}
+
+fn members_artifact(case: &Case<U1FusionRule>) -> Arc<DynamicTreeExecutionArtifact<f64>> {
+    let resolution = Context::<f64>::default()
+        .compile_storage_contract_resolution(
+            &case.dst(),
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap();
+    let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
+        panic!("fixture must select DynamicTree");
+    };
+    artifact
+}
+
+#[test]
+fn a_retained_workspace_core_destination_is_not_rezeroed_on_warm_replay() {
+    let mut cases = overwrite_cases();
+    let (_, workspace_dst, _) = cases.pop().unwrap();
+    let (_, caller_dst, _) = cases.remove(1);
+    let workspace_artifact = members_artifact(&workspace_dst);
+    let caller_artifact = members_artifact(&caller_dst);
+    assert!(workspace_artifact.test_has_core_dst());
+    assert!(!caller_artifact.test_has_core_dst());
+
+    // Workspace-owned core destination: only a new replay (cold, B change,
+    // plan change) fills the inactive blocks; an unchanged replay does not.
+    let mut ws = super::dynamic::DynamicTreeMembersWorkspace::default();
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 2, 3),
+        1
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 2, 9),
+        0
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 2, 14),
+        0
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 3, 4),
+        1
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 3, 8),
+        0
+    );
+    // Plan change: a caller-destination artifact replaces the core, then the
+    // original returns and must refill because its replay is new again.
+    assert_eq!(
+        replay_members_checked(&caller_dst, &caller_artifact, &mut ws, 3, 6),
+        1
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 3, 2),
+        1
+    );
+    assert_eq!(
+        replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 3, 5),
+        0
+    );
+
+    // Caller-owned destination (identity output): every call fills, even
+    // for an unchanged replay into freshly poisoned memory.
+    let mut ws = super::dynamic::DynamicTreeMembersWorkspace::default();
+    for salt in [3, 9, 14] {
+        assert_eq!(
+            replay_members_checked(&caller_dst, &caller_artifact, &mut ws, 2, salt),
+            1
+        );
+    }
+}
+
+#[test]
+fn a_failed_replay_into_a_dirtied_workspace_destination_rezeroes_on_retry() {
+    // Why: a new plan installs its replay, then a later step fails; the
+    // workspace destination may hold the previous plan's active results in
+    // this plan's inactive blocks, so the retry must fill them again.
+    let (_, case, _) = overwrite_cases().pop().unwrap();
+    let artifact = members_artifact(&case);
+    let mut ws = super::dynamic::DynamicTreeMembersWorkspace::default();
+    assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 2, 3), 1);
+    assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 2, 9), 0);
+    let fresh = members_artifact(&case);
+    ws.poison_dst_then_fail = true;
+    assert!(try_replay_members_checked(&case, &fresh, &mut ws, 2, 5).is_err());
+    assert_eq!(replay_members_checked(&case, &fresh, &mut ws, 2, 5), 1);
+    assert_eq!(replay_members_checked(&case, &fresh, &mut ws, 2, 7), 0);
+}
+
 #[test]
 fn dynamic_artifact_rejects_malformed_twisted_members_before_writes() {
     let (_, case) = fermionic_cases().into_iter().next().unwrap();
