@@ -377,3 +377,47 @@ fn truncspace_keeps_tensorkits_set_in_stored_order() {
         assert_eq!(positions, expected);
     }
 }
+
+#[test]
+fn every_spectrum_dtype_selects_the_same_tensorkit_positions() {
+    // The signed rank-3 fixture above, published as f32, and as Complex32 /
+    // Complex64 eigenvalues rotated by the exact phases 1, i, -1, -i, so
+    // every magnitude (and so every tie) is exactly the f64 one.
+    use num_complex::{Complex32, Complex64};
+    let values = [vec![-1.0, 0.5, 3.0, -2.0], vec![2.0, -2.0]];
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(u1(0), 4), (u1(1), 2)]).unwrap();
+    let expected = [vec![2, 3], vec![0]];
+    macro_rules! check {
+        ($convert:expr) => {{
+            let spectra: Vec<SectorSpectrum<_, _>> = [u1(0), u1(1)]
+                .into_iter()
+                .zip(&values)
+                .map(|(sector, values)| SectorSpectrum {
+                    sector,
+                    values: values.iter().enumerate().map($convert).collect(),
+                })
+                .collect();
+            let found = leg.find_truncated(&spectra, &Truncation::rank(3)).unwrap();
+            let got: Vec<Vec<usize>> = [u1(0), u1(1)]
+                .iter()
+                .map(|sector| found.selection.positions(sector).unwrap())
+                .collect();
+            assert_eq!(got, expected);
+        }};
+    }
+    let phase = |k: usize, v: f64| match k % 4 {
+        0 => (v, 0.0),
+        1 => (0.0, v),
+        2 => (-v, 0.0),
+        _ => (0.0, -v),
+    };
+    check!(|(_, &v): (usize, &f64)| v as f32);
+    check!(|(k, &v): (usize, &f64)| {
+        let (re, im) = phase(k, v);
+        Complex32::new(re as f32, im as f32)
+    });
+    check!(|(k, &v): (usize, &f64)| {
+        let (re, im) = phase(k, v);
+        Complex64::new(re, im)
+    });
+}

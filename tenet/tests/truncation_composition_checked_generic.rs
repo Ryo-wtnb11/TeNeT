@@ -25,7 +25,7 @@ use tenet::typed::HermitianTol;
 use num_complex::{Complex32, Complex64};
 use tenet::sector::SUNFusionRule;
 use tenet::typed::TensorMap;
-use tenet::typed::{Eig, Eigh, GradedSpace, Svd};
+use tenet::typed::{Eig, Eigh, GradedSpace, SectorSpectrum, Svd, Truncation};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -387,4 +387,37 @@ fn su3_eig_composition_matches_the_oracle_for_every_policy() {
     .unwrap();
     let complex = source.convert::<Complex64>();
     assert_su3_eig_composition!(source, complex, su3_target(&provider), "su3 eig f64");
+}
+
+#[test]
+fn checked_generic_decision_keeps_stored_positions() {
+    // What (#2095): the checked-Generic decision takes the stored order too.
+    // Weights are the exact SU(3) dimensions 3 and 27; no magnitude ties, so
+    // the hand answers below need no sector order. norm^2 = 3 (0.25 + 9 + 4)
+    // + 27 (2.25 + 1) = 127.5.
+    let (_, leg) = su3_legs();
+    let spectra = [
+        SectorSpectrum {
+            sector: vec![1i64, 0],
+            values: vec![0.5, -3.0, 2.0],
+        },
+        SectorSpectrum {
+            sector: vec![2i64, 2],
+            values: vec![1.5, 1.0],
+        },
+    ];
+    let positions = |truncation: Truncation| {
+        let found = leg.find_truncated(&spectra, &truncation).unwrap();
+        spectra
+            .iter()
+            .map(|entry| found.selection.positions(&entry.sector).unwrap())
+            .collect::<Vec<_>>()
+    };
+    // 3 (weight 3), 2 (6), then 1.5 (33) overflows rank 6.
+    assert_eq!(positions(Truncation::rank(6)), [vec![1, 2], vec![]]);
+    // Budget 1: 0.5 (0.75) goes, 1.0 (27.75 in total) does not.
+    assert_eq!(
+        positions(Truncation::relative_error(1.0 / 127.5f64.sqrt()).unwrap()),
+        [vec![1, 2], vec![0, 1]]
+    );
 }
