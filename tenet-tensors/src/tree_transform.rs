@@ -8,13 +8,14 @@ pub use cache::{
 };
 pub(crate) use cache::{
     lookup_bound, publish_committed, publishable, resolve, CheckedPendingCoefficients,
-    CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
-    TreeTransformPlanning, TreeTransformScope,
+    CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups,
+    TraceColumnReuse, TransformerMode, TreeTransformPlanning, TreeTransformScope,
 };
 #[cfg(test)]
 pub(crate) use cache::{
     take_coefficient_group_activity, take_completed_transformer_activity,
-    take_oriented_tree_pair_compiles, CompletedActivity,
+    take_oriented_tree_pair_compiles, take_trace_column_activity, CoefficientGroupActivity,
+    CompletedActivity,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,

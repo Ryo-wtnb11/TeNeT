@@ -454,22 +454,30 @@ where
     }
 }
 
-pub(crate) fn scatter_compact_block<S: Clone>(
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: DenseColumns<S>,
-) -> Vec<Vec<(FusionTreePairKey, S)>> {
+#[inline]
+fn record_compact_block_dimensions<S>(
+    _basis: &CompactMultiplicityFreeTreePairBasis,
+    _columns: &DenseColumns<S>,
+) {
     #[cfg(test)]
     COMPACT_BLOCK_DIMENSIONS.with(|dimensions| {
         dimensions.set(Some(CompactBlockDimensions {
-            destination_rows: basis.locals.len(),
-            source_columns: columns.num_src,
-            coefficient_slots: columns.data.len(),
-            coefficient_bytes: columns
+            destination_rows: _basis.locals.len(),
+            source_columns: _columns.num_src,
+            coefficient_slots: _columns.data.len(),
+            coefficient_bytes: _columns
                 .data
                 .len()
                 .saturating_mul(std::mem::size_of::<Option<S>>()),
         }));
     });
+}
+
+pub(crate) fn scatter_compact_block<S: Clone>(
+    basis: CompactMultiplicityFreeTreePairBasis,
+    columns: DenseColumns<S>,
+) -> Vec<Vec<(FusionTreePairKey, S)>> {
+    record_compact_block_dimensions(&basis, &columns);
     let mut rows_per_source = vec![Vec::new(); columns.num_src];
     for (destination_row, destination_local) in basis.locals.into_iter().enumerate() {
         let destination = basis.frame.materialize(destination_local);
@@ -486,18 +494,7 @@ pub(crate) fn order_compact_block<S: Clone>(
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
-    #[cfg(test)]
-    COMPACT_BLOCK_DIMENSIONS.with(|dimensions| {
-        dimensions.set(Some(CompactBlockDimensions {
-            destination_rows: basis.locals.len(),
-            source_columns: columns.num_src,
-            coefficient_slots: columns.data.len(),
-            coefficient_bytes: columns
-                .data
-                .len()
-                .saturating_mul(std::mem::size_of::<Option<S>>()),
-        }));
-    });
+    record_compact_block_dimensions(&basis, &columns);
 
     let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
     let mut local_slots = locals.into_iter().map(Some).collect::<Vec<_>>();
@@ -606,6 +603,55 @@ pub(super) fn scatter_compact_tree_pair_block<S: Clone>(
         }
         rows_per_source
     }
+}
+
+/// The compact block's present entries per source column, each column in
+/// ascending destination row (the order [`scatter_compact_tree_pair_block`]
+/// emits rows in). Each destination with a present entry is materialized
+/// once; coefficients are moved, not cloned. `O(D·N)`, as the dense compact
+/// composer that produced the block.
+pub(super) fn columns_compact_tree_pair_block<S>(
+    block: CompactMultiplicityFreeTreePairBlock<S>,
+) -> BlockSourceColumns<FusionTreePairKey, S> {
+    let CompactMultiplicityFreeTreePairBlock {
+        basis,
+        mut columns,
+        records_dimensions,
+    } = block;
+    if records_dimensions {
+        record_compact_block_dimensions(&basis, &columns);
+    }
+    let source_count = columns.num_src;
+    let mut destination_of_row = vec![usize::MAX; basis.locals.len()];
+    let mut destinations = Vec::with_capacity(basis.locals.len());
+    for (row, local) in basis.locals.into_iter().enumerate() {
+        if columns.row(row).iter().any(Option::is_some) {
+            destination_of_row[row] = destinations.len();
+            destinations.push(basis.frame.materialize(local));
+        }
+    }
+    let mut column_start = Vec::with_capacity(source_count + 1);
+    column_start.push(0);
+    let mut entries = Vec::with_capacity(
+        columns
+            .data
+            .iter()
+            .filter(|coefficient| coefficient.is_some())
+            .count(),
+    );
+    for source in 0..source_count {
+        for (row, &destination) in destination_of_row.iter().enumerate() {
+            if let Some(coefficient) = columns.data[row * source_count + source].take() {
+                entries.push((destination, coefficient));
+            }
+        }
+        column_start.push(entries.len());
+    }
+    BlockSourceColumns::new(
+        destinations.into_boxed_slice(),
+        column_start.into_boxed_slice(),
+        entries.into_boxed_slice(),
+    )
 }
 
 pub(super) fn order_compact_tree_pair_block<S: Clone>(

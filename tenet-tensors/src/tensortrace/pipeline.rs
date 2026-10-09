@@ -16,10 +16,11 @@
 //! selection, destination space (when there is one), pair duality.
 
 use super::*;
+use crate::tree_transform::{PendingCoefficientGroups, TraceColumnReuse, TransformerMode};
+use crate::TreeTransformOperation;
 use tenet_core::{
-    generic_permute_tree_pair_block_indexed_checked, BraidingStyleKind,
-    CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode, OrderedBlockLinearMap,
-    OrderedBlockLinearStorage,
+    generic_permute_tree_pair_block_indexed_checked, BlockSourceColumns, BraidingStyleKind,
+    CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode, RuleIdentity,
 };
 
 /// What the trace preflight asks of an admission mode.
@@ -249,20 +250,26 @@ where
 
 /// What the trace term builder asks of an admission mode.
 pub(super) trait TraceTermMode<R> {
-    type Scalar: Clone + Mul<Output = Self::Scalar>;
+    type Scalar: Clone + Mul<Output = Self::Scalar> + Send + Sync + 'static;
     type Error;
+
+    /// The composer and admission family a cache-4 trace entry is keyed by.
+    const MODE: TransformerMode;
+
+    fn rule_identity(rule: &R) -> RuleIdentity;
 
     fn operation(error: OperationError) -> Self::Error;
 
     /// Hands every source block's permuted tree-pair rows, in source block
-    /// order, to [`TraceLowering::lower`].
+    /// order, to [`TraceLowering::lower`]; returns the permutation groups it
+    /// built, for the caller to publish once its whole call succeeded.
     fn lower_source_rows(
         rule: &R,
         lowering: &TraceLowering<'_>,
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
         terms: &mut Vec<TensorTraceFusionStructureTerm<Self::Scalar>>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<PendingCoefficientGroups, Self::Error>;
 
     fn split(
         rule: &R,
@@ -289,7 +296,7 @@ impl TraceLowering<'_> {
     /// factor and address the destination block.
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn lower<M, R, I>(
+    fn lower<'r, M, R, I>(
         &self,
         rule: &R,
         src_block_index: usize,
@@ -299,7 +306,8 @@ impl TraceLowering<'_> {
     ) -> Result<(), M::Error>
     where
         M: TraceTermMode<R>,
-        I: IntoIterator<Item = (FusionTreePairKey, M::Scalar)>,
+        M::Scalar: 'r,
+        I: IntoIterator<Item = (&'r FusionTreePairKey, &'r M::Scalar)>,
     {
         for (permuted_key, permutation_coefficient) in rows {
             let (dst_codomain_tree, trace_codomain_tree) =
@@ -313,7 +321,7 @@ impl TraceLowering<'_> {
                 continue;
             }
             let trace_factor = M::channel_factor(rule, &trace_codomain_tree)?;
-            let coefficient = permutation_coefficient * trace_factor;
+            let coefficient = permutation_coefficient.clone() * trace_factor;
             let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
             let dst_block = self
                 .dst_structure
@@ -336,14 +344,23 @@ impl TraceLowering<'_> {
 }
 
 /// The one trace term builder: TensorKit's `(p…, q…)` permutation, then each
-/// source block's rows lowered by [`TraceLowering::lower`].
+/// source block's rows lowered by [`TraceLowering::lower`]. Returns the
+/// terms and the permutation groups built on a cache-4 miss; the caller
+/// publishes them only after its whole call succeeded, or drops them.
+#[allow(clippy::type_complexity)]
 pub(super) fn build_trace_terms<M, R>(
     rule: &R,
     dst_structure: &BlockStructure,
     src: OrientedTraceSource<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
-) -> Result<Vec<TensorTraceFusionStructureTerm<M::Scalar>>, M::Error>
+) -> Result<
+    (
+        Vec<TensorTraceFusionStructureTerm<M::Scalar>>,
+        PendingCoefficientGroups,
+    ),
+    M::Error,
+>
 where
     M: TraceTermMode<R>,
 {
@@ -364,18 +381,21 @@ where
         dst_codomain_rank,
     };
     let mut terms = Vec::new();
-    M::lower_source_rows(
+    let pending = M::lower_source_rows(
         rule,
         &lowering,
         &codomain_permutation,
         &domain_permutation,
         &mut terms,
     )?;
-    Ok(terms)
+    Ok((terms, pending))
 }
 
-/// Lowers every source block in block order, producing a fusion group's
-/// permuted rows once, when its first member is reached.
+/// Lowers every source block in block order, resolving a fusion group's
+/// permutation columns once, when its first member is reached: from cache 4
+/// when resident (no admission and no composition, see
+/// [`TraceColumnReuse`]), otherwise by `compose_group`, staged for the
+/// caller to publish.
 ///
 /// Why not compose every group up front: a later group's symbol or
 /// admission error must not overtake an earlier source's lowering error.
@@ -386,99 +406,83 @@ where
 fn lower_by_fusion_group<M, R>(
     rule: &R,
     lowering: &TraceLowering<'_>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
     terms: &mut Vec<TensorTraceFusionStructureTerm<M::Scalar>>,
     mut compose_group: impl FnMut(
         &[usize],
-    ) -> Result<Vec<Vec<(FusionTreePairKey, M::Scalar)>>, M::Error>,
-) -> Result<(), M::Error>
+    )
+        -> Result<BlockSourceColumns<FusionTreePairKey, M::Scalar>, M::Error>,
+) -> Result<PendingCoefficientGroups, M::Error>
 where
     M: TraceTermMode<R>,
 {
     let src = lowering.src;
+    // Keyed by the storage keys and orientation (not the oriented keys): a
+    // warm lookup then allocates no swapped key.
+    let mut reuse = TraceColumnReuse::<M::Scalar>::new(
+        M::rule_identity(rule),
+        M::MODE,
+        TreeTransformOperation::permute(
+            codomain_permutation.iter().copied(),
+            domain_permutation.iter().copied(),
+        ),
+        src.orientation,
+    );
+    let mut storage_keys = Vec::new();
     let block_count = src.structure.block_count();
     let groups = src.structure.fusion_tree_group_slice();
-    let mut group_by_source = vec![None; block_count];
+    // Each source's group and its position (column) in that group.
+    let mut member_of_source = vec![None; block_count];
     for (group_index, group) in groups.iter().enumerate() {
-        for &src_block_index in group.block_indices() {
-            group_by_source[src_block_index] = Some(group_index);
+        for (position, &src_block_index) in group.block_indices().iter().enumerate() {
+            member_of_source[src_block_index] = Some((group_index, position));
         }
     }
-    let mut rows_by_source = (0..block_count).map(|_| None).collect::<Vec<_>>();
-    let unassigned = || {
-        M::operation(OperationError::InvalidArgument {
-            message: "trace source block was not assigned to a fusion group",
-        })
-    };
-    for src_block_index in 0..block_count {
-        if rows_by_source[src_block_index].is_none() {
-            let group = &groups[group_by_source[src_block_index].ok_or_else(unassigned)?];
-            record_trace_transform_invocation(src_block_index);
-            let group_rows = compose_group(group.block_indices())?;
-            if group_rows.len() != group.block_indices().len() {
-                return Err(M::operation(OperationError::InvalidArgument {
-                    message: "trace block transform returned the wrong source row count",
-                }));
+    let mut columns_by_group = (0..groups.len()).map(|_| None).collect::<Vec<_>>();
+    for (src_block_index, member) in member_of_source.into_iter().enumerate() {
+        let (group_index, position) = member.ok_or_else(|| {
+            M::operation(OperationError::InvalidArgument {
+                message: "trace source block was not assigned to a fusion group",
+            })
+        })?;
+        let columns = match &mut columns_by_group[group_index] {
+            Some(columns) => columns,
+            slot @ None => {
+                let group = &groups[group_index];
+                record_trace_transform_invocation(src_block_index);
+                storage_keys.clear();
+                for &index in group.block_indices() {
+                    storage_keys.push(src.storage_key(index).map_err(M::operation)?);
+                }
+                let columns = match reuse.lookup((group.group_key(), &storage_keys)) {
+                    Ok(columns) => columns,
+                    Err(hash) => {
+                        let columns = compose_group(group.block_indices())?;
+                        reuse.stage(hash, (group.group_key(), &storage_keys), columns)
+                    }
+                };
+                if columns.source_count() != group.block_indices().len() {
+                    return Err(M::operation(OperationError::InvalidArgument {
+                        message: "trace block transform returned the wrong source column count",
+                    }));
+                }
+                slot.insert(columns)
             }
-            for (&member, rows) in group.block_indices().iter().zip(group_rows) {
-                rows_by_source[member] = Some(rows);
-            }
-        }
-        let rows = rows_by_source[src_block_index]
-            .take()
-            .ok_or_else(unassigned)?;
+        };
+        let destinations = columns.destinations();
         lowering.lower::<M, R, _>(
             rule,
             src_block_index,
             || src.source_key(src_block_index).map_err(M::operation),
-            rows,
+            columns
+                .column(position)
+                .iter()
+                .map(|(row, coefficient)| (&destinations[*row], coefficient)),
             terms,
         )?;
     }
-    Ok(())
-}
-
-/// Splits a whole-group block map into per-source rows in source order.
-/// Present zero coefficients stay rows; absent entries are skipped.
-fn ordered_block_columns<S: Clone>(
-    block: OrderedBlockLinearMap<FusionTreePairKey, S>,
-) -> Result<Vec<Vec<(FusionTreePairKey, S)>>, OperationError> {
-    let (destinations, source_count, storage) = block.into_parts();
-    let mut columns = (0..source_count).map(|_| Vec::new()).collect::<Vec<_>>();
-    let mismatch = OperationError::StructureMismatch {
-        tensor: "ordered trace block columns",
-    };
-    match storage {
-        OrderedBlockLinearStorage::SingletonColumns {
-            destination_rows,
-            coefficients,
-        } => {
-            if destination_rows.len() != source_count || coefficients.len() != source_count {
-                return Err(mismatch);
-            }
-            for ((column, row), coefficient) in
-                columns.iter_mut().zip(destination_rows).zip(coefficients)
-            {
-                let destination = destinations.get(row).ok_or_else(|| mismatch.clone())?;
-                column.push((destination.clone(), coefficient));
-            }
-        }
-        OrderedBlockLinearStorage::DenseDstSrc(dense) => {
-            if dense.len() != destinations.len() * source_count {
-                return Err(mismatch);
-            }
-            for (destination, row) in destinations
-                .iter()
-                .zip(dense.chunks_exact(source_count.max(1)))
-            {
-                for (column, entry) in columns.iter_mut().zip(row) {
-                    if let Some(coefficient) = entry {
-                        column.push((destination.clone(), coefficient.clone()));
-                    }
-                }
-            }
-        }
-    }
-    Ok(columns)
+    Ok(reuse.into_pending())
 }
 
 impl<R> TraceTermMode<R> for MultiplicityFreeAdmissionMode
@@ -488,6 +492,12 @@ where
 {
     type Scalar = R::Scalar;
     type Error = OperationError;
+
+    const MODE: TransformerMode = TransformerMode::MultiplicityFree;
+
+    fn rule_identity(rule: &R) -> RuleIdentity {
+        FusionRule::rule_identity(rule)
+    }
 
     #[inline]
     fn operation(error: OperationError) -> Self::Error {
@@ -503,7 +513,7 @@ where
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
         terms: &mut Vec<TensorTraceFusionStructureTerm<Self::Scalar>>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<PendingCoefficientGroups, Self::Error> {
         let src = lowering.src;
         src.validate_source_keys()?;
         if rule.fusion_style() == FusionStyleKind::Unique {
@@ -528,24 +538,32 @@ where
                     rule,
                     src_block_index,
                     || src.source_key(src_block_index),
-                    core::iter::once(row),
+                    core::iter::once((&row.0, &row.1)),
                     terms,
                 )?;
             }
-            return Ok(());
+            // TensorKit `NoCache` for Unique: one uncached phase per tree.
+            return Ok(PendingCoefficientGroups::default());
         }
 
-        lower_by_fusion_group::<Self, R>(rule, lowering, terms, |indices| {
-            multiplicity_free_permute_tree_pair_block_indexed(
-                rule,
-                src.structure,
-                indices,
-                src.orientation,
-                codomain_permutation,
-                domain_permutation,
-            )
-            .map_err(OperationError::from_core_preserving_context)
-        })
+        lower_by_fusion_group::<Self, R>(
+            rule,
+            lowering,
+            codomain_permutation,
+            domain_permutation,
+            terms,
+            |indices| {
+                multiplicity_free_permute_tree_pair_block_indexed(
+                    rule,
+                    src.structure,
+                    indices,
+                    src.orientation,
+                    codomain_permutation,
+                    domain_permutation,
+                )
+                .map_err(OperationError::from_core_preserving_context)
+            },
+        )
     }
 
     #[inline]
@@ -584,10 +602,16 @@ where
 impl<R> TraceTermMode<R> for CheckedGenericAdmissionMode
 where
     R: CheckedGenericPivotal,
-    R::Scalar: Clone + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Clone + Mul<Output = R::Scalar> + Zero + 'static,
 {
     type Scalar = R::Scalar;
     type Error = CheckedGenericPlanError<R::Error>;
+
+    const MODE: TransformerMode = TransformerMode::CheckedGeneric;
+
+    fn rule_identity(rule: &R) -> RuleIdentity {
+        CheckedGenericFusion::rule_identity(rule)
+    }
 
     #[inline]
     fn operation(error: OperationError) -> Self::Error {
@@ -602,22 +626,28 @@ where
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
         terms: &mut Vec<TensorTraceFusionStructureTerm<Self::Scalar>>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<PendingCoefficientGroups, Self::Error> {
         let src = lowering.src;
         src.validate_source_keys()
             .map_err(CheckedGenericPlanError::Operation)?;
-        lower_by_fusion_group::<Self, R>(rule, lowering, terms, |indices| {
-            let block = generic_permute_tree_pair_block_indexed_checked(
-                rule,
-                src.structure,
-                indices,
-                src.orientation,
-                codomain_permutation,
-                domain_permutation,
-            )
-            .map_err(map_checked_generic_trace_symbol_error)?;
-            ordered_block_columns(block).map_err(CheckedGenericPlanError::Operation)
-        })
+        lower_by_fusion_group::<Self, R>(
+            rule,
+            lowering,
+            codomain_permutation,
+            domain_permutation,
+            terms,
+            |indices| {
+                generic_permute_tree_pair_block_indexed_checked(
+                    rule,
+                    src.structure,
+                    indices,
+                    src.orientation,
+                    codomain_permutation,
+                    domain_permutation,
+                )
+                .map_err(map_checked_generic_trace_symbol_error)
+            },
+        )
     }
 
     fn split(

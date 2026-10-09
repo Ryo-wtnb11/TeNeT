@@ -66,9 +66,12 @@ mod coefficients;
 #[cfg(test)]
 mod owner_tests;
 #[cfg(test)]
-pub(crate) use coefficients::take_coefficient_group_activity;
 pub(crate) use coefficients::{
-    CheckedPendingCoefficients, CoefficientGroupReuse, GroupSlot, SourceGroup,
+    take_coefficient_group_activity, take_trace_column_activity, CoefficientGroupActivity,
+};
+pub(crate) use coefficients::{
+    CheckedPendingCoefficients, CoefficientGroupReuse, GroupSlot, PendingCoefficientGroups,
+    SourceGroup, TraceColumnReuse,
 };
 
 /// Snapshot of one process-global tree-transform cache in the shape of the
@@ -253,6 +256,8 @@ pub(crate) enum TransformerMode {
 pub(crate) enum TreeTransformScope {
     AllCodomain,
     TreePair,
+    /// A trace's permutation columns (cache 4 only; cache 3 never keys it).
+    TraceColumns,
 }
 
 /// The source block order an oriented (lazy-adjoint) transform reads.

@@ -171,6 +171,82 @@ impl<K, S> OrderedBlockLinearMap<K, S> {
     }
 }
 
+/// One block transform's structurally present entries per source column
+/// (TensorKit's `U[dst, src]` of `fsbraid`, sparse, column-major): the trace
+/// lowering's permutation input, and the value cache 4 retains for it.
+///
+/// `column(n)` lists source `n`'s present `(destination index, coefficient)`
+/// pairs. A present zero is an entry; a structurally absent coefficient is
+/// none, so the two stay distinct. Every destination has at least one entry.
+/// The storage is exact-length boxed slices: the value is immutable, and its
+/// retained bytes are its lengths.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockSourceColumns<K, S> {
+    destinations: Box<[K]>,
+    column_start: Box<[usize]>,
+    entries: Box<[(usize, S)]>,
+}
+
+#[doc(hidden)]
+impl<K, S> BlockSourceColumns<K, S> {
+    pub(crate) fn new(
+        destinations: Box<[K]>,
+        column_start: Box<[usize]>,
+        entries: Box<[(usize, S)]>,
+    ) -> Self {
+        debug_assert_eq!(column_start.first(), Some(&0));
+        debug_assert_eq!(column_start.last(), Some(&entries.len()));
+        debug_assert!(entries.iter().all(|(row, _)| *row < destinations.len()));
+        Self {
+            destinations,
+            column_start,
+            entries,
+        }
+    }
+
+    /// The empty block: no source, no destination.
+    pub(crate) fn empty() -> Self {
+        Self::new(Box::default(), Box::new([0]), Box::default())
+    }
+
+    /// Every source maps to the destination of its own position with
+    /// coefficient one.
+    pub(crate) fn identity(destinations: Box<[K]>) -> Self
+    where
+        S: CategoricalScalar,
+    {
+        let source_count = destinations.len();
+        Self::new(
+            destinations,
+            (0..=source_count).collect(),
+            (0..source_count).map(|row| (row, S::one())).collect(),
+        )
+    }
+
+    #[inline]
+    pub fn destinations(&self) -> &[K] {
+        &self.destinations
+    }
+
+    #[inline]
+    pub fn source_count(&self) -> usize {
+        self.column_start.len() - 1
+    }
+
+    /// Source `source`'s present entries.
+    #[inline]
+    pub fn column(&self, source: usize) -> &[(usize, S)] {
+        &self.entries[self.column_start[source]..self.column_start[source + 1]]
+    }
+
+    /// Present entries over all sources.
+    #[inline]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 impl<S> DenseColumns<S> {
     pub(crate) fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
         Self {
@@ -579,6 +655,71 @@ fn identity_generic_block<S: CategoricalScalar>(
     }
 }
 
+/// A whole-block Generic transform before it is put in a consumer's form:
+/// the transform builders' [`OrderedBlockLinearMap`] or the trace lowering's
+/// [`BlockSourceColumns`].
+enum GenericBlockOutcome<S> {
+    /// Every source maps to itself with coefficient one (no move ran).
+    Identity(Vec<FusionTreePairKey>),
+    Composed(GenericBlockState<S>),
+}
+
+impl<S: CategoricalScalar> GenericBlockOutcome<S> {
+    fn into_ordered(self) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+        match self {
+            Self::Identity(src_keys) => identity_generic_block(src_keys),
+            Self::Composed(state) => order_generic_block(state),
+        }
+    }
+
+    /// Moves the composer's sparse columns out, with destinations numbered
+    /// and each column ordered as [`order_generic_block`] does
+    /// (source-major first appearance). Why keep that order rather than the
+    /// composer's insertion order: trace lowering visits a source's rows in
+    /// it, so it fixes the order of lowering provider queries (and first
+    /// errors) and the accumulation order of terms. Cost `O(nnz log c + D)`,
+    /// `c` the widest column, on a build only.
+    fn into_source_columns(self) -> BlockSourceColumns<FusionTreePairKey, S> {
+        let (basis, columns) = match self {
+            Self::Identity(src_keys) => {
+                return BlockSourceColumns::identity(src_keys.into_boxed_slice())
+            }
+            Self::Composed(state) => state,
+        };
+        let GenericSourceColumns {
+            column_start,
+            mut entries,
+        } = columns;
+        let mut ordered_row = vec![usize::MAX; basis.len()];
+        let mut ordered_basis_rows = Vec::with_capacity(basis.len());
+        for (row, _) in &mut entries {
+            if ordered_row[*row] == usize::MAX {
+                ordered_row[*row] = ordered_basis_rows.len();
+                ordered_basis_rows.push(*row);
+            }
+            *row = ordered_row[*row];
+        }
+        // A column holds each row once (the composer accumulates repeats).
+        for range in column_start.windows(2) {
+            entries[range[0]..range[1]].sort_unstable_by_key(|(row, _)| *row);
+        }
+        let mut slots = basis.into_iter().map(Some).collect::<Vec<_>>();
+        let destinations = ordered_basis_rows
+            .into_iter()
+            .map(|row| {
+                slots[row]
+                    .take()
+                    .expect("ordered block rows contain each basis row once")
+            })
+            .collect();
+        BlockSourceColumns::new(
+            destinations,
+            column_start.into_boxed_slice(),
+            entries.into_boxed_slice(),
+        )
+    }
+}
+
 /// The one Generic keyed-block driver of the shared block schedule, over the
 /// fallible symbol access (a checked provider, or the test-only infallible
 /// adapter). Each hook is one or two whole-basis moves of the unchanged
@@ -726,8 +867,30 @@ fn generic_braid_block_result<C>(
 where
     C: GenericRigidAccess,
 {
+    generic_braid_block_outcome(
+        rule,
+        src_keys,
+        codomain_permutation,
+        domain_permutation,
+        codomain_levels,
+        domain_levels,
+    )
+    .map(GenericBlockOutcome::into_ordered)
+}
+
+fn generic_braid_block_outcome<C>(
+    rule: &C,
+    src_keys: Vec<FusionTreePairKey>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<GenericBlockOutcome<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     let Some(first) = src_keys.first() else {
-        return Ok(empty_generic_block());
+        return Ok(GenericBlockOutcome::Identity(src_keys));
     };
     let codomain_rank = first.codomain_tree().uncoupled().len();
     let domain_rank = first.domain_tree().uncoupled().len();
@@ -757,7 +920,7 @@ where
         domain_levels,
     )?;
     if identity {
-        return Ok(identity_generic_block(src_keys));
+        return Ok(GenericBlockOutcome::Identity(src_keys));
     }
     let columns = GenericSourceColumns::identity(src_keys.len());
     let state = block_braid(
@@ -768,7 +931,7 @@ where
         codomain_permutation.len(),
         &steps,
     )?;
-    Ok(order_generic_block(state))
+    Ok(GenericBlockOutcome::Composed(state))
 }
 
 fn generic_permute_block_result<C>(
@@ -780,6 +943,19 @@ fn generic_permute_block_result<C>(
 where
     C: GenericRigidAccess,
 {
+    generic_permute_block_outcome(rule, src_keys, codomain_permutation, domain_permutation)
+        .map(GenericBlockOutcome::into_ordered)
+}
+
+fn generic_permute_block_outcome<C>(
+    rule: &C,
+    src_keys: Vec<FusionTreePairKey>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<GenericBlockOutcome<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     if !rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
             expected: "symmetric braiding",
@@ -788,13 +964,13 @@ where
         .into());
     }
     let Some(first) = src_keys.first() else {
-        return Ok(empty_generic_block());
+        return Ok(GenericBlockOutcome::Identity(src_keys));
     };
     let codomain_rank = first.codomain_tree().uncoupled().len();
     let domain_rank = first.domain_tree().uncoupled().len();
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
-    generic_braid_block_result(
+    generic_braid_block_outcome(
         rule,
         src_keys,
         codomain_permutation,
@@ -987,6 +1163,7 @@ where
 ///
 /// Each oriented source key of `src_indices` is validated once, in order,
 /// then the group is recoupled step-major as [`generic_permute_block_result`]
+/// and returned as its present per-source columns
 /// (TensorKit `cfaa073e` `tensoroperations.jl:_trace_permute!`: one
 /// permutation matrix per fusion block). Why not
 /// [`CheckedGenericAdmittedFusionTreeBlockStructure`]: it admits the whole
@@ -1001,7 +1178,7 @@ pub fn generic_permute_tree_pair_block_indexed_checked<C>(
     orientation: FusionTreePairOrientation,
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
-) -> Result<OrderedBlockLinearMap<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
+) -> Result<BlockSourceColumns<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: CheckedGenericRigidSymbols,
 {
@@ -1024,7 +1201,8 @@ where
             .map_err(map_checked_generic_structure_error)?;
         src_keys.push(key);
     }
-    generic_permute_block_result(provider, src_keys, codomain_permutation, domain_permutation)
+    generic_permute_block_outcome(provider, src_keys, codomain_permutation, domain_permutation)
+        .map(GenericBlockOutcome::into_source_columns)
 }
 
 /// Validate infallible-rule keys as the test-only block entries' seed did.

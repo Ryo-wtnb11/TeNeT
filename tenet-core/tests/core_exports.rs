@@ -192,6 +192,7 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "BlockKeyKind",
         "BlockLayout",
         "BlockRef",
+        "BlockSourceColumns",
         "BlockSpec",
         "BlockStructure",
         "BlockStructureContent",

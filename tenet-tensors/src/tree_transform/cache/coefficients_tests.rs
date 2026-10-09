@@ -275,13 +275,13 @@ fn an_entry_charges_its_recoupling_matrix_and_trees() {
         &TreeTransformOperation::permute([1, 0], [2, 3]),
         FusionTreePairOrientation::Direct,
     );
-    let key = CoefficientGroupKey {
-        context: Arc::clone(&handle.context),
-        group_key: multi.0.clone(),
-        src_keys: multi.1.clone().into(),
-        hash: 0,
-    };
-    let bytes = charged_entry_bytes(&key, std::slice::from_ref(&spec), &mut Default::default());
+    let refs = multi.1.iter().collect::<Vec<_>>();
+    let key = handle.context.key(0, (&multi.0, &refs));
+    let mut backings = Default::default();
+    let bytes = charged_key_bytes(&key, &mut backings).saturating_add(charged_entry_bytes(
+        std::slice::from_ref(&spec),
+        &mut backings,
+    ));
     // What: the n x n matrix, the two key lists and every tree pair's heap
     // backing are inside the charge.
     let floor = width * width * core::mem::size_of::<f64>()
