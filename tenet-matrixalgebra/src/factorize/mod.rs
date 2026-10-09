@@ -74,9 +74,6 @@ mod source;
 mod svd;
 
 #[cfg(test)]
-mod numerical_null_tests;
-
-#[cfg(test)]
 mod hermitian_scale_tests;
 
 #[cfg(test)]

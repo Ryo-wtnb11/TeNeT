@@ -418,15 +418,16 @@ fn left_and_right_null_spaces_annihilate_the_source() {
 
         let left_null_dimensions = left.domain()[0].degeneracies().to_vec();
         let right_null_dimensions = right.codomain()[0].degeneracies().to_vec();
-        // The counting fixture has one rank-deficient sector: its tall form
-        // leaves dimensions 11 and 10 on the left bond and one on the right;
-        // repartitioning to the wide form exchanges those two nullities.
+        // The null dimension is `(rows - cols)+` per sector, from the space
+        // alone: the fixture's rank-deficient sector adds none. The tall form
+        // leaves 11 and 9 on the left bond and nothing on the right;
+        // repartitioning to the wide form exchanges the two sides.
         if num_codomain == 2 {
-            assert_eq!(left_null_dimensions, [11, 10]);
-            assert_eq!(right_null_dimensions, [1]);
+            assert_eq!(left_null_dimensions, [11, 9]);
+            assert!(right_null_dimensions.is_empty());
         } else {
-            assert_eq!(left_null_dimensions, [1]);
-            assert_eq!(right_null_dimensions, [11, 10]);
+            assert!(left_null_dimensions.is_empty());
+            assert_eq!(right_null_dimensions, [11, 9]);
         }
     }
 }

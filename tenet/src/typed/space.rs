@@ -365,6 +365,88 @@ where
     R: TypedSectorAdmission,
     R::Mode: TypedTruncationDispatch<R>,
 {
+    /// Pads a spectrum to this whole leg with zeros: each sector of the leg
+    /// gets the magnitudes `spectra` gives it, followed by zeros up to its
+    /// degeneracy, and a sector `spectra` omits is all zeros.
+    ///
+    /// This is TensorKit's `extended_S` in
+    /// `MAK.truncate(::typeof(left_null!), (U, S), strategy)`
+    /// (`src/factorizations/truncation.jl`): the diagonal of a full SVD's
+    /// rectangular `s` ([`TensorMap::diagview`]) covers only the leading
+    /// `min(m_c, n_c)` states of `u`'s bond `W_out`, and the remaining
+    /// `m_c - n_c` states, as well as every sector absent from the domain, are
+    /// the rectangular zeros. The result is a complete spectrum for
+    /// [`Self::find_truncated`] on that bond.
+    ///
+    /// Why a separate step instead of a lenient [`Self::find_truncated`]: the
+    /// selection keeps its complete-spectrum check, so a short or missing
+    /// spectrum is padded only where the caller says the zeros are
+    /// structural.
+    ///
+    /// The rank-revealing null space (TensorKit
+    /// `left_null(t; alg = :svd, trunc)`) is this padding composed with a
+    /// keep-below selection, as [`TensorMap::left_null`] shows.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when a sector is repeated, absent from this
+    /// leg, or carries more values than its degeneracy. Provider
+    /// label-encoding failures are returned unchanged.
+    ///
+    /// # Complexity
+    ///
+    /// `O(K + G log G)` for `K` states in `G` sectors of this leg.
+    pub fn extend_spectrum<V>(
+        &self,
+        spectra: &[SectorSpectrum<R::Sector, V>],
+    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, TypedFacadeError<R>>
+    where
+        V: SpectrumMagnitude,
+    {
+        let mut given = std::collections::BTreeMap::new();
+        for entry in spectra {
+            let sector = TypedSectorAdmission::try_encode_label(self.provider(), &entry.sector)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+            let degeneracy = self.leg.degeneracy(sector).ok_or_else(|| {
+                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                    "sector {:?} is absent from the extended leg",
+                    entry.sector
+                )))
+            })?;
+            if entry.values.len() > degeneracy {
+                return Err(Error::InvalidArgument(format!(
+                    "spectrum for sector {:?} has {} values, more than the leg degeneracy {degeneracy}",
+                    entry.sector,
+                    entry.values.len()
+                ))
+                .into());
+            }
+            if given.insert(sector, &entry.values).is_some() {
+                return Err(Error::InvalidArgument(format!(
+                    "sector {:?} carries more than one spectrum",
+                    entry.sector
+                ))
+                .into());
+            }
+        }
+        self.leg
+            .sectors()
+            .iter()
+            .zip(self.sectors()?)
+            .zip(self.leg.degeneracies())
+            .map(|((sector, label), &degeneracy)| {
+                let mut values: Vec<f64> = given.get(sector).map_or_else(Vec::new, |values| {
+                    values.iter().map(|value| value.magnitude()).collect()
+                });
+                values.resize(degeneracy, 0.0);
+                Ok(SectorSpectrum {
+                    sector: label,
+                    values,
+                })
+            })
+            .collect()
+    }
+
     /// Decides which states of this leg a [`Truncation`] keeps, and how much
     /// weight it discards.
     ///
@@ -430,14 +512,17 @@ where
     ///
     /// Spectrum-sized only, never payload-sized, for `K = sum_c n_c` values
     /// in `G` sectors: `O(K)` to copy and validate; for [`Truncation::Rank`],
-    /// [`Truncation::DiscardWeight`] and [`Truncation::Space`] each sector's
-    /// positions in magnitude order, `O(n_c)` when that sector is monotone in
-    /// magnitude in either direction, ties included (an SVD spectrum, or a
+    /// [`Truncation::RankSmallest`], [`Truncation::DiscardWeight`] and
+    /// [`Truncation::Space`] each sector's positions in magnitude order,
+    /// `O(n_c)` when that sector is monotone in magnitude in either
+    /// direction, ties included (an SVD spectrum, padded or not, or a
     /// spectrum stored by ascending magnitude), and `O(n_c log n_c)`
     /// otherwise (signed `eigh` eigenvalues stored ascending are two
     /// monotone runs in magnitude; the stable sort merges them), then
-    /// `O(G + k log G)` to merge `k` kept (`Rank`) or discarded
-    /// (`DiscardWeight`) values; `O(K)` for the other policies and for the
+    /// `O(G + k log G)` to merge `k` kept (`Rank`, `RankSmallest`) or
+    /// discarded (`DiscardWeight`) values; `O(K)` for the threshold policies
+    /// ([`Truncation::Tolerance`], [`Truncation::ToleranceInf`],
+    /// [`Truncation::ToleranceBelow`]: one norm and one pass) and for the
     /// error; and `O(K + G log G)` to build the selection.
     ///
     /// # Errors

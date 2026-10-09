@@ -1671,8 +1671,8 @@ fn adjoint_col_major_in_place<D: FactorScalar>(data: &mut [D], rows: usize, cols
 }
 
 /// Completes `k` orthonormal columns (`m x k`, column-major) to a full
-/// `m x m` orthonormal basis via an economy QR of `[Q1 | I]`; the first `k`
-/// columns are returned unchanged.
+/// `m x m` orthonormal basis via [`augmented_identity_qr`] of `[Q1 | I]`;
+/// the first `k` columns are returned unchanged.
 pub(super) fn orthonormal_completion<E, D>(
     dense: &mut E,
     thin: &[D],
@@ -1686,31 +1686,10 @@ where
     if rank == rows {
         return Ok(thin.to_vec());
     }
-    let mut augmented = vec![D::zero(); rows * (rank + rows)];
-    augmented[..rows * rank].copy_from_slice(thin);
-    for row in 0..rows {
-        augmented[rows * rank + row * rows + row] = D::one();
-    }
-    let mut q = vec![D::zero(); rows * rows];
-    let mut r = vec![D::zero(); rows * (rank + rows)];
-    qr_into_workspace(
-        dense,
-        &augmented,
-        rows,
-        rank + rows,
-        rows,
-        &mut q,
-        rows,
-        rows,
-        rows,
-        &mut r,
-        rows,
-        rank + rows,
-        rows,
-    )?;
-    let mut full = vec![D::zero(); rows * rows];
+    let (mut full, _) = augmented_identity_qr(dense, rows, rank, |block| {
+        block.copy_from_slice(thin);
+    })?;
     full[..rows * rank].copy_from_slice(thin);
-    full[rows * rank..].copy_from_slice(&q[rows * rank..rows * rows]);
     Ok(full)
 }
 

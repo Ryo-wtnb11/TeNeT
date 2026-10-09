@@ -193,6 +193,21 @@ pub(super) fn generic_factorization_input(
     (space, data)
 }
 
+/// [`generic_factorization_input`]'s space with codomain and domain
+/// exchanged: every coupled block is wide, so the right null space is the
+/// shape-based nonempty side.
+pub(super) fn wide_generic_factorization_input() -> BoundDynamicFusionMapSpace<FactorGenericRule> {
+    let x = SectorId::new(1);
+    let left = SectorLeg::new([(x, 2)], false);
+    let unit = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([unit.clone(), unit.clone()]),
+        FusionProductSpace::new([left, unit]),
+    );
+    BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(FactorGenericRule), homspace)
+        .unwrap()
+}
+
 pub(super) fn padded_generic_factorization_input(
     source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
     source_data: &[f64],

@@ -330,27 +330,39 @@ impl Observer for FailAfterObservingQrInput {
     }
 }
 
-/// Numerical null completion: owned SVD forwards, every QR fails.
+/// Shape-based null space: no SVD, EIGH or GEMM; every QR fails.
 #[derive(Default)]
-pub(super) struct FailAfterSvdQr;
+pub(super) struct FailNullQr;
 
-impl Observer for FailAfterSvdQr {
+impl Observer for FailNullQr {
     fn script(script: &mut Script) {
         script
-            .set(Op::Svd, Action::Forward)
-            .set(
-                Op::SvdInto,
-                Action::Panic("numerical null completion must use owned SVD outputs"),
+            .set_all(
+                &[Op::Svd, Op::SvdInto, Op::Eigh, Op::DotGeneral],
+                Action::Panic("the shape-based null space runs only QR"),
             )
-            .set(
-                Op::Eigh,
-                Action::Panic("test only exercises numerical null completion"),
+            .fail(&[Op::QrInto], None, "qr_into", "injected null QR failure");
+    }
+}
+
+/// Shape-based null space: no SVD, EIGH or GEMM; the second QR fails.
+#[derive(Default)]
+pub(super) struct FailSecondNullQr;
+
+impl Observer for FailSecondNullQr {
+    fn script(script: &mut Script) {
+        script
+            .set_all(
+                &[Op::Svd, Op::SvdInto, Op::Eigh, Op::DotGeneral],
+                Action::Panic("the shape-based null space runs only QR"),
             )
-            .set(
-                Op::DotGeneral,
-                Action::Panic("test only exercises numerical null completion"),
-            )
-            .fail(&[Op::Qr], None, "qr", "injected completion failure");
+            .set(Op::Qr, Action::Forward)
+            .fail(
+                &[Op::QrInto],
+                Some(2),
+                "qr_into",
+                "injected second-sector failure",
+            );
     }
 }
 

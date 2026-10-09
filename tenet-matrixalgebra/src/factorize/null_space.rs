@@ -1,63 +1,13 @@
 use super::*;
 
-/// Null-space coordinates of one finite diagonal sector, by the dense
-/// route's numerical-rank rule applied to the singular values `|a_i|`
-/// directly.
-///
-/// The dense route keeps singular values above
-/// `epsilon * max(rows, cols) * sigma_max` and spans the null space with the
-/// remaining singular vectors in descending singular-value order. On a
-/// diagonal those vectors are unit vectors, so the sector's null basis is
-/// `e_i` for each `|a_i|` at or below the tolerance, in descending `|a_i|`
-/// (stable).
-fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> (usize, Vec<D>) {
-    let k = values.len();
-    let rounded = |index: usize| {
-        D::from_real(values[index].widen_complex().norm())
-            .widen_complex()
-            .re
-    };
-    // A finite value whose magnitude overflows (e.g. `MAX (1 + i)`) would make
-    // `sigma_max` and the cutoff infinite and every direction null. Why not
-    // refuse it: the relative rule is scale-invariant, so such a sector is
-    // ranked in the scaled form `|a_i / m|`, `m` its largest component, which
-    // is finite and decides as exact arithmetic would.
-    let scale = (0..k).any(|index| !rounded(index).is_finite()).then(|| {
-        values.iter().fold(0.0_f64, |largest, &value| {
-            let value = value.widen_complex();
-            largest.max(value.re.abs()).max(value.im.abs())
-        })
-    });
-    let sigma = |index: usize| match scale {
-        None => rounded(index),
-        Some(scale) => (values[index].widen_complex() / scale).norm(),
-    };
-    let sigma_max = (0..k).map(sigma).fold(0.0_f64, f64::max);
-    let tolerance = D::epsilon() * k as f64 * sigma_max;
-    let is_null = |&index: &usize| sigma(index) <= tolerance;
-    let nullity = (0..k).filter(is_null).count();
-    let mut coordinates = vec![D::zero(); k * nullity];
-    let mut place = |column: usize, index: usize| match side {
-        FactorSide::Left => coordinates[index + column * k] = D::from_real(1.0),
-        FactorSide::Right => coordinates[column + index * nullity] = D::from_real(1.0),
-    };
-    // Exact zeros, the common case, are already in descending (equal) order;
-    // only a nonzero direction below the cutoff needs the stable sort.
-    if (0..k).filter(is_null).all(|index| sigma(index) == 0.0) {
-        for (column, index) in (0..k).filter(is_null).enumerate() {
-            place(column, index);
-        }
-    } else {
-        let mut null: Vec<usize> = (0..k).filter(is_null).collect();
-        null.sort_by(|&a, &b| sigma(b).total_cmp(&sigma(a)));
-        for (column, &index) in null.iter().enumerate() {
-            place(column, index);
-        }
-    }
-    (nullity, coordinates)
-}
-
 /// Null space of a compact diagonal, published through `authority`.
+///
+/// A diagonal sector is square, so its shape-based nullity is zero and every
+/// sector drops out of `W`: the empty null space of MatrixAlgebraKit's
+/// `qr_null!`/`lq_null!` with `DiagonalAlgorithm`
+/// (`src/implementations/{qr,lq}.jl`, `_diagonal_qr_null!`), whatever the
+/// values. The bond is still admitted so a nonfinite or malformed input is
+/// refused as on the dense route.
 fn null_diagonal<A, R, D>(
     authority: &A,
     space: &BoundDynamicFusionMapSpace<R>,
@@ -75,33 +25,14 @@ where
         FactorSide::Left => homspace.codomain(),
         FactorSide::Right => homspace.domain(),
     })?;
-    let mut pairs = Vec::new();
     for region in bond.iter() {
-        let k = region.rows();
-        let (nullity, coordinates) = compact_null_sector(&bond.entry(region).values, side);
-        if nullity == 0 {
-            null_dimensions.remove(&region.coupled());
-            continue;
-        }
-        null_dimensions.insert(region.coupled(), nullity);
-        let (left_data, right_data) = match side {
-            FactorSide::Left => (coordinates, Vec::new()),
-            FactorSide::Right => (Vec::new(), coordinates),
-        };
-        pairs.push(FactorPair {
-            sector: region.coupled(),
-            kept: nullity,
-            left: left_data,
-            left_rows: k,
-            right: right_data,
-            right_leading: nullity,
-        });
+        null_dimensions.remove(&region.coupled());
     }
     publish_one_sided_factor(
         authority,
         homspace,
         &bond.regions,
-        &mut pairs,
+        &mut Vec::new(),
         &null_dimensions,
         side,
         FactorPlacement::Direct,
@@ -128,10 +59,11 @@ where
     )
 }
 
-/// Numerical left null space of `source` in fusion mode `M`; a compact
-/// diagonal is read directly (see [`compact_null_sector`]). A checked dense
-/// input stages all SVDs and completions before the data-dependent bond is
-/// admitted.
+/// Left null space of `source` in fusion mode `M`: per coupled sector the
+/// `rows - cols` (when positive) trailing columns of the full QR's `Q`
+/// (MatrixAlgebraKit `qr_null!`). The null dimension follows from the space
+/// alone, so a checked dense input runs every QR before the bond is
+/// published; a compact diagonal has an empty null space.
 #[doc(hidden)]
 pub fn left_null_from_source<M, L, E, R, D>(
     lease: L,
@@ -146,8 +78,9 @@ where
     null_from_source::<M, _, _, _, _>(lease, source, FactorSide::Left)
 }
 
-/// Numerical right null space of `source` in fusion mode `M`; see
-/// [`left_null_from_source`].
+/// Right null space of `source` in fusion mode `M`: per coupled sector the
+/// `cols - rows` (when positive) trailing rows of the full LQ's `Q`
+/// (MatrixAlgebraKit `lq_null!`); see [`left_null_from_source`].
 #[doc(hidden)]
 pub fn right_null_from_source<M, L, E, R, D>(
     lease: L,
@@ -165,10 +98,8 @@ where
 #[cfg(test)]
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`).
 ///
-/// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
-/// `sigma > epsilon(dtype) * max(rows, cols) * sigma_max`. The returned columns
-/// are the orthonormal complement after that numerical rank; sectors with no
-/// null directions drop out of `W`.
+/// Each sector keeps the `rows - cols` (when positive) trailing columns of its
+/// full QR's `Q`; sectors with no null directions drop out of `W`.
 pub(crate) fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -199,10 +130,8 @@ where
 #[cfg(test)]
 /// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`).
 ///
-/// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
-/// `sigma > epsilon(dtype) * max(rows, cols) * sigma_max`. The returned rows
-/// span the kernel after that numerical rank; sectors with no null directions
-/// drop out of `W`.
+/// Each sector keeps the `cols - rows` (when positive) trailing rows of its
+/// full LQ's `Q`; sectors with no null directions drop out of `W`.
 pub(crate) fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -231,11 +160,11 @@ where
 }
 
 #[cfg(test)]
-/// Checked-Generic numerical left null space.
+/// Checked-Generic left null space.
 ///
-/// Structural dimensions are validated before dense work. All SVDs and
-/// completions are then staged before the exact data-dependent bond is
-/// admitted and scattered by the shared checked factor builder.
+/// Structural dimensions are validated before dense work. All QRs are then
+/// staged before the bond is admitted and scattered by the shared checked
+/// factor builder.
 pub(crate) fn left_null_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -254,7 +183,7 @@ where
 }
 
 #[cfg(test)]
-/// Checked-Generic numerical right null space; see
+/// Checked-Generic right null space; see
 /// [`left_null_dyn_checked_generic`] for the transaction boundary.
 pub(crate) fn right_null_dyn_checked_generic<E, R, D>(
     dense: &mut E,
@@ -273,8 +202,13 @@ where
     )
 }
 
-/// Numerical null space of every coupled sector of `input`, published through
-/// `authority`.
+/// Shape-based null space of every coupled sector of `input`, published
+/// through `authority`.
+///
+/// Why not a rank-revealing SVD: the null dimension of MatrixAlgebraKit's
+/// default (`LeftNullViaQR`/`RightNullViaLQ`, `src/interface/orthnull.jl`)
+/// is `(rows - cols)₊` per sector, decided by the space alone, so a sector
+/// whose null side is not the longer one needs no dense work at all.
 fn null_dense<A, E, R, D>(
     dense: &mut E,
     authority: &A,
@@ -298,27 +232,20 @@ where
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
             let (rows, cols) = (matrix.rows, matrix.cols);
-            let (rank, compact) =
-                numerical_rank_and_compact_basis(dense, matrix.data, rows, cols, side)?;
-            let extent = match side {
-                FactorSide::Left => rows,
-                FactorSide::Right => cols,
+            let (extent, other) = match side {
+                FactorSide::Left => (rows, cols),
+                FactorSide::Right => (cols, rows),
             };
-            if rank == extent {
+            if extent <= other {
                 null_dimensions.remove(&matrix.sector);
                 continue;
             }
-            // Only the null side's basis is completed: completing the other
-            // one would run an unused QR for this operation.
-            let basis = orthonormal_completion(dense, &compact, extent, rows.min(cols))?;
-            let null_dim = extent - rank;
+            let null_dim = extent - other;
+            let basis = qr_null_basis(dense, matrix.data, rows, cols, side)?;
             null_dimensions.insert(matrix.sector, null_dim);
             let (left, right) = match side {
-                FactorSide::Left => (basis[rows * rank..].to_vec(), Vec::new()),
-                FactorSide::Right => (
-                    Vec::new(),
-                    adjoint_col_major(&basis[cols * rank..], cols, null_dim),
-                ),
+                FactorSide::Left => (basis, Vec::new()),
+                FactorSide::Right => (Vec::new(), adjoint_col_major(&basis, cols, null_dim)),
             };
             pairs.push(FactorPair {
                 sector: matrix.sector,
@@ -342,37 +269,31 @@ where
     ))
 }
 
-/// Computes the requested compact singular-vector basis and the documented numerical rank.
-pub(super) fn numerical_rank_and_compact_basis<E, D>(
+/// The orthonormal complement `N` (`m x (m - n)`, column-major) of the
+/// column space of the `rows x cols` column-major `matrix` (`Left`, `m =
+/// rows`) or of its adjoint (`Right`, `m = cols`), for `m > n`: the last
+/// `m - n` columns of [`augmented_identity_qr`]'s `Q`. This is
+/// MatrixAlgebraKit `qr_null!`'s `Q * [0; I]` up to a unitary gauge on the
+/// null block, which the null-space contract leaves free.
+fn qr_null_basis<E, D>(
     dense: &mut E,
     matrix: &[D],
     rows: usize,
     cols: usize,
     side: FactorSide,
-) -> Result<(usize, Vec<D>), OperationError>
+) -> Result<Vec<D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    let compact_rank = rows.min(cols);
-    let (u, singular_values, vh) = compact_svd_owned(dense, matrix, rows, cols)?;
-
-    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
-    // Why not exact-zero rank: backward-stable SVD represents dependent
-    // directions at working precision, not necessarily as bitwise zero.
-    let tolerance = D::epsilon() * rows.max(cols) as f64 * sigma_max;
-    let rank = singular_values
-        .iter()
-        .copied()
-        .filter(|&sigma| sigma > tolerance)
-        .count();
-    drop(singular_values);
-    let basis = match side {
-        FactorSide::Left => u,
-        FactorSide::Right => {
-            drop(u);
-            adjoint_col_major(&vh, compact_rank, cols)
-        }
+    let (m, n) = match side {
+        FactorSide::Left => (rows, cols),
+        FactorSide::Right => (cols, rows),
     };
-    Ok((rank, basis))
+    let (mut q, _) = augmented_identity_qr(dense, m, n, |block| match side {
+        FactorSide::Left => block.copy_from_slice(matrix),
+        FactorSide::Right => adjoint_col_major_into(matrix, rows, cols, block),
+    })?;
+    q.drain(..m * n);
+    Ok(q)
 }

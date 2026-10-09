@@ -612,6 +612,19 @@ rank budget.
   quantum-dimension-weighted decision over all sectors
   (`GradedSpace::find_truncated`), applied with `restrict_leg` (on both
   legs of the spectrum factor at once).
+- `left_null` and `right_null` are shape-based, as TensorKit's default
+  (`qr_null`/`lq_null`): in sector `c` the left null space of an
+  `m_c × n_c` block has dimension `(m_c − n_c)₊`, the orthogonal complement
+  of a superspace of the block's column space, whatever its rank. The
+  rank-revealing null space (TensorKit `left_null(t; alg = :svd, trunc)`) is
+  a composition: `svd_full`, the diagonal of its `s` padded with the
+  rectangular zeros to `u`'s bond (`GradedSpace::extend_spectrum`), the
+  keep-below selection `Truncation::below(atol, rtol)` — the states whose
+  singular value is at most `max(atol, rtol ∥S∥)`, `∥S∥` the
+  quantum-dimension-weighted norm above — optionally intersected with
+  `Truncation::rank_smallest(maxnullity)`, a weighted budget filled from the
+  smallest values, and `restrict_leg` on `u`. Sector `c` then keeps
+  `(m_c − n_c)₊` rectangular states plus one per small singular value.
 - `restrict_leg` composes with the inclusion isometry of a `LegSelection`
   `σ = { c ↦ P_c }`, a set of kept degeneracy positions
   `P_c = {p_0 < … < p_{k_c − 1}}` per sector: the identity on every irrep

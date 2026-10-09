@@ -1036,13 +1036,13 @@ fn lq_full_reconstructs() {
 }
 
 #[test]
-fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
+fn null_qr_failure_preserves_input_and_builds_no_factor() {
     for (left, rows, cols) in [(true, 3, 2), (false, 2, 3)] {
         let tensor =
             one_sector_rectangular_matrix(vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0], rows, cols);
         let before = tensor.data().to_vec();
         let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-        let mut dense = ScriptedExecutor::<FailAfterSvdQr>::default();
+        let mut dense = ScriptedExecutor::<FailNullQr>::default();
 
         crate::factorize::reset_factor_buffer_build_counts_for_test();
         let result = if left {
@@ -1052,7 +1052,7 @@ fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
         };
 
         assert!(matches!(result, Err(OperationError::Dense(_))));
-        assert_eq!((dense.counts().svd, dense.counts().qr), (1, 1));
+        assert_eq!(dense.counts().qr_into, 1);
         assert_eq!(
             crate::factorize::factor_buffer_build_counts_for_test(),
             (0, 0)

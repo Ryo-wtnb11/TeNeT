@@ -157,7 +157,7 @@
 //!   parent view for dense storage. A compact diagonal, in either admission
 //!   mode, keeps its direct `O(Σ_c k_c)` conjugation path.
 //! - Some outer multiplicity factorization leaves. Checked `Generic` providers
-//!   have provider-neutral SVD/QR/LQ, numerical null spaces, and the admitted
+//!   have provider-neutral SVD/QR/LQ, shape-based null spaces, and the admitted
 //!   matrix-function subset; each leaf documents its own lazy-adjoint and
 //!   compact-storage boundary.
 //!

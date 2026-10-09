@@ -319,7 +319,7 @@ where
 {
     /// The leg of a `bond <- bond` endomorphism, after proving that is what
     /// the receiver is.
-    fn bond_endomorphism_leg(&self, operation: &str) -> Result<&SectorLeg, TypedFacadeError<R>> {
+    fn require_bond_map(&self, operation: &str) -> Result<(), TypedFacadeError<R>> {
         let homspace = self.logical_space().space().homspace();
         if homspace.codomain().len() != 1 || homspace.domain().len() != 1 {
             return Err(Error::InvalidArgument(format!(
@@ -329,22 +329,20 @@ where
             ))
             .into());
         }
-        let codomain = &homspace.codomain().legs()[0];
-        if codomain != &homspace.domain().legs()[0] {
-            return Err(Error::InvalidArgument(format!(
-                "{operation} requires equal codomain and domain legs"
-            ))
-            .into());
-        }
-        Ok(codomain)
+        Ok(())
     }
 
-    /// Returns the per-coupled-sector diagonal of a `bond <- bond` map.
+    /// Returns the per-coupled-sector diagonal of a one-leg `W_out <- W_in`
+    /// map.
     ///
     /// MatrixAlgebraKit's `diagview`, and the spectrum reader for a factor that
     /// is diagonal by construction but not stored compactly — an explicitly
-    /// materialized compact-SVD `s`, or a device `s`/`d` brought back with
-    /// `to_host`. Compact storage is cloned; dense storage is read one strided
+    /// materialized compact-SVD `s`, the rectangular `s` of
+    /// [`Self::svd_full`], or a device `s`/`d` brought back with `to_host`.
+    /// A rectangular sector block `m_c x n_c` contributes its leading
+    /// `min(m_c, n_c)` diagonal entries; a sector present on only one leg has
+    /// no block and no entry ([`GradedSpace::extend_spectrum`] pads such a
+    /// spectrum to a full leg). Compact storage is cloned; dense storage is read one strided
     /// diagonal per block.
     /// Off-diagonal entries are never inspected, so this returns the diagonal
     /// of an arbitrary endomorphism, not a proof that it is diagonal — use
@@ -362,7 +360,7 @@ where
     ///
     /// [`Error::InvalidArgument`] for a lazy adjoint (adjoin the result of the
     /// owned parent, or read [`Self::materialize`]'s result, instead), for a
-    /// receiver that is not `bond <- bond`, and
+    /// receiver that is not a rank-(1,1) map, and
     /// for a layout whose blocks are not fusion-tree keyed.
     ///
     /// Each sector is decoded to its provider label. A provider that cannot
@@ -378,7 +376,7 @@ where
                 "diagview requires an owned tensor, not a lazy adjoint".to_string(),
             ))
         })?;
-        self.bond_endomorphism_leg("diagview")?;
+        self.require_bond_map("diagview")?;
         let raw: Vec<tenet_matrixalgebra::SectorSpectrum<D>> = match body.data.as_ref() {
             TypedData::Diagonal(spectrum) => spectrum.clone(),
             TypedData::Dense(_) => {
