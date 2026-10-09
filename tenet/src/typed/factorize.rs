@@ -8,9 +8,11 @@ mod mode;
 pub use mode::FusionMode;
 use mode::{AdjointRule, FactorOp};
 
-/// The runtime as the seam's executor lease: the checked entries lease a
-/// dense executor only for a dense stage, so a compact diagonal never takes
-/// the runtime lock or mints an executor.
+/// The runtime as the seam's executor lease, the one lease rule of every
+/// factorization in both fusion modes (#1996): a dense executor is leased
+/// only for the dense stage, after preflight, materialization and payload
+/// binding, so a compact diagonal or an earlier error never takes the
+/// runtime lock or mints an executor.
 struct RuntimeDense<'a>(&'a Runtime);
 
 impl tenet_matrixalgebra::seam::ExecutorLease for RuntimeDense<'_> {
@@ -73,6 +75,18 @@ where
     R::Mode: FusionMode<R>,
     D: TensorScalar,
 {
+    /// The bound space and dense payload of an owned operand on a dense
+    /// route; a compact diagonal is densified operation-locally.
+    #[allow(clippy::type_complexity)]
+    fn dense_operand(
+        &self,
+    ) -> Result<(&BoundDynamicFusionMapSpace<R>, std::borrow::Cow<'_, [D]>), Error> {
+        let body = self.owned_body().ok_or_else(|| {
+            internal_layout_error("a dense-route operand must be owned after adjoint dispatch")
+        })?;
+        Ok((&body.space, body.materialized_dense_data()))
+    }
+
     /// The storage `op` reads: the receiver's own, or for a lazy adjoint
     /// whatever [`FactorOp::adjoint_rule`] selects. `local` holds an
     /// operation-local materialization.
@@ -477,23 +491,5 @@ where
             s: wrap_factor_on(&self.runtime, s),
             vh: wrap_factor_on(&self.runtime, vh),
         })
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    /// The bound space and dense payload of this owned tensor map; a compact
-    /// diagonal is densified operation-locally.
-    #[allow(clippy::type_complexity)]
-    fn bound_payload(
-        &self,
-    ) -> Result<(&BoundDynamicFusionMapSpace<R>, std::borrow::Cow<'_, [D]>), Error> {
-        let body = self.owned_body().ok_or_else(|| {
-            internal_layout_error("factorization input must be owned after adjoint dispatch")
-        })?;
-        Ok((&body.space, body.materialized_dense_data()))
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use tenet_matrixalgebra::seam::FactorSpaceAuthority;
+use tenet_matrixalgebra::seam::{ExecutorLease, FactorSpaceAuthority};
 
 impl<R, D> TensorMap<R, D>
 where
@@ -27,7 +27,14 @@ where
             self.admit_compact(spectrum)?;
             return Ok(self.with_spectrum(inv_spectrum(spectrum)?));
         }
-        R::Mode::inv_dense(self, self.swapped_output_space()?)
+        let output = self.swapped_output_space()?;
+        let _host_pool = self.runtime.enter_host_pool();
+        let (space, data) = self.dense_operand()?;
+        let input = BoundDynamicTensorRef::try_new(space, &data).map_err(Error::from)?;
+        let factor = RuntimeDense(&self.runtime)
+            .run(|dense| tenet_matrixalgebra::seam::inv_direct_into_dyn(dense, &input, output))
+            .map_err(Error::from)?;
+        Ok(wrap_factor_on(&self.runtime, factor))
     }
 
     /// The one body of the pseudo-inverse: a lazy adjoint `A^H` is read
@@ -59,7 +66,28 @@ where
                 .map_err(pinv_seam_error)?;
             return Ok(self.with_spectrum(inverted));
         }
-        R::Mode::pinv_dense(self, self.swapped_output_space()?, rcond)
+        let output = self.swapped_output_space()?;
+        let _host_pool = self.runtime.enter_host_pool();
+        let factor = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => {
+                let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                    .map_err(Error::from)?;
+                RuntimeDense(&self.runtime).run(|dense| {
+                    tenet_matrixalgebra::seam::pinv_adjoint_parent_direct_into_dyn(
+                        dense, &parent, output, rcond,
+                    )
+                })
+            }
+            TypedTensorRepr::Owned(_) => {
+                let (space, data) = self.dense_operand()?;
+                let input = BoundDynamicTensorRef::try_new(space, &data).map_err(Error::from)?;
+                RuntimeDense(&self.runtime).run(|dense| {
+                    tenet_matrixalgebra::seam::pinv_direct_into_dyn(dense, &input, output, rcond)
+                })
+            }
+        }
+        .map_err(pinv_seam_error)?;
+        Ok(wrap_factor_on(&self.runtime, factor))
     }
 }
 
