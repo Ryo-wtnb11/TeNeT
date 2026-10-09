@@ -566,6 +566,7 @@ pub struct CudaContractMembersWorkspace<S> {
     /// its right operand.
     lens: [usize; 3],
     /// Test seam: the next output transform fails before it submits.
+    #[cfg(any(test, feature = "testing"))]
     fail_before_output: bool,
 }
 
@@ -579,11 +580,13 @@ impl<S> Default for CudaContractMembersWorkspace<S> {
             buffers: [None, None, None],
             core_zeros: Vec::new(),
             lens: [0; 3],
+            #[cfg(any(test, feature = "testing"))]
             fail_before_output: false,
         }
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl<S> CudaContractMembersWorkspace<S> {
     /// Test seam: makes the next replay of the prepared route fail after its
     /// core GEMMs and before its output transform, as a backend error there
@@ -616,7 +619,12 @@ impl<D: CudaScalar> CudaContractMembersWorkspace<CudaStorage<D>> {
             .flatten()
             .map(CudaSingleMemberRegions::retained_bytes)
             .chain(self.core_zeros.iter().map(CudaRegion::retained_heap_bytes))
-            .fold(0usize, usize::saturating_add);
+            .fold(
+                self.core_zeros
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CudaRegion>()),
+                usize::saturating_add,
+            );
         elements
             .saturating_mul(std::mem::size_of::<D>())
             .saturating_add(regions)
@@ -944,6 +952,7 @@ where
         _: ContractDestinationInit<D>,
     ) -> Result<(), OperationError> {
         let workspace = &mut *self.workspace;
+        #[cfg(any(test, feature = "testing"))]
         if std::mem::take(&mut workspace.fail_before_output) {
             return Err(OperationError::InvalidArgument {
                 message: "injected CUDA member failure before the output transform",
