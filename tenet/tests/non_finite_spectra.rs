@@ -201,35 +201,44 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
 fn dense_pinv_of_a_nan_tensor_is_invalid_argument() {
     let runtime = host_runtime();
     let leg = u1();
-    let real: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {
-            if *trees.coupled() == U1Irrep::new(1) && index == [0, 0] {
-                f64::NAN
-            } else if index[0] == index[1] {
-                2.0
-            } else {
-                0.5
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let real: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {
+                if *trees.coupled() == U1Irrep::new(1) && index == [0, 0] {
+                    bad
+                } else if index[0] == index[1] {
+                    2.0
+                } else {
+                    0.5
+                }
+            })
+            .unwrap();
+        let complex = real.convert::<Complex64>();
+        for (case, result) in [
+            ("f64 owned", real.pinv(&[0], &[1], 0.1).map(|_| ())),
+            (
+                "f64 adjoint",
+                real.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
+            ),
+            ("c64 owned", complex.pinv(&[0], &[1], 0.1).map(|_| ())),
+            (
+                "c64 adjoint",
+                complex.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
+            ),
+        ] {
+            match result {
+                Err(Error::InvalidArgument(message)) => {
+                    assert!(message.contains("must be finite"), "{case}: {message}")
+                }
+                other => panic!("{case}: expected InvalidArgument, got {other:?}"),
             }
-        })
-        .unwrap();
-    let complex = real.convert::<Complex64>();
-    for (case, result) in [
-        ("f64 owned", real.pinv(&[0], &[1], 0.1).map(|_| ())),
-        (
-            "f64 adjoint",
-            real.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
-        ),
-        ("c64 owned", complex.pinv(&[0], &[1], 0.1).map(|_| ())),
-        (
-            "c64 adjoint",
-            complex.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
-        ),
-    ] {
-        match result {
+        }
+        // rcond validation precedes the finite scan.
+        match real.pinv(&[0], &[1], -1.0) {
             Err(Error::InvalidArgument(message)) => {
-                assert!(message.contains("must be finite"), "{case}: {message}")
+                assert!(message.contains("rcond"), "{message}")
             }
-            other => panic!("{case}: expected InvalidArgument, got {other:?}"),
+            other => panic!("expected the rcond error, got {:?}", other.map(|_| ())),
         }
     }
 }

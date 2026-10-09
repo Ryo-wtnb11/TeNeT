@@ -373,30 +373,39 @@ fn checked_generic_pinv_of_a_nan_tensor_is_invalid_argument() {
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let bond =
         GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)]).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, _| {
-            if trees.coupled() == &Label::Vacuum {
-                4.0
-            } else {
-                f64::NAN
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &Label::Vacuum {
+                    4.0
+                } else {
+                    bad
+                }
+            })
+            .unwrap();
+        for (case, result) in [
+            ("f64", source.pinv(&[0], &[1], 0.5).map(|_| ())),
+            (
+                "c64",
+                source
+                    .convert::<Complex64>()
+                    .pinv(&[0], &[1], 0.5)
+                    .map(|_| ()),
+            ),
+        ] {
+            match result {
+                Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                    assert!(message.contains("must be finite"), "{case}: {message}")
+                }
+                other => panic!("{case}: expected InvalidArgument, got {other:?}"),
             }
-        })
-        .unwrap();
-    for (case, result) in [
-        ("f64", source.pinv(&[0], &[1], 0.5).map(|_| ())),
-        (
-            "c64",
-            source
-                .convert::<Complex64>()
-                .pinv(&[0], &[1], 0.5)
-                .map(|_| ()),
-        ),
-    ] {
-        match result {
+        }
+        // rcond validation precedes the finite scan.
+        match source.pinv(&[0], &[1], -1.0) {
             Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
-                assert!(message.contains("must be finite"), "{case}: {message}")
+                assert!(message.contains("rcond"), "{message}")
             }
-            other => panic!("{case}: expected InvalidArgument, got {other:?}"),
+            other => panic!("expected the rcond error, got {:?}", other.map(|_| ())),
         }
     }
 }

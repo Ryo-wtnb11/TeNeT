@@ -131,6 +131,20 @@ where
                 terms,
             );
         }
+        // On faer the values-only and full drivers agree bitwise.
+        #[cfg(all(
+            feature = "cpu-faer",
+            not(any(
+                feature = "cpu-blas",
+                feature = "blas-accelerate",
+                feature = "blas-openblas",
+                feature = "blas-mkl"
+            ))
+        ))]
+        assert!(
+            output.spectra[member] == eager_spectra,
+            "{what}: spectra bitwise"
+        );
         check_member(&what, input, &d, &v, (&eager_d, &eager_v), f64::EPSILON);
     }
 }
