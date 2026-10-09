@@ -275,8 +275,14 @@ mod tests {
         }
     }
 
+    /// What: the two primitives the executor replays a B > 1 CopyC route
+    /// with — the planned core's signed stacked replay and the member
+    /// output transform — each submit one member-expanded batch (jobs × B).
+    /// Payload values are not checked here; the executor's member values
+    /// are pinned against the base sequence and a dense oracle in
+    /// `tenet-tensors` (`route_host_core_tests`).
     #[test]
-    fn compiled_copy_c_core_and_transform_submit_member_expanded_jobs() {
+    fn copy_c_core_and_transform_primitives_submit_member_expanded_batches() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let v = GradedSpace::try_new(
             Arc::new(SU2FusionRule),
@@ -310,14 +316,6 @@ mod tests {
                 }),
                 "this selected SU2 CopyC route must contain a scaled Single move"
             );
-            let mut workspace = plan.workspace().unwrap();
-            let expected = plan
-                .execute(&lhs, &rhs, &mut workspace)
-                .unwrap()
-                .storage
-                .clone();
-            assert_eq!(expected.len(), plan.member_len * members);
-
             // The member expansion the executor replays at B > 1.
             let core = Arc::clone(plan.resolution.direct_core().unwrap().0);
             let replay = StackedDirectReplay::new_signed(core, members).unwrap();
@@ -349,7 +347,7 @@ mod tests {
             assert!(core_jobs_per_member > 0);
             assert_eq!(core.jobs, core_jobs_per_member * members);
 
-            let mut output = vec![f64::NAN; expected.len()];
+            let mut output = vec![f64::NAN; plan.member_len * members];
             let transform_counts = Arc::new(SpyCounts::default());
             let mut transform = SpyExecutor::counting(&transform_counts);
             tree_transform_members_overwrite_raw(
