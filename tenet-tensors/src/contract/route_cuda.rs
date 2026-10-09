@@ -560,9 +560,9 @@ pub struct CudaContractMembersWorkspace<S> {
     /// `B`-independent, so the first `B` members are the active stack and the
     /// rest is idle capacity.
     buffers: [Option<S>; 3],
-    /// Core inactive blocks of a directly written destination, per member,
-    /// and the elements of the largest before the member axis.
+    /// Core inactive blocks of a directly written destination, per member.
     core_zeros: Vec<CudaRegion>,
+    /// Elements of the largest `core_zeros` block, before the member axis.
     core_zero_len: usize,
     /// Member lengths of the core destination, the core's left operand and
     /// its right operand.
