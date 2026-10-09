@@ -147,81 +147,79 @@ fn dense_multisector_full_svd_publishes_compact_s_for_real_and_complex() {
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-12));
 }
 
+/// The left and right null spaces of a square input are empty: the
+/// codomain/domain is kept and the fresh one-leg bond has no sectors.
+fn assert_empty_null_spaces<R, D>(input: &TensorMap<R, D>, rows: &[usize], cols: &[usize])
+where
+    R: TypedSectorAdmission,
+    R::Mode: FusionMode<R> + TypedAdjointSpace<R> + TypedTensorTransformDispatch<R, D>,
+    D: FactorizationScalar,
+{
+    let matrix = input.permute(rows, cols).unwrap();
+    let left = input.left_null(rows, cols).unwrap();
+    let right = input.right_null(rows, cols).unwrap();
+    assert_eq!(left.codomain(), matrix.codomain());
+    assert_eq!(right.domain(), matrix.domain());
+    for bond in [&left.domain()[0], &right.codomain()[0]] {
+        assert!(!bond.is_dual());
+        assert!(bond.sectors().unwrap().is_empty());
+    }
+    assert!(left.dense_data().unwrap().is_empty());
+    assert!(right.dense_data().unwrap().is_empty());
+}
+
 #[test]
-fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
+fn compact_diagonal_null_is_empty_by_shape_without_dense_work() {
+    // What: a diagonal is square in every coupled sector, so its shape-based
+    // null spaces are empty whatever its values (MatrixAlgebraKit
+    // `qr_null!`/`lq_null!` with `DiagonalAlgorithm`), read with no
+    // materialization and no dense solver, across scalars, U(1) with zero
+    // and nonzero entries, SU(2), a fermionic product rule, and a dual leg.
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(polar_spy(&calls)))
         .build()
         .unwrap();
-    let leg = GradedSpace::try_new(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
     )
     .unwrap();
-    let input: TensorMap<_, f64> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [
-            SectorSpectrum {
-                sector: U1Irrep::new(0),
-                values: vec![3.0, 0.0, -2.0],
-            },
-            SectorSpectrum {
-                sector: U1Irrep::new(1),
-                values: vec![0.0, 0.0],
-            },
-        ],
-    )
-    .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
-    let left = input.left_null(&[0], &[1]).unwrap();
-    let right = input.right_null(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.of(POLAR_SVD), 0);
-    assert_eq!(left.codomain(), input.codomain());
-    assert_eq!(right.domain(), input.domain());
-    assert_eq!(left.domain()[0].sectors().unwrap().len(), 2);
-    assert_eq!(right.codomain()[0].sectors().unwrap().len(), 2);
-    assert_eq!(left.domain()[0].degeneracy(&U1Irrep::new(0)).unwrap(), 1);
-    assert_eq!(left.domain()[0].degeneracy(&U1Irrep::new(1)).unwrap(), 2);
-    assert_eq!(right.codomain()[0].degeneracy(&U1Irrep::new(0)).unwrap(), 1);
-    assert_eq!(right.codomain()[0].degeneracy(&U1Irrep::new(1)).unwrap(), 2);
-    let coordinates = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-    assert_eq!(left.dense_data().unwrap(), coordinates);
-    assert_eq!(right.dense_data().unwrap(), coordinates);
-    assert!(
-        left.adjoint()
-            .unwrap()
-            .compose(&input)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    assert!(
-        input
-            .compose(&right.adjoint().unwrap())
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-}
+    macro_rules! check_scalar {
+        ($scalar:ty) => {{
+            let value = <$scalar as FactorScalar>::from_real;
+            let input: TensorMap<_, $scalar> = TensorMap::diagonal(
+                &runtime,
+                &u1,
+                [
+                    SectorSpectrum {
+                        sector: U1Irrep::new(0),
+                        values: vec![value(3.0), value(0.0), value(-2.0)],
+                    },
+                    SectorSpectrum {
+                        sector: U1Irrep::new(1),
+                        values: vec![value(0.0), value(0.0)],
+                    },
+                ],
+            )
+            .unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            assert_empty_null_spaces(&input, &[0], &[1]);
+            assert_empty_null_spaces(&input, &[1], &[0]);
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        }};
+    }
+    check_scalar!(f32);
+    check_scalar!(f64);
+    check_scalar!(num_complex::Complex32);
+    check_scalar!(num_complex::Complex64);
 
-#[test]
-fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
-    let calls = Arc::new(SpyCounts::default());
-    let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(polar_spy(&calls)))
-        .build()
-        .unwrap();
     let spin0 = SU2Irrep::from_twice_spin(0);
     let half = SU2Irrep::from_twice_spin(1);
-    let leg = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 3), (half, 2)]).unwrap();
+    let su2 = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 3), (half, 2)]).unwrap();
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
-        &leg,
+        &su2,
         [
             SectorSpectrum {
                 sector: spin0,
@@ -235,301 +233,16 @@ fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let left = input.left_null(&[0], &[1]).unwrap();
-    let right = input.right_null(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.of(POLAR_SVD), 0);
-    assert_eq!(left.codomain(), input.codomain());
-    assert_eq!(right.domain(), input.domain());
-    for bond in [&left.domain()[0], &right.codomain()[0]] {
-        assert!(!bond.is_dual());
-        assert_eq!(bond.sectors().unwrap().len(), 2);
-        assert_eq!(bond.degeneracy(&spin0).unwrap(), 1);
-        assert_eq!(bond.degeneracy(&half).unwrap(), 1);
-    }
-    let coordinates = [0.0, 1.0, 0.0, 1.0, 0.0];
-    assert_eq!(left.dense_data().unwrap(), coordinates);
-    assert_eq!(right.dense_data().unwrap(), coordinates);
-    assert!(
-        left.adjoint()
-            .unwrap()
-            .compose(&input)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    assert!(
-        input
-            .compose(&right.adjoint().unwrap())
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    let left_gram = left.adjoint().unwrap().compose(&left).unwrap();
-    let right_gram = right.compose(&right.adjoint().unwrap()).unwrap();
-    let left_eye = TensorMap::isomorphism(&runtime, &left.domain(), &left.domain()).unwrap();
-    let right_eye = TensorMap::isomorphism(&runtime, &right.codomain(), &right.codomain()).unwrap();
-    assert!(
-        left_gram
-            .axpby(1.0, &left_eye, -1.0)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    assert!(
-        right_gram
-            .axpby(1.0, &right_eye, -1.0)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-}
-
-#[test]
-fn compact_diagonal_null_and_cutoff_cover_all_scalars() {
-    let calls = Arc::new(SpyCounts::default());
-    let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(polar_spy(&calls)))
-        .build()
-        .unwrap();
-    let near_runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let sector = U1Irrep::new(0);
-    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 3)]).unwrap();
-    macro_rules! check_scalar {
-        ($scalar:ty, $convert:expr, $eps:expr) => {{
-            let input: TensorMap<_, $scalar> = TensorMap::diagonal(
-                &runtime,
-                &leg,
-                [SectorSpectrum {
-                    sector,
-                    values: vec![($convert)(0.0), ($convert)(3.0), ($convert)(0.0)],
-                }],
-            )
-            .unwrap();
-            calls.reset();
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            let left = input.left_null(&[0], &[1]).unwrap();
-            let right = input.right_null(&[0], &[1]).unwrap();
-            assert_eq!(calls.of(POLAR_SVD), 0);
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            let coordinates = [
-                ($convert)(1.0),
-                ($convert)(0.0),
-                ($convert)(0.0),
-                ($convert)(0.0),
-                ($convert)(0.0),
-                ($convert)(1.0),
-            ];
-            assert_eq!(left.dense_data().unwrap(), coordinates);
-            assert_eq!(right.dense_data().unwrap(), coordinates);
-            assert_eq!(left.domain()[0].degeneracy(&sector).unwrap(), 2);
-            assert_eq!(right.codomain()[0].degeneracy(&sector).unwrap(), 2);
-
-            let full: TensorMap<_, $scalar> = TensorMap::diagonal(
-                &runtime,
-                &leg,
-                [SectorSpectrum {
-                    sector,
-                    values: vec![($convert)(1.0), ($convert)(2.0), ($convert)(3.0)],
-                }],
-            )
-            .unwrap();
-            calls.reset();
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            let full_left = full.left_null(&[0], &[1]).unwrap();
-            let full_right = full.right_null(&[0], &[1]).unwrap();
-            assert_eq!(calls.of(POLAR_SVD), 0);
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            assert!(full_left.dense_data().unwrap().is_empty());
-            assert!(full_right.dense_data().unwrap().is_empty());
-            assert!(full_left.domain()[0].sectors().unwrap().is_empty());
-            assert!(full_right.codomain()[0].sectors().unwrap().is_empty());
-
-            // The dense route's rank cutoff `eps * max(rows, cols) * sigma_max`
-            // is applied to `|a_i|` directly: at or below it is null.
-            let cutoff = ($eps as f64) * 2.0;
-            let small_leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 2)]).unwrap();
-            for (small, expected_len) in [(0.5 * cutoff, 2), (cutoff, 2), (2.0 * cutoff, 0)] {
-                let near: TensorMap<_, $scalar> = TensorMap::diagonal(
-                    &near_runtime,
-                    &small_leg,
-                    [SectorSpectrum {
-                        sector,
-                        values: vec![($convert)(1.0), ($convert)(small)],
-                    }],
-                )
-                .unwrap();
-                DIAGONAL_MATERIALIZATIONS.set(0);
-                let left = near.left_null(&[0], &[1]).unwrap();
-                let right = near.right_null(&[0], &[1]).unwrap();
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-                assert_eq!(left.dense_data().unwrap().len(), expected_len);
-                assert_eq!(right.dense_data().unwrap().len(), expected_len);
-                if expected_len != 0 {
-                    // The null direction is the unit vector of the small value.
-                    let unit = [($convert)(0.0), ($convert)(1.0)];
-                    assert_eq!(left.dense_data().unwrap(), unit);
-                    assert_eq!(right.dense_data().unwrap(), unit);
-                }
-            }
-        }};
-    }
-    check_scalar!(f32, |x: f64| x as f32, f32::EPSILON);
-    check_scalar!(f64, |x: f64| x, f64::EPSILON);
-    check_scalar!(
-        num_complex::Complex32,
-        |x: f64| num_complex::Complex32::new(x as f32, 0.0),
-        f32::EPSILON
-    );
-    check_scalar!(
-        num_complex::Complex64,
-        |x: f64| num_complex::Complex64::new(x, 0.0),
-        f64::EPSILON
-    );
-
-    let tiny: TensorMap<_, f32> = TensorMap::diagonal(
-        &near_runtime,
-        &GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 1)]).unwrap(),
-        [SectorSpectrum {
-            sector,
-            values: vec![f32::from_bits(1)],
-        }],
-    )
-    .unwrap();
-    // A subnormal is above its own `eps * sigma_max` cutoff, so the sector has
-    // full rank; read directly, with no materialization.
-    DIAGONAL_MATERIALIZATIONS.set(0);
-    assert!(tiny
-        .left_null(&[0], &[1])
-        .unwrap()
-        .dense_data()
-        .unwrap()
-        .is_empty());
+    assert_empty_null_spaces(&input, &[0], &[1]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
-    let unrepresentable: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
-        &near_runtime,
-        &GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 1)]).unwrap(),
-        [SectorSpectrum {
-            sector,
-            values: vec![num_complex::Complex32::new(f32::MAX, f32::MAX)],
-        }],
-    )
-    .unwrap();
-    // `|MAX (1 + i)|` overflows f32, so the sector is ranked in scaled form:
-    // a nonzero 1 x 1 sector has full rank and an empty null space.
-    DIAGONAL_MATERIALIZATIONS.set(0);
-    let null = unrepresentable.left_null(&[0], &[1]).unwrap();
-    assert!(null.dense_data().unwrap().is_empty());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-
-    // Hand-computed, scaled by `m = MAX`: `|a| / m = (sqrt 2, 1 / MAX)` and the
-    // cutoff `eps * 2 * sqrt 2`, so the `1` direction is null and the overflow
-    // direction is not.
-    let mixed: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
-        &near_runtime,
-        &GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 2)]).unwrap(),
-        [SectorSpectrum {
-            sector,
-            values: vec![
-                num_complex::Complex32::new(f32::MAX, f32::MAX),
-                num_complex::Complex32::new(1.0, 0.0),
-            ],
-        }],
-    )
-    .unwrap();
-    let null = mixed.left_null(&[0], &[1]).unwrap();
-    assert_eq!(
-        null.dense_data().unwrap(),
-        [
-            num_complex::Complex32::new(0.0, 0.0),
-            num_complex::Complex32::new(1.0, 0.0)
-        ]
-    );
-}
-
-#[test]
-fn compact_diagonal_null_preserves_dual_space_and_lazy_adjoint_semantics() {
-    use num_complex::Complex64;
-
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 2)])
-        .unwrap()
-        .try_dual()
-        .unwrap();
-    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [SectorSpectrum {
-            sector: U1Irrep::new(-1),
-            values: vec![Complex64::new(0.0, 0.0), Complex64::new(2.0, 3.0)],
-        }],
-    )
-    .unwrap();
-    let dense = input.materialize().unwrap();
-    let lazy = dense.adjoint().unwrap();
-    let left = input.left_null(&[0], &[1]).unwrap();
-    let right = input.right_null(&[0], &[1]).unwrap();
-    assert_eq!(left.codomain(), input.codomain());
-    assert_eq!(right.domain(), input.domain());
-    assert_eq!(left.domain()[0].degeneracy(&U1Irrep::new(-1)).unwrap(), 1);
-    assert!(!left.domain()[0].is_dual());
-    assert!(!right.codomain()[0].is_dual());
-    assert_eq!(
-        left.dense_data().unwrap(),
-        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)]
-    );
-    assert_eq!(
-        right.dense_data().unwrap(),
-        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)]
-    );
-    let lazy_left = lazy.left_null(&[0], &[1]).unwrap();
-    let lazy_right = lazy.right_null(&[0], &[1]).unwrap();
-    assert_eq!(lazy_left.codomain(), lazy.codomain());
-    assert_eq!(lazy_right.domain(), lazy.domain());
-    assert_eq!(
-        lazy_left.domain()[0].degeneracy(&U1Irrep::new(-1)).unwrap(),
-        1
-    );
-    assert_eq!(
-        lazy_right.codomain()[0]
-            .degeneracy(&U1Irrep::new(-1))
-            .unwrap(),
-        1
-    );
-    assert!(
-        lazy_left
-            .adjoint()
-            .unwrap()
-            .compose(&lazy)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    assert!(
-        lazy.compose(&lazy_right.adjoint().unwrap())
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-}
-
-#[test]
-fn compact_diagonal_null_product_sectors_roles_and_nonfinite_refusal() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
     let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
     let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(even, 2), (odd, 2)]).unwrap();
+    let product = GradedSpace::try_new(Arc::clone(&provider), [(even, 2), (odd, 2)]).unwrap();
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
-        &leg,
+        &product,
         [
             SectorSpectrum {
                 sector: even,
@@ -543,64 +256,60 @@ fn compact_diagonal_null_product_sectors_roles_and_nonfinite_refusal() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let left = input.left_null(&[0], &[1]).unwrap();
-    let right = input.right_null(&[0], &[1]).unwrap();
+    assert_empty_null_spaces(&input, &[0], &[1]);
+    assert_empty_null_spaces(&input, &[1], &[0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(left.domain()[0].degeneracy(&even).unwrap(), 1);
-    assert_eq!(left.domain()[0].degeneracy(&odd).unwrap(), 1);
-    assert_eq!(right.codomain()[0].degeneracy(&even).unwrap(), 1);
-    assert_eq!(right.codomain()[0].degeneracy(&odd).unwrap(), 1);
-    assert_eq!(left.dense_data().unwrap(), [1.0, 0.0, 0.0, 1.0]);
-    assert_eq!(right.dense_data().unwrap(), [1.0, 0.0, 0.0, 1.0]);
-    let permuted = input.permute(&[1], &[0]).unwrap();
-    let changed_left = input.left_null(&[1], &[0]).unwrap();
-    let changed_right = input.right_null(&[1], &[0]).unwrap();
-    assert_eq!(changed_left.codomain(), permuted.codomain());
-    assert_eq!(changed_right.domain(), permuted.domain());
-    assert!(
-        changed_left
-            .adjoint()
-            .unwrap()
-            .compose(&permuted)
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
-    assert!(
-        permuted
-            .compose(&changed_right.adjoint().unwrap())
-            .unwrap()
-            .norm(2.0)
-            .unwrap()
-            < 1e-12
-    );
 
+    let dual = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &dual,
+        [SectorSpectrum {
+            sector: U1Irrep::new(-1),
+            values: vec![Complex64::new(0.0, 0.0), Complex64::new(2.0, 3.0)],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_empty_null_spaces(&input, &[0], &[1]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.of(POLAR_SVD), 0);
+
+    // The materialized lazy adjoint takes the dense route, which agrees.
+    let lazy = input.materialize().unwrap().adjoint().unwrap();
+    assert_empty_null_spaces(&lazy, &[0], &[1]);
+}
+
+#[test]
+fn compact_diagonal_null_refuses_nonfinite_input() {
+    // What: an empty result does not skip the shared finite-input stage, so
+    // dense and diagonal input refuse a NaN alike (#1986).
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &leg,
-        [
-            SectorSpectrum {
-                sector: even,
-                values: vec![f64::NAN, 0.0],
-            },
-            SectorSpectrum {
-                sector: odd,
-                values: vec![3.0, 0.0],
-            },
-        ],
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![f64::NAN, 0.0],
+        }],
     )
     .unwrap();
-    // A NaN is refused by the shared finite-input stage, with no
-    // materialization.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let error = nonfinite.left_null(&[0], &[1]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("null input components must be finite"),
-        "{error}"
-    );
+    for error in [
+        nonfinite.left_null(&[0], &[1]).unwrap_err(),
+        nonfinite.right_null(&[0], &[1]).unwrap_err(),
+    ] {
+        assert!(
+            error
+                .to_string()
+                .contains("null input components must be finite"),
+            "{error}"
+        );
+    }
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 

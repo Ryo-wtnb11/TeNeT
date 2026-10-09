@@ -327,12 +327,25 @@ fn null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
 
 fn assert_null_late_failure(left: bool) {
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
+        .with_dense_executor(Box::new(fail_second_qr()))
         .build()
         .unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)]).unwrap();
-    let source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
+    let short = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let long =
+        GradedSpace::try_new(provider, [(U1Irrep::new(0), 3), (U1Irrep::new(1), 3)]).unwrap();
+    // The adjoint's null space is the parent's opposite one, so the parent is
+    // long on that side and both sectors run a QR.
+    let (codomain, domain) = if left {
+        (&short, &long)
+    } else {
+        (&long, &short)
+    };
+    let source = TensorMap::from_subblock_fn(&runtime, [codomain], [domain], |_, indices| {
         (indices.iter().sum::<usize>() + 1) as f64
     })
     .unwrap();

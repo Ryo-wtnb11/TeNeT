@@ -14,17 +14,27 @@ fn checked_spy_null(
     }
 }
 
+/// A checked Generic input whose blocks are longer on the requested null
+/// side, so every coupled sector runs one QR.
+fn null_side_generic_input(left: bool) -> BoundDynamicFusionMapSpace<FactorGenericRule> {
+    if left {
+        generic_factorization_input().0
+    } else {
+        wide_generic_factorization_input()
+    }
+}
+
 #[test]
 #[expect(
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
 fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authority() {
-    // What: both null sides finish every local SVD/completion before their
-    // data-dependent output admission, whose late error publishes no factor.
-    let (source, _) = generic_factorization_input();
-    let data = vec![0.0; source.space().required_len().unwrap()];
+    // What: both null sides finish every sector QR before their output
+    // admission, whose late error publishes no factor.
     for left in [true, false] {
+        let source = null_side_generic_input(left);
+        let data = vec![0.0; source.space().required_len().unwrap()];
         let complete_provider = Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
@@ -41,7 +51,8 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
         ));
         let final_call = complete_provider.calls.get();
         assert!(final_call > 1);
-        assert!(complete_dense.counts().of(&[Op::Svd, Op::SvdInto]) > 1);
+        assert_eq!(complete_dense.counts().of(&[Op::Svd, Op::SvdInto]), 0);
+        assert!(complete_dense.counts().qr_into > 1);
 
         let failing_provider = Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
@@ -59,10 +70,9 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
                 if call == final_call
         ));
         assert_eq!(
-            failing_dense.counts().of(&[Op::Svd, Op::SvdInto]),
-            complete_dense.counts().of(&[Op::Svd, Op::SvdInto])
+            failing_dense.counts().qr_into,
+            complete_dense.counts().qr_into
         );
-        assert_eq!(failing_dense.counts().qr, complete_dense.counts().qr);
         assert_eq!(failing_input.data(), before);
         assert!(Arc::ptr_eq(
             failing_input.space().provider_arc(),
@@ -77,11 +87,11 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
 fn checked_generic_null_dense_failure_never_reaches_output_admission() {
-    // What: a later sector SVD failure stops after structural preflight and
+    // What: a later sector QR failure stops after structural preflight and
     // before the checked output builder or any scatter can run.
-    let (source, _) = generic_factorization_input();
-    let data = vec![0.0; source.space().required_len().unwrap()];
     for left in [true, false] {
+        let source = null_side_generic_input(left);
+        let data = vec![0.0; source.space().required_len().unwrap()];
         let provider = Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
@@ -109,7 +119,7 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
         assert!(matches!(
             checked_spy_null(
                 left,
-                &mut ScriptedExecutor::<FailSecondSvd>::default(),
+                &mut ScriptedExecutor::<FailSecondNullQr>::default(),
                 &input
             ),
             Err(CheckedGenericFactorPlanError::Operation(
@@ -128,7 +138,7 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
 )]
 fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
     // What: disjoint support returns complete identity bases for both sides
-    // and never enters SVD or completion.
+    // and never enters dense work.
     let x = SectorId::new(1);
     let vacuum = SectorId::new(0);
     let homspace = FusionTreeHomSpace::new(
@@ -283,236 +293,133 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
 }
 
 #[test]
-fn rank_deficient_real_null_spaces_include_zero_and_duplicate_directions() {
-    // What: numerical nullity, not the rectangular shape deficit, determines both null spaces.
+fn square_null_spaces_are_empty_whatever_the_rank() {
+    // What: the default null dimension is `(rows - cols)+` from the space
+    // alone (MatrixAlgebraKit `qr_null!`/`lq_null!`), so square sectors,
+    // including zero and rank-one ones, have no null directions and run no
+    // dense work.
     let rule = Z2FusionRule;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (matrix, expected_nullity) in [
-        (one_sector_matrix(vec![0.0; 4]), 2),
-        (one_sector_matrix(vec![1.0, 2.0, 1.0, 2.0]), 1),
-        (one_sector_matrix(vec![1.0, 1.0, 2.0, 2.0]), 1),
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
+    for matrix in [
+        one_sector_matrix(vec![0.0; 4]),
+        one_sector_matrix(vec![1.0, 2.0, 1.0, 2.0]),
+        one_sector_matrix(vec![1.0, 0.0, 0.0, 1.0e-300]),
     ] {
         let input = bound_tensor(Arc::new(rule), &matrix);
         let left = left_null(&mut dense, &input.as_ref()).unwrap();
         let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        let left_shape = left.structure().block(0).unwrap().shape();
-        let right_shape = right.structure().block(0).unwrap().shape();
-        assert_eq!(left_shape, &[2, expected_nullity]);
-        assert_eq!(right_shape, &[expected_nullity, 2]);
-
-        for null_col in 0..expected_nullity {
-            for matrix_col in 0..2 {
-                let dot = (0..2)
-                    .map(|row| {
-                        left.data()[row + 2 * null_col] * matrix.data()[row + 2 * matrix_col]
-                    })
-                    .sum::<f64>();
-                assert!(dot.abs() < 1.0e-10);
-            }
-        }
-        for matrix_row in 0..2 {
-            for null_row in 0..expected_nullity {
-                let dot = (0..2)
-                    .map(|col| {
-                        matrix.data()[matrix_row + 2 * col]
-                            * right.data()[null_row + expected_nullity * col]
-                    })
-                    .sum::<f64>();
-                assert!(dot.abs() < 1.0e-10);
-            }
-        }
+        assert_eq!(left.structure().block_count(), 0);
+        assert!(left.data().is_empty());
+        assert_eq!(right.structure().block_count(), 0);
+        assert!(right.data().is_empty());
     }
 }
 
-#[test]
-fn numerical_null_rank_uses_the_documented_f64_threshold() {
-    // What: singular values immediately below and above
-    // epsilon(f64) * max(m, n) * sigma_max fall on opposite rank decisions.
+/// Left null of a tall `3 x 2` and right null of a wide `2 x 3` sector in
+/// dtype `D`: one null direction each, orthonormal and annihilating the
+/// input under the conjugate-transpose pairing, whatever the rank.
+fn assert_rectangular_null_spaces_ignore_rank<D: FactorScalar>(
+    tall: Vec<D>,
+    wide: Vec<D>,
+    tol: f64,
+) {
     let rule = Z2FusionRule;
-    let tolerance = f64::EPSILON * 2.0;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
-        let matrix = one_sector_matrix(vec![1.0, 0.0, 0.0, small]);
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        if expected_nullity == 0 {
-            assert!(left.data().is_empty());
-            assert!(right.data().is_empty());
-        } else {
-            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
-            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
-        }
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
+    let tall = one_sector_rectangular_matrix(tall, 3, 2);
+    let input = bound_tensor(Arc::new(rule), &tall);
+    let n = left_null(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(n.structure().block(0).unwrap().shape(), &[3, 1]);
+    let norm: f64 = n.data().iter().map(|v| v.widen_complex().norm_sqr()).sum();
+    assert!((norm - 1.0).abs() < tol);
+    for col in 0..2 {
+        let dot: num_complex::Complex64 = (0..3)
+            .map(|row| {
+                n.data()[row].widen_complex().conj() * tall.data()[row + 3 * col].widen_complex()
+            })
+            .sum();
+        assert!(dot.norm() < tol, "left null failed: {dot}");
     }
+    assert_eq!(
+        right_null(&mut dense, &input.as_ref())
+            .unwrap()
+            .structure()
+            .block_count(),
+        0
+    );
+
+    let wide = one_sector_rectangular_matrix(wide, 2, 3);
+    let input = bound_tensor(Arc::new(rule), &wide);
+    let n = right_null(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(n.structure().block(0).unwrap().shape(), &[1, 3]);
+    let norm: f64 = n.data().iter().map(|v| v.widen_complex().norm_sqr()).sum();
+    assert!((norm - 1.0).abs() < tol);
+    for row in 0..2 {
+        // A N^H = 0.
+        let dot: num_complex::Complex64 = (0..3)
+            .map(|col| {
+                wide.data()[row + 2 * col].widen_complex() * n.data()[col].widen_complex().conj()
+            })
+            .sum();
+        assert!(dot.norm() < tol, "right null failed: {dot}");
+    }
+    assert_eq!(
+        left_null(&mut dense, &input.as_ref())
+            .unwrap()
+            .structure()
+            .block_count(),
+        0
+    );
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 0);
+    assert_eq!(dense.counts().qr_into, 2);
 }
 
 #[test]
-fn numerical_null_rank_uses_the_documented_f32_threshold() {
-    // What: the rank contract follows the input dtype rather than silently
-    // applying the f64 machine epsilon to f32 sectors.
-    let rule = Z2FusionRule;
-    let tolerance = f32::EPSILON * 2.0;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
-        let matrix = one_sector_matrix(vec![1.0_f32, 0.0, 0.0, small]);
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        if expected_nullity == 0 {
-            assert!(left.data().is_empty());
-            assert!(right.data().is_empty());
-        } else {
-            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
-            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
-        }
-    }
-}
-
-#[test]
-fn numerical_null_rank_uses_the_documented_c32_threshold() {
-    let rule = Z2FusionRule;
-    let tolerance = f32::EPSILON * 2.0;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
-        let matrix = one_sector_matrix(vec![
-            Complex32::new(1.0, 0.0),
-            Complex32::new(0.0, 0.0),
-            Complex32::new(0.0, 0.0),
-            Complex32::new(small, 0.0),
-        ]);
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        if expected_nullity == 0 {
-            assert!(left.data().is_empty());
-            assert!(right.data().is_empty());
-        } else {
-            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
-            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
-        }
-    }
-}
-
-#[test]
-fn numerical_null_rank_uses_the_documented_c64_threshold() {
-    let rule = Z2FusionRule;
-    let tolerance = f64::EPSILON * 2.0;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
-        let matrix = one_sector_matrix(vec![
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 0.0),
-            Complex64::new(0.0, 0.0),
-            Complex64::new(small, 0.0),
-        ]);
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        if expected_nullity == 0 {
-            assert!(left.data().is_empty());
-            assert!(right.data().is_empty());
-        } else {
-            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
-            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
-        }
-    }
-}
-
-#[test]
-fn rectangular_rank_deficient_null_spaces_include_shape_and_rank_deficits() {
-    // What: tall and wide sectors include both the rectangular shape deficit
-    // and additional null directions caused by numerical rank deficiency.
-    let rule = Z2FusionRule;
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (rows, cols, data, left_nullity, right_nullity) in [
-        (3, 2, vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0], 2, 1),
-        (2, 3, vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], 1, 2),
+fn rectangular_null_spaces_keep_the_shape_deficit_only() {
+    // What: tall/wide sectors keep exactly `|rows - cols|` directions on the
+    // longer side for full-rank, rank-one, near-cutoff and zero inputs, in
+    // every factorization dtype; the rank deficit adds none.
+    for (tall, wide) in [
+        (
+            vec![1.0, 2.0, 3.0, -2.0, 0.5, 1.0],
+            vec![1.0, -2.0, 2.0, 0.5, 3.0, 1.0],
+        ),
+        (
+            vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0],
+            vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0],
+        ),
+        (
+            vec![1.0, 0.0, 0.0, 0.0, 1.0e-20, 0.0],
+            vec![1.0, 0.0, 0.0, 1.0e-20, 0.0, 0.0],
+        ),
+        (vec![0.0; 6], vec![0.0; 6]),
     ] {
-        let matrix = one_sector_rectangular_matrix(data, rows, cols);
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        assert_eq!(
-            left.structure().block(0).unwrap().shape(),
-            &[rows, left_nullity]
+        assert_rectangular_null_spaces_ignore_rank::<f64>(tall.clone(), wide.clone(), 1e-12);
+        let single = |v: &Vec<f64>| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
+        assert_rectangular_null_spaces_ignore_rank::<f32>(single(&tall), single(&wide), 1e-5);
+        // A complex payload with phases on both factors, so the pairing
+        // must conjugate.
+        let phased = |v: &Vec<f64>| {
+            v.iter()
+                .enumerate()
+                .map(|(i, &x)| Complex64::new(x, 0.5 * x * (i as f64 - 2.0)))
+                .collect::<Vec<_>>()
+        };
+        assert_rectangular_null_spaces_ignore_rank::<Complex64>(
+            phased(&tall),
+            phased(&wide),
+            1e-12,
         );
-        assert_eq!(
-            right.structure().block(0).unwrap().shape(),
-            &[right_nullity, cols]
+        let phased32 = |v: &Vec<f64>| {
+            phased(v)
+                .into_iter()
+                .map(|z| Complex32::new(z.re as f32, z.im as f32))
+                .collect::<Vec<_>>()
+        };
+        assert_rectangular_null_spaces_ignore_rank::<Complex32>(
+            phased32(&tall),
+            phased32(&wide),
+            1e-5,
         );
-
-        for null_col in 0..left_nullity {
-            for matrix_col in 0..cols {
-                let dot = (0..rows)
-                    .map(|row| {
-                        left.data()[row + rows * null_col] * matrix.data()[row + rows * matrix_col]
-                    })
-                    .sum::<f64>();
-                assert!(dot.abs() < 1.0e-9);
-            }
-        }
-        for matrix_row in 0..rows {
-            for null_row in 0..right_nullity {
-                let dot = (0..cols)
-                    .map(|col| {
-                        matrix.data()[matrix_row + rows * col]
-                            * right.data()[null_row + right_nullity * col]
-                    })
-                    .sum::<f64>();
-                assert!(dot.abs() < 1.0e-9);
-            }
-        }
-    }
-}
-
-#[test]
-fn rank_deficient_complex_null_spaces_include_zero_and_duplicate_directions() {
-    // What: complex conjugation and numerical-rank detection preserve the full left/right kernels.
-    use num_complex::Complex64;
-
-    let rule = Z2FusionRule;
-    let zero = Complex64::new(0.0, 0.0);
-    let duplicate = one_sector_matrix(vec![
-        Complex64::new(1.0, 1.0),
-        Complex64::new(2.0, -1.0),
-        Complex64::new(1.0, 1.0),
-        Complex64::new(2.0, -1.0),
-    ]);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    for (matrix, expected_nullity) in [(one_sector_matrix(vec![zero; 4]), 2), (duplicate, 1)] {
-        let input = bound_tensor(Arc::new(rule), &matrix);
-        let left = left_null(&mut dense, &input.as_ref()).unwrap();
-        let right = right_null(&mut dense, &input.as_ref()).unwrap();
-        assert_eq!(
-            left.structure().block(0).unwrap().shape(),
-            &[2, expected_nullity]
-        );
-        assert_eq!(
-            right.structure().block(0).unwrap().shape(),
-            &[expected_nullity, 2]
-        );
-
-        for null_col in 0..expected_nullity {
-            for matrix_col in 0..2 {
-                let dot = (0..2)
-                    .map(|row| {
-                        left.data()[row + 2 * null_col].conj() * matrix.data()[row + 2 * matrix_col]
-                    })
-                    .sum::<Complex64>();
-                assert!(dot.norm() < 1.0e-10);
-            }
-        }
-        for matrix_row in 0..2 {
-            for null_row in 0..expected_nullity {
-                let dot = (0..2)
-                    .map(|col| {
-                        matrix.data()[matrix_row + 2 * col]
-                            * right.data()[null_row + expected_nullity * col].conj()
-                    })
-                    .sum::<Complex64>();
-                assert!(dot.norm() < 1.0e-10);
-            }
-        }
     }
 }
 
@@ -588,21 +495,19 @@ fn null_zero_only_input_normalizes_to_empty_without_dense_work() {
 
 #[test]
 fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
-    // What: matched full-rank directions disappear while side-only sectors
-    // survive as identity bases.
+    // What: a matched square sector has no null directions and runs no
+    // dense work, while side-only sectors survive as identity bases.
     let provider = Arc::new(U1FusionRule);
     let tensor = u1_cross_space_map::<f64>(&[(0, 1), (1, 2)], &[(0, 1), (2, 3)]);
     let input = bound_tensor(Arc::clone(&provider), &tensor);
 
-    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let left = left_null(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(dense.counts().svd, 1);
     assert_eq!(left.structure().block_count(), 1);
     assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
 
-    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let right = right_null(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(dense.counts().svd, 1);
     assert_eq!(right.structure().block_count(), 1);
     assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
 }
@@ -611,36 +516,26 @@ fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
 fn null_space_second_sector_failure_builds_no_factor() {
     // What: all dense work finishes before the one requested factor is built.
     let provider = Arc::new(U1FusionRule);
-    let tensor = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
-    let before = tensor.data().to_vec();
-    let input = bound_tensor(provider, &tensor);
-
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
-    assert!(matches!(
-        left_null(
-            &mut ScriptedExecutor::<FailSecondSvd>::default(),
-            &input.as_ref()
-        ),
-        Err(OperationError::Dense(_))
-    ));
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (0, 0)
-    );
-
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
-    assert!(matches!(
-        right_null(
-            &mut ScriptedExecutor::<FailSecondSvd>::default(),
-            &input.as_ref()
-        ),
-        Err(OperationError::Dense(_))
-    ));
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (0, 0)
-    );
-    assert_eq!(tensor.data(), before);
+    let tall = u1_cross_space_map::<f64>(&[(0, 3), (1, 3)], &[(0, 2), (1, 2)]);
+    let wide = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 3), (1, 3)]);
+    for (left, tensor) in [(true, &tall), (false, &wide)] {
+        let before = tensor.data().to_vec();
+        let input = bound_tensor(Arc::clone(&provider), tensor);
+        crate::factorize::reset_factor_buffer_build_counts_for_test();
+        let mut dense = ScriptedExecutor::<FailSecondNullQr>::default();
+        let result = if left {
+            left_null(&mut dense, &input.as_ref())
+        } else {
+            right_null(&mut dense, &input.as_ref())
+        };
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!(dense.counts().qr_into, 2);
+        assert_eq!(
+            crate::factorize::factor_buffer_build_counts_for_test(),
+            (0, 0)
+        );
+        assert_eq!(tensor.data(), before);
+    }
 }
 
 // Caller-thread allocation bytes, so a pack can be compared against its

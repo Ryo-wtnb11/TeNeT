@@ -800,25 +800,23 @@ where
     R::Mode: FusionMode<R> + TypedAdjointSpace<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns an orthonormal basis `n : codomain(self) <- W` for the numerical
-    /// left null space, satisfying `n^H * self ~= 0`.
+    /// Returns an orthonormal basis `n : codomain(self) <- W` for the left
+    /// null space, satisfying `n^H * self ~= 0`.
     ///
-    /// In sector `c`, singular values count as nonzero only when
-    /// `sigma > epsilon(dtype) * max(m_c, n_c) * sigma_max,c`. The fresh
-    /// non-dual one-leg bond `W` contains `m_c - rank_c` directions; sectors
-    /// with zero nullity are absent. This intentionally differs from
-    /// TensorKit/MatrixAlgebraKit's QR-based default, which reports structural
-    /// nullity rather than this SVD numerical rank. [`Self::right_null`]
-    /// returns the corresponding basis on the domain side.
+    /// The null space is shape-based, as TensorKit/MatrixAlgebraKit's default
+    /// `left_null` (`LeftNullViaQR`, `qr_null!`): in coupled sector `c` the
+    /// fresh non-dual one-leg bond `W` has `(m_c - n_c)+` directions, the
+    /// trailing columns of the sector's full QR, whatever the input's rank.
+    /// A rank-deficient input therefore has a null space smaller than its
+    /// numerical kernel; a rank-revealing (SVD-based) null space is not
+    /// provided here. Sectors present only in the codomain contribute their
+    /// whole degeneracy; sectors with zero nullity are absent.
+    /// [`Self::right_null`] returns the corresponding basis on the domain side.
     ///
-    /// The dense-input compact SVD costs
-    /// `O(sum_c m_c * n_c * min(m_c, n_c))`, plus an orthonormal completion in
-    /// sectors that keep null directions. An owned Host compact diagonal uses a
-    /// direct coordinate basis in `O(sum_c k_c + sum_c k_c q_c)` work and
-    /// storage, where `k_c` is sector size and `q_c` is nullity: the dense
-    /// route's rank cutoff is applied to the magnitudes `|a_i|` directly, and
-    /// the null directions are the unit vectors of the magnitudes at or below
-    /// it, in descending magnitude. A nonfinite entry, dense or diagonal,
+    /// Only sectors with `m_c > n_c` run dense work: one economy QR of the
+    /// `m_c x (n_c + m_c)` block `[A_c | I]`, `O(m_c^2 (n_c + m_c))`. A compact
+    /// diagonal is square in every sector, so its null space is empty and is
+    /// returned with no dense work. A nonfinite entry, dense or diagonal,
     /// returns [`Error::Operation`] (an `InvalidArgument`: `null input components must be
     /// finite`).
     /// Lazy adjoints use the opposite null space of their
@@ -874,13 +872,14 @@ where
         })
     }
 
-    /// Returns an orthonormal-row basis `n : W <- domain(self)` for the
-    /// numerical right null space, satisfying `self * n^H ~= 0`.
+    /// Returns an orthonormal-row basis `n : W <- domain(self)` for the right
+    /// null space, satisfying `self * n^H ~= 0`.
     ///
-    /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
-    /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
-    /// columns exchanged. Host compact diagonals use the direct
-    /// coordinate route described above; a lazy
+    /// The fresh bond contains `(n_c - m_c)+` directions per sector, the
+    /// trailing rows of the sector's full LQ (TensorKit/MatrixAlgebraKit
+    /// `RightNullViaLQ`, `lq_null!`), with the cost of [`Self::left_null`] with
+    /// rows and columns exchanged. Compact diagonals return an empty null
+    /// space directly; a lazy
     /// adjoint uses the left null space of its owned parent without
     /// materializing the receiver. Checked results use the source provider instance, and a
     /// failure returns no tensor.

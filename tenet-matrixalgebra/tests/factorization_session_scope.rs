@@ -72,9 +72,14 @@ fn sessions_during<T>(call: impl FnOnce() -> T) -> u64 {
 
 /// A U(1) 2 <- 2 tensor with legs over `charges`, degeneracy 2 each.
 fn u1_tensor(charges: &[i32]) -> BoundTensorMap {
+    u1_tensor_with(charges, 2, 2)
+}
+
+/// [`u1_tensor`] with codomain legs of degeneracy `rows` and domain legs of
+/// degeneracy `cols` per charge.
+fn u1_tensor_with(charges: &[i32], rows: usize, cols: usize) -> BoundTensorMap {
     let rule = U1FusionRule;
-    let degeneracy = 2usize;
-    let leg = || {
+    let leg = |degeneracy| {
         SectorLeg::new(
             charges
                 .iter()
@@ -82,17 +87,17 @@ fn u1_tensor(charges: &[i32]) -> BoundTensorMap {
             false,
         )
     };
-    let dim = charges.len() * degeneracy;
+    let (row_dim, col_dim) = (charges.len() * rows, charges.len() * cols);
     let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([leg(), leg()]),
-        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(rows), leg(rows)]),
+        FusionProductSpace::new([leg(cols), leg(cols)]),
     );
     let keys = homspace.fusion_tree_keys(&rule).len();
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([dim, dim], [dim, dim]).unwrap(),
+        TensorMapSpace::<2, 2>::from_dims([row_dim, row_dim], [col_dim, col_dim]).unwrap(),
         homspace,
         &rule,
-        vec![vec![degeneracy; 4]; keys],
+        vec![vec![rows, rows, cols, cols]; keys],
     )
     .unwrap();
     let len = space.required_len().unwrap();
@@ -359,13 +364,19 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
         "svd matricized",
         admissions_during(|| svd_compact_factors_dyn(dense, &matricized).unwrap()),
     );
+    // The shape-based null space factorizes only blocks longer on the null
+    // side: a tall map and its (wide) matricized adjoint.
+    let tall = u1_tensor_with(&[-1, 0, 1], 3, 2);
+    let tall_direct = BoundDynamicTensorRef::try_new(tall.space(), tall.data()).unwrap();
+    let tall_adjoint = tall.space().adjoint_view().unwrap();
+    let wide = BoundDynamicTensorRef::try_new(&tall_adjoint, tall.data()).unwrap();
     assert_one_admission(
         "left_null",
-        admissions_during(|| left_null_dyn(dense, &direct).unwrap()),
+        admissions_during(|| left_null_dyn(dense, &tall_direct).unwrap()),
     );
     assert_one_admission(
         "right_null",
-        admissions_during(|| right_null_dyn(dense, &direct).unwrap()),
+        admissions_during(|| right_null_dyn(dense, &wide).unwrap()),
     );
     let hermitian = hermitian_u1_tensor(&[-1, 0, 1]);
     let h_direct = BoundDynamicTensorRef::try_new(hermitian.space(), hermitian.data()).unwrap();
@@ -432,10 +443,13 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
         "checked left_null",
         admissions_during(|| left_null_checked_generic(&mut *dense, dense_source(&input)).unwrap()),
     );
+    // `homspace` is tall, so the right null space runs on its adjoint.
+    let checked_adjoint = checked.adjoint_view().unwrap();
+    let wide_input = BoundDynamicTensorRef::try_new(&checked_adjoint, &data).unwrap();
     assert_one_admission(
         "checked right_null",
         admissions_during(|| {
-            right_null_checked_generic(&mut *dense, dense_source(&input)).unwrap()
+            right_null_checked_generic(&mut *dense, dense_source(&wide_input)).unwrap()
         }),
     );
 

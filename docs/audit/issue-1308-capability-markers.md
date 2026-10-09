@@ -159,7 +159,7 @@ such callers inside this workspace are test scaffolding:
 | `tenet/src/typed.rs` | `assert_exp_uses_a_cold_logical_copy`, `assert_sqrt_uses_a_cold_logical_copy`, `assert_inverse_redirect`, `assert_pinv_redirect`, `assert_rank_deficient_polar_support` | `AdvancedLinalgScalar` |
 | `tenet/tests/typed_facade.rs` | `compact_bond_trace` | `FactorizationScalar` |
 | `tenet/src/typed.rs` | `assert_checked_generic_solve_acceptance` (`racah-generated`) | `AdvancedLinalgScalar` |
-| `tenet/tests/checked_generic_facade.rs` | `assert_checked_generic_eigh_factors`, and under `racah-generated` `assert_sun_checked_generic_eigh`, `..._null_projectors`, `..._polar_qh` | `FactorizationScalar` |
+| `tenet/tests/checked_generic_facade.rs` | `assert_checked_generic_eigh_factors`, and under `racah-generated` `assert_sun_checked_generic_eigh`, `..._null_spaces`, `..._polar_qh` | `FactorizationScalar` |
 | `tenet/tests/checked_generic_facade.rs` | under `racah-generated`: `assert_sun_checked_generic_powi_outer_multiplicity`, `..._inv`, `..._pinv`, `..._solve_right`, and the `SunEigInput` helper trait | `AdvancedLinalgScalar` |
 | `tenet/examples/operation_matrix.rs` | `run_mf_eig` | `AdvancedLinalgScalar` |
 | `tenet-network/examples/cuda_operation_matrix.rs` | `HarnessScalar` supertrait | `FactorizationScalar + CudaPayload` |

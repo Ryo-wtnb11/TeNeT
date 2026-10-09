@@ -606,14 +606,16 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
 }
 
 #[test]
-fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sectors() {
-    // What: Generic null spaces use the documented numerical rank, keep full
-    // zero/side-only directions, drop full-rank sectors, and retain authority.
+fn checked_generic_null_spaces_cover_shape_zero_disjoint_and_side_only_sectors() {
+    // What: Generic null spaces are shape-based (MatrixAlgebraKit
+    // `qr_null!`/`lq_null!`): square sectors are empty whatever their rank,
+    // a tall sector keeps `rows - cols` orthonormal directions annihilating
+    // the input even when rank-deficient, zero/side-only directions are kept
+    // in full, and the provider authority is retained.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let tolerance = f64::EPSILON * 2.0;
-    for (small, nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+    for small in [0.0, f64::EPSILON, 1.0] {
         let source: TensorMap<_, f64> =
             TensorMap::from_subblock_fn(&runtime, [&x], [&x], |_, index| match index {
                 [0, 0] => 1.0,
@@ -626,31 +628,55 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
             source.right_null(&[0], &[1]).unwrap(),
         ] {
             assert!(std::ptr::eq(null.provider(), provider.as_ref()));
-            if nullity == 0 {
-                assert!(null.dense_data().unwrap().is_empty());
-            } else {
-                assert_eq!(null.dense_data().unwrap().len(), 2);
-            }
+            assert!(null.dense_data().unwrap().is_empty());
         }
     }
 
+    let x3 = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
+    // Rank one: an outer product `a b^T`, so both columns are multiples of
+    // `a`. Checked Generic composition reads owned tensors, so adjoints are
+    // materialized through `axpby`.
+    let owned = |t: &TensorMap<_, Complex64>| {
+        let lazy = t.adjoint().unwrap();
+        lazy.axpby(Complex64::new(1.0, 0.0), &lazy, Complex64::new(0.0, 0.0))
+            .unwrap()
+    };
+    let tall: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&x3], [&x], |_, index| {
+            Complex64::new((index[0] + 1) as f64, 0.5) * Complex64::new(1.0, index[1] as f64)
+        })
+        .unwrap();
+    let left = tall.left_null(&[0], &[1]).unwrap();
+    assert!(std::ptr::eq(left.provider(), provider.as_ref()));
+    assert_eq!(left.dense_data().unwrap().len(), 3);
+    let left_adjoint = owned(&left);
+    assert!(left_adjoint.compose(&tall).unwrap().norm(2.0).unwrap() < 1e-12);
+    let gram = left_adjoint.compose(&left).unwrap();
+    assert!((gram.dense_data().unwrap()[0] - Complex64::new(1.0, 0.0)).norm() < 1e-12);
+    assert!(tall
+        .right_null(&[0], &[1])
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
+    let wide = owned(&tall);
+    let right = wide.right_null(&[0], &[1]).unwrap();
+    assert_eq!(right.dense_data().unwrap().len(), 3);
+    assert!(wide.compose(&owned(&right)).unwrap().norm(2.0).unwrap() < 1e-12);
+
     let zero: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&x], [&x]).unwrap();
-    assert_eq!(
-        zero.left_null(&[0], &[1])
-            .unwrap()
-            .dense_data()
-            .unwrap()
-            .len(),
-        4
-    );
-    assert_eq!(
-        zero.right_null(&[0], &[1])
-            .unwrap()
-            .dense_data()
-            .unwrap()
-            .len(),
-        4
-    );
+    assert!(zero
+        .left_null(&[0], &[1])
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
+    assert!(zero
+        .right_null(&[0], &[1])
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 
     let vacuum = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 3)]).unwrap();
     let disjoint: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&x], [&vacuum]).unwrap();
@@ -695,18 +721,24 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
 #[test]
 fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
     let _cache = cache_shared();
-    // What: a later sector SVD failure crosses the public Generic facade as a
+    // What: a later sector QR failure crosses the public Generic facade as a
     // typed plan error without changing the source or returning a partial null.
-    let svd_calls = Arc::new(SpyCounts::default());
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(pinv_spy(&svd_calls, Some(2), None)))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls).failing(
+            &[Kernel::QrInto],
+            Some(2),
+            "injected null QR failure",
+        )))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg =
+    let long =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 2)]).unwrap();
+    let short =
         GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)]).unwrap();
-    let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&long], [&short]).unwrap();
     let before = source.dense_data().unwrap().to_vec();
     assert!(matches!(
         source.left_null(&[0], &[1]),
@@ -714,18 +746,19 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
             tenet::typed::CheckedGenericPlanError::Operation(_)
         ))
     ));
-    assert_eq!(svd_calls.of(PINV_SVD), 2);
+    assert_eq!(calls.of(&[Kernel::QrInto]), 2);
+    assert_eq!(calls.of(PINV_SVD), 0);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
 #[test]
-fn checked_compact_null_near_the_cutoff_is_direct_and_agrees_with_dense() {
+fn checked_compact_null_is_direct_and_agrees_with_dense() {
     let _cache = cache_shared();
-    let svd_calls = Arc::new(SpyCounts::default());
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -735,50 +768,37 @@ fn checked_compact_null_near_the_cutoff_is_direct_and_agrees_with_dense() {
         &bond,
         [SectorSpectrum {
             sector: Label::X,
-            values: vec![1.0, 4.0 * f64::EPSILON],
+            values: vec![1.0, 0.0],
         }],
     )
     .unwrap();
     let dense = source.materialize().unwrap();
 
-    // The dense route's rank cutoff, `eps * max(rows, cols) * sigma_max =
-    // 2 eps`, applied to `|a_i|` directly: `4 eps` is above it, so the sector
-    // has full rank and an empty null space, with no dense SVD and the same
-    // single coupled-dimension query as the dense route.
+    // A square sector's shape-based null space is empty whatever its values:
+    // read directly, with no dense kernel and the same single
+    // coupled-dimension query as the dense route, which also runs none.
     reset_provider_queries(&provider);
     let compact = source.left_null(&[0], &[1]).unwrap();
     let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-    assert_eq!(svd_calls.of(PINV_SVD), 0);
 
     reset_provider_queries(&provider);
-    svd_calls.reset();
     let expected = dense.left_null(&[0], &[1]).unwrap();
     assert_eq!(
         provider.queries_since_reset.load(Ordering::Relaxed),
         compact_queries
     );
-    assert_eq!(svd_calls.of(PINV_SVD), 1);
+    assert_eq!(calls.total(), 0);
     assert_eq!(compact.codomain(), expected.codomain());
     assert_eq!(compact.domain(), expected.domain());
-    assert_eq!(
-        compact.dense_data().unwrap(),
-        expected.dense_data().unwrap()
-    );
+    assert!(compact.dense_data().unwrap().is_empty());
+    assert!(expected.dense_data().unwrap().is_empty());
 }
 
-// Why not fewer args: each parameter is an independent fixture input for one
-// assertion helper shared by several SU(N) null-projector tests; bundling
-// them would add a struct with a single call-site shape.
-#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "racah-generated")]
-fn assert_sun_checked_generic_null_projectors<D>(
+fn assert_sun_checked_generic_null_spaces<D>(
     n: usize,
     label: Vec<i64>,
-    u: [D; 2],
-    v: [D; 2],
-    u_norm_squared: f64,
-    v_norm_squared: f64,
-    adjoint: impl Fn(D) -> D,
+    vertex_weights: [D; 2],
     close: impl Fn(D, D) -> f64,
 ) where
     D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq + numerics::Numeric,
@@ -787,168 +807,75 @@ fn assert_sun_checked_generic_null_projectors<D>(
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)]).unwrap();
+    // `V ⊗ V <- V` with `V` the adjoint irrep: its coupled sector `V` has
+    // outer multiplicity 2, so that block is `(2 * 2 * 2) x 2`, its rows
+    // mixing both vertices. Both columns are equal, so the block has rank
+    // one; the shape-based null space ignores that.
     let source: TensorMap<_, D> =
-        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if row == column {
-                u[trees.codomain_vertices()[0].get() - 1]
-                    * adjoint(v[trees.domain_vertices()[0].get() - 1])
-            } else {
-                D::from_real(0.0)
-            }
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, index| {
+            vertex_weights[trees.codomain_vertices()[0].get() - 1]
+                * D::from_real((1 + index[0] + 2 * index[1]) as f64)
         })
         .unwrap();
-    assert!((0..source.subblock_count()).any(|index| {
-        let trees = source.subblock_fusion_trees(index).unwrap();
-        trees.codomain_vertices()[0].get() == 2
-            && trees.domain_vertices()[0].get() == 1
-            && source.dense_data().unwrap()[source.subblock(index).unwrap().offset()]
-                != D::from_real(0.0)
-    }));
-    let outer_multiplicity_sectors = (0..source.subblock_count())
-        .filter_map(|index| {
-            let trees = source.subblock_fusion_trees(index).unwrap();
-            trees
-                .codomain_vertices()
-                .iter()
-                .chain(trees.domain_vertices())
-                .any(|vertex| vertex.get() > 1)
-                .then(|| trees.coupled().clone())
-        })
-        .collect::<Vec<_>>();
 
-    let left = source.left_null(&[0, 1], &[2, 3]).unwrap();
-    let right = source.right_null(&[0, 1], &[2, 3]).unwrap();
+    let left = source.left_null(&[0, 1], &[2]).unwrap();
+    let right = source.right_null(&[0, 1], &[2]).unwrap();
     assert!(std::ptr::eq(left.provider(), provider.as_ref()));
     assert!(std::ptr::eq(right.provider(), provider.as_ref()));
+    assert!(right.dense_data().unwrap().is_empty());
+    assert_eq!(left.domain()[0].degeneracy(&label).unwrap(), 2 * 2 * 2 - 2);
+
     let left_adjoint = left.adjoint().unwrap();
     let left_adjoint = left_adjoint
         .axpby(D::from_real(1.0), &left_adjoint, D::from_real(0.0))
         .unwrap();
-    let right_adjoint = right.adjoint().unwrap();
-    let right_adjoint = right_adjoint
-        .axpby(D::from_real(1.0), &right_adjoint, D::from_real(0.0))
-        .unwrap();
-    let left_projector = left.compose(&left_adjoint).unwrap();
-    let right_projector = right_adjoint.compose(&right).unwrap();
-    let expected_left: TensorMap<_, D> =
-        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if row != column || !outer_multiplicity_sectors.contains(trees.coupled()) {
-                return D::from_real(0.0);
-            }
-            let i = trees.codomain_vertices()[0].get() - 1;
-            let j = trees.domain_vertices()[0].get() - 1;
-            D::from_real(f64::from(i == j))
-                + D::from_real(-1.0 / u_norm_squared) * u[i] * adjoint(u[j])
-        })
-        .unwrap();
-    let expected_right: TensorMap<_, D> =
-        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if row != column || !outer_multiplicity_sectors.contains(trees.coupled()) {
-                return D::from_real(0.0);
-            }
-            let i = trees.codomain_vertices()[0].get() - 1;
-            let j = trees.domain_vertices()[0].get() - 1;
-            D::from_real(f64::from(i == j))
-                + D::from_real(-1.0 / v_norm_squared) * v[i] * adjoint(v[j])
-        })
-        .unwrap();
-    for (name, actual, expected) in [
-        ("left", &left_projector, &expected_left),
-        ("right", &right_projector, &expected_right),
-    ] {
-        assert_eq!(actual.subblock_count(), expected.subblock_count());
-        for index in 0..actual.subblock_count() {
-            let actual = actual.subblock(index).unwrap();
-            let expected = expected.subblock(index).unwrap();
-            assert_eq!(actual.key(), expected.key());
-            assert_eq!(actual.shape(), expected.shape());
-            assert_eq!(actual.strides(), expected.strides());
-        }
-        for (index, (&actual, &expected)) in actual
-            .dense_data()
-            .unwrap()
-            .iter()
-            .zip(expected.dense_data().unwrap())
-            .enumerate()
-        {
-            assert!(
-                close(actual, expected) < 1e-9,
-                "{name} projector mismatch at raw {index}: {actual:?} != {expected:?}"
-            );
-        }
-    }
-
     for value in left_adjoint.compose(&source).unwrap().dense_data().unwrap() {
         assert!(close(*value, D::from_real(0.0)) < 1e-9);
     }
-    for value in source
-        .compose(&right_adjoint)
-        .unwrap()
-        .dense_data()
-        .unwrap()
-    {
-        assert!(close(*value, D::from_real(0.0)) < 1e-9);
-    }
-    for gram in [
-        left_adjoint.compose(&left).unwrap(),
-        right.compose(&right_adjoint).unwrap(),
-    ] {
-        for block_index in 0..gram.subblock_count() {
-            let block = gram.subblock(block_index).unwrap();
-            for column in 0..block.shape()[1] {
-                for row in 0..block.shape()[0] {
-                    let expected = D::from_real(f64::from(row == column));
-                    let actual = gram.dense_data().unwrap()
-                        [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
-                    assert!(close(actual, expected) < 1e-9);
-                }
+    let gram = left_adjoint.compose(&left).unwrap();
+    for block_index in 0..gram.subblock_count() {
+        let block = gram.subblock(block_index).unwrap();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                let expected = D::from_real(f64::from(row == column));
+                let actual = gram.dense_data().unwrap()
+                    [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
+                assert!(close(actual, expected) < 1e-9);
             }
         }
     }
 
     let lazy = source.adjoint().unwrap();
-    let lazy_left = lazy.left_null(&[0, 1], &[2, 3]).unwrap();
-    let expected_lazy_left = right_adjoint;
-    assert!(std::ptr::eq(lazy_left.provider(), provider.as_ref()));
+    let lazy_right = lazy.right_null(&[0], &[1, 2]).unwrap();
+    assert!(std::ptr::eq(lazy_right.provider(), provider.as_ref()));
     // Path agreement is the contract: the lazy route is defined as the
-    // adjoint of the parent's right null space, gauge included.
+    // adjoint of the parent's left null space, gauge included.
     numerics::assert_slices_close(
-        "left_null of the lazy adjoint",
-        lazy_left.dense_data().unwrap(),
-        expected_lazy_left.dense_data().unwrap(),
+        "right_null of the lazy adjoint",
+        lazy_right.dense_data().unwrap(),
+        left_adjoint.dense_data().unwrap(),
         endomorphism_terms(source.dense_data().unwrap().len()),
     );
 }
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_checked_generic_null_projectors_resolve_cross_mu_for_both_dtypes() {
+fn sun_checked_generic_null_spaces_resolve_cross_mu_for_both_dtypes() {
+    // What: SU(3)/SU(4) multiplicity blocks keep `rows - cols` orthonormal
+    // directions annihilating a rank-deficient input whose rows mix both
+    // vertices, for real and complex payloads.
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
-        assert_sun_checked_generic_null_projectors::<f64>(
+        assert_sun_checked_generic_null_spaces::<f64>(
             n,
             label.clone(),
             [1.0, 2.0],
-            [1.0, -1.0],
-            5.0,
-            2.0,
-            |value| value,
             |actual, expected| (actual - expected).abs(),
         );
-        assert_sun_checked_generic_null_projectors::<Complex64>(
+        assert_sun_checked_generic_null_spaces::<Complex64>(
             n,
             label,
             [Complex64::new(1.0, 1.0), Complex64::new(2.0, -0.5)],
-            [Complex64::new(0.5, -1.0), Complex64::new(-1.5, 2.0)],
-            6.25,
-            7.5,
-            |value| value.conj(),
             |actual, expected| (actual - expected).norm(),
         );
     }
