@@ -102,10 +102,10 @@ where
     };
     let core_right_homspace = core_right_space.homspace();
     let mut lhs_core = (!lhs_borrowed)
-        .then(|| DynamicFusionScratch::<D>::zeroed(Arc::new(lhs_transformed.0.clone())))
+        .then(|| OracleScratch::<D>::zeroed(Arc::new(lhs_transformed.0.clone())))
         .transpose()?;
     let mut rhs_core = (!rhs_borrowed)
-        .then(|| DynamicFusionScratch::<D>::zeroed(Arc::new(rhs_space.clone())))
+        .then(|| OracleScratch::<D>::zeroed(Arc::new(rhs_space.clone())))
         .transpose()?;
 
     let twisted_space = if twist_lhs {
@@ -195,7 +195,7 @@ where
 
     let core_dst_space =
         DynamicFusionMapSpace::core_dst(rule, lhs_core.space(), rhs_core_view.space(), plan)?;
-    let mut core_dst = DynamicFusionScratch::<D>::zeroed(Arc::new(core_dst_space))?;
+    let mut core_dst = OracleScratch::<D>::zeroed(Arc::new(core_dst_space))?;
     let core_dst_space_for_contract = core_dst.space().clone();
     let core_dst_structure = std::sync::Arc::clone(core_dst.space().structure());
     tensorcontract_dynamic_core_into_raw(
@@ -272,7 +272,7 @@ fn tree_pair_transform_typed_to_dynamic<
     tree_workspace: &mut BT::Workspace,
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &mut DynamicFusionScratch<D>,
+    dst: &mut OracleScratch<D>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     src_replay_structure: &std::sync::Arc<BlockStructure>,
     source_conjugate: bool,
@@ -323,7 +323,7 @@ fn tree_pair_transform_dynamic_to_typed<
     rule: &R,
     operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &DynamicFusionScratch<D>,
+    src: &OracleScratch<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -386,4 +386,75 @@ where
         alpha,
         beta,
     )
+}
+
+/// The oracle's own space-tagged scratch: kept apart from the route
+/// executor's scratch so this reference sequence stays independent.
+struct OracleScratch<D> {
+    space: Arc<DynamicFusionMapSpace>,
+    data: Vec<D>,
+}
+
+impl<D: Clone + num_traits::Zero> OracleScratch<D> {
+    fn zeroed(space: Arc<DynamicFusionMapSpace>) -> Result<Self, OperationError> {
+        let len = space.required_len()?;
+        Ok(Self {
+            space,
+            data: vec![D::zero(); len],
+        })
+    }
+}
+
+impl<D> OracleScratch<D> {
+    fn space(&self) -> &DynamicFusionMapSpace {
+        &self.space
+    }
+
+    fn data(&self) -> &[D] {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut [D] {
+        &mut self.data
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CoreSource<'a, D> {
+    space: &'a DynamicFusionMapSpace,
+    data: &'a [D],
+}
+
+impl<'a, D> CoreSource<'a, D> {
+    fn borrowed(space: &'a DynamicFusionMapSpace, data: &'a [D]) -> Self {
+        Self { space, data }
+    }
+
+    fn from_host_scratch(scratch: &'a OracleScratch<D>) -> Self {
+        Self {
+            space: scratch.space(),
+            data: scratch.data(),
+        }
+    }
+
+    fn space(self) -> &'a DynamicFusionMapSpace {
+        self.space
+    }
+
+    fn data(self) -> &'a [D] {
+        self.data
+    }
+}
+
+fn select_core_source<'a, D>(
+    borrow: bool,
+    borrowed_space: &'a DynamicFusionMapSpace,
+    borrowed_data: &'a [D],
+    materialize: impl FnOnce() -> CoreSource<'a, D>,
+) -> CoreSource<'a, D> {
+    if borrow {
+        CoreSource::borrowed(borrowed_space, borrowed_data)
+    } else {
+        materialize()
+    }
 }

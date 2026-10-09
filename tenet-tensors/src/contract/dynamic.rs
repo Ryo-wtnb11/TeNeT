@@ -17,6 +17,7 @@ use crate::{
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
+#[cfg(test)]
 use super::backend::TensorContractBackend;
 #[cfg(test)]
 use super::dynamic_space::encoded_layout_primer;
@@ -24,9 +25,9 @@ use super::dynamic_space::{DynamicFusionMapSpace, FusionOperandLayout, LayoutKey
 use super::fusion::{
     contract_twist_on_physical_lhs, FusionContractOrientation, FusionContractPlan,
 };
+#[cfg(test)]
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::rhs_contract_requires_twist;
-use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 use tenet_operations::TensorContractFusionProfile;
 
 #[cfg(test)]
@@ -61,14 +62,12 @@ pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
 pub(crate) mod cuda;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_member;
-mod member;
-pub(crate) use member::execute_dynamic_tree_execution_artifact_members_host;
-#[doc(hidden)]
-pub use member::DynamicTreeMembersWorkspace;
 
 #[cfg(test)]
+use super::fusion_block;
+#[cfg(test)]
 use super::{backend, dynamic_space};
-use super::{fusion, fusion_block, resolution};
+use super::{fusion, resolution};
 
 mod artifact;
 #[cfg(test)]
@@ -88,53 +87,6 @@ use transformed_spaces::*;
 pub(super) use twist::*;
 #[cfg(test)]
 pub(crate) use typed_eager::*;
-
-#[derive(Clone, Copy)]
-struct CoreSource<'a, D> {
-    space: &'a DynamicFusionMapSpace,
-    data: &'a [D],
-}
-
-impl<'a, D> CoreSource<'a, D> {
-    fn borrowed(space: &'a DynamicFusionMapSpace, data: &'a [D]) -> Self {
-        Self { space, data }
-    }
-
-    fn materialized(space: &'a DynamicFusionMapSpace, data: &'a [D]) -> Self {
-        Self { space, data }
-    }
-
-    fn from_host_scratch(scratch: &'a DynamicFusionScratch<D>) -> Self {
-        Self::materialized(scratch.space(), scratch.data())
-    }
-
-    fn space(self) -> &'a DynamicFusionMapSpace {
-        self.space
-    }
-
-    fn structure(self) -> &'a Arc<BlockStructure> {
-        // Why not retain the input structure separately: borrowability proves
-        // identical core layout, so the core space remains the single authority.
-        self.space().structure()
-    }
-
-    fn data(self) -> &'a [D] {
-        self.data
-    }
-}
-
-fn select_core_source<'a, D>(
-    borrow: bool,
-    borrowed_space: &'a DynamicFusionMapSpace,
-    borrowed_data: &'a [D],
-    materialize: impl FnOnce() -> CoreSource<'a, D>,
-) -> CoreSource<'a, D> {
-    if borrow {
-        CoreSource::borrowed(borrowed_space, borrowed_data)
-    } else {
-        materialize()
-    }
-}
 
 pub(super) fn source_layout_metadata_is_borrowable<HomSpaceMatches>(
     source_space: &DynamicFusionMapSpace,

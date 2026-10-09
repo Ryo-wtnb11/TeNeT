@@ -306,6 +306,8 @@ pub struct HostTreeTransformWorkspace<T> {
     coefficient_scratch: Vec<T>,
     // Identity of the structure whose layout-ordered RHS pack is installed.
     coefficient_structure_identity: Option<Weak<()>>,
+    /// Coefficient packs converted into this workspace so far.
+    coefficient_pack_builds: usize,
     chunk_jobs: Vec<DenseGemmBatchJob>,
     chunk_runs: Vec<usize>,
     chunk_scatter_groups: Vec<usize>,
@@ -325,6 +327,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
             coefficient_structure_identity: None,
+            coefficient_pack_builds: 0,
             chunk_jobs: Vec::new(),
             chunk_runs: Vec::new(),
             chunk_scatter_groups: Vec::new(),
@@ -366,6 +369,13 @@ impl<T> HostTreeTransformWorkspace<T> {
             self.member_ranges.capacity(),
             std::mem::size_of::<(usize, usize)>(),
         )
+    }
+
+    /// Coefficient packs this workspace has converted: a warm replay of the
+    /// structure whose pack is installed converts none.
+    #[doc(hidden)]
+    pub fn coefficient_pack_builds(&self) -> usize {
+        self.coefficient_pack_builds
     }
 
     #[inline]

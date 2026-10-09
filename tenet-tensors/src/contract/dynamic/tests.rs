@@ -1,3 +1,4 @@
+use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
 use std::cell::Cell;
 use tenet_core::{

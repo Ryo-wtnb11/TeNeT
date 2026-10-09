@@ -16,9 +16,10 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// Immutable contraction structure for owned-dense Host or CUDA stacks.
 ///
 /// The route is the contraction planner's (`plan_contract`), the one the
-/// device [`TensorMap::contract`] replays. This binding admits owned-source
-/// transformed-tree routes, and fully direct Core routes and CopyC
-/// temporaries with exact +1/-1 coefficients. CUDA admits CopyC when every
+/// device [`TensorMap::contract`] replays. This binding admits Core, CopyC
+/// and owned-source transformed-tree routes whose core is fully direct with
+/// exact +1/-1 coefficients, checked once at construction so the admitted
+/// set does not depend on the member count. CUDA admits CopyC when every
 /// output move is an unconjugated nonzero Single task, and transformed-tree
 /// routes whose source and output moves are all such tasks over a unit-alpha
 /// direct core. Direct
@@ -104,10 +105,13 @@ where
             spec.rhs,
             &output_axes,
         )?;
+        // One admission for every route and member count: a plan accepted at
+        // B = 1 replays at any B.
+        resolution
+            .core_plan()
+            .require_identity_signed_direct_replay()?;
+        #[cfg(feature = "cuda")]
         let direct_core = resolution.direct_core();
-        if let Some((core, _)) = direct_core {
-            core.require_identity_signed_direct_replay()?;
-        }
         #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
             if let Some(copy) = resolution.copy_c() {

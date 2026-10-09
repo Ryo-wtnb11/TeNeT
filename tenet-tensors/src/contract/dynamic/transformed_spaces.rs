@@ -6,16 +6,16 @@
 use super::*;
 
 #[derive(Clone, Debug)]
-pub(super) struct DynamicFusionTransformedSourceEntry<C = f64> {
-    pub(super) space: Arc<DynamicFusionMapSpace>,
-    pub(super) replay_structure: Arc<BlockStructure>,
-    pub(super) transform_structure: TreeTransformStructure<C>,
+pub(in crate::contract) struct DynamicFusionTransformedSourceEntry<C = f64> {
+    pub(in crate::contract) space: Arc<DynamicFusionMapSpace>,
+    pub(in crate::contract) replay_structure: Arc<BlockStructure>,
+    pub(in crate::contract) transform_structure: TreeTransformStructure<C>,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct DynamicFusionCoreDstEntry<C = f64> {
-    pub(super) space: Arc<DynamicFusionMapSpace>,
-    pub(super) output_transform_structure: TreeTransformStructure<C>,
+pub(in crate::contract) struct DynamicFusionCoreDstEntry<C = f64> {
+    pub(in crate::contract) space: Arc<DynamicFusionMapSpace>,
+    pub(in crate::contract) output_transform_structure: TreeTransformStructure<C>,
 }
 
 /// The core-layout space of a stored source and its transformer. A
