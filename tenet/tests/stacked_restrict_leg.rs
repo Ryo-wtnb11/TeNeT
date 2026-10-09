@@ -66,7 +66,8 @@ fn restrict_leg_equals_eager_per_member_bitwise() {
 }
 
 /// The multi-axis sets: all four legs in a shuffled order, three legs, and
-/// two legs, each leg with its own selection.
+/// two legs, each leg with its own selection; and two non-contiguous
+/// selections next to a contiguous one.
 fn multi_axis_sets<'s, R>(
     on_a: &'s [LegSelection<R>],
     on_dual: &'s [LegSelection<R>],
@@ -80,6 +81,7 @@ fn multi_axis_sets<'s, R>(
         ],
         vec![(1, &on_dual[0]), (2, &on_a[0]), (0, &on_a[1])],
         vec![(3, &on_dual[1]), (0, &on_a[0])],
+        vec![(1, &on_dual[2]), (2, &on_a[2]), (3, &on_dual[0])],
     ]
 }
 

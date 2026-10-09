@@ -84,7 +84,9 @@ macro_rules! members {
 
 /// Calls `$check!(label, leg)` for U(1), SU(2), fZ2xU(1) and, with
 /// `racah-generated`, checked Generic SU(3). `leg(0)` is the base leg and
-/// `leg(1)` changes one degeneracy.
+/// `leg(1)` changes one degeneracy. Every base leg has a sector of
+/// degeneracy at least three, so [`selections`] can keep a non-contiguous
+/// set.
 macro_rules! for_each_symmetry {
     ($check:ident) => {{
         use fixtures::*;
@@ -102,7 +104,7 @@ macro_rules! for_each_symmetry {
             let j = SU2Irrep::from_twice_spin;
             GradedSpace::try_new(
                 Arc::new(SU2FusionRule),
-                [(j(0), 2), (j(1), 2 + variant), (j(2), 1)],
+                [(j(0), 3), (j(1), 2 + variant), (j(2), 1)],
             )
             .unwrap()
         });
@@ -110,20 +112,22 @@ macro_rules! for_each_symmetry {
             let rule = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
             let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
             let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
-            GradedSpace::try_new(rule, [(even(0), 2), (odd(1), 1 + variant), (odd(-1), 2)]).unwrap()
+            GradedSpace::try_new(rule, [(even(0), 3), (odd(1), 1 + variant), (odd(-1), 2)]).unwrap()
         });
         #[cfg(feature = "racah-generated")]
         $check!("SU3 checked Generic", |variant: usize| {
             let rule = Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap());
-            GradedSpace::try_new(rule, [(vec![0i64, 0], 1), (vec![1, 1], 2 + variant)]).unwrap()
+            GradedSpace::try_new(rule, [(vec![0i64, 0], 1), (vec![1, 1], 3 + variant)]).unwrap()
         });
     }};
 }
 
-/// Two selections of `leg`, named in its own labels: every sector at a
+/// Three selections of `leg`, named in its own labels: every sector at a
 /// non-leading offset where it has room, with every other one-dimensional
-/// sector dropped (several surviving blocks, some removed); and one index of
-/// the last sector (a one-dimensional charged leg).
+/// sector dropped (several surviving blocks, some removed); one index of
+/// the last sector (a one-dimensional charged leg); and the first and last
+/// position of every sector of degeneracy at least three, every position of
+/// the others (two runs per such sector, #2095).
 pub fn selections<R>(leg: &tenet::typed::GradedSpace<R>) -> Vec<tenet::typed::LegSelection<R>>
 where
     R: tenet::sector::TypedSectorAdmission,
@@ -144,6 +148,21 @@ where
     vec![
         tenet::typed::LegSelection::try_new(leg, partial).unwrap(),
         tenet::typed::LegSelection::try_new(leg, [(sectors[last].clone(), 0..1)]).unwrap(),
+        tenet::typed::LegSelection::try_new(
+            leg,
+            sectors
+                .iter()
+                .zip(degeneracies)
+                .map(|(sector, &degeneracy)| {
+                    let ends = if degeneracy >= 3 {
+                        vec![0, degeneracy - 1]
+                    } else {
+                        (0..degeneracy).collect()
+                    };
+                    (sector.clone(), ends)
+                }),
+        )
+        .unwrap(),
     ]
 }
 
