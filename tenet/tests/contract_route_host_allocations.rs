@@ -8,7 +8,15 @@
 // The call budgets are measured on the faer provider; a BLAS provider owns
 // its own scratch allocations (grouped-GEMM metadata, QR/LQ workspaces), which
 // these gates do not model (#2107).
-#![cfg(feature = "cpu-faer")]
+#![cfg(all(
+    feature = "cpu-faer",
+    not(any(
+        feature = "cpu-blas",
+        feature = "blas-accelerate",
+        feature = "blas-openblas",
+        feature = "blas-mkl"
+    ))
+))]
 
 use std::sync::Arc;
 

@@ -13,7 +13,6 @@ use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::OperationError;
 use tenet::typed::{Error, TensorMap, Truncation};
 use tenet::typed::{GradedSpace, SectorSpectrum};
 
@@ -196,12 +195,10 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
 }
 
 /// A NaN tensor through the dense multiplicity-free pinv routes (owned and
-/// lazy adjoint). Today's CPU backend refuses the NaN SVD before any cutoff
-/// runs, so that typed backend error is what is pinned here; a backend that
-/// returned NaN singular values instead would reach `pinv_cutoff` and answer
-/// `Error::InvalidArgument`. Either way the result is never `Ok`.
+/// lazy adjoint): the finite-input stage refuses it before any provider SVD,
+/// so every provider answers the compact route's `Error::InvalidArgument`.
 #[test]
-fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
+fn dense_pinv_of_a_nan_tensor_is_invalid_argument() {
     let runtime = host_runtime();
     let leg = u1();
     let real: TensorMap<_, f64> =
@@ -229,13 +226,10 @@ fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
         ),
     ] {
         match result {
-            Err(Error::Operation(error)) => {
-                assert!(
-                    matches!(*error, OperationError::Dense(_)),
-                    "{case}: {error:?}"
-                )
+            Err(Error::InvalidArgument(message)) => {
+                assert!(message.contains("must be finite"), "{case}: {message}")
             }
-            other => panic!("{case}: expected the backend SVD rejection, got {other:?}"),
+            other => panic!("{case}: expected InvalidArgument, got {other:?}"),
         }
     }
 }

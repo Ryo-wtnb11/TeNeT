@@ -304,6 +304,14 @@ where
         message: "pinv requires coupled-sector output storage",
     })?;
     let output_len = output_space.space().required_len()?;
+    // The one finite-input stage (#1986), before the provider: a provider's SVD
+    // may refuse a nonfinite input or return NaN singular values, so only this
+    // check gives every provider the compact route's kind (#1800).
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Svd).map_err(|_| {
+        OperationError::InvalidArgument {
+            message: "pinv singular values must be finite",
+        }
+    })?;
     let matrices =
         generic_input_matricizations(source_space.structure(), input.data(), source_space.nout())?;
     // `A^+` is `domain <- codomain`: its rows are the input's column trees.

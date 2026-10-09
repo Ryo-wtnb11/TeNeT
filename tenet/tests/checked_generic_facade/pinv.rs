@@ -365,11 +365,10 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
 }
 
 #[test]
-fn checked_generic_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
+fn checked_generic_pinv_of_a_nan_tensor_is_invalid_argument() {
     // What: the staged checked-Generic pinv never publishes a finite answer
-    // for a NaN payload. Today's CPU backend refuses the NaN SVD before the
-    // cutoff, so that typed error is pinned; a backend returning NaN singular
-    // values would reach `pinv_cutoff` and answer `Error::InvalidArgument`.
+    // for a NaN payload; the finite-input stage answers `InvalidArgument`
+    // before any provider SVD, so the kind does not depend on the provider.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let bond =
@@ -394,13 +393,10 @@ fn checked_generic_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
         ),
     ] {
         match result {
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error))) => {
-                assert!(
-                    matches!(*error, tenet::typed::OperationError::Dense(_)),
-                    "{case}: {error:?}"
-                )
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                assert!(message.contains("must be finite"), "{case}: {message}")
             }
-            other => panic!("{case}: expected the backend SVD rejection, got {other:?}"),
+            other => panic!("{case}: expected InvalidArgument, got {other:?}"),
         }
     }
 }

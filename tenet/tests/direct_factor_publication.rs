@@ -6,7 +6,18 @@
 // Without faer or racah-generated only the provider-independent LQ oracle runs,
 // leaving the allocation helpers unused.
 #![cfg_attr(
-    not(any(feature = "cpu-faer", feature = "racah-generated")),
+    not(any(
+        all(
+            feature = "cpu-faer",
+            not(any(
+                feature = "cpu-blas",
+                feature = "blas-accelerate",
+                feature = "blas-openblas",
+                feature = "blas-mkl"
+            ))
+        ),
+        feature = "racah-generated"
+    )),
     allow(unused_imports, dead_code)
 )]
 
@@ -170,7 +181,15 @@ fn multiplicity_free_compact_lq_matches_reconstruction_oracle() {
 // 16928 zeroed bytes before, 4872 (= L) after.
 // The zeroed R factor is faer's `upper_triangle_vec_from_mat`; a BLAS provider
 // zero-fills its own workspaces (#2107).
-#[cfg(feature = "cpu-faer")]
+#[cfg(all(
+    feature = "cpu-faer",
+    not(any(
+        feature = "cpu-blas",
+        feature = "blas-accelerate",
+        feature = "blas-openblas",
+        feature = "blas-mkl"
+    ))
+))]
 #[test]
 fn compact_lq_requests_no_zeroed_output_storage() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
