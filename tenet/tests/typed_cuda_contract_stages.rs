@@ -153,6 +153,13 @@ impl Recorder {
                 }
                 expected[6] = observed[6];
             }
+            if let Some((_, [calls, bytes])) =
+                ZERO_TEMPLATE_GROWTH.iter().find(|(row, _)| row == key)
+            {
+                for (index, change) in [(0, calls), (1, bytes), (3, calls)] {
+                    expected[index] = expected[index].checked_add_signed(*change).unwrap();
+                }
+            }
             assert_eq!(
                 observed, &expected,
                 "{key}: counters differ from the base pin"
@@ -167,6 +174,22 @@ impl Recorder {
 /// is the member workspace's core-destination stack, born zero and written
 /// only by the core GEMMs (#1746). Every head call therefore submits the
 /// base's no-refill count: exactly `R` fewer on each base refill call.
+/// Cold rows whose context zero-template growth moved (#1859 C2): the
+/// template is a high-water mark of the runtime's device context, shared by
+/// the cases that run one after another. The base grew it for the CopyC
+/// temporary's per-call zero fills (6 elements per member, at B = 17 one
+/// 816-byte upload); the head submits no such fill and reserves nothing for
+/// it, so the next case that needs a larger template (fA at B = 2, 256
+/// bytes) grows it instead. Only `h2d_calls`, `device_allocs` (one per
+/// upload) and `h2d_bytes` change.
+const ZERO_TEMPLATE_GROWTH: &[(&str, [i64; 2])] = &[
+    (
+        "member U(1) output transform over an inactive core block f64 seq=[1, 2, 17, 1] call=2 B=17 execute first",
+        [-1, -816],
+    ),
+    ("member fA f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 256]),
+];
+
 const MEMBER_COPY_C: &[(&str, u64)] = &[
     ("U(1) output transform over an inactive core block", 1),
     ("C1p", 0),
