@@ -182,7 +182,10 @@ impl tenet_dense::DenseExecutor for CountingDense {
     }
 }
 
-fn physical_oracle(case: &Case<SU2FusionRule>, lhs: &[f64], rhs: &[f64]) -> (Vec<usize>, Vec<f64>) {
+fn physical_oracle<R>(case: &Case<R>, lhs: &[f64], rhs: &[f64]) -> (Vec<usize>, Vec<f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + tenet_core::PhysicalFusionBasis<Scalar = f64>,
+{
     let (a_shape, a) =
         crate::expand_physical_host(crate::BoundDynamicTensorRef::try_new(&case.lhs, lhs).unwrap())
             .unwrap();
@@ -291,8 +294,8 @@ fn dynamic_artifact_replays_host_members() {
     let lhs_len = case.lhs.space().required_len().unwrap();
     let rhs_len = case.rhs.space().required_len().unwrap();
     let member_len = destination.space().required_len().unwrap();
-    let mut workspace = super::DynamicTreeMembersWorkspace::default();
-    let mut independent = super::DynamicTreeMembersWorkspace::default();
+    let mut workspace = super::HostContractMembersWorkspace::default();
+    let mut independent = super::HostContractMembersWorkspace::default();
     let mut first_bytes = 0;
     let mut b2_submissions = 0;
     for (pass, members) in [1, 2, 2, 17, 1].into_iter().enumerate() {
@@ -449,7 +452,7 @@ fn dynamic_artifact_complex_members_match_eager() {
     let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("fixture must select DynamicTree");
     };
-    let mut workspace = super::DynamicTreeMembersWorkspace::default();
+    let mut workspace = super::HostContractMembersWorkspace::default();
     let lhs_len = case.lhs.space().required_len().unwrap();
     let rhs_len = case.rhs.space().required_len().unwrap();
     let dst_len = destination.space().required_len().unwrap();
@@ -533,7 +536,7 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
         &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
         &artifact,
         destination.space().structure(),
-        &mut super::DynamicTreeMembersWorkspace::default(),
+        &mut super::HostContractMembersWorkspace::default(),
         &mut actual,
         &lhs,
         &rhs,
@@ -562,7 +565,7 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
 fn replay_members_checked(
     case: &Case<U1FusionRule>,
     artifact: &DynamicTreeExecutionArtifact<f64>,
-    workspace: &mut super::DynamicTreeMembersWorkspace<f64>,
+    workspace: &mut super::HostContractMembersWorkspace<f64>,
     members: usize,
     salt: usize,
 ) -> usize {
@@ -572,7 +575,7 @@ fn replay_members_checked(
 fn try_replay_members_checked(
     case: &Case<U1FusionRule>,
     artifact: &DynamicTreeExecutionArtifact<f64>,
-    workspace: &mut super::DynamicTreeMembersWorkspace<f64>,
+    workspace: &mut super::HostContractMembersWorkspace<f64>,
     members: usize,
     salt: usize,
 ) -> Result<usize, tenet_operations::OperationError> {
@@ -645,7 +648,7 @@ fn a_retained_workspace_core_destination_is_not_rezeroed_on_warm_replay() {
 
     // Workspace-owned core destination: only a new replay (cold, B change,
     // plan change) fills the inactive blocks; an unchanged replay does not.
-    let mut ws = super::DynamicTreeMembersWorkspace::default();
+    let mut ws = super::HostContractMembersWorkspace::default();
     assert_eq!(
         replay_members_checked(&workspace_dst, &workspace_artifact, &mut ws, 2, 3),
         1
@@ -683,7 +686,7 @@ fn a_retained_workspace_core_destination_is_not_rezeroed_on_warm_replay() {
 
     // Caller-owned destination (identity output): every call fills, even
     // for an unchanged replay into freshly poisoned memory.
-    let mut ws = super::DynamicTreeMembersWorkspace::default();
+    let mut ws = super::HostContractMembersWorkspace::default();
     for salt in [3, 9, 14] {
         assert_eq!(
             replay_members_checked(&caller_dst, &caller_artifact, &mut ws, 2, salt),
@@ -699,7 +702,7 @@ fn a_failed_replay_into_a_dirtied_workspace_destination_rezeroes_on_retry() {
     // this plan's inactive blocks, so the retry must fill them again.
     let (_, case, _) = overwrite_cases().pop().unwrap();
     let artifact = members_artifact(&case);
-    let mut ws = super::DynamicTreeMembersWorkspace::default();
+    let mut ws = super::HostContractMembersWorkspace::default();
     assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 2, 3), 1);
     assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 2, 9), 0);
     let fresh = members_artifact(&case);
@@ -739,7 +742,7 @@ fn dynamic_artifact_rejects_malformed_twisted_members_before_writes() {
         &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
         &artifact,
         destination.space().structure(),
-        &mut super::DynamicTreeMembersWorkspace::default(),
+        &mut super::HostContractMembersWorkspace::default(),
         &mut dst,
         &lhs,
         &rhs,
@@ -1551,7 +1554,7 @@ where
             "{what}: element {index} is {forced}/{replayed}, eager Host {production}"
         );
     }
-    let mut first_workspace = super::DynamicTreeMembersWorkspace::default();
+    let mut first_workspace = super::HostContractMembersWorkspace::default();
     let mut first_dense = DenseTreeTransformOperations::new(CountingDense::default());
     let mut first_backend = DenseTreeTransformOperations::new(CountingDense::default());
     let mut first_backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
@@ -1572,7 +1575,7 @@ where
     .unwrap();
     assert_eq!(first_backend.dense_mut().submissions.len(), 1);
     let jobs_per_member = first_backend.dense_mut().submissions[0];
-    let mut member_workspace = super::DynamicTreeMembersWorkspace::default();
+    let mut member_workspace = super::HostContractMembersWorkspace::default();
     let mut dense = DenseTreeTransformOperations::new(CountingDense::default());
     let mut backend = DenseTreeTransformOperations::new(CountingDense::default());
     let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();

@@ -1,11 +1,14 @@
 //! Restricted binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
-use tenet_tensors::{DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution};
+use tenet_tensors::{HostContractMembersWorkspace, OutputAxisOrder, StorageContractResolution};
 
+#[cfg(test)]
 #[path = "contract_batch_copy_c.rs"]
 mod copy_c;
-use copy_c::CopyCWorkspace;
+#[cfg(test)]
+#[path = "contract_batch_pins.rs"]
+mod member_pins;
 
 // Only the two owned-dense stack payloads have an execution implementation.
 trait ContractBatchStorage<D>: TensorStorage<D> {}
@@ -44,9 +47,7 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     runtime: Runtime,
     binding: Arc<StorageContractResolution<f64>>,
     output: OutputSlot<StackedTensorMap<R, D, S>>,
-    members: DynamicTreeMembersWorkspace<D>,
-    replay: Option<(StackedDirectReplay, bool)>,
-    copy_c: Option<CopyCWorkspace<D>>,
+    members: HostContractMembersWorkspace<D>,
     /// The CopyC temporary stack and its member count.
     #[cfg(feature = "cuda")]
     copy_c_temporary: Option<(S, usize)>,
@@ -146,6 +147,7 @@ where
         })
     }
 
+    #[cfg(any(test, feature = "cuda"))]
     fn copy_c(&self) -> Option<&tenet_tensors::CopyCRoute<f64>> {
         self.resolution.copy_c()
     }
@@ -243,9 +245,7 @@ where
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.resolution),
             output: OutputSlot::default(),
-            members: DynamicTreeMembersWorkspace::default(),
-            replay: None,
-            copy_c: self.copy_c().map(|_| CopyCWorkspace::default()),
+            members: HostContractMembersWorkspace::default(),
             #[cfg(feature = "cuda")]
             copy_c_temporary: None,
             #[cfg(feature = "cuda")]
@@ -259,70 +259,20 @@ where
         &self,
         lhs: &StackedTensorMap<R, D>,
         rhs: &StackedTensorMap<R, D>,
-        dst: &mut Vec<D>,
+        dst: &mut [D],
         members: usize,
         workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
-        if let Some(copy_c) = self.copy_c() {
-            return copy_c::run(copy_c, self, lhs, rhs, dst, members, workspace);
-        }
-        if !self.resolution.is_dynamic_tree() {
-            if workspace
-                .replay
-                .as_ref()
-                .is_none_or(|(replay, _)| replay.members() != members)
-            {
-                workspace.replay = self
-                    .resolution
-                    .direct_core()
-                    .map(|(core, swapped)| {
-                        StackedDirectReplay::new_signed(Arc::clone(core), members)
-                            .map(|replay| (replay, swapped))
-                    })
-                    .transpose()?;
-            }
-            let (replay, swapped) = workspace.replay.as_ref().ok_or_else(|| {
-                Error::InvalidArgument("direct Host replay is not prepared".into())
-            })?;
-            let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
-            let left = StackedStorageView::new::<D>(
-                &left.storage,
-                left.member_len,
-                members,
-                left.member_len,
-            )?;
-            let right = StackedStorageView::new::<D>(
-                &right.storage,
-                right.member_len,
-                members,
-                right.member_len,
-            )?;
-            let mut destination =
-                StackedStorageViewMut::new::<D>(dst, self.member_len, members, self.member_len)?;
-            let mut lease = self.runtime.lease_context()?;
-            lease
-                .context()
-                .multiplicity_free_lane::<D>()?
-                .execute_stacked_signed_direct_host(
-                    replay,
-                    &mut destination,
-                    &left,
-                    &right,
-                    true,
-                )?;
-            return Ok(());
-        }
         let mut lease = self.runtime.lease_context()?;
         lease
             .context()
             .multiplicity_free_lane::<D>()?
             .execute_storage_contract_members_host(
                 &self.resolution,
-                self.space.space().structure(),
+                (self.space.space().structure(), dst),
+                (lhs.space.space().structure(), &lhs.storage),
+                (rhs.space.space().structure(), &rhs.storage),
                 &mut workspace.members,
-                dst,
-                &lhs.storage,
-                &rhs.storage,
                 members,
             )?;
         Ok(())
@@ -389,14 +339,6 @@ impl<R, D, S> ContractWorkspace<R, D, S> {
 
     fn retained_scratch_bytes(&self) -> usize {
         self.members.retained_bytes()
-            + self
-                .copy_c
-                .as_ref()
-                .map_or(0, CopyCWorkspace::retained_bytes)
-            + self
-                .replay
-                .as_ref()
-                .map_or(0, |(replay, _)| replay.retained_bytes())
     }
 }
 
@@ -476,9 +418,7 @@ where
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.resolution),
             output: OutputSlot::default(),
-            members: DynamicTreeMembersWorkspace::default(),
-            replay: None,
-            copy_c: None,
+            members: HostContractMembersWorkspace::default(),
             copy_c_temporary: None,
             dynamic: Default::default(),
             device: DeviceComposeState::default(),
@@ -821,7 +761,8 @@ mod failure_tests {
                 .clone();
             let bytes = workspace.retained_bytes();
 
-            // Only the replay compares the operand layout with its own.
+            // Only the route executor compares the payload with the plan's
+            // operand structure.
             let Err(crate::error::Error::Operation(error)) =
                 plan.execute(&corrupt, &rhs, &mut workspace).map(|_| ())
             else {
@@ -830,9 +771,7 @@ mod failure_tests {
             assert!(
                 matches!(
                     *error,
-                    tenet_tensors::OperationError::InvalidArgument {
-                        message: "stacked operand does not match the replay's members or layout"
-                    }
+                    tenet_tensors::OperationError::ElementCountMismatch { .. }
                 ),
                 "{error:?}"
             );

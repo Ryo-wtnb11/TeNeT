@@ -77,6 +77,7 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
 
     /// The structure the core GEMMs write: the output transform's source, or
     /// the caller's destination when the output transform is the identity.
+    #[cfg(feature = "cuda")]
     pub(crate) fn core_dst_structure<'a>(
         &'a self,
         dst: &'a Arc<BlockStructure>,

@@ -438,40 +438,40 @@ where
     C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    /// Replays an admitted Host member artifact, including owned-source twists,
-    /// using this lane's existing tree and contract resources.
+    /// Replays an admitted route (Core, CopyC or DynamicTree) over uniform
+    /// member-major Host stacks through the one Host route executor, with
+    /// this lane's tree and contract resources and the caller's workspace:
+    /// `dst = contract(lhs, rhs)` per member.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn execute_storage_contract_members_host(
         &mut self,
         resolution: &StorageContractResolution<C>,
-        dst_structure: &Arc<BlockStructure>,
-        workspace: &mut super::route_host::DynamicTreeMembersWorkspace<D, C>,
-        dst: &mut [D],
-        lhs: &[D],
-        rhs: &[D],
+        dst: (&Arc<BlockStructure>, &mut [D]),
+        lhs: (&Arc<BlockStructure>, &[D]),
+        rhs: (&Arc<BlockStructure>, &[D]),
+        workspace: &mut super::route_host::HostContractMembersWorkspace<D, C>,
         members: usize,
     ) -> Result<(), OperationError>
     where
         C: std::ops::Neg<Output = C>,
     {
-        let ContractRoute::DynamicTree(artifact) = &resolution.route else {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host member contraction requires transformed-tree route",
-            });
-        };
         let (tree_backend, _) = self.tree_context.backend_workspace_mut();
-        super::route_host::execute_dynamic_tree_execution_artifact_members_host(
+        super::route_host::execute_members_host(
             tree_backend,
             &mut self.contract_backend,
             &mut self.contract_workspace,
             &mut self.fusion_block_workspace,
-            artifact,
-            dst_structure,
+            super::route_host::MemberRoute::Resolution {
+                resolution,
+                lhs: lhs.0,
+                rhs: rhs.0,
+            },
+            dst.0,
             workspace,
-            dst,
-            lhs,
-            rhs,
+            dst.1,
+            lhs.1,
+            rhs.1,
             members,
         )
     }
@@ -613,35 +613,6 @@ where
         SR: tenet_core::HostReadableStorage<D>,
     {
         replay.execute_host(
-            &mut crate::StridedHostKernelAdapter::default(),
-            &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
-                &mut self.contract_backend,
-                &mut self.contract_workspace,
-            ),
-            dst,
-            lhs,
-            rhs,
-            zero_inactive,
-        )
-    }
-
-    /// Replays exact-sign direct jobs with one batch per nonempty sign class.
-    #[doc(hidden)]
-    pub fn execute_stacked_signed_direct_host<SD, SL, SR>(
-        &mut self,
-        replay: &tenet_operations::stacked::StackedDirectReplay<C>,
-        dst: &mut tenet_operations::stacked::StackedStorageViewMut<'_, SD>,
-        lhs: &tenet_operations::stacked::StackedStorageView<'_, SL>,
-        rhs: &tenet_operations::stacked::StackedStorageView<'_, SR>,
-        zero_inactive: bool,
-    ) -> Result<(), OperationError>
-    where
-        C: std::ops::Neg<Output = C>,
-        SD: tenet_core::HostWritableStorage<D>,
-        SL: tenet_core::HostReadableStorage<D>,
-        SR: tenet_core::HostReadableStorage<D>,
-    {
-        replay.execute_signed_host(
             &mut crate::StridedHostKernelAdapter::default(),
             &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
                 &mut self.contract_backend,
@@ -1840,16 +1811,17 @@ where
 
     /// Replays a planned route ([`Self::plan_contract`] with
     /// [`HostEagerExecutor`](super::resolution::HostEagerExecutor)) on Host
-    /// slices: `dst = alpha * contract(lhs, rhs) + beta * dst`.
+    /// slices through the one Host route executor at one member:
+    /// `dst = alpha * contract(lhs, rhs) + beta * dst`.
     ///
     /// `CopyC` is TensorKit `blas_contract!`'s `copyC`
     /// (`tensoroperations.jl:436-446` @cfaa073): `mul!(Cnew, A, B)` into the
     /// lane's pooled temporary, then `tensoradd!(C, Cnew, pAB, false, α, β)`.
     /// TensorKit allocates `Cnew` per call (`tensoralloc_add(..., Val(true))`);
     /// the pooled buffer plays that role, so a warm call allocates no
-    /// output-sized temporary. Stale pooled values are never read: the core
-    /// writes the temporary with a strong-zero `beta = 0`, inactive blocks
-    /// included.
+    /// output-sized temporary. Stale pooled values are never read: eager
+    /// scratch carries no core slot, so the core writes the temporary with a
+    /// strong-zero `beta = 0`, inactive blocks included.
     #[allow(clippy::too_many_arguments)]
     fn execute_contract_route_host(
         &mut self,
@@ -1864,109 +1836,14 @@ where
     where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        match &resolution.route {
-            ContractRoute::Core { plan, swapped } => self.execute_core_plan_host(
-                plan,
-                *swapped,
-                dst_structure,
-                dst_data,
-                lhs,
-                rhs,
-                alpha,
-                init,
-            ),
-            ContractRoute::DynamicTree(artifact) => self.execute_dynamic_tree_host(
-                artifact,
-                dst_structure,
-                dst_data,
-                lhs.1,
-                rhs.1,
-                alpha,
-                init,
-                None,
-            ),
-            ContractRoute::CopyC(copy) => {
-                let mut temporary = std::mem::take(&mut self.copy_c_scratch);
-                temporary.resize_filled(copy.temporary_len, D::zero());
-                let result = self
-                    .execute_core_plan_host(
-                        &copy.core,
-                        copy.swapped,
-                        &copy.temporary,
-                        temporary.as_mut_slice(),
-                        lhs,
-                        rhs,
-                        D::one(),
-                        ContractDestinationInit::Axpby(D::zero()),
-                    )
-                    .and_then(|()| match init {
-                        ContractDestinationInit::Zeroed => self
-                            .tree_context
-                            .tree_transform_structure_overwrite_into_raw(
-                                &copy.transform,
-                                dst_structure,
-                                &copy.temporary,
-                                dst_data,
-                                temporary.as_slice(),
-                                alpha,
-                                &[],
-                            ),
-                        ContractDestinationInit::Axpby(beta) => {
-                            self.tree_context.tree_transform_structure_into_raw(
-                                &copy.transform,
-                                dst_structure,
-                                &copy.temporary,
-                                dst_data,
-                                temporary.as_slice(),
-                                alpha,
-                                beta,
-                            )
-                        }
-                    });
-                self.copy_c_scratch = temporary;
-                result
-            }
-        }
-    }
-
-    /// The eager `DynamicTree` arm: the one route executor at one member,
-    /// over this context's tree workspace and scratch.
-    #[allow(clippy::too_many_arguments)]
-    fn execute_dynamic_tree_host(
-        &mut self,
-        artifact: &super::dynamic::DynamicTreeExecutionArtifact<C>,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        lhs_data: &[D],
-        rhs_data: &[D],
-        alpha: D,
-        init: ContractDestinationInit<D>,
-        profile: Option<&mut TensorContractFusionProfile>,
-    ) -> Result<(), OperationError>
-    where
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        let Self {
-            tree_context,
-            contract_backend,
-            contract_workspace,
-            fusion_block_workspace,
-            fusion_scratch,
-            ..
-        } = self;
-        super::route_host::execute_dynamic_tree_route_host(
-            tree_context,
-            &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
-            fusion_block_workspace,
-            fusion_scratch.route_scratch(),
-            artifact,
+        self.execute_route_host(
+            resolution,
             (dst_structure, dst_data),
-            lhs_data,
-            rhs_data,
-            1,
+            lhs,
+            rhs,
             alpha,
             init,
-            profile,
+            None,
         )
     }
 
@@ -1987,113 +1864,64 @@ where
     where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        match &resolution.route {
-            ContractRoute::Core { plan, swapped } => {
-                profile.route = TensorContractFusionRoute::CoreFusionBlocks;
-                self.execute_core_plan_host_profiled(
-                    plan,
-                    *swapped,
-                    dst_structure,
-                    dst_data,
-                    lhs,
-                    rhs,
-                    alpha,
-                    beta,
-                    profile,
-                )
-            }
-            ContractRoute::DynamicTree(artifact) => {
-                profile.route = TensorContractFusionRoute::DynamicTreeCore;
-                self.execute_dynamic_tree_host(
-                    artifact,
-                    dst_structure,
-                    dst_data,
-                    lhs.1,
-                    rhs.1,
-                    alpha,
-                    ContractDestinationInit::Axpby(beta),
-                    Some(profile),
-                )
-            }
-            ContractRoute::CopyC(copy) => {
-                profile.route = TensorContractFusionRoute::CopyC;
-                let mut temporary = std::mem::take(&mut self.copy_c_scratch);
-                temporary.resize_filled(copy.temporary_len, D::zero());
-                let result = self
-                    .execute_core_plan_host_profiled(
-                        &copy.core,
-                        copy.swapped,
-                        &copy.temporary,
-                        temporary.as_mut_slice(),
-                        lhs,
-                        rhs,
-                        D::one(),
-                        D::zero(),
-                        profile,
-                    )
-                    .and_then(|()| {
-                        let start = std::time::Instant::now();
-                        let result = self
-                            .tree_context
-                            .tree_transform_structure_into_raw_profiled(
-                                &copy.transform,
-                                dst_structure,
-                                &copy.temporary,
-                                dst_data,
-                                temporary.as_slice(),
-                                alpha,
-                                beta,
-                                &mut profile.tree_replay,
-                            );
-                        profile.output_transform += start.elapsed();
-                        profile.output_transform_calls += 1;
-                        result
-                    });
-                self.copy_c_scratch = temporary;
-                result
-            }
-        }
+        profile.route = match &resolution.route {
+            ContractRoute::Core { .. } => TensorContractFusionRoute::CoreFusionBlocks,
+            ContractRoute::DynamicTree(_) => TensorContractFusionRoute::DynamicTreeCore,
+            ContractRoute::CopyC(_) => TensorContractFusionRoute::CopyC,
+        };
+        self.execute_route_host(
+            resolution,
+            (dst_structure, dst_data),
+            lhs,
+            rhs,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+            Some(profile),
+        )
     }
 
+    /// The eager arm of every route: the one route executor at one member,
+    /// over this context's tree workspace and scratch (the pooled `copyC`
+    /// temporary as a CopyC core destination).
     #[allow(clippy::too_many_arguments)]
-    fn execute_core_plan_host_profiled(
+    fn execute_route_host(
         &mut self,
-        plan: &tenet_operations::FusionBlockContractPlan<C>,
-        swapped: bool,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
+        resolution: &StorageContractResolution<C>,
+        dst: (&Arc<BlockStructure>, &mut [D]),
         lhs: (&Arc<BlockStructure>, &[D]),
         rhs: (&Arc<BlockStructure>, &[D]),
         alpha: D,
-        beta: D,
-        profile: &mut TensorContractFusionProfile,
+        init: ContractDestinationInit<D>,
+        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<(), OperationError>
     where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) =
-            if swapped { (rhs, lhs) } else { (lhs, rhs) };
         let Self {
+            tree_context,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
+            fusion_scratch,
+            copy_c_scratch,
             ..
         } = self;
-        let mut kernels = crate::StridedHostKernelAdapter::default();
-        let mut gemm =
-            super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
-        plan.execute_raw_profiled(
-            &mut kernels,
-            &mut gemm,
+        let mut scratch = fusion_scratch.route_scratch();
+        if resolution.copy_c().is_some() {
+            scratch.core_dst = copy_c_scratch;
+        }
+        super::route_host::execute_route_host(
+            tree_context,
+            &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
             fusion_block_workspace,
-            dst_structure,
-            dst_data,
-            lhs_structure,
-            lhs_data,
-            rhs_structure,
-            rhs_data,
+            scratch,
+            resolution,
+            dst,
+            lhs,
+            rhs,
+            1,
             alpha,
-            beta,
+            init,
             profile,
         )
     }
