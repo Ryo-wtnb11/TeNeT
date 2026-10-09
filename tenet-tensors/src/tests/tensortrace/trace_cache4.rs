@@ -22,7 +22,25 @@ pub(super) fn fingerprint(words: impl IntoIterator<Item = u64>) -> u64 {
     hash
 }
 
-/// `(terms, f64 output, Complex64 output)` fingerprints of one MF trace.
+/// A platform-portable word for a pinned value: rounded to `f32`, with ±0
+/// and every NaN folded. Why not the `f64` bits: symbol providers and dense
+/// kernels may round the last bits differently across platforms (libm, FMA,
+/// SIMD width; #2104), while a changed term set, order or accumulation
+/// path moves values far beyond `f32` rounding. Same-run comparisons (cold
+/// against warm) stay bit-exact.
+pub(super) fn portable(value: f64) -> u64 {
+    let value = value as f32;
+    if value == 0.0 {
+        0
+    } else if value.is_nan() {
+        u64::MAX
+    } else {
+        u64::from(value.to_bits())
+    }
+}
+
+/// `(terms, f64 output, Complex64 output)` fingerprints of one MF trace:
+/// term blocks exact, values through [`portable`].
 type Prints = [u64; 3];
 
 fn real(i: usize) -> f64 {
@@ -58,7 +76,7 @@ where
         [
             term.dst_block() as u64,
             term.src_block() as u64,
-            term.coefficient().to_bits(),
+            portable(*term.coefficient()),
         ]
     }));
     let len = src.space().required_len().unwrap();
@@ -76,11 +94,11 @@ where
     .unwrap();
     [
         terms,
-        fingerprint(real_out.iter().map(|value| value.to_bits())),
+        fingerprint(real_out.iter().map(|&value| portable(value))),
         fingerprint(
             complex_out
                 .iter()
-                .flat_map(|value| [value.re.to_bits(), value.im.to_bits()]),
+                .flat_map(|value| [portable(value.re), portable(value.im)]),
         ),
     ]
 }
@@ -96,11 +114,8 @@ fn assert_cold_and_warm(name: &str, expected: Prints, prints: impl Fn() -> Print
     clear_structure_caches();
     let cold = prints();
     let warm = prints();
-    assert_eq!(cold, warm, "{name}: warm bits differ from cold");
-    assert_eq!(
-        cold, expected,
-        "{name}: bits differ from the pinned revision"
-    );
+    assert_eq!(cold, warm, "{name}: warm differs from cold");
+    assert_eq!(cold, expected, "{name}: differs from the pinned revision");
 }
 
 fn su2_leg() -> SectorLeg {
@@ -224,52 +239,53 @@ fn mf_trace_bits_match_pinned_revision_cold_and_warm() {
     }
 }
 
-/// Recorded at a04e59c2 (before #2072).
+/// Recorded through [`portable`] at 25724aa2, whose f64 bits equal
+/// a04e59c2's (before #2072) on macOS arm64.
 const PIN_SU2_OPEN: Prints = [
-    6797032591768898186,
-    11542341682854181360,
-    10205597355325690015,
+    11611427905873280266,
+    10875861184201763681,
+    18314849795358653513,
 ];
 const PIN_SU2_IDENTITY: Prints = [
-    5946816043996689180,
-    10064097200336381756,
-    6544399261609154517,
+    4232214989127025742,
+    14871361164243178883,
+    7230379840223023516,
 ];
 const PIN_SU2_ADJOINT: Prints = [
-    12583905454829699337,
-    11542341682854181360,
-    1152431112794283509,
+    11908699873957774648,
+    10875861184201763681,
+    595741395235360969,
 ];
 const PIN_SU2_BOTH: Prints = [
-    16340709039126675528,
-    12194415398254016631,
-    12541757064838289309,
+    3784787345327458428,
+    2335335494070420844,
+    18406391343200945282,
 ];
 const PIN_FP_OPEN: Prints = [
-    14713718370923663374,
-    7120500526032442709,
-    14955366930349779627,
+    6096770442742908238,
+    9093196998694218356,
+    13131061586690796996,
 ];
-const PIN_FP_IDENTITY: Prints = [
-    9319061474827989388,
-    18065772038357404277,
-    5050611406896117456,
-];
+const PIN_FP_IDENTITY: Prints = [9754700174760375834, 954779586424958464, 90324878527814011];
 const PIN_FP_ADJOINT: Prints = [
-    15885020966606187352,
-    5860062657676541310,
-    9015904545330042487,
+    7639453720453207797,
+    18388007180403325428,
+    8925810726760189892,
 ];
-const PIN_FP_BOTH: Prints = [33104485184910472, 11925859689077087162, 5933484787948759124];
+const PIN_FP_BOTH: Prints = [
+    549713337742343836,
+    13971276279694029957,
+    4008062945554711502,
+];
 const PIN_U1_OPEN: Prints = [
-    12180223929535698292,
-    18178240109427535153,
-    18316357646671316850,
+    13709948616143683732,
+    11264073318909681051,
+    8471838890349698562,
 ];
 const PIN_U1_ADJOINT: Prints = [
-    5011798078153603172,
-    12510737463361251689,
-    7339927660487231306,
+    10518078638784018340,
+    13735893356685760447,
+    15747945630213552074,
 ];
 
 /// One multiplicity-free trace: its bound source and selected destination.

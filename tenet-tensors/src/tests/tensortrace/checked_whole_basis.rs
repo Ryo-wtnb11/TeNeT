@@ -490,8 +490,10 @@ fn group_admission_validates_each_member_once_in_block_order() {
 }
 
 /// What: a cold checked compile makes exactly the provider queries, in the
-/// same order, and produces the same term bits as a04e59c2 (before #2072):
-/// routing through cache 4 changes nothing on a miss.
+/// same order, and produces the same term sequence as a04e59c2 (before
+/// #2072): routing through cache 4 changes nothing on a miss. The ledger is
+/// exact; term values go through `portable` (racah SU(3) coefficients round
+/// their last bits differently on Linux and macOS).
 #[test]
 fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
     let fixture = fixture();
@@ -503,12 +505,12 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
         [
             term.dst_block() as u64,
             term.src_block() as u64,
-            term.coefficient().to_bits(),
+            super::trace_cache4::portable(*term.coefficient()),
         ]
     }));
     assert_eq!(
         (calls.len(), ledger, terms),
-        (2031, 12_939_473_490_702_431_790, 1_780_564_817_329_036_331)
+        (2031, 12_939_473_490_702_431_790, 14_775_106_432_576_145_088)
     );
 }
 
