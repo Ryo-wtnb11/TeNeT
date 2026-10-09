@@ -2847,3 +2847,6 @@ fn the_planner_walks_the_requested_order_once() {
     // DynamicTree: the requested order and both default orders. Four before.
     assert_eq!(walks(&u1_case()), (RouteKind::DynamicTree, 3));
 }
+
+#[path = "route_host_tests.rs"]
+mod route_host_tests;

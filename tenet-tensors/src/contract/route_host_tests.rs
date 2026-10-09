@@ -1,0 +1,261 @@
+//! #1859 Host H1: the DynamicTree route has one Host executor for eager and
+//! member (any B) replays.
+//!
+//! The characterization tables pin the exact output bits of the eager and
+//! member DynamicTree replays (alpha/beta placement, `Zeroed`, signed zeros,
+//! non-finite operands) on exactly representable data, so every sum is exact
+//! and only the executor's operation placement decides the bits. They were
+//! recorded on `d416b1a2` (before the executor merge) and must not change.
+
+use super::*;
+use tenet_operations::ContractDestinationInit;
+
+/// Exactly representable payload in `{-2, -1, ±0, 1, 2}`.
+fn exact_data(len: usize, salt: usize) -> Vec<f64> {
+    (0..len)
+        .map(|index| {
+            let value = ((index * 7 + salt) % 5) as f64 - 2.0;
+            if value == 0.0 && (index + salt) % 2 == 1 {
+                -0.0
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
+fn fnv(digest: &mut u64, values: &[f64]) {
+    for value in values {
+        for byte in value.to_bits().to_le_bytes() {
+            *digest ^= u64::from(byte);
+            *digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The DynamicTree fixtures: U(1) identity output with and without an
+/// inactive core block, U(1) source and output transforms, and a twisted
+/// fermionic contraction.
+fn dynamic_tree_fixtures() -> (Vec<(&'static str, Case<U1FusionRule>)>, Case<FermionU1>) {
+    let mut cases = overwrite_cases();
+    cases.truncate(3);
+    let u1 = cases
+        .drain(1..)
+        .map(|(name, case, _)| (name, case))
+        .chain([("u1 source and output transforms", u1_case())])
+        .map(|(name, case)| {
+            assert_eq!(
+                owned_routes(&case),
+                (RouteKind::DynamicTree, RouteKind::DynamicTree),
+                "{name}"
+            );
+            (name, case)
+        })
+        .collect::<Vec<_>>();
+    let (_, fermionic) = fermionic_cases()
+        .into_iter()
+        .find(|(_, case)| {
+            owned_routes(case) == (RouteKind::DynamicTree, RouteKind::DynamicTree)
+                && planned_resolution(case).requires_source_twist()
+        })
+        .expect("a twisted fermionic DynamicTree fixture");
+    (u1, fermionic)
+}
+
+fn planned_resolution<R>(case: &Case<R>) -> crate::contract::StorageContractResolution<f64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    Context::<f64>::default()
+        .compile_storage_contract_resolution(
+            &case.dst(),
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap()
+}
+
+fn inits() -> [(ContractDestinationInit<f64>, Option<f64>); 5] {
+    // `None`: the destination starts NaN-poisoned (strong-zero beta) or zero
+    // (`Zeroed`); `Some(fill)` marks a destination read through beta.
+    [
+        (ContractDestinationInit::Axpby(0.0), None),
+        (ContractDestinationInit::Axpby(-0.0), Some(0.0)),
+        (ContractDestinationInit::Axpby(1.0), Some(0.0)),
+        (ContractDestinationInit::Axpby(2.0), Some(0.0)),
+        (ContractDestinationInit::Zeroed, None),
+    ]
+}
+
+/// One eager replay per `(alpha, init)` plus a non-finite operand replay,
+/// folded into one digest.
+fn eager_digest<R>(case: &Case<R>) -> u64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs = exact_data(case.lhs.space().required_len().unwrap(), 1);
+    let rhs = exact_data(case.rhs.space().required_len().unwrap(), 3);
+    let mut digest = FNV_START;
+    let mut context = Context::<f64>::default();
+    let mut run = |lhs: &[f64], alpha: f64, init: ContractDestinationInit<f64>, out: &mut [f64]| {
+        context
+            .tensorcontract_fusion_dyn_prelowered_into_with_init(
+                &dst,
+                out,
+                FusionOperand::direct(case.lhs.space()),
+                lhs,
+                FusionOperand::direct(case.rhs.space()),
+                &rhs,
+                case.axes(),
+                alpha,
+                init,
+            )
+            .unwrap();
+        assert!(!context.last_resolution_is_core());
+        assert!(context.last_resolution_orientation().is_some());
+    };
+    for alpha in [0.0, 1.0, -1.0, 2.5] {
+        for (init, read) in inits() {
+            let mut out = match (init, read) {
+                (ContractDestinationInit::Zeroed, _) => vec![0.0; len],
+                (_, None) => vec![f64::NAN; len],
+                (_, Some(_)) => exact_data(len, 11),
+            };
+            run(&lhs, alpha, init, &mut out);
+            fnv(&mut digest, &out);
+        }
+    }
+    let mut poisoned = lhs.clone();
+    poisoned[0] = f64::NAN;
+    if poisoned.len() > 1 {
+        poisoned[1] = f64::INFINITY;
+    }
+    for alpha in [0.0, 1.0] {
+        let mut out = exact_data(len, 11);
+        run(
+            &poisoned,
+            alpha,
+            ContractDestinationInit::Axpby(1.0),
+            &mut out,
+        );
+        fnv(&mut digest, &out);
+    }
+    digest
+}
+
+/// Member replays of the planner's artifact at B = 1, 2 into NaN-poisoned
+/// destinations, folded into one digest.
+fn member_digest<R>(case: &Case<R>) -> u64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let resolution = planned_resolution(case);
+    let crate::contract::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+    else {
+        panic!("fixture must plan DynamicTree");
+    };
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let mut workspace = crate::contract::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut digest = FNV_START;
+    for members in [1, 2, 1] {
+        let lhs = exact_data(lhs_len * members, 1);
+        let rhs = exact_data(rhs_len * members, 3);
+        let mut out = vec![f64::NAN; len * members];
+        run_members(
+            artifact,
+            dst.space().structure(),
+            &mut workspace,
+            &mut out,
+            &lhs,
+            &rhs,
+            members,
+        )
+        .unwrap();
+        fnv(&mut digest, &out);
+    }
+    digest
+}
+
+/// The Host member entry over default dense executors.
+pub(super) fn run_members(
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    dst_structure: &Arc<tenet_core::BlockStructure>,
+    workspace: &mut crate::contract::dynamic::DynamicTreeMembersWorkspace<f64>,
+    dst: &mut [f64],
+    lhs: &[f64],
+    rhs: &[f64],
+    members: usize,
+) -> Result<(), crate::OperationError> {
+    crate::contract::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        artifact,
+        dst_structure,
+        workspace,
+        dst,
+        lhs,
+        rhs,
+        members,
+        1,
+    )
+}
+
+/// Recorded on `d416b1a2`: `(fixture, eager digest, member digest)`.
+const PINNED: [(&str, u64, u64); 4] = [
+    (
+        "transformed lhs, identity output, inactive block",
+        0x8f9e_882e_4f9e_d814,
+        0xa52a_4ee5_0ad3_cdcd,
+    ),
+    (
+        "transformed rhs, identity output, fully covered",
+        0x6203_f240_4ef7_5df5,
+        0xdb99_a4e5_ec6b_0e4d,
+    ),
+    (
+        "u1 source and output transforms",
+        0x5a37_4453_eea1_39ed,
+        0x3c43_b277_1a82_5538,
+    ),
+    (
+        "fermionic twisted",
+        0x057a_e7e0_ebf2_98e6,
+        0x77ce_6c67_abe8_f0d5,
+    ),
+];
+
+#[test]
+fn dynamic_tree_eager_and_member_bits_are_pinned() {
+    let (u1, fermionic) = dynamic_tree_fixtures();
+    let has_core_dst = |resolution: crate::contract::StorageContractResolution<f64>| {
+        resolution.direct_destination_inactive_blocks().is_none()
+    };
+    assert_eq!(
+        u1.iter()
+            .map(|(_, case)| has_core_dst(planned_resolution(case)))
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+    let mut observed = u1
+        .iter()
+        .map(|(name, case)| (*name, eager_digest(case), member_digest(case)))
+        .collect::<Vec<_>>();
+    observed.push((
+        "fermionic twisted",
+        eager_digest(&fermionic),
+        member_digest(&fermionic),
+    ));
+    assert_eq!(observed, PINNED, "observed digests: {observed:#x?}");
+}
