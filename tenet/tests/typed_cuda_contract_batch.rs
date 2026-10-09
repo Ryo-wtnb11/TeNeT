@@ -1195,6 +1195,7 @@ fn copy_c_nonzero_single_public_admission() {
                     blas_contract_oracle,
                 );
             }
+            check_high_water(&plan, &case, &blas_contract_oracle);
             let held_with_eager = runtime
                 .cuda_plan_cache_stats()
                 .unwrap()
@@ -1399,10 +1400,11 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
             workspace.retained_bytes()
         );
     }
-    check_dynamic_tree_high_water(&plan, case, &oracle);
+    check_high_water(&plan, case, &oracle);
 }
 
-/// High-water member stacks across B changes (#1746). Fresh workspaces run
+/// High-water member stacks across B changes (#1746): the DynamicTree
+/// workspace stacks and the CopyC temporary. Fresh workspaces run
 /// B = 4, 2, 4 and B = 1, 17, 3 with new values at every call, so a stale
 /// stack region left by an earlier, larger B would show. Each member of
 /// `execute` and of `execute_into` (NaN-poisoned destination, so every
@@ -1410,7 +1412,7 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
 /// Through `execute_into`, which owns no output, a B at or below the high
 /// water allocates and uploads nothing and keeps the retained bytes; through
 /// `execute` the only upload is the owned output of the new B (#740).
-fn check_dynamic_tree_high_water<R: DeviceRule, D: DevicePayload>(
+fn check_high_water<R: DeviceRule, D: DevicePayload>(
     plan: &ContractPlan<R, D, CudaStorage<D>>,
     case: &Case<R, D>,
     oracle: &impl Fn(&Case<R, D>) -> TensorMap<R, D>,
@@ -1505,7 +1507,7 @@ fn check_dynamic_tree_high_water<R: DeviceRule, D: DevicePayload>(
                 (high_water, high_bytes) = (count, into.retained_bytes());
             }
             eprintln!(
-                "DynamicTree high water {} {} B={count} (high water {high_water}): execute={owned}; execute_into={written_metrics}; retained_into_bytes={}",
+                "high water {} {} B={count} (high water {high_water}): execute={owned}; execute_into={written_metrics}; retained_into_bytes={}",
                 case.name,
                 D::NAME,
                 into.retained_bytes()
