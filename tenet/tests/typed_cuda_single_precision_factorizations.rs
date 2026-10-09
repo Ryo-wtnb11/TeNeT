@@ -1318,3 +1318,227 @@ fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
         assert_eq!(complex.1, real.1 * 2, "{name}: h2d bytes must be doubled");
     }
 }
+
+// ---------------------------------------------------------------------------
+// One compact factor plan for Host and CUDA (#1774)
+// ---------------------------------------------------------------------------
+
+/// QR, SVD and EIGH of one multi-leg source against the Host at `D`.
+///
+/// The fixture has several coupled sectors of unequal shape, several codomain
+/// trees per sector, a dual codomain leg, and coupled sectors present on only
+/// one side (no region, so no route). The Host factor spaces and block
+/// placements are the oracle for the device publication; the values compare
+/// through the gauge-independent identities of the suites above. EIGH runs on
+/// both `A A^H` (rank deficient: zero eigenvalues in every tall sector) and
+/// `A A^H + 1` (full rank).
+fn assert_shared_plan_matches_host<R, D>(
+    runtime: &Runtime,
+    codomain: [&GradedSpace<R>; 2],
+    domain: &GradedSpace<R>,
+    seed: u64,
+) where
+    R: DeviceRule,
+    D: FactorPayload,
+{
+    let source = TensorMap::<R, D>::rand_with_seed(runtime, codomain, [domain], seed).unwrap();
+    let terms = source.dense_data().unwrap().len().max(1);
+    let norm = source.norm(2.0).unwrap();
+    let (mut largest, mut smallest) = (0.0_f64, f64::INFINITY);
+    for entry in &source
+        .svd_vals(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap()
+    {
+        for &value in &entry.values {
+            largest = largest.max(value);
+            smallest = smallest.min(value);
+        }
+    }
+    assert!(
+        smallest > 0.0,
+        "the fixture [{}] must have full rank",
+        D::NAME
+    );
+    let kappa = largest / smallest;
+    let bound = tolerance::<D>(terms, norm, kappa);
+    let device = source.to_cuda().unwrap();
+
+    let Qr {
+        q: host_q,
+        r: host_r,
+    } = source
+        .qr_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
+    let Qr { q, r } = device
+        .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
+    let (q, r) = (q.to_host().unwrap(), r.to_host().unwrap());
+    assert_eq!(structure(&q), structure(&host_q), "plan qr q [{}]", D::NAME);
+    assert_eq!(structure(&r), structure(&host_r), "plan qr r [{}]", D::NAME);
+    numerics::assert_slices_close_scaled(
+        &format!("plan qr q [{}]", D::NAME),
+        q.dense_data().unwrap(),
+        host_q.dense_data().unwrap(),
+        terms,
+        kappa,
+    );
+    numerics::assert_slices_close_scaled(
+        &format!("plan qr r [{}]", D::NAME),
+        r.dense_data().unwrap(),
+        host_r.dense_data().unwrap(),
+        terms,
+        kappa,
+    );
+    assert_residual(
+        &q.compose(&r).unwrap(),
+        &source,
+        bound,
+        "plan qr reconstruction",
+    );
+
+    let Svd {
+        u: host_u,
+        s: host_s,
+        vh: host_vh,
+    } = source
+        .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
+    let Svd { u, s, vh } = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
+    let (u, s, vh) = (
+        u.to_host().unwrap(),
+        s.to_host().unwrap(),
+        vh.to_host().unwrap(),
+    );
+    assert_eq!(
+        structure(&u),
+        structure(&host_u),
+        "plan svd u [{}]",
+        D::NAME
+    );
+    assert_eq!(
+        structure(&s),
+        structure(&host_s),
+        "plan svd s [{}]",
+        D::NAME
+    );
+    assert_eq!(
+        structure(&vh),
+        structure(&host_vh),
+        "plan svd vh [{}]",
+        D::NAME
+    );
+    numerics::assert_slices_close_scaled(
+        &format!("plan svd s [{}]", D::NAME),
+        s.materialize().unwrap().dense_data().unwrap(),
+        host_s.materialize().unwrap().dense_data().unwrap(),
+        terms,
+        kappa,
+    );
+    assert_residual(
+        &u.compose(&s).unwrap().compose(&vh).unwrap(),
+        &source,
+        bound,
+        "plan svd reconstruction",
+    );
+
+    let gram = source.compose(&source.adjoint().unwrap()).unwrap();
+    let identity =
+        TensorMap::<R, D>::isomorphism(runtime, gram.codomain().iter(), gram.domain().iter())
+            .unwrap();
+    let shifted = gram
+        .axpby(D::entry(1.0, 0.0), &identity, D::entry(1.0, 0.0))
+        .unwrap();
+    for (hermitian, what) in [(gram, "A A^H"), (shifted, "A A^H + 1")] {
+        let terms = hermitian.dense_data().unwrap().len().max(1);
+        let scale = hermitian.norm(2.0).unwrap();
+        let Eigh {
+            d: host_d,
+            v: host_v,
+        } = hermitian
+            .eigh_full(
+                &codomain_axes(&hermitian),
+                &domain_axes(&hermitian),
+                HermitianTol::DEFAULT,
+            )
+            .unwrap();
+        let hermitian_device = hermitian.to_cuda().unwrap();
+        let Eigh { d, v } = hermitian_device
+            .eigh_full(
+                &codomain_axes(&hermitian_device),
+                &domain_axes(&hermitian_device),
+                HermitianTol::DEFAULT,
+            )
+            .unwrap();
+        let (d, v) = (d.to_host().unwrap(), v.to_host().unwrap());
+        assert_eq!(
+            structure(&d),
+            structure(&host_d),
+            "plan eigh d {what} [{}]",
+            D::NAME
+        );
+        assert_eq!(
+            structure(&v),
+            structure(&host_v),
+            "plan eigh v {what} [{}]",
+            D::NAME
+        );
+        // Weyl: each eigenvalue moves by at most the backward error, so the
+        // spectrum needs no conditioning factor even at a zero eigenvalue.
+        numerics::assert_slices_close_scaled(
+            &format!("plan eigh d {what} [{}]", D::NAME),
+            d.materialize().unwrap().dense_data().unwrap(),
+            host_d.materialize().unwrap().dense_data().unwrap(),
+            terms,
+            scale.max(1.0),
+        );
+        assert_residual(
+            &v.compose(&d)
+                .unwrap()
+                .compose(&v.adjoint().unwrap())
+                .unwrap(),
+            &hermitian,
+            tolerance::<D>(terms, scale, 1.0),
+            "plan eigh reconstruction",
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_factor_plan_publishes_the_host_spaces_at_every_payload() {
+    fn all_payloads<R: DeviceRule>(
+        runtime: &Runtime,
+        codomain: [&GradedSpace<R>; 2],
+        domain: &GradedSpace<R>,
+    ) {
+        assert_shared_plan_matches_host::<_, f64>(runtime, codomain, domain, 17);
+        assert_shared_plan_matches_host::<_, Complex64>(runtime, codomain, domain, 17);
+        assert_shared_plan_matches_host::<_, f32>(runtime, codomain, domain, 17);
+        assert_shared_plan_matches_host::<_, Complex32>(runtime, codomain, domain, 17);
+    }
+
+    let runtime = cuda_runtime();
+    let u1 = Arc::new(U1FusionRule);
+    let leg = |sectors: &[(i32, usize)]| {
+        GradedSpace::try_new(
+            Arc::clone(&u1),
+            sectors
+                .iter()
+                .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        )
+        .unwrap()
+    };
+    // Codomain `a (x) dual(b)` couples to {-2, -1, 0, 1}, sectors -1 and 0
+    // through two trees each; the domain has {-1, 0, 2}. Only -1 and 0 form
+    // regions, both tall and of unequal shape.
+    let a = leg(&[(-1, 2), (0, 1), (1, 2)]);
+    let b = leg(&[(0, 1), (1, 2)]).try_dual().unwrap();
+    let c = leg(&[(-1, 3), (0, 2), (2, 1)]);
+    all_payloads(&runtime, [&a, &b], &c);
+
+    // SU(2): several trees per coupled sector with `dim(c) != 1`.
+    let su2 = su2_leg();
+    all_payloads(&runtime, [&su2, &su2], &su2);
+}
