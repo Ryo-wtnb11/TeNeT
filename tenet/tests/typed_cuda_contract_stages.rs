@@ -19,7 +19,12 @@
 //! ([`MEMBER_COPY_C`]), and member retained bytes now use the one member
 //! workspace's Host region accounting, so they differ from the base by a
 //! pinned per-case constant ([`RETAINED_METADATA_DELTA`]) while every device
-//! byte, which grows with `B`, is equal. The counters are process-wide, hence `--test-threads=1`:
+//! byte, which grows with `B`, is equal. #2123 adds two more: a warm member
+//! `execute` whose core writes its born-zero output directly no longer
+//! refills its inactive regions ([`BORN_ZERO_OUTPUT`]), and the core fill's
+//! context templates are reserved by the first call that fills, an
+//! `execute_into` ([`LAZY_CORE_TEMPLATE`]). The counters are process-wide,
+//! hence `--test-threads=1`:
 //!
 //! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
 //! --test typed_cuda_contract_stages -- --ignored --test-threads=1`.
@@ -152,6 +157,16 @@ impl Recorder {
                     expected[4] -= inactive;
                 }
             }
+            for (call, [calls, bytes]) in LAZY_CORE_TEMPLATE {
+                let sign = match key.strip_prefix(call) {
+                    Some(" execute first") => -1,
+                    Some(" execute_into") => 1,
+                    _ => continue,
+                };
+                for (index, change) in [(0, calls), (1, bytes), (3, calls)] {
+                    expected[index] = expected[index].checked_add_signed(sign * change).unwrap();
+                }
+            }
             if let Some((_, [calls, bytes])) =
                 ZERO_TEMPLATE_GROWTH.iter().find(|(row, _)| row == key)
             {
@@ -234,6 +249,41 @@ const BORN_ZERO_OUTPUT: &[(&str, u64)] = &[
     ("direct member U(1) core route, inactive block f64", 1),
     ("direct member signed core f64", 1),
     ("direct member signed swapped core f64", 1),
+];
+
+/// Calls whose context template growth moved (#2123) from the cold
+/// `execute` to the `execute_into` of the same call: the base reserved the
+/// core fill's zero template (and, first, the ones template) when `execute`
+/// prepared a new B; the head reserves them only for a call that fills, the
+/// `execute_into`. The uploads are the same; only the row that pays them
+/// changes. Later calls find the template at its high-water size.
+const LAZY_CORE_TEMPLATE: &[(&str, [i64; 2])] = &[
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1",
+        [2, 56],
+    ),
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2",
+        [1, 96],
+    ),
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17",
+        [1, 816],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1",
+        [2, 16],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2",
+        [1, 16],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17",
+        [1, 136],
+    ),
+    ("member fA f64 seq=[1, 2, 17, 1] call=1 B=2", [1, 256]),
+    ("member fA f64 seq=[1, 2, 17, 1] call=2 B=17", [1, 2176]),
 ];
 
 const MEMBER_COPY_C: &[(&str, u64)] = &[
