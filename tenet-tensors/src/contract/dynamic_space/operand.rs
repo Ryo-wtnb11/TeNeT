@@ -72,11 +72,6 @@ impl<'a> FusionOperandLayout<'a> {
     }
 
     #[inline]
-    pub(crate) fn oriented_homspace(&self) -> OrientedFusionTreeHomSpace<'a> {
-        self.operand.oriented_homspace()
-    }
-
-    #[inline]
     pub(crate) fn nout(&self) -> usize {
         self.operand.oriented_homspace().nout()
     }

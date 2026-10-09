@@ -68,11 +68,10 @@ pub use backend::{
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
-    compile_direct_composition_plan, plan_compose,
-    tensorcompose_fusion_dyn_prelowered_direct_on_storage, tensorcontract_into_with_context,
-    try_compile_storage_contract_core_route, HostTreeFusionExecutionContext,
-    PreparedTensorContractFusion, TensorContractCache, TensorContractCacheStats,
-    TensorContractExecutionContext, TensorContractFusionExecutionContext, TensorContractPlanKey,
+    plan_compose, tensorcontract_into_with_context, try_compile_storage_contract_core_route,
+    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractCache,
+    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    TensorContractPlanKey,
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{

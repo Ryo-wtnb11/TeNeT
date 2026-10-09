@@ -479,10 +479,12 @@ where
         Ok(())
     }
 
-    /// Tensor-map composition on owned or lazy-adjoint device tensors. This uses the
-    /// twist-free composition compiler and therefore remains distinct from
-    /// [`Self::contract`] for fermionic providers, and it admits every
-    /// braiding style, as on Host, where `contract` requires a symmetric one.
+    /// Tensor-map composition on owned or lazy-adjoint device tensors. It
+    /// plans through the composition planner that `ComposePlan` and Host
+    /// `compose` share, which inserts no supertrace twist, so it remains
+    /// distinct from [`Self::contract`] for fermionic providers, and it admits
+    /// every braiding style, as on Host, where `contract` requires a
+    /// symmetric one.
     #[doc(alias = "mul")]
     pub fn compose<'a>(
         &self,
@@ -501,7 +503,7 @@ where
             lhs_space, rhs_space, &lhs_axes, &rhs_axes,
         )?;
         let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
+        let (cuda, transforms, scratch) = lease.split_contract();
         let expected_placement = Placement::Cuda(cuda.device());
         if lhs_storage.placement() != expected_placement
             || rhs_storage.placement() != expected_placement
@@ -512,16 +514,21 @@ where
             cuda,
             vec![D::from_real(0.0); dst_space.space().required_len()?],
         )?;
-        tenet_tensors::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
-            &mut CudaStorageGemm::new(cuda),
+        let resolution = tenet_tensors::plan_compose::<tenet_tensors::DirectCoreExecutor, _>(
             &dst_space,
-            &mut dst,
             lhs_operand,
-            lhs_storage,
             rhs_operand,
-            rhs_storage,
-            &lhs_axes,
-            &rhs_axes,
+        )?;
+        tenet_tensors::execute_storage_contract_resolution_on_cuda(
+            cuda,
+            transforms,
+            scratch,
+            &resolution,
+            (dst_space.space().structure(), &mut dst),
+            (lhs_operand.storage_space().structure(), lhs_storage),
+            (rhs_operand.storage_space().structure(), rhs_storage),
+            D::from_real(1.0),
+            tenet_tensors::ContractDestinationInit::Zeroed,
         )?;
         drop(lease);
         Ok(Self {
