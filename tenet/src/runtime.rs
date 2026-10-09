@@ -815,6 +815,46 @@ fn missing_cuda_device() -> Error {
     )
 }
 
+/// A runtime's Host pool entry on the calling thread (see
+/// [`Runtime::enter_host_pool`]); the pool stays entered until it drops.
+#[must_use = "the pool is entered only while the entry lives"]
+pub(crate) struct HostPoolEntry {
+    _guard: tenet_operations::host_pool::HostPoolGuard,
+    #[cfg(test)]
+    _probe: HostPoolDepth,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_POOL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test mirror of the entered runtime pools on this thread, so a probe can
+/// ask whether a data-movement site runs inside one.
+#[cfg(test)]
+struct HostPoolDepth;
+
+#[cfg(test)]
+impl HostPoolDepth {
+    fn enter() -> Self {
+        HOST_POOL_DEPTH.set(HOST_POOL_DEPTH.get() + 1);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for HostPoolDepth {
+    fn drop(&mut self) {
+        HOST_POOL_DEPTH.set(HOST_POOL_DEPTH.get() - 1);
+    }
+}
+
+/// Whether a runtime Host pool is entered on this thread.
+#[cfg(test)]
+pub(crate) fn host_pool_entered() -> bool {
+    HOST_POOL_DEPTH.get() > 0
+}
+
 #[cfg(test)]
 thread_local! {
     /// Dense leases taken on this thread: the #1996 lease-count probe.
@@ -830,7 +870,7 @@ pub(crate) struct ContextLease<'a> {
     pool: &'a Mutex<Vec<PooledContext>>,
     max_idle: usize,
     context: Option<PooledContext>,
-    _host_pool: tenet_operations::host_pool::HostPoolGuard,
+    _host_pool: HostPoolEntry,
 }
 
 impl ContextLease<'_> {
@@ -866,11 +906,11 @@ pub(crate) enum DenseLease<'a> {
         pool: &'a Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
         max_idle: usize,
         executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
-        _host_pool: tenet_operations::host_pool::HostPoolGuard,
+        _host_pool: HostPoolEntry,
     },
     Locked {
         state: MutexGuard<'a, RuntimeState>,
-        _host_pool: tenet_operations::host_pool::HostPoolGuard,
+        _host_pool: HostPoolEntry,
     },
 }
 
@@ -1145,8 +1185,14 @@ impl Runtime {
     /// Enters this runtime's CPU pool as the calling thread's Host pool until
     /// the guard drops. Every Host eager operation runs inside one: through
     /// its execution lease, or directly for the strided-only operations.
-    pub(crate) fn enter_host_pool(&self) -> tenet_operations::host_pool::HostPoolGuard {
-        tenet_operations::host_pool::enter_host_pool(&self.inner.execution_config.shared_ctx)
+    pub(crate) fn enter_host_pool(&self) -> HostPoolEntry {
+        HostPoolEntry {
+            _guard: tenet_operations::host_pool::enter_host_pool(
+                &self.inner.execution_config.shared_ctx,
+            ),
+            #[cfg(test)]
+            _probe: HostPoolDepth::enter(),
+        }
     }
 
     /// Leases an execution context for one standalone op: pop an idle one or

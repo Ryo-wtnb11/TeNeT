@@ -230,6 +230,20 @@ thread_local! {
     /// Operation-local densifications of a compact diagonal payload
     /// (`TypedTensorBody::materialized_dense_data`).
     pub(crate) static DIAGONAL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `(inside, outside)` a runtime Host pool: the adjoint materializations
+    /// and diagonal densifications on this thread (#1996).
+    pub(crate) static MATERIALIZATION_POOLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Records whether a materialization site runs inside a runtime Host pool.
+#[cfg(test)]
+pub(super) fn observe_materialization_pool() {
+    let (inside, outside) = MATERIALIZATION_POOLS.get();
+    MATERIALIZATION_POOLS.set(if crate::runtime::host_pool_entered() {
+        (inside + 1, outside)
+    } else {
+        (inside, outside + 1)
+    });
 }
 
 pub(super) enum TypedTensorRepr<R, D, S = Vec<D>> {

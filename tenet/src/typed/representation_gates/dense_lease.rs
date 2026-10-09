@@ -2,19 +2,38 @@
 //! dense route, the same way in both fusion modes and on both runtime lease
 //! arms (pooled executor, injected executor behind the state lock). A compact
 //! diagonal and every error raised before the dense stage (preflight, leg
-//! roles, the shared finite-input stage) take no lease.
+//! roles, the shared finite-input stage) take no lease. Every adjoint
+//! materialization and compact densification runs inside the runtime's Host
+//! pool.
 
 use super::*;
 use crate::runtime::DENSE_LEASES;
+use crate::typed::MATERIALIZATION_POOLS;
 use num_complex::Complex64;
 #[cfg(feature = "racah-generated")]
 use tenet_core::SUNFusionRule;
 
-/// The dense leases `f` takes on this thread, and whether it succeeded.
-fn leases<T, E>(f: impl FnOnce() -> Result<T, E>) -> (bool, usize) {
+/// What `f` did on this thread: whether it succeeded, its dense leases,
+/// and its materializations inside and outside a runtime Host pool.
+fn leases<T, E>(f: impl FnOnce() -> Result<T, E>) -> Probe {
     DENSE_LEASES.set(0);
+    MATERIALIZATION_POOLS.set((0, 0));
     let ok = f().is_ok();
-    (ok, DENSE_LEASES.get())
+    let (pooled, unpooled) = MATERIALIZATION_POOLS.get();
+    Probe {
+        ok,
+        leases: DENSE_LEASES.get(),
+        pooled,
+        unpooled,
+    }
+}
+
+#[derive(Debug)]
+struct Probe {
+    ok: bool,
+    leases: usize,
+    pooled: usize,
+    unpooled: usize,
 }
 
 fn spectrum_of<R, D>(
@@ -64,8 +83,8 @@ macro_rules! lease_rows {
         )
         .unwrap();
         let tol = HermitianTol::DEFAULT;
-        let mut rows: Vec<(String, bool, usize)> = Vec::new();
-        let mut row = |name: String, (ok, n): (bool, usize)| rows.push((name, ok, n));
+        let mut rows: Vec<(String, Probe)> = Vec::new();
+        let mut row = |name: String, probe: Probe| rows.push((name, probe));
         // Dense owned, lazy adjoint (each family's adjoint rule) and compact.
         let lazy_a = a.adjoint().unwrap();
         let lazy_h = h.adjoint().unwrap();
@@ -162,16 +181,33 @@ macro_rules! lease_rows {
     }};
 }
 
-fn check(case: &str, rows: Vec<(String, bool, usize)>) {
+/// Rows whose route must materialize or densify, so the pool check is not
+/// vacuous: a compact rhs densified for a dense divisor, and a lazy adjoint
+/// copied by every `Materialize` family.
+const MATERIALIZING: &[&str] = &[
+    "solve compact rhs dense",
+    "solve lazy rhs dense",
+    "solve divisor lazy",
+    "exp lazy",
+    "qr_compact lazy",
+    "lq_full lazy",
+    "eigh_full lazy",
+    "eig_vals lazy",
+];
+
+fn check(case: &str, rows: Vec<(String, Probe)>) {
     let wrong: Vec<_> = rows
         .iter()
-        .filter(|(name, ok, n)| {
+        .filter(|(name, probe)| {
             let error = name.starts_with("error");
             let expected = usize::from(name.ends_with("dense") || name.ends_with("lazy"));
-            *ok == error || *n != expected
+            probe.ok == error
+                || probe.leases != expected
+                || probe.unpooled != 0
+                || (MATERIALIZING.contains(&name.as_str()) && probe.pooled == 0)
         })
         .collect();
-    assert!(wrong.is_empty(), "{case}: (row, ok, leases) {wrong:?}");
+    assert!(wrong.is_empty(), "{case}: {wrong:?}");
 }
 
 fn runtimes() -> [(&'static str, Runtime); 2] {

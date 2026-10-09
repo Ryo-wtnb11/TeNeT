@@ -108,6 +108,8 @@ where
         observe_adjoint_materialization();
         let _host_pool = self.runtime.enter_host_pool();
         #[cfg(test)]
+        observe_materialization_pool();
+        #[cfg(test)]
         UNCACHED_ADJOINT_MATERIALIZATIONS
             .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
         let data = tenet_tensors::materialize_adjoint_data_dyn(
@@ -183,6 +185,8 @@ where
             TypedData::Diagonal(spectrum) => {
                 #[cfg(test)]
                 DIAGONAL_MATERIALIZATIONS.set(DIAGONAL_MATERIALIZATIONS.get().saturating_add(1));
+                #[cfg(test)]
+                observe_materialization_pool();
                 std::borrow::Cow::Owned(
                     tenet_matrixalgebra::seam::diagonal_bond_data(
                         self.space.space(),

@@ -396,7 +396,8 @@ use tensor_repr::{
 };
 #[cfg(test)]
 use tensor_repr::{
-    observe_adjoint_materialization, DIAGONAL_MATERIALIZATIONS, UNCACHED_ADJOINT_MATERIALIZATIONS,
+    observe_adjoint_materialization, observe_materialization_pool, DIAGONAL_MATERIALIZATIONS,
+    MATERIALIZATION_POOLS, UNCACHED_ADJOINT_MATERIALIZATIONS,
 };
 pub use tensor_repr::{PayloadConversion, PhysicalDense, TensorMap, TensorRef};
 mod cat;
