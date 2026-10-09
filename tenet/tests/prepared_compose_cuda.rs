@@ -1,4 +1,4 @@
-//! Device gates of `ComposePlan`/`ComposeWorkspace` (#1639).
+//! Device gates of `ComposePlan` and its `ContractWorkspace` (#1639).
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with

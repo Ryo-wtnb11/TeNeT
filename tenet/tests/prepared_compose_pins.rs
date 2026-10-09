@@ -13,6 +13,11 @@
 //!
 //! One test, so the process-wide caches warm in one fixed order and the
 //! allocation counts are reproducible.
+//!
+//! [`ROWS`] and [`ERRORS`] are the base observations. Since #1775 the plan
+//! runs on `ContractPlan`'s executor, and the head differs from them only as
+//! [`B1_STACKED_REPLAY_BYTES`], [`B1_FIRST_CALLS`] and [`CHANGED_ERRORS`]
+//! state; every value digest and every row at B > 1 is the base's.
 
 #![cfg(all(
     feature = "cpu-faer",
@@ -230,16 +235,54 @@ fn host_compose_plan_values_bytes_allocations_and_errors_are_pinned() {
     }
     let pinned: Vec<_> = ROWS
         .iter()
-        .map(|&(key, row)| (key.to_string(), row))
+        .map(|&(key, mut row)| {
+            if key.ends_with(" B=1") {
+                row[1] -= B1_STACKED_REPLAY_BYTES;
+                row[2] -= B1_STACKED_REPLAY_BYTES;
+                row[3] = B1_FIRST_CALLS;
+            }
+            (key.to_string(), row)
+        })
         .collect();
     assert_eq!(rows, pinned, "observed rows are printed above");
     let pinned_errors: Vec<_> = ERRORS
         .iter()
-        .map(|&(row, error)| (row, error.to_string()))
+        .map(|&(row, base)| {
+            let error = CHANGED_ERRORS
+                .iter()
+                .find(|(changed, _)| *changed == row)
+                .map_or(base, |&(_, head)| head);
+            (row, error.to_string())
+        })
         .collect();
     assert_eq!(errors, pinned_errors, "observed errors are printed above");
 }
 
+/// At B = 1 the base built a one-member stacked replay (its job list, runs
+/// and inactive layouts) in the workspace; the head runs the plan's own jobs,
+/// as `ContractPlan` does for one member, so the workspace retains these
+/// bytes less at B = 1 (the same 208 for every fixture: two direct jobs and
+/// one inactive block each) and B > 1 is unchanged.
+const B1_STACKED_REPLAY_BYTES: u64 = 208;
+
+/// The first `execute` at B = 1 allocates the output and Tenferro's grouped
+/// GEMM validation only; the base also allocated the eight buffers of the
+/// one-member stacked replay (10 calls).
+const B1_FIRST_CALLS: u64 = 2;
+
+/// Error rows the head changes (#1775, approved stricter errors A23): a
+/// member-count mismatch is rejected at `new`, the member-count messages are
+/// `ContractPlan`'s, and the foreign-workspace message names no operation.
+#[rustfmt::skip]
+const CHANGED_ERRORS: &[(&str, &str)] = &[
+    ("new: member counts differ", "Some(InvalidArgument(\"operand stacks have different member counts\"))"),
+    ("execute: member counts differ", "Some(InvalidArgument(\"operand stacks have different member counts\"))"),
+    ("execute_into: short destination", "Some(InvalidArgument(\"destination member count differs from operands\"))"),
+    ("execute_into: foreign workspace", "Some(InvalidArgument(\"workspace belongs to another plan\"))"),
+    ("execute: foreign workspace", "Some(InvalidArgument(\"workspace belongs to another plan\"))"),
+];
+
+/// Base observations, `ec3dea5d` (macOS aarch64 and qg1 x86_64 Linux alike).
 #[rustfmt::skip]
 const ROWS: &[(&str, Row)] = &[
     ("U1 f64 call=0 B=1", [0xd76442f7a019dd2, 520, 520, 10, 1, 1]),

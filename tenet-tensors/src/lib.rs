@@ -44,7 +44,8 @@ pub use contract::tensorcontract_structure;
 pub(crate) use contract::TensorContractFusionRoute;
 #[doc(hidden)]
 pub use contract::{
-    compile_direct_composition_plan, tensorcompose_fusion_dyn_prelowered_direct_on_storage,
+    compile_direct_composition_plan, plan_compose,
+    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
     tensorcompose_owned_checked_generic_in_context,
     tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
     HostContractMembersWorkspace, StorageContractResolution,

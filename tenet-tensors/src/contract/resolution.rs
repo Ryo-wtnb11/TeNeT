@@ -81,6 +81,23 @@ pub(crate) enum ContractRoute<C> {
     CopyC(CopyCRoute<C>),
 }
 
+/// Which TensorKit operation a planned contraction is, decided before route
+/// planning: the axes alone cannot tell them apart, because a fermionic
+/// composition and the contraction over the same legs differ by the
+/// supertrace twist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContractKind {
+    /// TensorKit `tensorcontract!` / `blas_contract!`
+    /// (`tensoroperations.jl:383-452` @cfaa073): the candidate walk, the
+    /// supertrace twist on dual rhs-contracted legs, then Core, `copyC` and
+    /// `DynamicTree`.
+    Contract,
+    /// TensorKit `mul!` (`linalg.jl:330-370` @cfaa073): A's domain against
+    /// B's codomain in order and the identity output, with no twist, no
+    /// candidate walk and no transform route, so only the canonical Core.
+    Compose,
+}
+
 /// The planner's first rung: the canonical core over the parent buffers, or
 /// what its candidate walk learned for the rest of the planner.
 #[doc(hidden)]
@@ -207,7 +224,7 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     /// caller's rhs; `None` for a DynamicTree route. Under `CopyC` the core
     /// writes the temporary ([`Self::copy_c`]). Callers state the replay
     /// contract they need on the plan (`require_identity_(signed_)direct_replay`)
-    /// or build it (`StackedDirectReplay::new(_signed)`).
+    /// or build it (`StackedDirectReplay::new_signed`).
     #[doc(hidden)]
     pub fn direct_core(&self) -> Option<(&Arc<FusionBlockContractPlan<C>>, bool)> {
         match &self.route {
@@ -452,14 +469,16 @@ where
 /// lazy operand orientation: the canonical coupled-region plan, and, when
 /// `irregular` carries a layout primer (an executor with
 /// [`ExecCaps::IRREGULAR_CORE`]), the packed plan of a non-canonical tiling
-/// (#1517) when the canonical one declines. A twisted candidate takes only
-/// the canonical scaled plan.
+/// (#1517) when the canonical one declines. A twisted [`ContractKind::Contract`]
+/// candidate takes only the canonical scaled plan; a [`ContractKind::Compose`]
+/// is never twisted.
 pub(crate) fn try_compile_oriented_storage_contract_plan<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
+    kind: ContractKind,
     irregular: Option<LayoutKeyBuilder<R>>,
 ) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
 where
@@ -476,7 +495,9 @@ where
     let Some(validated) = preflight.validate_core_geometry()? else {
         return Ok(None);
     };
-    let plan = if validated_rhs_contract_requires_twist(&validated)? {
+    let twisted =
+        kind == ContractKind::Contract && validated_rhs_contract_requires_twist(&validated)?;
+    let plan = if twisted {
         try_compile_scaled_storage_contract_plan(
             rule,
             &validated,
@@ -576,7 +597,13 @@ where
         candidate_seen,
         |core_lhs, core_rhs, core_axes, orientation| {
             let plan = try_compile_oriented_storage_contract_plan(
-                rule, dst, core_lhs, core_rhs, core_axes, irregular,
+                rule,
+                dst,
+                core_lhs,
+                core_rhs,
+                core_axes,
+                ContractKind::Contract,
+                irregular,
             )?;
             Ok(plan
                 .filter(|plan| irregular.is_some() || plan.is_fully_direct())

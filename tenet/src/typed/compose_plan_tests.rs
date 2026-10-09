@@ -1,15 +1,16 @@
-//! `ComposePlan` pins that need private stack fields (#1775): the errors of
-//! corrupted stacks, and the CUDA zero regions of the inactive destination
-//! blocks against a hand derivation (#1980).
+//! `ComposePlan` tests that need private plan and stack fields (#1775): the
+//! composition's route, the errors of corrupted stacks, and the CUDA zero
+//! regions of the inactive destination blocks against a hand derivation
+//! (#1980).
 
 use std::sync::Arc;
 
 use super::*;
-#[cfg(feature = "cuda")]
 use crate::sector::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use crate::sector::{U1FusionRule, U1Irrep};
+#[cfg(feature = "cuda")]
+use crate::sector::{SU2FusionRule, SU2Irrep};
 use crate::typed::GradedSpace;
 #[cfg(feature = "cuda")]
 use std::collections::HashSet;
@@ -31,6 +32,73 @@ fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
         GradedSpace::try_new(Arc::clone(&rule), [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap(),
         GradedSpace::try_new(rule, [(j(0), 1), (j(2), 2)]).unwrap(),
     )
+}
+
+/// The composition's route: the unswapped direct core with every job
+/// coefficient +1, never a candidate walk, `copyC` or `DynamicTree`.
+fn assert_unit_unswapped_core<R>(what: &str, plan: &ComposePlan<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let resolution = &plan.0.resolution;
+    assert!(
+        resolution.copy_c().is_none() && !resolution.is_dynamic_tree(),
+        "{what}"
+    );
+    let (core, swapped) = resolution.direct_core().unwrap();
+    assert!(!swapped, "{what}");
+    core.require_identity_direct_replay().unwrap();
+}
+
+#[test]
+fn composition_resolves_to_the_unswapped_unit_core() {
+    // What: on the fermionic `[v] <- [w']` · `[w'] <- [v]` geometry of
+    // `signed_direct_can_leave_inactive_destination_blocks`, the composition
+    // is the unit core while the contraction over the same legs is the
+    // signed one: the kind, not the axes, decides the twist.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let (v, w) = u1_legs();
+    let lhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w], 1).unwrap();
+    let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w], [&v], 2).unwrap();
+    let plan = ComposePlan::new(
+        &StackedTensorMap::pack(&[&lhs]).unwrap(),
+        &StackedTensorMap::pack(&[&rhs]).unwrap(),
+    )
+    .unwrap();
+    assert_unit_unswapped_core("U1", &plan);
+
+    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
+    let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
+    let v =
+        GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 2), (odd(-1), 1)]).unwrap();
+    let wd = GradedSpace::try_new(rule, [(even(0), 2), (odd(1), 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&wd], |_, _| 1.0).unwrap();
+    let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&wd], [&v], |_, _| 1.0).unwrap();
+    let left = StackedTensorMap::pack(&[&lhs]).unwrap();
+    let right = StackedTensorMap::pack(&[&rhs]).unwrap();
+    let plan = ComposePlan::new(&left, &right).unwrap();
+    assert_unit_unswapped_core("fZ2xU1 dual leg", &plan);
+    assert!(!plan
+        .0
+        .resolution
+        .core_plan()
+        .inactive_destination_regions()
+        .is_empty());
+    let spec = super::super::super::ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    let contract = ContractPlan::new(&left, &right, &spec).unwrap();
+    let (core, swapped) = contract.resolution.direct_core().unwrap();
+    assert!(!swapped);
+    core.require_identity_signed_direct_replay().unwrap();
+    assert!(core.require_identity_direct_replay().is_err());
 }
 
 #[test]
@@ -93,12 +161,21 @@ fn corrupted_stack_errors_are_pinned() {
     );
 }
 
+/// Since #1775 `ComposePlan` runs `ContractPlan`'s per-call checks
+/// (approved stricter errors A23): a payload whose length differs from its
+/// structure is a typed `InvalidArgument` before any work. A corruption that
+/// keeps length and structure consistent reaches the route executor, which
+/// reports the operand's length against the plan's. Base `ec3dea5d`
+/// observations, in row order: `Operation(InvalidArgument { "stacked operand
+/// does not match the replay's members or layout" })`, then
+/// `Operation(ElementCountMismatch { expected: 64, actual: 63 })` twice and
+/// `Operation(ElementCountMismatch { expected: 78, actual: 77 })`.
 #[rustfmt::skip]
 const CORRUPTED: [(&str, &str); 4] = [
-    ("execute: consistent short lhs", "Some(Operation(InvalidArgument { message: \"stacked operand does not match the replay's members or layout\" }))"),
-    ("execute: payload shorter than structure", "Some(Operation(ElementCountMismatch { expected: 64, actual: 63 }))"),
-    ("execute_into: payload shorter than structure", "Some(Operation(ElementCountMismatch { expected: 64, actual: 63 }))"),
-    ("execute_into: destination shorter than structure", "Some(Operation(ElementCountMismatch { expected: 78, actual: 77 }))"),
+    ("execute: consistent short lhs", "Some(Operation(ElementCountMismatch { expected: 64, actual: 62 }))"),
+    ("execute: payload shorter than structure", "Some(InvalidArgument(\"stacked payload length differs from its structure\"))"),
+    ("execute_into: payload shorter than structure", "Some(InvalidArgument(\"stacked payload length differs from its structure\"))"),
+    ("execute_into: destination shorter than structure", "Some(InvalidArgument(\"destination payload length differs from its structure\"))"),
 ];
 
 /// Every linear position of a strided region.
@@ -196,6 +273,10 @@ fn assert_regions_cover<R, D>(
     );
 }
 
+/// The zero regions the CUDA member stage builds for a composition's core
+/// (`MemberCudaStage::prepare` → `CudaMemberZeroRegions::prepare` over the
+/// core plan's inactive blocks), without a device: the resolution does not
+/// depend on the placement.
 #[cfg(feature = "cuda")]
 fn regions_match_hand_derivation<R>(
     runtime: &Runtime,
@@ -206,29 +287,32 @@ fn regions_match_hand_derivation<R>(
 {
     let a = TensorMap::<_, f64>::rand_with_seed(runtime, [&v, &v], [&w], 11).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(runtime, [&w], [&v], 12).unwrap();
+    let plan = ComposePlan::new(
+        &StackedTensorMap::pack(&[&a]).unwrap(),
+        &StackedTensorMap::pack(&[&b]).unwrap(),
+    )
+    .unwrap();
+    let resolution = &plan.0.resolution;
+    assert!(resolution.admit_cuda_members().unwrap() > 0, "{what}");
     for members in [1, 2, 17] {
-        let lhs = StackedTensorMap::pack(&vec![&a; members])
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        let rhs = StackedTensorMap::pack(&vec![&b; members])
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        let plan = ComposePlan::new(&lhs, &rhs).unwrap();
-        let mut workspace = plan.workspace().unwrap();
-        let mut lease = runtime.lease_cuda().unwrap();
-        plan.prepare_zero_regions(&mut workspace, &mut lease, members)
-            .unwrap();
-        assert_regions_cover(what, &workspace.device.zero_regions, &a, &b, members);
+        let regions = tenet_operations::cuda_transform::CudaMemberZeroRegions::prepare(
+            resolution.core_plan().inactive_destination_regions(),
+            plan.0.member_len,
+            members,
+        )
+        .unwrap();
+        assert_regions_cover(what, regions.regions(), &a, &b, members);
     }
 }
 
+/// #1980, superseded by #1775: the regions now come from the one member
+/// stage, which also validates each within the stack; the base's own
+/// `prepare_zero_regions` covered the same positions (checked on a device
+/// at the base `8eb8ddbc`).
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires a real CUDA device"]
 fn cuda_zero_regions_match_the_hand_derivation() {
-    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     regions_match_hand_derivation(&runtime, "U1", u1_legs());
     regions_match_hand_derivation(&runtime, "SU2", su2_legs());
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));

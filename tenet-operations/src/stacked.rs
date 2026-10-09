@@ -176,16 +176,7 @@ where
     C: Copy + PartialEq + One,
 {
     /// Rejects a plan that is not fully direct, has a transformed operand or
-    /// a non-unit job coefficient, or `members == 0`.
-    pub fn new(
-        plan: Arc<FusionBlockContractPlan<C>>,
-        members: usize,
-    ) -> Result<Self, OperationError> {
-        plan.require_identity_direct_replay()?;
-        Self::from_admitted(plan, members)
-    }
-
-    /// Accepts only exact +1 and -1 direct coefficients.
+    /// a job coefficient other than exact +1 or -1, or `members == 0`.
     #[doc(hidden)]
     pub fn new_signed(
         plan: Arc<FusionBlockContractPlan<C>>,

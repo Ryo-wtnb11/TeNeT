@@ -67,7 +67,9 @@ mathematical and layout structure. The mutable workspace owns execution
 scratch and, where documented, an output buffer. Bindings and destinations
 are checked per call. Batch size may affect workspace capacity or backend
 artifacts; it does not define a structural plan's semantic identity.
-`ComposePlan` / `ComposeWorkspace` implement this split for stacked compose.
+`ContractPlan` and `ComposePlan` implement this split for stacked contraction
+and composition; both execute with a `ContractWorkspace`, the executor state
+the two operations share.
 `EighFullPlan` / `EighFullWorkspace` implement it for stacked real Hermitian
 eigendecomposition.
 

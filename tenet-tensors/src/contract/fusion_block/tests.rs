@@ -722,8 +722,10 @@ fn nonselfdual_u1_adjoint_projects_logical_order_to_parent_blocks() {
     assert_eq!(mapped, vec![2, 1, 0]);
 }
 
-#[test]
-fn direct_operand_keeps_noncanonical_parent_tree_order() {
+/// A Z2 `V ⊗ V ← V ⊗ V` space in canonical block order, and the same space
+/// with the fusion-tree blocks of every coupled sector stored in reverse: a
+/// non-canonical tiling of the same coupled-sector matrices.
+fn z2_reordered_rank4() -> (DynamicFusionMapSpace, DynamicFusionMapSpace) {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let homspace = FusionTreeHomSpace::new(
@@ -761,6 +763,13 @@ fn direct_operand_keeps_noncanonical_parent_tree_order() {
     .unwrap();
     let canonical = DynamicFusionMapSpace::from_typed(&canonical);
     let storage = DynamicFusionMapSpace::from_typed(&storage);
+    (canonical, storage)
+}
+
+#[test]
+fn direct_operand_keeps_noncanonical_parent_tree_order() {
+    let rule = Z2FusionRule;
+    let (canonical, storage) = z2_reordered_rank4();
     let canonical_regions = canonical
         .structure()
         .coupled_sector_regions(canonical.nout())
@@ -800,6 +809,56 @@ fn direct_operand_keeps_noncanonical_parent_tree_order() {
             storage.structure().block(index).unwrap().key().clone()
         );
     }
+}
+
+#[test]
+fn a_non_canonical_composition_misses_the_direct_core_with_the_unchanged_message() {
+    // What: composition plans the canonical core only (TensorKit `mul!` has
+    // no transform route). A non-canonical tiling has no fully-direct core,
+    // so a direct-core executor gets today's composition `Unsupported`
+    // message, while an executor with an irregular core packs it.
+    let (canonical, storage) = z2_reordered_rank4();
+    let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+    let dst = crate::BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        std::sync::Arc::new(Z2FusionRule),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        ),
+    )
+    .unwrap();
+    let canonical_operand = crate::FusionOperand::direct(&canonical);
+    let resolution = crate::plan_compose::<crate::DirectCoreExecutor, _>(
+        &dst,
+        canonical_operand,
+        canonical_operand,
+    )
+    .unwrap();
+    assert!(matches!(resolution.direct_core(), Some((_, false))));
+    let error = crate::plan_compose::<crate::DirectCoreExecutor, _>(
+        &dst,
+        crate::FusionOperand::direct(&storage),
+        canonical_operand,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct composition supports only canonical fully-direct oriented operands"
+            }
+        ),
+        "{error:?}"
+    );
+    let irregular = crate::plan_compose::<crate::HostEagerExecutor, _>(
+        &dst,
+        crate::FusionOperand::direct(&storage),
+        canonical_operand,
+    )
+    .unwrap();
+    let (core, swapped) = irregular.direct_core().unwrap();
+    assert!(!swapped && !core.is_fully_direct());
 }
 
 #[test]

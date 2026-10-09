@@ -35,12 +35,11 @@ use super::fusion::{
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
-#[cfg(test)]
 use super::resolution::try_compile_oriented_storage_contract_plan;
 use super::resolution::{
     compile_composition_plan, compile_core_plan, try_compile_oriented_storage_composition_plan,
-    try_compile_oriented_storage_contract_candidate_plan, ContractRoute, CopyCRoute, CoreMiss,
-    CoreRoute, ExecCaps, StorageContractResolution,
+    try_compile_oriented_storage_contract_candidate_plan, ContractKind, ContractRoute, CopyCRoute,
+    CoreMiss, CoreRoute, ExecCaps, StorageContractResolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -588,35 +587,6 @@ where
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
-        )
-    }
-
-    /// Replays `replay` over stacked Host operands with this context's
-    /// contract backend: one batch submission for all members and jobs.
-    #[doc(hidden)]
-    pub fn execute_stacked_direct_host<SD, SL, SR>(
-        &mut self,
-        replay: &tenet_operations::stacked::StackedDirectReplay<C>,
-        dst: &mut tenet_operations::stacked::StackedStorageViewMut<'_, SD>,
-        lhs: &tenet_operations::stacked::StackedStorageView<'_, SL>,
-        rhs: &tenet_operations::stacked::StackedStorageView<'_, SR>,
-        zero_inactive: bool,
-    ) -> Result<(), OperationError>
-    where
-        SD: tenet_core::HostWritableStorage<D>,
-        SL: tenet_core::HostReadableStorage<D>,
-        SR: tenet_core::HostReadableStorage<D>,
-    {
-        replay.execute_host(
-            &mut crate::StridedHostKernelAdapter::default(),
-            &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
-                &mut self.contract_backend,
-                &mut self.contract_workspace,
-            ),
-            dst,
-            lhs,
-            rhs,
-            zero_inactive,
         )
     }
 
@@ -1397,7 +1367,7 @@ where
             rhs.storage_conjugate(),
         );
         let start = profile.is_some().then(std::time::Instant::now);
-        let core = try_compile_core_route::<X, R>(target, lhs, rhs, axes)?;
+        let core = try_compile_core_route::<X, R>(target, lhs, rhs, axes, ContractKind::Contract)?;
         if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
             // A hit is dominated by its core plan compile, a miss by the walk.
             match core {
@@ -1567,6 +1537,7 @@ where
                 first.storage_conjugate(),
                 second.storage_conjugate(),
             ),
+            ContractKind::Contract,
         )?;
         let core_time = core_start.map(|start| start.elapsed());
         let CoreRoute::Hit(core) = core else {
@@ -2733,7 +2704,62 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    try_compile_core_route::<X, R>(PlanTarget::bound(dst_space), lhs, rhs, axes)
+    try_compile_core_route::<X, R>(
+        PlanTarget::bound(dst_space),
+        lhs,
+        rhs,
+        axes,
+        ContractKind::Contract,
+    )
+}
+
+/// The planner for a composition, TensorKit `mul!(C, A, B)`
+/// (`linalg.jl:330-370` @cfaa073): A's domain against B's codomain in
+/// order, the identity output, no twist and no candidate walk, resolved to
+/// `Core { swapped: false }` with unit job coefficients, or the packed core
+/// of a non-canonical tiling for an executor with
+/// [`ExecCaps::IRREGULAR_CORE`]. Any other composition is
+/// `UnsupportedTensorContractScope`: `mul!` has no transform route, so
+/// none is planned.
+///
+/// The braiding check stays with the caller: `mul!` admits every braiding
+/// style, since composition has no braid-dependent step.
+///
+/// Free function, not a context method: the core resolves entirely from
+/// the operands, so planning a composition takes no Runtime context lock.
+#[doc(hidden)]
+pub fn plan_compose<X: ExecCaps, R>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+) -> Result<StorageContractResolution<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    let (left, right) = (lhs.oriented_homspace(), rhs.oriented_homspace());
+    let lhs_axes: Vec<usize> = (left.nout()..left.rank()).collect();
+    let rhs_axes: Vec<usize> = (0..right.nout()).collect();
+    let axes = TensorContractSpec::new_with_conjugation(
+        &lhs_axes,
+        &rhs_axes,
+        tenet_operations::OutputAxisOrder::identity(),
+        lhs.storage_conjugate(),
+        rhs.storage_conjugate(),
+    );
+    match try_compile_core_route::<X, R>(
+        PlanTarget::bound(dst_space),
+        lhs,
+        rhs,
+        axes,
+        ContractKind::Compose,
+    )? {
+        CoreRoute::Hit(resolution) => Ok(resolution),
+        CoreRoute::Miss(_) => Err(OperationError::UnsupportedTensorContractScope {
+            message:
+                "storage-direct composition supports only canonical fully-direct oriented operands",
+        }),
+    }
 }
 
 fn try_compile_core_route<X: ExecCaps, R>(
@@ -2741,31 +2767,48 @@ fn try_compile_core_route<X: ExecCaps, R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
+    kind: ContractKind,
 ) -> Result<CoreRoute<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
     validate_raw_contract_request(target, lhs, rhs, axes)?;
+    let irregular = X::IRREGULAR_CORE.then_some(target.primer);
     // A twist that is not uniform within one coupled-sector matrix has no
     // per-job alpha; the DynamicTree artifact applies it per block instead.
     let mut requested_zero_copy = false;
-    Ok(
-        match try_compile_oriented_storage_contract_candidate_plan(
+    let route = match kind {
+        ContractKind::Contract => try_compile_oriented_storage_contract_candidate_plan(
             target.rule,
             target.space,
             lhs,
             rhs,
             axes,
             &mut requested_zero_copy,
-            X::IRREGULAR_CORE.then_some(target.primer),
-        )? {
-            Some(route) => CoreRoute::Hit(StorageContractResolution::new(route)),
-            None => CoreRoute::Miss(CoreMiss {
-                requested_zero_copy,
-            }),
-        },
-    )
+            irregular,
+        )?,
+        ContractKind::Compose => try_compile_oriented_storage_contract_plan(
+            target.rule,
+            target.space,
+            lhs,
+            rhs,
+            axes,
+            kind,
+            irregular,
+        )?
+        .filter(|plan| irregular.is_some() || plan.is_fully_direct())
+        .map(|plan| ContractRoute::Core {
+            plan,
+            swapped: false,
+        }),
+    };
+    Ok(match route {
+        Some(route) => CoreRoute::Hit(StorageContractResolution::new(route)),
+        None => CoreRoute::Miss(CoreMiss {
+            requested_zero_copy,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -2799,15 +2842,20 @@ where
 {
     let rule = dst_space.provider();
     validate_raw_contract_request(PlanTarget::bound(dst_space), lhs, rhs, axes)?;
-    let plan =
-        try_compile_oriented_storage_contract_plan(rule, dst_space.space(), lhs, rhs, axes, None)?
-            .filter(|plan| plan.is_fully_direct())
-            .ok_or_else(|| {
-                OperationError::UnsupportedTensorContractScope {
+    let plan = try_compile_oriented_storage_contract_plan(
+        rule,
+        dst_space.space(),
+        lhs,
+        rhs,
+        axes,
+        ContractKind::Contract,
+        None,
+    )?
+    .filter(|plan| plan.is_fully_direct())
+    .ok_or_else(|| OperationError::UnsupportedTensorContractScope {
         message:
             "storage-direct contraction supports only canonical fully-direct oriented operands",
-    }
-            })?;
+    })?;
     plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
 }
 

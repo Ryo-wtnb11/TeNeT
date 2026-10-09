@@ -69,7 +69,8 @@ fn assert_one_batch_submission(
     let mut jobs_per_member = 0;
     for members in [1, 2, 17] {
         let (core, actual_swapped) = route.direct_core().unwrap();
-        let replay = StackedDirectReplay::new(Arc::clone(core), members).unwrap();
+        core.require_identity_direct_replay().unwrap();
+        let replay = StackedDirectReplay::new_signed(Arc::clone(core), members).unwrap();
         assert_eq!(actual_swapped, swapped);
         let mut dst = vec![f64::NAN; dst_len * members];
         let lhs = vec![1.0; lhs_len * members];

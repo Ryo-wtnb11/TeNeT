@@ -183,6 +183,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "compile_direct_composition_plan",
         "execute_storage_contract_members_cuda",
         "execute_storage_contract_resolution_on_cuda",
+        "plan_compose",
         "prepare_tensorcontract_fusion_plan",
         "prepare_tensorcontract_fusion_plan_dyn",
         "tensorcompose_fusion_dyn_prelowered_direct_on_storage",
