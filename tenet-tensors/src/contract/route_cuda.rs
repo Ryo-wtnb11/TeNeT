@@ -635,7 +635,7 @@ impl<D: CudaScalar> CudaContractMembersWorkspace<CudaStorage<D>> {
 }
 
 /// The per-call member contract every route's member replay admits, checked
-/// without a device: overwrite only (`alpha = 1`, a fresh zero destination or
+/// without a device: overwrite only (`alpha = 1`, a born-zero destination or
 /// `Axpby(0)`), at least one member.
 fn admit_member_call<D: CudaScalar>(
     alpha: D,

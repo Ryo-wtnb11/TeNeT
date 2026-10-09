@@ -43,11 +43,14 @@ pub struct ContractPlan<R, D, S = Vec<D>> {
 ///
 /// The workspace-owned output's inactive blocks (those no core GEMM writes)
 /// are zero for the buffer's whole life, so `execute` never refills them
-/// (#2123), as TensorKit `mul!` with `β = 0` never touches a block it does
-/// not write: the buffer is born zero, and a changed member count replaces
-/// it with a fresh zero buffer; the inactive set is fixed, because the
-/// workspace is bound to one resolution (`Arc::ptr_eq`); a Core route's
-/// GEMMs write only the active blocks, a disjoint tiling, so a failure
+/// (#2123). This is a Rust-specific deviation: TensorKit `mul!` rescales
+/// every block with no product by `β` on each call, because its destination
+/// is the caller's; here the workspace owns the buffer, and its inactive
+/// blocks are provably zero: the buffer is born zero, and a changed member
+/// count replaces it with a fresh zero buffer; the inactive set is fixed,
+/// because the workspace is bound to one resolution (`Arc::ptr_eq`); a route
+/// whose core writes the output directly (Core and DynamicTree identity
+/// output) has GEMMs that write only the active blocks, a disjoint tiling, so a failure
 /// part-way leaves only partial active writes, which the next call
 /// overwrites; a CopyC or DynamicTree output transform overwrites the whole
 /// destination; and the caller never reaches the buffer mutably until
