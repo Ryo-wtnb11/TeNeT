@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    generic_permute_tree_pair_checked, multiplicity_free_permute_tree_pair_block_indexed,
-    split_fusion_tree, split_fusion_tree_generic_checked,
-    validate_generic_fusion_tree_pair_checked, BlockKey, BlockStructure, CheckedFusionAlgebra,
+    multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree,
+    split_fusion_tree_generic_checked, BlockKey, BlockStructure, CheckedFusionAlgebra,
     CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericPivotal,
     CheckedGenericSymbolError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
