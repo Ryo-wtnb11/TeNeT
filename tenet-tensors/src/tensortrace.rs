@@ -19,7 +19,7 @@ use crate::lowering::{
     lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
 };
 use crate::strided::offset_to_isize;
-use crate::tree_transform::CheckedGenericPlanError;
+use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
 use tenet_operations::TensorTraceAxisSpec;
@@ -91,6 +91,10 @@ where
 /// those references do not establish identical malformed-layout error
 /// ordering. Why not recover per-source error precedence within a group: doing
 /// so would replay the same F/R traversal for every source tree.
+///
+/// A fusion group whose permutation is resident in the process-global
+/// transformation-coefficient cache makes no symbol queries; only a whole
+/// successful compile publishes the groups it built.
 pub fn tensortrace_fusion_structure<
     R,
     TDst,
@@ -197,6 +201,18 @@ impl<'a> OrientedTraceSource<'a> {
                 FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone())
             }
         })
+    }
+
+    /// Block `index`'s stored key (no orientation applied).
+    fn storage_key(self, index: usize) -> Result<&'a FusionTreePairKey, OperationError> {
+        let block = self.structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index,
+            });
+        };
+        Ok(key)
     }
 
     fn validate_source_keys(self) -> Result<(), OperationError> {
@@ -489,6 +505,9 @@ impl<C> TensorTraceFusionStructure<C> {
             &TensorTraceAxisPlan,
         ) -> Result<Option<TracePreflight>, OperationError>,
     {
+        // Captured before any cache-4 lookup: a reset during the compile
+        // leaves its built groups unpublished.
+        let epoch = tenet_core::core_reset_epoch();
         crate::admission::require_symmetric_braiding(
             rule.braiding_style(),
             crate::admission::SymmetricBraidingOp::Trace,
@@ -506,14 +525,16 @@ impl<C> TensorTraceFusionStructure<C> {
             dst_codomain_rank,
             checked_geometry,
         )?;
-        let terms = build_trace_terms::<MultiplicityFreeAdmissionMode, R>(
+        let (terms, pending) = build_trace_terms::<MultiplicityFreeAdmissionMode, R>(
             rule,
             &dst_structure,
             src,
             &axis_plan,
             dst_codomain_rank,
         )?;
-        Self::assemble(axis_plan, terms, dst_structure, src)
+        let structure = Self::assemble(axis_plan, terms, dst_structure, src)?;
+        pending.publish(epoch);
+        Ok(structure)
     }
 
     /// The only constructor. The descriptor is compiled here from `terms`
@@ -1291,14 +1312,18 @@ where
 /// The checked Generic trace terms and descriptor
 /// [`tensortrace_fusion_dyn_owned_generic_checked`] executes: the structural
 /// half of a checked Generic trace, before any payload is read.
+///
+/// Its permutation groups built on a cache-4 miss are staged into `pending`;
+/// the caller flushes them once its whole call succeeded (#2043).
 pub(crate) fn compile_fusion_dyn_generic_checked<R>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     src_space: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
+    pending: &mut CheckedPendingCoefficients,
 ) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
-    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + 'static,
 {
     compile_fusion_generic_checked_parts(
         dst_space.space().homspace(),
@@ -1306,6 +1331,7 @@ where
         dst_space.space().nout(),
         src_space,
         axes,
+        pending,
     )
 }
 
@@ -1315,10 +1341,11 @@ fn compile_fusion_generic_checked_parts<R>(
     dst_nout: usize,
     src_space: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
+    pending: &mut CheckedPendingCoefficients,
 ) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
-    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + 'static,
 {
     let orientation = if axes.source_conjugate() {
         FusionTreePairOrientation::Adjoint
@@ -1354,15 +1381,17 @@ where
         src_space.space().nin(),
         orientation,
     );
-    let terms = build_trace_terms::<CheckedGenericAdmissionMode, R>(
+    let (terms, built) = build_trace_terms::<CheckedGenericAdmissionMode, R>(
         src_space.provider(),
         &dst_structure,
         source,
         &axis_plan,
         dst_nout,
     )?;
-    TensorTraceFusionStructure::assemble(axis_plan, terms, dst_structure, source)
-        .map_err(CheckedGenericPlanError::Operation)
+    let structure = TensorTraceFusionStructure::assemble(axis_plan, terms, dst_structure, source)
+        .map_err(CheckedGenericPlanError::Operation)?;
+    pending.stage(built);
+    Ok(structure)
 }
 
 /// Executes and then publishes an existing checked trace destination.
@@ -1391,7 +1420,7 @@ pub fn tensortrace_fusion_dyn_staged_owned_generic_checked<R, D, P>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
-    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + 'static,
     D: Copy
         + Add<D, Output = D>
         + Mul<D, Output = D>
@@ -1403,6 +1432,7 @@ where
         + strided_kernel::MaybeSendSync,
     P: AsRef<[D]>,
 {
+    let mut coefficients = CheckedPendingCoefficients::new();
     src.validate_prepared_final_homspace_generic_checked(&dst)
         .map_err(CheckedGenericPlanError::Operation)?;
     let structure = compile_fusion_generic_checked_parts(
@@ -1411,6 +1441,7 @@ where
         dst.nout(),
         src,
         axes,
+        &mut coefficients,
     )?;
     let payload = payload();
     let data = trace_structure_owned_parts(
@@ -1425,6 +1456,7 @@ where
     let space = src
         .commit_final_homspace_generic_bound_checked(dst)
         .map_err(CheckedGenericPlanError::Operation)?;
+    coefficients.flush();
     Ok((space, data))
 }
 
@@ -1442,7 +1474,7 @@ pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
 ) -> Result<Vec<D>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
-    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + 'static,
     D: Copy
         + Add<D, Output = D>
         + Mul<D, Output = D>
@@ -1453,15 +1485,19 @@ where
         + RecouplingCoefficientAction<R::Scalar>
         + strided_kernel::MaybeSendSync,
 {
-    let structure = compile_fusion_dyn_generic_checked(dst_space, src_space, axes)?;
-    tensortrace_fusion_dyn_structure_owned(
+    let mut coefficients = CheckedPendingCoefficients::new();
+    let structure =
+        compile_fusion_dyn_generic_checked(dst_space, src_space, axes, &mut coefficients)?;
+    let data = tensortrace_fusion_dyn_structure_owned(
         &structure,
         dst_space.space(),
         src_space.space(),
         src_data,
         alpha,
     )
-    .map_err(CheckedGenericPlanError::Operation)
+    .map_err(CheckedGenericPlanError::Operation)?;
+    coefficients.flush();
+    Ok(data)
 }
 
 fn map_checked_generic_trace_symbol_error<E>(
@@ -1520,6 +1556,7 @@ where
         0,
         FusionTreePairOrientation::Direct,
     );
+    // Publishes nothing: the helper probes terms, not reuse.
     build_trace_terms::<MultiplicityFreeAdmissionMode, R>(
         rule,
         dst_structure,
@@ -1527,6 +1564,7 @@ where
         &axis_plan,
         dst_codomain_rank,
     )
+    .map(|(terms, _)| terms)
 }
 
 fn validate_fusion_trace_homspace<R>(

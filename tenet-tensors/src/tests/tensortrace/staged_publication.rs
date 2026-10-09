@@ -31,7 +31,7 @@ fn isolated(name: &str) -> bool {
 fn source() -> BoundDynamicFusionMapSpace<CheckedTraceToy> {
     let leg = || SectorLeg::new([(SectorId::new(0), 2)], false);
     BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::new(CheckedTraceToy(tenet_core::BraidingStyleKind::Bosonic)),
+        Arc::new(CheckedTraceToy::new(tenet_core::BraidingStyleKind::Bosonic)),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(), leg()]),
             FusionProductSpace::new([leg(), leg()]),
@@ -102,6 +102,11 @@ fn raw_execution_failure_does_not_publish() {
     assert_eq!(payloads.get(), 1);
     assert_eq!(executions.get(), 1);
     assert_unpublished();
+    // Nor are its trace permutation groups (#2072).
+    assert_eq!(
+        crate::tree_transform::take_trace_column_activity().publications,
+        0
+    );
 }
 
 #[test]
@@ -130,6 +135,10 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
     TRACE_RAW_EXECUTION_HOOK.take();
     TRACE_TEST_FAIL_TWIST.set(false);
     assert_unpublished();
+    assert_eq!(
+        crate::tree_transform::take_trace_column_activity().publications,
+        0
+    );
 }
 
 #[test]
@@ -211,6 +220,10 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
     let (admissions, entries, bytes) = owner();
     assert_eq!((admissions, entries), (1, 1));
     assert!(bytes > 0);
+    // Its trace permutation groups are published after the commit (#2072).
+    let activity = crate::tree_transform::take_trace_column_activity();
+    assert!(activity.publications > 0);
+    assert_eq!(activity.publications, activity.misses);
 }
 
 #[test]

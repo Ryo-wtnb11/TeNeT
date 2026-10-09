@@ -16,6 +16,14 @@
 //! or another HomSpace sharing a source group) therefore makes no F/R
 //! provider call.
 //!
+//! Trace (#2072) keeps its group's permutation here too, under its own scope
+//! [`TreeTransformScope::TraceColumns`] and value form
+//! ([`BlockSourceColumns`]: present entries only, so a present zero stays
+//! distinct from an absent one, which the dense transform spec merges). The
+//! trace of TensorKit `_trace_permute!` permutes a `FusionTreeBlock` through
+//! the same cached `fsbraid`; Unique trace stays uncached, as TensorKit's
+//! `NoCache`, since a trace hit saves no work over one phase per source.
+//!
 //! Deliberate deviation: Unique fusion is cached as well. TensorKit leaves it
 //! `NoCache` (one tree, one phase per group), but a Unique rebuild allocates
 //! every destination tree key, so the degeneracy-only churn of U(1)/Z2
@@ -43,8 +51,9 @@ use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    ErasedStructureCacheControl, FusionTreeGroupKey, FusionTreePairKey, FusionTreePairOrientation,
-    RuleIdentity, StructureCache, StructureCacheInfo, StructureCacheKind,
+    BlockSourceColumns, ErasedStructureCacheControl, FusionTreeGroupKey, FusionTreePairKey,
+    FusionTreePairOrientation, RuleIdentity, StructureCache, StructureCacheInfo,
+    StructureCacheKind,
 };
 
 use super::{TransformerMode, TreeTransformScope, ENTRY_OVERHEAD_BYTES};
@@ -185,6 +194,14 @@ std::thread_local! {
     static GROUP_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static GROUP_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static GROUP_PUBLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TRACE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TRACE_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TRACE_PUBLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    counter.set(counter.get() + 1);
 }
 
 /// This thread's composed-coefficient activity since the last take.
@@ -207,6 +224,17 @@ pub(crate) fn take_coefficient_group_activity() -> CoefficientGroupActivity {
         hits: GROUP_HITS.replace(0),
         misses: GROUP_MISSES.replace(0),
         publications: GROUP_PUBLICATIONS.replace(0),
+    }
+}
+
+/// This thread's trace-column activity since the last take; transform
+/// groups are counted apart by [`take_coefficient_group_activity`].
+#[cfg(test)]
+pub(crate) fn take_trace_column_activity() -> CoefficientGroupActivity {
+    CoefficientGroupActivity {
+        hits: TRACE_HITS.replace(0),
+        misses: TRACE_MISSES.replace(0),
+        publications: TRACE_PUBLICATIONS.replace(0),
     }
 }
 
@@ -236,7 +264,11 @@ impl PendingCoefficientGroups {
     pub(crate) fn publish(self, epoch: usize) {
         for (key, entry, bytes) in self.groups {
             #[cfg(test)]
-            GROUP_PUBLICATIONS.set(GROUP_PUBLICATIONS.get() + 1);
+            bump(if key.context.scope == TreeTransformScope::TraceColumns {
+                &TRACE_PUBLICATIONS
+            } else {
+                &GROUP_PUBLICATIONS
+            });
             let _ = coefficient_groups().publish(&key, entry, bytes, epoch);
         }
     }
@@ -272,11 +304,75 @@ impl CheckedPendingCoefficients {
     }
 }
 
+/// The key context of one build's lookups, hashed once; shared by the
+/// transform and trace reuse handles.
+struct ReuseContext {
+    context: Arc<GroupContext>,
+    context_hash: u64,
+}
+
+impl ReuseContext {
+    fn new<T: 'static>(
+        rule: RuleIdentity,
+        mode: TransformerMode,
+        scope: TreeTransformScope,
+        operation: TreeTransformOperation,
+        orientation: FusionTreePairOrientation,
+    ) -> Self {
+        let context = GroupContext {
+            rule,
+            mode,
+            coefficient: TypeId::of::<T>(),
+            scope,
+            operation,
+            orientation,
+        };
+        let mut hasher = rustc_hash::FxHasher::default();
+        context.hash(&mut hasher);
+        Self {
+            context_hash: hasher.finish(),
+            context: Arc::new(context),
+        }
+    }
+
+    fn group_hash(&self, group_key: &FusionTreeGroupKey, src_keys: &[&FusionTreePairKey]) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        hasher.write_u64(self.context_hash);
+        group_key.hash(&mut hasher);
+        for key in src_keys {
+            key.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// The resident entry of one group, or the hash to stage it under.
+    fn get(&self, (group_key, src_keys): SourceGroup<'_>) -> Result<Arc<ErasedEntry>, u64> {
+        let hash = self.group_hash(group_key, src_keys);
+        let view = GroupKeyRef {
+            context: &self.context,
+            group_key,
+            src_keys,
+            hash,
+        };
+        coefficient_groups().get(&view).ok_or(hash)
+    }
+
+    /// The owned key of a freshly built group; its tree list is cloned only
+    /// here.
+    fn key(&self, hash: u64, (group_key, src_keys): SourceGroup<'_>) -> CoefficientGroupKey {
+        CoefficientGroupKey {
+            context: Arc::clone(&self.context),
+            group_key: group_key.clone(),
+            src_keys: src_keys.iter().map(|key| (*key).clone()).collect(),
+            hash,
+        }
+    }
+}
+
 /// Per-group reuse handle of one plan build: looks source groups up and
 /// stages the built ones.
 pub(crate) struct CoefficientGroupReuse<T> {
-    context: Arc<GroupContext>,
-    context_hash: u64,
+    context: ReuseContext,
     built: RefCell<PendingCoefficientGroups>,
     /// Charge scratch reused across this build's staged groups: a fresh set
     /// per group would allocate once per Unique group.
@@ -295,86 +391,51 @@ where
         operation: &TreeTransformOperation,
         orientation: FusionTreePairOrientation,
     ) -> Self {
-        let context = GroupContext {
-            rule,
-            mode,
-            coefficient: TypeId::of::<T>(),
-            scope,
-            operation: operation.clone(),
-            orientation,
-        };
-        let mut hasher = rustc_hash::FxHasher::default();
-        context.hash(&mut hasher);
         Self {
-            context_hash: hasher.finish(),
-            context: Arc::new(context),
+            context: ReuseContext::new::<T>(rule, mode, scope, operation.clone(), orientation),
             built: RefCell::new(PendingCoefficientGroups::default()),
             backings: RefCell::default(),
             coefficient: PhantomData,
         }
     }
 
-    fn group_hash(&self, group_key: &FusionTreeGroupKey, src_keys: &[&FusionTreePairKey]) -> u64 {
-        let mut hasher = rustc_hash::FxHasher::default();
-        hasher.write_u64(self.context_hash);
-        group_key.hash(&mut hasher);
-        for key in src_keys {
-            key.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
     /// Looks every group up, in order.
     pub(crate) fn lookup(&self, groups: &[SourceGroup<'_>]) -> Vec<GroupSlot<T>> {
-        let cache = coefficient_groups();
         groups
             .iter()
-            .map(|&(group_key, src_keys)| {
-                let hash = self.group_hash(group_key, src_keys);
-                let view = GroupKeyRef {
-                    context: &self.context,
-                    group_key,
-                    src_keys,
-                    hash,
-                };
-                match cache.get(&view) {
-                    Some(entry) => {
-                        #[cfg(test)]
-                        GROUP_HITS.set(GROUP_HITS.get() + 1);
-                        GroupSlot::Hit(entry.downcast::<CoefficientGroupEntry<T>>().unwrap_or_else(
-                            |_| unreachable!("the key's TypeId fixes the entry type"),
-                        ))
-                    }
-                    None => {
-                        #[cfg(test)]
-                        GROUP_MISSES.set(GROUP_MISSES.get() + 1);
-                        GroupSlot::Miss(hash)
-                    }
+            .map(|&group| match self.context.get(group) {
+                Ok(entry) => {
+                    #[cfg(test)]
+                    bump(&GROUP_HITS);
+                    GroupSlot::Hit(entry.downcast::<CoefficientGroupEntry<T>>().unwrap_or_else(
+                        |_| unreachable!("the key's TypeId and scope fix the entry type"),
+                    ))
+                }
+                Err(hash) => {
+                    #[cfg(test)]
+                    bump(&GROUP_MISSES);
+                    GroupSlot::Miss(hash)
                 }
             })
             .collect()
     }
 
-    /// Stages one freshly built group; its tree list is cloned only here.
+    /// Stages one freshly built group.
     pub(crate) fn stage(
         &self,
         hash: u64,
-        (group_key, src_keys): SourceGroup<'_>,
+        group: SourceGroup<'_>,
         specs: Vec<TreeTransformGroupBlockSpec<T>>,
     ) -> Arc<CoefficientGroupEntry<T>> {
-        let key = CoefficientGroupKey {
-            context: Arc::clone(&self.context),
-            group_key: group_key.clone(),
-            src_keys: src_keys.iter().map(|key| (*key).clone()).collect(),
-            hash,
-        };
+        let key = self.context.key(hash, group);
         let entry = Arc::new(CoefficientGroupEntry {
             specs: specs.into(),
         });
         let bytes = {
             let mut backings = self.backings.borrow_mut();
             backings.clear();
-            charged_entry_bytes(&key, &entry.specs, &mut backings) as u64
+            charged_key_bytes(&key, &mut backings)
+                .saturating_add(charged_entry_bytes(&entry.specs, &mut backings)) as u64
         };
         self.built
             .borrow_mut()
@@ -389,17 +450,97 @@ where
     }
 }
 
-/// What one entry retains, fixed at staging.
-fn charged_entry_bytes<T>(
+/// One trace group's permutation columns.
+pub(crate) type TraceColumns<T> = BlockSourceColumns<FusionTreePairKey, T>;
+
+/// Trace-column reuse of one trace compile (scope
+/// [`TreeTransformScope::TraceColumns`]). A hit stands for the build's
+/// member admission as well: the build validated every member with a
+/// provider of the same identity and mode before composing, and only a
+/// whole successful call publishes.
+pub(crate) struct TraceColumnReuse<T> {
+    context: ReuseContext,
+    built: PendingCoefficientGroups,
+    backings: rustc_hash::FxHashSet<usize>,
+    coefficient: PhantomData<fn() -> T>,
+}
+
+impl<T> TraceColumnReuse<T>
+where
+    T: 'static + Send + Sync,
+{
+    /// `operation` is the trace's `(p…, q…)` permutation.
+    pub(crate) fn new(
+        rule: RuleIdentity,
+        mode: TransformerMode,
+        operation: TreeTransformOperation,
+        orientation: FusionTreePairOrientation,
+    ) -> Self {
+        Self {
+            context: ReuseContext::new::<T>(
+                rule,
+                mode,
+                TreeTransformScope::TraceColumns,
+                operation,
+                orientation,
+            ),
+            built: PendingCoefficientGroups::default(),
+            backings: rustc_hash::FxHashSet::default(),
+            coefficient: PhantomData,
+        }
+    }
+
+    /// The resident columns of one group (storage keys, storage order), or
+    /// the hash to stage its build under.
+    pub(crate) fn lookup(&self, group: SourceGroup<'_>) -> Result<Arc<TraceColumns<T>>, u64> {
+        match self.context.get(group) {
+            Ok(entry) => {
+                #[cfg(test)]
+                bump(&TRACE_HITS);
+                Ok(entry.downcast::<TraceColumns<T>>().unwrap_or_else(|_| {
+                    unreachable!("the key's TypeId and scope fix the entry type")
+                }))
+            }
+            Err(hash) => {
+                #[cfg(test)]
+                bump(&TRACE_MISSES);
+                Err(hash)
+            }
+        }
+    }
+
+    /// Stages one freshly built group.
+    pub(crate) fn stage(
+        &mut self,
+        hash: u64,
+        group: SourceGroup<'_>,
+        columns: TraceColumns<T>,
+    ) -> Arc<TraceColumns<T>> {
+        let key = self.context.key(hash, group);
+        let columns = Arc::new(columns);
+        self.backings.clear();
+        let bytes = charged_key_bytes(&key, &mut self.backings)
+            .saturating_add(charged_trace_bytes(&columns, &mut self.backings))
+            as u64;
+        self.built
+            .groups
+            .push((key, Arc::clone(&columns) as Arc<ErasedEntry>, bytes));
+        columns
+    }
+
+    /// The groups staged by this compile, for the owner to publish.
+    pub(crate) fn into_pending(self) -> PendingCoefficientGroups {
+        self.built
+    }
+}
+
+/// What one entry's key retains, fixed at staging.
+fn charged_key_bytes(
     key: &CoefficientGroupKey,
-    specs: &[TreeTransformGroupBlockSpec<T>],
     backings: &mut rustc_hash::FxHashSet<usize>,
 ) -> usize {
     let mut bytes = core::mem::size_of::<CoefficientGroupKey>()
-        .saturating_add(core::mem::size_of::<CoefficientGroupEntry<T>>())
         .saturating_add(ENTRY_OVERHEAD_BYTES)
-        // The specs' own `Arc` control.
-        .saturating_add(ARC_CONTROL_BYTES)
         // ponytail: the shared context is charged in full to every entry.
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(core::mem::size_of::<GroupContext>())
@@ -411,16 +552,53 @@ fn charged_entry_bytes<T>(
             key.src_keys
                 .len()
                 .saturating_mul(core::mem::size_of::<FusionTreePairKey>()),
-        )
-        .saturating_add(
-            specs
-                .len()
-                .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         );
     for src in key.src_keys.iter() {
         bytes = bytes.saturating_add(src.charge_retained_backings(backings));
     }
-    bytes.saturating_add(charged_spec_bytes(specs, backings))
+    bytes
+}
+
+/// What one transform entry's value retains.
+fn charged_entry_bytes<T>(
+    specs: &[TreeTransformGroupBlockSpec<T>],
+    backings: &mut rustc_hash::FxHashSet<usize>,
+) -> usize {
+    core::mem::size_of::<CoefficientGroupEntry<T>>()
+        // The specs' own `Arc` control.
+        .saturating_add(ARC_CONTROL_BYTES)
+        .saturating_add(
+            specs
+                .len()
+                .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
+        )
+        .saturating_add(charged_spec_bytes(specs, backings))
+}
+
+/// What one trace entry's value retains: its `Arc`, the inline value and
+/// its three exact-length slices, plus the destinations' key backings.
+fn charged_trace_bytes<T>(
+    columns: &TraceColumns<T>,
+    backings: &mut rustc_hash::FxHashSet<usize>,
+) -> usize {
+    let mut bytes = ARC_CONTROL_BYTES
+        .saturating_add(core::mem::size_of::<TraceColumns<T>>())
+        .saturating_add(
+            columns
+                .destinations()
+                .len()
+                .saturating_mul(core::mem::size_of::<FusionTreePairKey>()),
+        )
+        .saturating_add((columns.source_count() + 1).saturating_mul(core::mem::size_of::<usize>()))
+        .saturating_add(
+            columns
+                .entry_count()
+                .saturating_mul(core::mem::size_of::<(usize, T)>()),
+        );
+    for destination in columns.destinations() {
+        bytes = bytes.saturating_add(destination.charge_retained_backings(backings));
+    }
+    bytes
 }
 
 /// Heap bytes of `specs` (excluding their inline structs), coefficients

@@ -2,13 +2,30 @@ use super::*;
 use std::sync::Arc;
 use tenet_core::Trivial;
 
-#[derive(Clone, Copy, Debug)]
-struct CheckedTraceToy(tenet_core::BraidingStyleKind);
+/// Its answers follow `TRACE_TEST_WRONG_STYLE` (admission) and
+/// `TRACE_TEST_FAIL_TWIST` (lowering only, never cached), so its identity
+/// is per instance and changes with the style switch: equal identity means
+/// equal admission and symbol answers.
+#[derive(Clone, Debug)]
+struct CheckedTraceToy(tenet_core::BraidingStyleKind, tenet_core::RuleIdentity);
+
+impl CheckedTraceToy {
+    fn new(braiding: tenet_core::BraidingStyleKind) -> Self {
+        Self(braiding, tenet_core::RuleIdentity::new_unique::<Self>())
+    }
+}
+
+/// The identity of every `CheckedTraceToy` while its fusion style is wrong.
+struct WrongStyleCheckedTraceToy;
 
 impl tenet_core::CheckedGenericFusion for CheckedTraceToy {
     type Error = std::io::Error;
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
-        tenet_core::RuleIdentity::of_type::<Self>()
+        if TRACE_TEST_WRONG_STYLE.get() {
+            tenet_core::RuleIdentity::of_type::<WrongStyleCheckedTraceToy>()
+        } else {
+            self.1.clone()
+        }
     }
     fn fusion_style(&self) -> FusionStyleKind {
         if TRACE_TEST_WRONG_STYLE.get() {
@@ -101,7 +118,7 @@ fn checked_generic_trace_owned_path_reuses_strided_executor() {
     );
     let destination_hom =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-    let provider = Arc::new(CheckedTraceToy(tenet_core::BraidingStyleKind::Bosonic));
+    let provider = Arc::new(CheckedTraceToy::new(tenet_core::BraidingStyleKind::Bosonic));
     let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&provider),
         source_hom,
@@ -128,7 +145,7 @@ fn checked_generic_trace_preflight_gates_non_symmetric_braiding_first() {
     // multiplicity-free compile already did (#1872).
     let leg = || SectorLeg::new([(SectorId::new(0), 1)], false);
     let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::new(CheckedTraceToy(tenet_core::BraidingStyleKind::Anyonic)),
+        Arc::new(CheckedTraceToy::new(tenet_core::BraidingStyleKind::Anyonic)),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),

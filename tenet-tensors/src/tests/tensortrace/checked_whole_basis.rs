@@ -42,8 +42,13 @@ impl std::error::Error for LedgerError {}
 /// Records every provider query in order and fails exactly the queries in
 /// `fail` plus every F or R symbol query that names `fail_symbols_with`;
 /// every other answer is the checked SU(N) provider's.
+///
+/// Its identity is renewed whenever its answers change, so a cache-4 entry
+/// built under one failure set is never a hit under another (equal
+/// identity must mean equal answers).
 struct Ledger {
     inner: SUNFusionRule,
+    identity: RefCell<RuleIdentity>,
     calls: RefCell<Vec<Call>>,
     fail: RefCell<Vec<Call>>,
     fail_symbols_with: Cell<Option<SectorId>>,
@@ -70,14 +75,19 @@ impl Ledger {
     fn reset(&self, fail: Vec<Call>) {
         self.calls.borrow_mut().clear();
         *self.fail.borrow_mut() = fail;
-        self.fail_symbols_with.set(None);
+        self.fail_symbols_with(None);
+    }
+
+    fn fail_symbols_with(&self, sector: Option<SectorId>) {
+        self.fail_symbols_with.set(sector);
+        *self.identity.borrow_mut() = RuleIdentity::new_unique::<Self>();
     }
 }
 
 impl CheckedGenericFusion for Ledger {
     type Error = LedgerError;
     fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::of_type::<Self>()
+        self.identity.borrow().clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         self.inner.fusion_style()
@@ -181,6 +191,7 @@ fn fixture() -> Fixture {
     let fundamental = inner.encode_dynkin(&[1, 0]).unwrap();
     let provider = Arc::new(Ledger {
         inner,
+        identity: RefCell::new(RuleIdentity::new_unique::<Ledger>()),
         calls: RefCell::new(Vec::new()),
         fail: RefCell::new(Vec::new()),
         fail_symbols_with: Cell::new(None),
@@ -215,14 +226,20 @@ fn fixture() -> Fixture {
 fn compile(
     fixture: &Fixture,
 ) -> Result<TensorTraceFusionStructure<f64>, CheckedGenericPlanError<LedgerError>> {
-    crate::tensortrace::compile_fusion_dyn_generic_checked(&fixture.dst, &fixture.src, axes())
+    // Publishes nothing: each call of this helper is cold.
+    crate::tensortrace::compile_fusion_dyn_generic_checked(
+        &fixture.dst,
+        &fixture.src,
+        axes(),
+        &mut crate::tree_transform::CheckedPendingCoefficients::new(),
+    )
 }
 
 /// The first provider error of a compile that fails `fail` and, when
 /// given, every F/R query naming `symbols_with`.
 fn first_error(fixture: &Fixture, fail: Vec<Call>, symbols_with: Option<SectorId>) -> Call {
     fixture.provider.reset(fail);
-    fixture.provider.fail_symbols_with.set(symbols_with);
+    fixture.provider.fail_symbols_with(symbols_with);
     match compile(fixture) {
         Err(CheckedGenericPlanError::Provider(LedgerError::Injected(call))) => call,
         other => panic!("expected an injected provider error, got {other:?}"),
@@ -492,5 +509,154 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
     assert_eq!(
         (calls.len(), ledger, terms),
         (2031, 12_939_473_490_702_431_790, 1_780_564_817_329_036_331)
+    );
+}
+
+/// The compile-only checked trace that publishes on success
+/// (`PivotalCoefficientAlgebra::trace_terms`).
+fn publishing_compile(
+    fixture: &Fixture,
+) -> Result<TensorTraceFusionStructure<f64>, CheckedGenericPlanError<LedgerError>> {
+    <tenet_core::CheckedGenericAdmissionMode as crate::PivotalCoefficientAlgebra<Ledger>>::trace_terms(
+        &fixture.dst,
+        &fixture.src,
+        axes(),
+    )
+}
+
+fn trace_activity() -> (usize, usize, usize) {
+    let activity = crate::tree_transform::take_trace_column_activity();
+    (activity.hits, activity.misses, activity.publications)
+}
+
+fn sorted(mut calls: Vec<Call>) -> Vec<Call> {
+    calls.sort_by_key(|call| format!("{call:?}"));
+    calls
+}
+
+/// What (#2072): a warm checked compile hits every fusion group and makes
+/// none of the groups' admission or recoupling queries. Its ledger is the
+/// cold ledger less, as a multiset, exactly what composing each group alone
+/// asks (member validation, then F/R): the preflight and lowering queries
+/// remain, no F or R is asked, and the term bits equal the cold ones.
+#[test]
+fn warm_compile_skips_exactly_group_admission_and_recoupling() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let provider = &*fixture.provider;
+    let structure = fixture.src.space().structure();
+    let groups = structure.fusion_tree_group_slice().len();
+    provider.reset(Vec::new());
+    trace_activity();
+    let cold = publishing_compile(&fixture).unwrap();
+    let cold_calls = provider.calls.take();
+    assert_eq!(trace_activity(), (0, groups, groups));
+    let warm = publishing_compile(&fixture).unwrap();
+    let warm_calls = provider.calls.take();
+    assert_eq!(trace_activity(), (groups, 0, 0));
+
+    let bits = |structure: &TensorTraceFusionStructure<f64>| {
+        structure
+            .terms()
+            .iter()
+            .map(|term| {
+                (
+                    term.dst_block(),
+                    term.src_block(),
+                    term.coefficient().to_bits(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&cold), bits(&warm));
+    assert!(!warm_calls
+        .iter()
+        .any(|call| matches!(call, Call::F(_) | Call::R(_))));
+    let mut skipped = Vec::new();
+    for group in structure.fusion_tree_group_slice() {
+        tenet_core::generic_permute_tree_pair_block_indexed_checked(
+            provider,
+            structure,
+            group.block_indices(),
+            tenet_core::FusionTreePairOrientation::Direct,
+            &[1, 0],
+            &[3, 2],
+        )
+        .unwrap();
+        skipped.extend(provider.calls.take());
+    }
+    assert!(skipped.iter().any(|call| matches!(call, Call::F(_))));
+    let mut expected = warm_calls;
+    expected.extend(skipped);
+    assert_eq!(sorted(cold_calls), sorted(expected));
+}
+
+/// What (#2072): a failing call publishes no group, whether it fails in a
+/// later group's admission or recoupling (after earlier groups were built)
+/// or in lowering, so repeating it asks the provider exactly the same
+/// queries and fails the same way.
+#[test]
+fn failing_compile_publishes_nothing_and_repeats_its_ledger() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let provider = &*fixture.provider;
+    let [twist, later_admission, recoupling, admission] = keys(&fixture);
+    for fail in [twist, later_admission, recoupling, admission] {
+        provider.reset(vec![fail]);
+        trace_activity();
+        let first = format!("{:?}", publishing_compile(&fixture).unwrap_err());
+        let first_calls = provider.calls.take();
+        let (_, misses, publications) = trace_activity();
+        assert!(misses > 0, "{fail:?}");
+        assert_eq!(publications, 0, "{fail:?}");
+        let again = format!("{:?}", publishing_compile(&fixture).unwrap_err());
+        assert_eq!(again, first, "{fail:?}");
+        assert_eq!(provider.calls.take(), first_calls, "{fail:?}");
+        assert_eq!(trace_activity().2, 0, "{fail:?}");
+    }
+}
+
+/// What (#2072): the owned checked trace publishes its groups only once
+/// execution returned `Ok`; a lowering failure publishes none, and the
+/// following successful call is cold, then warm.
+#[test]
+fn owned_checked_trace_publishes_after_success_only() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let groups = fixture
+        .src
+        .space()
+        .structure()
+        .fusion_tree_group_slice()
+        .len();
+    let [twist, ..] = keys(&fixture);
+    let data = vec![1.0_f64; fixture.src.space().required_len().unwrap()];
+    let run = || {
+        crate::tensortrace_fusion_dyn_owned_generic_checked(
+            &fixture.dst,
+            &fixture.src,
+            &data,
+            axes(),
+            1.0,
+        )
+    };
+    fixture.provider.reset(vec![twist]);
+    trace_activity();
+    assert!(run().is_err());
+    assert_eq!(trace_activity().2, 0);
+    fixture.provider.reset(Vec::new());
+    let cold = run().unwrap();
+    assert_eq!(trace_activity(), (0, groups, groups));
+    let warm = run().unwrap();
+    assert_eq!(trace_activity(), (groups, 0, 0));
+    assert_eq!(
+        cold.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+        warm.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
     );
 }

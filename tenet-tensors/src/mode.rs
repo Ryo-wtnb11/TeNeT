@@ -165,7 +165,16 @@ where
         src: &BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'_>,
     ) -> Result<TensorTraceFusionStructure<f64>, Self::Error> {
-        crate::tensortrace::compile_fusion_dyn_generic_checked(dst, src, axes)
+        // Compile-only: nothing commits, so a successful compile publishes.
+        let mut coefficients = CheckedPendingCoefficients::new();
+        let structure = crate::tensortrace::compile_fusion_dyn_generic_checked(
+            dst,
+            src,
+            axes,
+            &mut coefficients,
+        )?;
+        coefficients.flush();
+        Ok(structure)
     }
 }
 
