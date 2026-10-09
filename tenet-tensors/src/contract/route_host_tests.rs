@@ -511,6 +511,241 @@ fn a_warm_one_member_replay_converts_no_coefficient_pack() {
 }
 
 #[test]
+fn a_warm_eager_contraction_converts_no_coefficient_pack() {
+    // Why (#2101): the eager lhs, rhs and output transforms each replay into
+    // their own workspace, so a warm call finds all three Multi coefficient
+    // packs installed instead of evicting each other's. Isolated: an eager
+    // call resolves its transformers through the process-global cache, which
+    // a concurrent test's clear would rebuild under a fresh identity.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_WARM_EAGER_PACKS_ISOLATED",
+        "contract::storage_contract_tests::route_host_tests::a_warm_eager_contraction_converts_no_coefficient_pack",
+    ) {
+        return;
+    }
+    fn check<R>(case: &Case<R>, what: &str)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        let resolution = planned_resolution(case);
+        let crate::contract::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+        else {
+            panic!("{what}: fixture must plan DynamicTree");
+        };
+        assert!(artifact.test_has_core_dst(), "{what}");
+        assert_eq!(artifact.borrowed_sources(), (false, false), "{what}");
+        let dst = case.dst();
+        let len = dst.space().required_len().unwrap();
+        let lhs = exact_data(case.lhs.space().required_len().unwrap(), 1);
+        let rhs = exact_data(case.rhs.space().required_len().unwrap(), 3);
+        let mut expected = vec![f64::NAN; len];
+        base_sequence(
+            artifact,
+            dst.space().structure(),
+            &mut expected,
+            &lhs,
+            &rhs,
+            1.0,
+            ContractDestinationInit::Axpby(0.0),
+        );
+        let run = |context: &mut Context<f64>| {
+            let mut out = vec![f64::NAN; len];
+            context
+                .tensorcontract_fusion_dyn_prelowered_into_with_init(
+                    &dst,
+                    &mut out,
+                    FusionOperand::direct(case.lhs.space()),
+                    &lhs,
+                    FusionOperand::direct(case.rhs.space()),
+                    &rhs,
+                    case.axes(),
+                    1.0,
+                    ContractDestinationInit::Axpby(0.0),
+                )
+                .unwrap();
+            assert_eq!(bits(&out), bits(&expected), "{what}");
+            context.eager_coefficient_pack_builds()
+        };
+        let mut context = Context::<f64>::default();
+        let cold = run(&mut context);
+        assert_eq!(cold, [1, 1, 1], "{what}: all three stages recouple");
+        for _ in 0..3 {
+            assert_eq!(run(&mut context), cold, "{what}");
+        }
+        // The stage workspaces are retained Host scratch: counted, and
+        // released by trim (a fresh workspace has converted no pack).
+        let stage_bytes = context.stage_workspace_retained_bytes();
+        assert!(stage_bytes > 0, "{what}");
+        assert!(
+            context.retained_host_scratch_bytes() >= stage_bytes,
+            "{what}"
+        );
+        context.trim_host_scratch();
+        assert_eq!(context.retained_host_scratch_bytes(), 0, "{what}");
+        assert_eq!(context.eager_coefficient_pack_builds(), [0; 3], "{what}");
+        assert_eq!(run(&mut context), cold, "{what}");
+    }
+    check(&su2_rank5_case(), "SU2");
+    let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let v = || fermion_su2_leg(&provider, false);
+    check(
+        &Case {
+            lhs: space(&provider, vec![v(), v(), v()], vec![v(), v()]),
+            rhs: space(&provider, vec![v(), v()], vec![v(), v()]),
+            lhs_axes: vec![3, 1],
+            rhs_axes: vec![0, 3],
+            output_axes: vec![2, 0, 4, 1, 3],
+        },
+        "fZ2xSU2",
+    );
+}
+
+#[test]
+fn warm_prepared_plan_contractions_convert_no_coefficient_pack() {
+    // Why (#2101): the caller-supplied-plan entries replay their source and
+    // output transforms through the same per-stage workspaces as the routed
+    // eager path. Isolated for the same process-global cache reason.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_WARM_PREPARED_PACKS_ISOLATED",
+        "contract::storage_contract_tests::route_host_tests::warm_prepared_plan_contractions_convert_no_coefficient_pack",
+    ) {
+        return;
+    }
+    use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
+    let rule = SU2FusionRule;
+    let half = |count: usize| (0..count).map(|_| (1, 2)).collect::<Vec<_>>();
+    let lhs_hom = FusionTreeHomSpace::from_sector_ids(half(3), half(1));
+    let rhs_hom = FusionTreeHomSpace::from_sector_ids(half(1), half(3));
+    let shapes = [vec![2, 2, 2, 2], vec![2, 2, 2, 2]];
+    let space31 = |hom| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+            hom,
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap()
+    };
+    let space13 = |hom| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+            hom,
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap()
+    };
+    let lhs_core_space = space13(lhs_hom.permute(&rule, &[3], &[0, 1, 2]).unwrap());
+    let rhs_core_space = space31(rhs_hom.permute(&rule, &[1, 2, 3], &[0]).unwrap());
+    let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        (0..32).map(|index| 1.0 + 0.125 * index as f64).collect(),
+        space31(lhs_hom.clone()),
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        (0..32).map(|index| -3.0 + 0.25 * index as f64).collect(),
+        space13(rhs_hom.clone()),
+    )
+    .unwrap();
+    let dst_space = |axes: &TensorContractSpec<'_>, order: &[usize]| {
+        let hom = FusionTreeHomSpace::tensorcontract_homspace(
+            &rule,
+            &lhs_hom,
+            &rhs_hom,
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            order,
+            1,
+        )
+        .unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            hom,
+            &rule,
+            [vec![2, 2]],
+        )
+        .unwrap()
+    };
+    let zeros = |space: &FusionTensorMapSpace<1, 3>| vec![0.0; space.required_len().unwrap()];
+    let mut lhs_core =
+        TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(zeros(&lhs_core_space), lhs_core_space)
+            .unwrap();
+    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
+    )
+    .unwrap();
+    let identity_axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
+    let swapped_axes =
+        TensorContractSpec::new(&[0, 1, 2], &[1, 2, 3], OutputAxisOrder::from_axes(&[1, 0]));
+    let identity_space = dst_space(&identity_axes, &[0, 1]);
+    let swapped_space = dst_space(&swapped_axes, &[1, 0]);
+    let plan = |dst: &FusionTensorMapSpace<1, 1>, axes| {
+        crate::prepare_tensorcontract_fusion_plan(
+            &rule,
+            dst,
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap()
+    };
+    let identity_plan = plan(&identity_space, identity_axes);
+    let swapped_plan = plan(&swapped_space, swapped_axes);
+    let fresh = |space: &FusionTensorMapSpace<1, 1>| {
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![0.0; 4], space.clone()).unwrap()
+    };
+    let mut context = Context::<f64>::default();
+    let mut run = |context: &mut Context<f64>| {
+        let mut out = fresh(&identity_space);
+        context
+            .tensorcontract_fusion_prepared_into(
+                &rule,
+                &identity_plan,
+                &mut out,
+                &mut lhs_core,
+                &mut rhs_core,
+                &lhs,
+                &rhs,
+                -1.5,
+                0.0,
+            )
+            .unwrap();
+        let mut swapped = fresh(&swapped_space);
+        let mut core_dst = fresh(&identity_space);
+        context
+            .tensorcontract_fusion_prepared_into_core_dst(
+                &rule,
+                &swapped_plan,
+                &mut swapped,
+                &mut core_dst,
+                &mut lhs_core,
+                &mut rhs_core,
+                &lhs,
+                &rhs,
+                -1.5,
+                0.0,
+            )
+            .unwrap();
+        (
+            bits(out.data()),
+            bits(swapped.data()),
+            context.eager_coefficient_pack_builds(),
+        )
+    };
+    let (out, swapped, cold) = run(&mut context);
+    assert!(cold[0] > 0 && cold[1] > 0, "{cold:?}");
+    assert!(cold.iter().all(|&builds| builds <= 1), "{cold:?}");
+    for _ in 0..3 {
+        assert_eq!(run(&mut context), (out.clone(), swapped.clone(), cold));
+    }
+    // A fresh context (no installed pack) computes the same values.
+    let (fresh_out, fresh_swapped, _) = run(&mut Context::<f64>::default());
+    assert_eq!((fresh_out, fresh_swapped), (out, swapped));
+}
+
+#[test]
 fn one_workspace_refills_its_core_destination_only_on_a_replay_change() {
     // Plan and member-count changes on one workspace, B = 1 included:
     // only a new replay (cold, B change, plan change) fills the inactive
@@ -558,16 +793,17 @@ fn a_failed_one_member_replay_rezeroes_on_retry() {
 
 #[test]
 fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes() {
-    use crate::contract::route_host::{execute_dynamic_tree_route_host, HostRouteScratch};
+    use crate::contract::route_host::{
+        execute_dynamic_tree_route_host, EagerTreeStage, HostRouteScratch,
+    };
     let (_, case, _) = overwrite_cases().pop().unwrap();
     let artifact = members_artifact(&case);
     let dst = case.dst();
     let len = dst.space().required_len().unwrap();
     let lhs = host_data(case.lhs.space(), 3).repeat(2);
     let rhs = host_data(case.rhs.space(), 5).repeat(2);
-    let mut tree = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
-        DenseTreeTransformOperations::default(),
-    );
+    let mut tree_backend = DenseTreeTransformOperations::default();
+    let mut tree_workspaces = <[tenet_operations::TreeTransformWorkspace<f64>; 3]>::default();
     let mut backend = DenseTreeTransformOperations::default();
     let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
     let mut slot = crate::contract::route_host::CoreSlot::default();
@@ -596,7 +832,10 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
     ] {
         let mut out = vec![f64::NAN; 2 * len];
         let error = execute_dynamic_tree_route_host(
-            &mut tree,
+            &mut EagerTreeStage {
+                backend: &mut tree_backend,
+                workspaces: &mut tree_workspaces,
+            },
             &mut crate::contract::fusion_block::BackendRank2Gemm::<_, _, f64>::new(
                 &mut backend,
                 &mut backend_workspace,

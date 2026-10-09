@@ -28,6 +28,7 @@ use super::fusion::{
 use super::fusion_block::{
     compile_checked_generic_core_plan, BackendRank2Gemm, FusionBlockContractWorkspace, Rank2Gemm,
 };
+use super::route_host::Stage;
 use super::structure::TensorContractAxisPlan;
 
 type CheckedContractResult<P, D> = Result<
@@ -269,7 +270,7 @@ where
         + ZeroBytes,
 {
     let mut transform_backend = DenseTreeTransformOperations::default();
-    let mut transform_workspace = Default::default();
+    let mut transform_workspaces = Default::default();
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = Default::default();
     let mut fusion_workspace = FusionBlockContractWorkspace::default();
@@ -281,7 +282,7 @@ where
         axes,
         None,
         &mut transform_backend,
-        &mut transform_workspace,
+        &mut transform_workspaces,
         &mut BackendRank2Gemm::<_, _, f64>::new(&mut contract_backend, &mut contract_workspace),
         &mut fusion_workspace,
     )
@@ -311,7 +312,7 @@ where
 {
     let (
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         contract_backend,
         contract_workspace,
         fusion_workspace,
@@ -324,7 +325,7 @@ where
         axes,
         Some(codomain_rank),
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
         fusion_workspace,
     )
@@ -339,7 +340,7 @@ fn tensorcontract_owned_checked_generic_with_resources<P, D, G, B>(
     axes: TensorContractSpec<'_>,
     codomain_rank: Option<usize>,
     transform_backend: &mut B,
-    transform_workspace: &mut B::Workspace,
+    transform_workspaces: &mut [B::Workspace; 3],
     core_gemm: &mut G,
     fusion_workspace: &mut FusionBlockContractWorkspace<D>,
 ) -> CheckedContractResult<P, D>
@@ -413,7 +414,7 @@ where
         output_rank,
         destination,
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         core_gemm,
         fusion_workspace,
     )
@@ -467,7 +468,7 @@ where
     let candidate = super::fusion::contracted_axis_order_candidates(&lhs_axes, &rhs_axes).remove(0);
     let (
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         contract_backend,
         contract_workspace,
         fusion_workspace,
@@ -485,7 +486,7 @@ where
         output_rank,
         destination,
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
         fusion_workspace,
     )
@@ -520,7 +521,7 @@ where
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = Default::default();
     let mut transform_backend = DenseTreeTransformOperations::default();
-    let mut transform_workspace = Default::default();
+    let mut transform_workspaces = Default::default();
     let mut fusion_workspace = FusionBlockContractWorkspace::default();
     tensorcontract_owned_checked_generic_preselected_with_core_gemm(
         lhs_space,
@@ -532,7 +533,7 @@ where
         candidate,
         orientation,
         &mut transform_backend,
-        &mut transform_workspace,
+        &mut transform_workspaces,
         &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
         &mut fusion_workspace,
     )
@@ -550,7 +551,7 @@ fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G, B>(
     candidate: &ContractAxisOrderCandidate,
     orientation: FusionContractOrientation,
     transform_backend: &mut B,
-    transform_workspace: &mut B::Workspace,
+    transform_workspaces: &mut [B::Workspace; 3],
     core_gemm: &mut G,
     fusion_workspace: &mut FusionBlockContractWorkspace<D>,
 ) -> CheckedContractResult<P, D>
@@ -621,7 +622,7 @@ where
         output_rank,
         destination,
         transform_backend,
-        transform_workspace,
+        transform_workspaces,
         core_gemm,
         fusion_workspace,
     )
@@ -641,7 +642,7 @@ fn execute_preselected_checked_generic_contract<P, D, G, B>(
     output_rank: usize,
     destination: PreparedCheckedGenericDynamicSpace,
     transform_backend: &mut B,
-    transform_workspace: &mut B::Workspace,
+    transform_workspaces: &mut [B::Workspace; 3],
     core_gemm: &mut G,
     fusion_workspace: &mut FusionBlockContractWorkspace<D>,
 ) -> CheckedContractResult<P, D>
@@ -754,14 +755,14 @@ where
 
     let lhs_transformed = execute_staged_transform(
         transform_backend,
-        transform_workspace,
+        &mut transform_workspaces[Stage::Lhs as usize],
         &lhs_prepared,
         lhs_space.space().structure(),
         lhs_data,
     )?;
     let rhs_transformed = execute_staged_transform(
         transform_backend,
-        transform_workspace,
+        &mut transform_workspaces[Stage::Rhs as usize],
         &rhs_prepared,
         rhs_space.space().structure(),
         rhs_data,
@@ -792,7 +793,7 @@ where
         )?;
         execute_transform(
             transform_backend,
-            transform_workspace,
+            &mut transform_workspaces[Stage::Output as usize],
             &output_replay,
             &destination_structure,
             &core_structure,
@@ -1250,6 +1251,53 @@ mod tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
+    fn a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage() {
+        // Why (#2101): each stage replays into its own context workspace, so
+        // no stage evicts another's Multi pack: a warm call converts at most
+        // one pack per stage (a shared workspace would convert three into one
+        // slot). #2063 tightens this to none: until it reuses checked Generic
+        // transformers across calls, each call compiles them afresh.
+        let (_left, lhs, _right, rhs) = bound_pair(2, 2);
+        let lhs_data = (0..lhs.space().required_len().unwrap())
+            .map(|index| index as f64 - 1.5)
+            .collect::<Vec<_>>();
+        let rhs_data = (0..rhs.space().required_len().unwrap())
+            .map(|index| 2.0 - index as f64)
+            .collect::<Vec<_>>();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, tenet_core::RuleIdentity>::default();
+        let mut run = || {
+            let (_, data) = tensorcontract_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::new(
+                    &[3, 1],
+                    &[0, 3],
+                    tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
+                ),
+                2,
+            )
+            .unwrap();
+            (data, context.eager_coefficient_pack_builds())
+        };
+        let (cold_data, cold) = run();
+        assert_eq!(cold, [1, 1, 1], "all three stages recouple");
+        let mut previous = cold;
+        for _ in 0..3 {
+            let (data, builds) = run();
+            assert_eq!(data, cold_data);
+            for (now, before) in builds.iter().zip(previous) {
+                assert!(*now - before <= 1, "{builds:?} after {previous:?}");
+            }
+            previous = builds;
+        }
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn preselected_checked_generic_preserves_late_provider_and_shape_errors() {
         const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_PROVIDER_FAILURE_ISOLATED";
         if std::env::var_os(ISOLATED).is_none() {
@@ -1355,7 +1403,7 @@ mod tests {
         tenet_core::clear_structure_caches();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let mut transform_backend = DenseTreeTransformOperations::default();
-        let mut transform_workspace = Default::default();
+        let mut transform_workspaces = Default::default();
         let mut fusion_workspace = FusionBlockContractWorkspace::default();
         let error = tensorcontract_owned_checked_generic_preselected_with_core_gemm(
             &lhs,
@@ -1367,7 +1415,7 @@ mod tests {
             &candidate,
             FusionContractOrientation::LhsRhs,
             &mut transform_backend,
-            &mut transform_workspace,
+            &mut transform_workspaces,
             &mut FailingGemm,
             &mut fusion_workspace,
         )
@@ -1596,7 +1644,7 @@ mod tests {
             gemm: &mut G,
         ) -> CheckedContractResult<CheckedGenericSpy, f64> {
             let mut transform_backend = DenseTreeTransformOperations::default();
-            let mut transform_workspace = Default::default();
+            let mut transform_workspaces = Default::default();
             let mut fusion_workspace = FusionBlockContractWorkspace::default();
             tensorcontract_owned_checked_generic_preselected_with_core_gemm(
                 lhs,
@@ -1608,7 +1656,7 @@ mod tests {
                 candidate,
                 FusionContractOrientation::RhsLhs,
                 &mut transform_backend,
-                &mut transform_workspace,
+                &mut transform_workspaces,
                 gemm,
                 &mut fusion_workspace,
             )
@@ -1695,7 +1743,7 @@ mod tests {
         let rhs = bound_space(homspace_with(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]));
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let mut transform_backend = DenseTreeTransformOperations::default();
-        let mut transform_workspace = Default::default();
+        let mut transform_workspaces = Default::default();
         let mut fusion_workspace = FusionBlockContractWorkspace::default();
         let mut gemm = FailingAtJob {
             calls: 0,
@@ -1711,7 +1759,7 @@ mod tests {
             &candidate,
             FusionContractOrientation::LhsRhs,
             &mut transform_backend,
-            &mut transform_workspace,
+            &mut transform_workspaces,
             &mut gemm,
             &mut fusion_workspace,
         )

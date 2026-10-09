@@ -375,7 +375,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn replay_structure_overwrite<D, C, B>(
+pub(crate) fn replay_structure_overwrite<D, C, B>(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TreeTransformStructure<C>,
@@ -1023,6 +1023,7 @@ where
     /// Overwrite replay; the move writing destination block `b` is scaled by
     /// `θ_b` from `destination_scales` (see
     /// [`TreeTransformBackend::tree_transform_structure_overwrite_into_raw`]).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_structure_overwrite_into_raw(
         &mut self,

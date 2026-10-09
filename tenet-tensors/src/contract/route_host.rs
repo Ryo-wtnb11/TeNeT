@@ -34,7 +34,6 @@ use tenet_operations::{
 };
 
 use crate::host_scratch::HostScratchBuffer;
-use crate::tree_context::TreeTransformExecutionContext;
 use crate::{
     DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
     TreeTransformBackend, TreeTransformStructure,
@@ -124,8 +123,21 @@ const EAGER_IS_ONE_MEMBER: OperationError = OperationError::UnsupportedTensorCon
     message: "eager Host contraction replays exactly one member",
 };
 
-/// The eager stage: every stage replays into the context's one workspace.
-impl<D, RuleKey, C, BT> HostTreeStage<D, C> for TreeTransformExecutionContext<D, RuleKey, C, BT>
+/// The eager stage: each stage replays into its own workspace, as the member
+/// stage does, so a warm call finds each stage's coefficient pack installed.
+///
+/// Why not one shared workspace: its pack is keyed by one structure identity,
+/// so the lhs, rhs and output stages would evict each other every call
+/// (#2101). Why not a structure cache: the pack is the completed
+/// transformer's matrices converted to the payload scalar `D` in its
+/// layout-ordered job order; the composed-coefficient key has no layout, and
+/// the transformer entry is typed by the coefficient scalar only.
+pub(super) struct EagerTreeStage<'a, B, W> {
+    pub(super) backend: &'a mut B,
+    pub(super) workspaces: &'a mut [W; 3],
+}
+
+impl<D, C, BT> HostTreeStage<D, C> for EagerTreeStage<'_, BT, BT::Workspace>
 where
     D: DenseRecouplingScalar,
     C: Copy,
@@ -133,8 +145,8 @@ where
 {
     type Backend = BT;
 
-    fn ordinary(&mut self, _: Stage) -> (&mut BT, &mut BT::Workspace) {
-        self.backend_workspace_mut()
+    fn ordinary(&mut self, stage: Stage) -> (&mut BT, &mut BT::Workspace) {
+        (self.backend, &mut self.workspaces[stage as usize])
     }
 
     fn admit_members(
