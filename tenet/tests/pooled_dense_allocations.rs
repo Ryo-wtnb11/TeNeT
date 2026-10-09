@@ -6,15 +6,17 @@
 //! allocate more calls than the locked arm, at either block count: pool
 //! pop/push, the lease guard and the Host-pool entry cost nothing per call.
 //!
-//! Why both arms pin one provider thread: the counter is thread-local, and an
-//! injected `DefaultDenseExecutor::default()` sizes its own Rayon pool from
-//! the environment, so its kernel scratch is allocated on worker threads and
-//! the locked arm looks 3-6x cheaper than it is (the #1996 observation).
+//! Why the locked executor is built exactly as the pool mints one (on a
+//! one-thread `SharedCpuContext`): the counter is thread-local, and any other
+//! constructor may run provider calls off the calling thread, so the locked
+//! arm looks 3-6x cheaper than it is. `DefaultDenseExecutor::default()` sizes
+//! a Rayon pool from the environment (the #1996 observation), and on Linux
+//! even `with_threads(1)` builds a managed engine with its own workers.
 
 use std::hint::black_box;
 use std::sync::Arc;
 
-use tenet::expert::DefaultDenseExecutor;
+use tenet::expert::{DefaultDenseExecutor, SharedCpuContext};
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, HermitianTol, Runtime, TensorMap};
 
@@ -31,7 +33,13 @@ fn pooled() -> Runtime {
 fn locked() -> Runtime {
     Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(DefaultDenseExecutor::with_threads(1).unwrap()))
+        .with_dense_executor(Box::new(
+            DefaultDenseExecutor::with_shared_context(
+                &SharedCpuContext::with_threads(1).unwrap(),
+                None,
+            )
+            .unwrap(),
+        ))
         .build()
         .unwrap()
 }
