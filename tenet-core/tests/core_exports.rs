@@ -329,6 +329,7 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "StructureCacheRegistrationError",
         "core_reset_epoch",
         "generic_braid_tree_pair_checked",
+        "generic_permute_tree_pair_block_indexed_checked",
         "generic_permute_tree_pair_checked",
         "generic_transpose_tree_pair_checked",
         "merge_fusion_trees_generic_checked",
