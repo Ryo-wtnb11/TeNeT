@@ -1,0 +1,999 @@
+//! The one Host executor of a `DynamicTree` contraction route (#1859).
+//!
+//! Eager and member replays run the same stage sequence: install the core
+//! slot, source transforms, core GEMMs, output transform. An eager call is a
+//! one-member replay. The member count `B` matters only at two seams, each a
+//! structural identity at `B = 1` (a trailing member axis of extent one
+//! addresses the same elements):
+//!
+//! - the core: `B = 1` replays the plan's own jobs (`execute_raw*`); `B > 1`
+//!   replays its member expansion ([`StackedDirectReplay`]);
+//! - the transforms: `B = 1` is the ordinary replay; `B > 1` its member
+//!   expansion, which only the dense tree backend provides
+//!   ([`HostTreeStage`]).
+//!
+//! Reference step order: TensorKit `blas_contract!`
+//! (`tensoroperations.jl:378-447` @cfaa073): copy and twist the sources,
+//! `mul!` into the destination or a temporary, `tensoradd!` the temporary
+//! into the destination. QSpace `contract` (`QSpace.cc:4141-4263`
+//! @dd2cc7e) has no member axis either; `B = 1` is the reference sequence.
+
+use std::ops::Neg;
+use std::sync::Arc;
+
+use num_traits::{One, Zero};
+use tenet_core::{BlockStructure, Placement, TensorStorage};
+use tenet_dense::DenseExecutor;
+use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
+use tenet_operations::{
+    admit_tree_transform_members_overwrite_raw, tree_transform_members_overwrite_raw,
+    ContractDestinationInit, DenseTreeTransformOperations, Rank2Gemm, TensorContractFusionProfile,
+    TreeTransformReplayProfile, TreeTransformWorkspace,
+};
+
+use crate::host_scratch::HostScratchBuffer;
+use crate::tree_context::TreeTransformExecutionContext;
+use crate::{
+    DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
+    TreeTransformBackend, TreeTransformStructure,
+};
+
+use super::dynamic::DynamicTreeExecutionArtifact;
+use super::fusion_block::FusionBlockContractWorkspace;
+
+/// One tree-transform stage of a route; each owns its member workspace.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Stage {
+    Lhs = 0,
+    Rhs = 1,
+    Output = 2,
+}
+
+/// The tree-transform half of a Host route replay.
+///
+/// Why a trait and not a branch: eager entries are generic over the public
+/// [`TreeTransformBackend`], while the member expansion (`B > 1`) needs the
+/// dense executor only [`DenseTreeTransformOperations`] exposes. Widening the
+/// public trait for one internal caller is not justified.
+pub(super) trait HostTreeStage<D, C>
+where
+    D: DenseRecouplingScalar,
+    C: Copy,
+{
+    type Backend: TreeTransformBackend<D, C>;
+
+    /// The backend and the workspace stage `stage` replays into at `B = 1`.
+    fn ordinary(
+        &mut self,
+        stage: Stage,
+    ) -> (
+        &mut Self::Backend,
+        &mut <Self::Backend as TreeTransformBackend<D, C>>::Workspace,
+    );
+
+    /// Admits one `B > 1` overwrite stage before any write.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_members(
+        &mut self,
+        stage: Stage,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_len: usize,
+        src_len: usize,
+        members: usize,
+    ) -> Result<(), OperationError>;
+
+    /// One `B > 1` overwrite stage over member-major stacks.
+    #[allow(clippy::too_many_arguments)]
+    fn overwrite_members(
+        &mut self,
+        stage: Stage,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst: &mut [D],
+        src: &[D],
+        members: usize,
+        destination_scales: &[(usize, C)],
+    ) -> Result<(), OperationError>;
+
+    /// The `B > 1` member expansion of `plan`.
+    fn stacked_replay(
+        &mut self,
+        plan: &Arc<FusionBlockContractPlan<C>>,
+        members: usize,
+    ) -> Result<StackedDirectReplay<C>, OperationError>;
+
+    /// Replays a `B > 1` core over member-major stacks.
+    fn stacked_core<G: Rank2Gemm<D>>(
+        &mut self,
+        replay: &StackedDirectReplay<C>,
+        gemm: &mut G,
+        dst: &mut [D],
+        left: &[D],
+        right: &[D],
+        zero_inactive: bool,
+    ) -> Result<(), OperationError>;
+}
+
+const EAGER_IS_ONE_MEMBER: OperationError = OperationError::UnsupportedTensorContractScope {
+    message: "eager Host contraction replays exactly one member",
+};
+
+/// The eager stage: every stage replays into the context's one workspace.
+impl<D, RuleKey, C, BT> HostTreeStage<D, C> for TreeTransformExecutionContext<D, RuleKey, C, BT>
+where
+    D: DenseRecouplingScalar,
+    C: Copy,
+    BT: TreeTransformBackend<D, C>,
+{
+    type Backend = BT;
+
+    fn ordinary(&mut self, _: Stage) -> (&mut BT, &mut BT::Workspace) {
+        self.backend_workspace_mut()
+    }
+
+    fn admit_members(
+        &mut self,
+        _: Stage,
+        _: &TreeTransformStructure<C>,
+        _: &Arc<BlockStructure>,
+        _: &Arc<BlockStructure>,
+        _: usize,
+        _: usize,
+        _: usize,
+    ) -> Result<(), OperationError> {
+        Err(EAGER_IS_ONE_MEMBER)
+    }
+
+    fn overwrite_members(
+        &mut self,
+        _: Stage,
+        _: &TreeTransformStructure<C>,
+        _: &Arc<BlockStructure>,
+        _: &Arc<BlockStructure>,
+        _: &mut [D],
+        _: &[D],
+        _: usize,
+        _: &[(usize, C)],
+    ) -> Result<(), OperationError> {
+        Err(EAGER_IS_ONE_MEMBER)
+    }
+
+    fn stacked_replay(
+        &mut self,
+        _: &Arc<FusionBlockContractPlan<C>>,
+        _: usize,
+    ) -> Result<StackedDirectReplay<C>, OperationError> {
+        Err(EAGER_IS_ONE_MEMBER)
+    }
+
+    fn stacked_core<G: Rank2Gemm<D>>(
+        &mut self,
+        _: &StackedDirectReplay<C>,
+        _: &mut G,
+        _: &mut [D],
+        _: &[D],
+        _: &[D],
+        _: bool,
+    ) -> Result<(), OperationError> {
+        Err(EAGER_IS_ONE_MEMBER)
+    }
+}
+
+/// The member stage: each stage replays into its own workspace at every `B`,
+/// so a warm replay finds each stage's coefficient pack installed.
+pub(super) struct MemberTreeStage<'a, E, D> {
+    backend: &'a mut DenseTreeTransformOperations<E>,
+    workspaces: &'a mut [TreeTransformWorkspace<D>; 3],
+}
+
+impl<E, D, C> HostTreeStage<D, C> for MemberTreeStage<'_, E, D>
+where
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar + Neg<Output = C>,
+{
+    type Backend = DenseTreeTransformOperations<E>;
+
+    fn ordinary(
+        &mut self,
+        stage: Stage,
+    ) -> (
+        &mut DenseTreeTransformOperations<E>,
+        &mut TreeTransformWorkspace<D>,
+    ) {
+        (self.backend, &mut self.workspaces[stage as usize])
+    }
+
+    fn admit_members(
+        &mut self,
+        stage: Stage,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_len: usize,
+        src_len: usize,
+        members: usize,
+    ) -> Result<(), OperationError> {
+        admit_tree_transform_members_overwrite_raw::<D, C>(
+            &mut self.workspaces[stage as usize],
+            structure,
+            dst_structure,
+            src_structure,
+            dst_len,
+            src_len,
+            members,
+        )
+    }
+
+    fn overwrite_members(
+        &mut self,
+        stage: Stage,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst: &mut [D],
+        src: &[D],
+        members: usize,
+        destination_scales: &[(usize, C)],
+    ) -> Result<(), OperationError> {
+        let threads = self.backend.recoupling_threads().get();
+        tree_transform_members_overwrite_raw(
+            &mut crate::StridedHostKernelAdapter::default(),
+            self.backend.dense_mut(),
+            &mut self.workspaces[stage as usize],
+            structure,
+            dst_structure,
+            src_structure,
+            dst,
+            src,
+            members,
+            threads,
+            destination_scales,
+        )
+    }
+
+    fn stacked_replay(
+        &mut self,
+        plan: &Arc<FusionBlockContractPlan<C>>,
+        members: usize,
+    ) -> Result<StackedDirectReplay<C>, OperationError> {
+        StackedDirectReplay::new_signed(Arc::clone(plan), members)
+    }
+
+    fn stacked_core<G: Rank2Gemm<D>>(
+        &mut self,
+        replay: &StackedDirectReplay<C>,
+        gemm: &mut G,
+        dst: &mut [D],
+        left: &[D],
+        right: &[D],
+        zero_inactive: bool,
+    ) -> Result<(), OperationError> {
+        let members = replay.members();
+        let [dst_len, left_len, right_len] = replay.member_lens();
+        let (left, right) = (ReadSlice(left), ReadSlice(right));
+        let left = StackedStorageView::new::<D>(&left, left_len, members, left_len)?;
+        let right = StackedStorageView::new::<D>(&right, right_len, members, right_len)?;
+        let mut dst = WriteSlice(dst);
+        let mut dst = StackedStorageViewMut::new::<D>(&mut dst, dst_len, members, dst_len)?;
+        replay.execute_signed_host(
+            &mut crate::StridedHostKernelAdapter::default(),
+            gemm,
+            &mut dst,
+            &left,
+            &right,
+            zero_inactive,
+        )
+    }
+}
+
+struct ReadSlice<'a, D>(&'a [D]);
+struct WriteSlice<'a, D>(&'a mut [D]);
+
+impl<D> TensorStorage<D> for ReadSlice<'_, D> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+impl<D> tenet_core::HostReadableStorage<D> for ReadSlice<'_, D> {
+    fn as_slice(&self) -> &[D] {
+        self.0
+    }
+}
+impl<D> TensorStorage<D> for WriteSlice<'_, D> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+impl<D> tenet_core::HostReadableStorage<D> for WriteSlice<'_, D> {
+    fn as_slice(&self) -> &[D] {
+        self.0
+    }
+}
+impl<D> tenet_core::HostWritableStorage<D> for WriteSlice<'_, D> {
+    fn as_mut_slice(&mut self) -> &mut [D] {
+        self.0
+    }
+}
+
+/// The core replay installed in a workspace: the plan itself at `B = 1`,
+/// its member expansion at `B > 1`.
+enum CoreReplay<C> {
+    Empty,
+    Plan(Arc<FusionBlockContractPlan<C>>),
+    Stacked(StackedDirectReplay<C>),
+}
+
+impl<C: Copy + PartialEq + One> CoreReplay<C> {
+    fn replays(&self, plan: &Arc<FusionBlockContractPlan<C>>, members: usize) -> bool {
+        match self {
+            Self::Empty => false,
+            Self::Plan(installed) => members == 1 && Arc::ptr_eq(installed, plan),
+            Self::Stacked(replay) => {
+                replay.members() == members && Arc::ptr_eq(replay.plan(), plan)
+            }
+        }
+    }
+}
+
+/// A caller-owned core replay and the proof that its workspace core
+/// destination's inactive blocks are zero (#1747).
+///
+/// `inactive_zero` is cleared whenever a different replay is installed and
+/// set only after a successful core replay into the workspace core
+/// destination. GEMMs never write inactive blocks, so a later failure keeps
+/// it valid. A core writing the caller's destination never consults it.
+pub(super) struct CoreSlot<C> {
+    replay: CoreReplay<C>,
+    inactive_zero: bool,
+    #[cfg(test)]
+    builds: usize,
+    #[cfg(test)]
+    inactive_fills: usize,
+    /// Test fault point: the next replay dirties the core destination (as a
+    /// previous plan's active results would) and fails before the core.
+    #[cfg(test)]
+    poison_dst_then_fail: bool,
+}
+
+impl<C> Default for CoreSlot<C> {
+    fn default() -> Self {
+        Self {
+            replay: CoreReplay::Empty,
+            inactive_zero: false,
+            #[cfg(test)]
+            builds: 0,
+            #[cfg(test)]
+            inactive_fills: 0,
+            #[cfg(test)]
+            poison_dst_then_fail: false,
+        }
+    }
+}
+
+impl<C: Copy + PartialEq + One> CoreSlot<C> {
+    fn install(&mut self, replay: CoreReplay<C>) {
+        self.replay = replay;
+        self.inactive_zero = false;
+        #[cfg(test)]
+        {
+            self.builds += 1;
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match &self.replay {
+            CoreReplay::Stacked(replay) => replay.retained_bytes(),
+            CoreReplay::Empty | CoreReplay::Plan(_) => 0,
+        }
+    }
+}
+
+/// The Host scratch one route replay writes: owned source copies, the core
+/// destination of a non-identity output, and — for a caller-owned member
+/// workspace — the core slot. Eager scratch carries no slot, so its core
+/// destination is zero-filled on every call.
+pub(super) struct HostRouteScratch<'a, D, C> {
+    pub(super) lhs: &'a mut HostScratchBuffer<D>,
+    pub(super) rhs: &'a mut HostScratchBuffer<D>,
+    pub(super) core_dst: &'a mut HostScratchBuffer<D>,
+    pub(super) core: Option<&'a mut CoreSlot<C>>,
+}
+
+/// Exact capacity when cold, then grow-only without clearing: every reader
+/// first runs a replay that writes the logical length itself.
+pub(super) fn prepare<D: Clone + Zero>(buffer: &mut HostScratchBuffer<D>, len: usize) {
+    if buffer.capacity() == 0 {
+        *buffer = HostScratchBuffer::filled(len, D::zero());
+    } else {
+        buffer.resize_filled(len, D::zero());
+    }
+}
+
+fn member_len<D>(structure: &Arc<BlockStructure>, members: usize) -> Result<usize, OperationError> {
+    let len = structure.required_len()?;
+    let total = len
+        .checked_mul(members)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    core::alloc::Layout::array::<D>(total).map_err(|_| OperationError::ElementCountOverflow)?;
+    Ok(total)
+}
+
+fn exact_len(actual: usize, expected: usize) -> Result<(), OperationError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(OperationError::ElementCountMismatch { expected, actual })
+    }
+}
+
+fn timed<T>(
+    profile: &mut Option<&mut TensorContractFusionProfile>,
+    field: fn(&mut TensorContractFusionProfile) -> &mut std::time::Duration,
+    run: impl FnOnce(Option<&mut TreeTransformReplayProfile>) -> T,
+) -> T {
+    match profile.as_deref_mut() {
+        Some(profile) => {
+            let start = std::time::Instant::now();
+            let result = run(Some(&mut profile.tree_replay));
+            *field(profile) += start.elapsed();
+            result
+        }
+        None => run(None),
+    }
+}
+
+/// `overwrite` one stage: `dst = T(src)`, the move writing destination block
+/// `b` scaled by `θ_b` from `destination_scales`.
+#[allow(clippy::too_many_arguments)]
+fn overwrite_stage<S, D, C>(
+    stage: &mut S,
+    slot: Stage,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst: &mut [D],
+    src: &[D],
+    members: usize,
+    destination_scales: &[(usize, C)],
+    profile: Option<&mut TreeTransformReplayProfile>,
+) -> Result<(), OperationError>
+where
+    S: HostTreeStage<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    if members != 1 {
+        return stage.overwrite_members(
+            slot,
+            structure,
+            dst_structure,
+            src_structure,
+            dst,
+            src,
+            members,
+            destination_scales,
+        );
+    }
+    let (backend, workspace) = stage.ordinary(slot);
+    match profile {
+        Some(profile) => backend.tree_transform_structure_overwrite_into_raw_profiled(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst,
+            src,
+            D::one(),
+            destination_scales,
+            profile,
+        ),
+        None => backend.tree_transform_structure_overwrite_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst,
+            src,
+            D::one(),
+            destination_scales,
+        ),
+    }
+}
+
+/// Replays `artifact` over `members` member-major stacks:
+/// `dst = alpha * contract(lhs, rhs) + init(dst)` per member.
+///
+/// `B > 1` admits only the member overwrite contract (`alpha = 1`,
+/// `Axpby(0)`) with a caller-owned core slot, and checks every structure,
+/// length and transform before the first write. At `B = 1` each stage
+/// validates its inputs before its first write and only the last stage writes
+/// `dst`, so a validation error leaves `dst` unchanged at every `B`.
+///
+/// Alpha rides the core GEMMs; beta rides the stage that writes `dst` — the
+/// core for an identity output, else the output transform.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_dynamic_tree_route_host<S, G, D, C>(
+    stage: &mut S,
+    gemm: &mut G,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: HostRouteScratch<'_, D, C>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    (dst_structure, dst_data): (&Arc<BlockStructure>, &mut [D]),
+    lhs_data: &[D],
+    rhs_data: &[D],
+    members: usize,
+    alpha: D,
+    init: ContractDestinationInit<D>,
+    mut profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<(), OperationError>
+where
+    S: HostTreeStage<D, C>,
+    G: Rank2Gemm<D>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    debug_assert!(members == 1 || profile.is_none());
+    let HostRouteScratch {
+        lhs: lhs_scratch,
+        rhs: rhs_scratch,
+        core_dst,
+        mut core,
+    } = scratch;
+    let lhs_transform = &artifact.lhs_transform;
+    let rhs_transform = &artifact.rhs_transform;
+    let lhs_core = lhs_transform.space.structure();
+    let rhs_core = rhs_transform.space.structure();
+    let output = artifact.core_dst.as_ref();
+    let core_dst_structure = artifact.core_dst_structure(dst_structure);
+    let plan = &artifact.block_plan;
+    let lhs_core_len = member_len::<D>(lhs_core, members)?;
+    let rhs_core_len = member_len::<D>(rhs_core, members)?;
+    let core_dst_len = member_len::<D>(core_dst_structure, members)?;
+
+    let mut stacked = None;
+    if members != 1 {
+        if alpha != D::one()
+            || !matches!(init, ContractDestinationInit::Axpby(beta) if beta.is_zero())
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "member contraction overwrites its destination with unit alpha",
+            });
+        }
+        let slot = core
+            .as_deref_mut()
+            .ok_or(OperationError::UnsupportedTensorContractScope {
+                message: "member contraction needs a caller-owned core slot",
+            })?;
+        let lhs_src = &lhs_transform.replay_structure;
+        let rhs_src = &rhs_transform.replay_structure;
+        let dst_len = member_len::<D>(dst_structure, members)?;
+        exact_len(lhs_data.len(), member_len::<D>(lhs_src, members)?)?;
+        exact_len(rhs_data.len(), member_len::<D>(rhs_src, members)?)?;
+        exact_len(dst_data.len(), dst_len)?;
+        if !slot.replay.replays(plan, members) {
+            stacked = Some(stage.stacked_replay(plan, members)?);
+        }
+        let replay = match (&stacked, &slot.replay) {
+            (Some(replay), _) | (None, CoreReplay::Stacked(replay)) => replay,
+            (None, _) => unreachable!("a matching B > 1 replay is stacked"),
+        };
+        let (left_structure, right_structure) = artifact.core_order(lhs_core, rhs_core);
+        replay.plan().validate_replay_structures(
+            core_dst_structure,
+            left_structure,
+            right_structure,
+        )?;
+        let (left_len, right_len) = artifact.core_order(lhs_core_len, rhs_core_len);
+        if replay.member_lens().map(|len| len * members) != [core_dst_len, left_len, right_len] {
+            return Err(OperationError::InvalidArgument {
+                message: "member artifact core structure does not match its replay",
+            });
+        }
+        if !artifact.lhs_borrowed {
+            stage.admit_members(
+                Stage::Lhs,
+                &lhs_transform.transform_structure,
+                lhs_core,
+                lhs_src,
+                lhs_core_len,
+                lhs_data.len(),
+                members,
+            )?;
+        }
+        if !artifact.rhs_borrowed {
+            stage.admit_members(
+                Stage::Rhs,
+                &rhs_transform.transform_structure,
+                rhs_core,
+                rhs_src,
+                rhs_core_len,
+                rhs_data.len(),
+                members,
+            )?;
+        }
+        if let Some(output) = output {
+            stage.admit_members(
+                Stage::Output,
+                &output.output_transform_structure,
+                dst_structure,
+                core_dst_structure,
+                dst_len,
+                core_dst_len,
+                members,
+            )?;
+        }
+    }
+
+    // A different replay is installed before any write and clears the proof.
+    if let Some(slot) = core.as_deref_mut() {
+        if let Some(replay) = stacked {
+            slot.install(CoreReplay::Stacked(replay));
+        } else if !slot.replay.replays(plan, members) {
+            slot.install(CoreReplay::Plan(Arc::clone(plan)));
+        }
+    }
+
+    if !artifact.lhs_borrowed {
+        timed(
+            &mut profile,
+            |p| &mut p.lhs_scratch_prepare,
+            |_| prepare(lhs_scratch, lhs_core_len),
+        );
+    }
+    if !artifact.rhs_borrowed {
+        timed(
+            &mut profile,
+            |p| &mut p.rhs_scratch_prepare,
+            |_| prepare(rhs_scratch, rhs_core_len),
+        );
+    }
+    // Workspace core destination: refill its inactive blocks unless the slot
+    // proves them zero for this replay and length.
+    let core_init = if output.is_none() {
+        init
+    } else {
+        let proved = core
+            .as_deref()
+            .is_some_and(|slot| slot.inactive_zero && core_dst.len() == core_dst_len);
+        timed(
+            &mut profile,
+            |p| &mut p.dst_scratch_prepare,
+            |_| prepare(core_dst, core_dst_len),
+        );
+        if proved {
+            ContractDestinationInit::Zeroed
+        } else {
+            ContractDestinationInit::Axpby(D::zero())
+        }
+    };
+    #[cfg(test)]
+    if let Some(slot) = core.as_deref_mut() {
+        if std::mem::take(&mut slot.poison_dst_then_fail) {
+            core_dst.fill(D::zero() + D::one());
+            return Err(OperationError::InvalidArgument {
+                message: "injected fault before the core replay",
+            });
+        }
+    }
+
+    let [lhs_scales, rhs_scales] = artifact.stage_scales();
+    if !artifact.lhs_borrowed {
+        timed(
+            &mut profile,
+            |p| &mut p.lhs_transform,
+            |replay_profile| {
+                overwrite_stage(
+                    stage,
+                    Stage::Lhs,
+                    &lhs_transform.transform_structure,
+                    lhs_core,
+                    &lhs_transform.replay_structure,
+                    lhs_scratch.as_mut_slice(),
+                    lhs_data,
+                    members,
+                    lhs_scales,
+                    replay_profile,
+                )
+            },
+        )?;
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.lhs_transform_calls += 1;
+        }
+    }
+    if !artifact.rhs_borrowed {
+        timed(
+            &mut profile,
+            |p| &mut p.rhs_transform,
+            |replay_profile| {
+                overwrite_stage(
+                    stage,
+                    Stage::Rhs,
+                    &rhs_transform.transform_structure,
+                    rhs_core,
+                    &rhs_transform.replay_structure,
+                    rhs_scratch.as_mut_slice(),
+                    rhs_data,
+                    members,
+                    rhs_scales,
+                    replay_profile,
+                )
+            },
+        )?;
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.rhs_transform_calls += 1;
+        }
+    }
+
+    let physical_lhs = if artifact.lhs_borrowed {
+        lhs_data
+    } else {
+        lhs_scratch.as_slice()
+    };
+    let physical_rhs = if artifact.rhs_borrowed {
+        rhs_data
+    } else {
+        rhs_scratch.as_slice()
+    };
+    let (left, right) = artifact.core_order(physical_lhs, physical_rhs);
+    let (left_structure, right_structure) = artifact.core_order(lhs_core, rhs_core);
+    let core_out = if output.is_some() {
+        core_dst.as_mut_slice()
+    } else {
+        &mut *dst_data
+    };
+    #[cfg(test)]
+    if let Some(slot) = core.as_deref_mut() {
+        slot.inactive_fills += usize::from(matches!(core_init, ContractDestinationInit::Axpby(_)));
+    }
+    if members == 1 {
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+        match (profile.as_deref_mut(), core_init) {
+            (Some(profile), init) => {
+                debug_assert!(matches!(init, ContractDestinationInit::Axpby(_)));
+                plan.execute_raw_profiled(
+                    &mut kernels,
+                    gemm,
+                    fusion_block_workspace,
+                    core_dst_structure,
+                    core_out,
+                    left_structure,
+                    left,
+                    right_structure,
+                    right,
+                    alpha,
+                    init.active_beta(),
+                    profile,
+                )
+            }
+            (None, ContractDestinationInit::Zeroed) => plan.execute_raw_zeroed(
+                &mut kernels,
+                gemm,
+                fusion_block_workspace,
+                core_dst_structure,
+                core_out,
+                left_structure,
+                left,
+                right_structure,
+                right,
+                alpha,
+            ),
+            (None, ContractDestinationInit::Axpby(beta)) => plan.execute_raw(
+                &mut kernels,
+                gemm,
+                fusion_block_workspace,
+                core_dst_structure,
+                core_out,
+                left_structure,
+                left,
+                right_structure,
+                right,
+                alpha,
+                beta,
+            ),
+        }?;
+    } else {
+        let Some(CoreReplay::Stacked(replay)) = core.as_deref().map(|slot| &slot.replay) else {
+            unreachable!("B > 1 installed its stacked replay");
+        };
+        stage.stacked_core(
+            replay,
+            gemm,
+            core_out,
+            left,
+            right,
+            matches!(core_init, ContractDestinationInit::Axpby(_)),
+        )?;
+    }
+
+    let Some(output) = output else {
+        return Ok(());
+    };
+    if let Some(slot) = core {
+        slot.inactive_zero = true;
+    }
+    let result = timed(
+        &mut profile,
+        |p| &mut p.output_transform,
+        |replay_profile| {
+            if members != 1 {
+                return stage.overwrite_members(
+                    Stage::Output,
+                    &output.output_transform_structure,
+                    dst_structure,
+                    core_dst_structure,
+                    dst_data,
+                    core_dst.as_slice(),
+                    members,
+                    &[],
+                );
+            }
+            let (backend, workspace) = stage.ordinary(Stage::Output);
+            let structure = &output.output_transform_structure;
+            let source = core_dst.as_slice();
+            match (replay_profile, init) {
+                (None, ContractDestinationInit::Zeroed) => backend
+                    .tree_transform_structure_overwrite_into_raw(
+                        workspace,
+                        structure,
+                        dst_structure,
+                        core_dst_structure,
+                        dst_data,
+                        source,
+                        D::one(),
+                        &[],
+                    ),
+                (None, ContractDestinationInit::Axpby(beta)) => backend
+                    .tree_transform_structure_into_raw(
+                        workspace,
+                        structure,
+                        dst_structure,
+                        core_dst_structure,
+                        dst_data,
+                        source,
+                        D::one(),
+                        beta,
+                    ),
+                (Some(replay_profile), init) => backend.tree_transform_structure_into_raw_profiled(
+                    workspace,
+                    structure,
+                    dst_structure,
+                    core_dst_structure,
+                    dst_data,
+                    source,
+                    D::one(),
+                    init.active_beta(),
+                    replay_profile,
+                ),
+            }
+        },
+    );
+    if let Some(profile) = profile {
+        profile.output_transform_calls += 1;
+    }
+    result
+}
+
+/// Caller-owned Host payload and replay state for one member route at
+/// varying `B`.
+#[doc(hidden)]
+pub struct DynamicTreeMembersWorkspace<D, C = f64> {
+    lhs: HostScratchBuffer<D>,
+    rhs: HostScratchBuffer<D>,
+    core_dst: HostScratchBuffer<D>,
+    core: CoreSlot<C>,
+    /// Per-stage workspaces, indexed by [`Stage`].
+    transforms: [TreeTransformWorkspace<D>; 3],
+}
+
+impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
+    fn default() -> Self {
+        Self {
+            lhs: HostScratchBuffer::default(),
+            rhs: HostScratchBuffer::default(),
+            core_dst: HostScratchBuffer::default(),
+            core: CoreSlot::default(),
+            transforms: Default::default(),
+        }
+    }
+}
+
+impl<D, C: Copy + PartialEq + One> DynamicTreeMembersWorkspace<D, C> {
+    pub fn retained_bytes(&self) -> usize {
+        (self.lhs.capacity() + self.rhs.capacity() + self.core_dst.capacity())
+            .saturating_mul(std::mem::size_of::<D>())
+            + self.core.retained_bytes()
+            + self
+                .transforms
+                .iter()
+                .map(TreeTransformWorkspace::retained_bytes)
+                .sum::<usize>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn core_replay_builds(&self) -> usize {
+        self.core.builds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn core_inactive_fills(&self) -> usize {
+        self.core.inactive_fills
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_dst_then_fail(&mut self) {
+        self.core.poison_dst_then_fail = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn coefficient_pack_builds(&self) -> [usize; 3] {
+        std::array::from_fn(|stage| self.transforms[stage].coefficient_pack_builds())
+    }
+}
+
+/// Replays one DynamicTree artifact over uniform member-major Host stacks
+/// through the route executor, with this workspace's slot and per-stage
+/// transform workspaces.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, EC, D, C>(
+    tree_backend: &mut DenseTreeTransformOperations<E>,
+    contract_backend: &mut DenseTreeTransformOperations<EC>,
+    contract_workspace: &mut super::backend::TensorContractWorkspace<D>,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst_structure: &Arc<BlockStructure>,
+    workspace: &mut DynamicTreeMembersWorkspace<D, C>,
+    dst: &mut [D],
+    lhs: &[D],
+    rhs: &[D],
+    members: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    EC: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar + Neg<Output = C>,
+{
+    let DynamicTreeMembersWorkspace {
+        lhs: lhs_scratch,
+        rhs: rhs_scratch,
+        core_dst,
+        core,
+        transforms,
+    } = workspace;
+    execute_dynamic_tree_route_host(
+        &mut MemberTreeStage {
+            backend: tree_backend,
+            workspaces: transforms,
+        },
+        &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+            contract_backend,
+            contract_workspace,
+        ),
+        fusion_block_workspace,
+        HostRouteScratch {
+            lhs: lhs_scratch,
+            rhs: rhs_scratch,
+            core_dst,
+            core: Some(core),
+        },
+        artifact,
+        (dst_structure, dst),
+        lhs,
+        rhs,
+        members,
+        D::one(),
+        ContractDestinationInit::Axpby(D::zero()),
+        None,
+    )
+}

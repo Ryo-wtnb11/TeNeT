@@ -47,7 +47,6 @@ pub struct StorageContractResolution<C = f64> {
     pub(crate) route: ContractRoute<C>,
 }
 
-#[cfg(feature = "cuda")]
 impl<C: DenseBlockScalar> ContractRoute<C> {
     /// The core plan whose GEMMs this route runs.
     pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
@@ -188,6 +187,14 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
             ContractRoute::DynamicTree(artifact) => artifact.direct_destination_inactive_blocks(),
             ContractRoute::CopyC(_) => None,
         }
+    }
+
+    /// The core plan whose GEMMs this route runs. A `DynamicTree` core is
+    /// unit-coefficient: the fermionic twist rides its source transforms.
+    /// Member replays state their admission on it once, independent of `B`.
+    #[doc(hidden)]
+    pub fn core_plan(&self) -> &FusionBlockContractPlan<C> {
+        self.route.block_plan()
     }
 
     /// True when the route runs source/output tree transforms around the core.

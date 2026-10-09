@@ -104,10 +104,13 @@ where
             spec.rhs,
             &output_axes,
         )?;
+        // One admission for every route and member count: a plan accepted at
+        // B = 1 replays at any B.
+        resolution
+            .core_plan()
+            .require_identity_signed_direct_replay()?;
+        #[cfg(feature = "cuda")]
         let direct_core = resolution.direct_core();
-        if let Some((core, _)) = direct_core {
-            core.require_identity_signed_direct_replay()?;
-        }
         #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
             if let Some(copy) = resolution.copy_c() {

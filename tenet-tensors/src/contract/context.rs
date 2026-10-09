@@ -446,23 +446,26 @@ where
         &mut self,
         resolution: &StorageContractResolution<C>,
         dst_structure: &Arc<BlockStructure>,
-        workspace: &mut super::dynamic::DynamicTreeMembersWorkspace<D, C>,
+        workspace: &mut super::route_host::DynamicTreeMembersWorkspace<D, C>,
         dst: &mut [D],
         lhs: &[D],
         rhs: &[D],
         members: usize,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        C: std::ops::Neg<Output = C>,
+    {
         let ContractRoute::DynamicTree(artifact) = &resolution.route else {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "Host member contraction requires transformed-tree route",
             });
         };
-        let threads = self.tree_context.backend().recoupling_threads().get();
         let (tree_backend, _) = self.tree_context.backend_workspace_mut();
-        super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
-            tree_backend.dense_mut(),
+        super::route_host::execute_dynamic_tree_execution_artifact_members_host(
+            tree_backend,
             &mut self.contract_backend,
             &mut self.contract_workspace,
+            &mut self.fusion_block_workspace,
             artifact,
             dst_structure,
             workspace,
@@ -470,7 +473,6 @@ where
             lhs,
             rhs,
             members,
-            threads,
         )
     }
 }
@@ -1873,30 +1875,16 @@ where
                 alpha,
                 init,
             ),
-            ContractRoute::DynamicTree(artifact) => {
-                let Self {
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    ..
-                } = self;
-                super::dynamic::execute_dynamic_tree_execution_artifact(
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    artifact,
-                    dst_structure,
-                    dst_data,
-                    lhs.1,
-                    rhs.1,
-                    alpha,
-                    init.active_beta(),
-                )
-            }
+            ContractRoute::DynamicTree(artifact) => self.execute_dynamic_tree_host(
+                artifact,
+                dst_structure,
+                dst_data,
+                lhs.1,
+                rhs.1,
+                alpha,
+                init,
+                None,
+            ),
             ContractRoute::CopyC(copy) => {
                 let mut temporary = std::mem::take(&mut self.copy_c_scratch);
                 temporary.resize_filled(copy.temporary_len, D::zero());
@@ -1941,6 +1929,47 @@ where
         }
     }
 
+    /// The eager `DynamicTree` arm: the one route executor at one member,
+    /// over this context's tree workspace and scratch.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_dynamic_tree_host(
+        &mut self,
+        artifact: &super::dynamic::DynamicTreeExecutionArtifact<C>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        alpha: D,
+        init: ContractDestinationInit<D>,
+        profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<(), OperationError>
+    where
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let Self {
+            tree_context,
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            fusion_scratch,
+            ..
+        } = self;
+        super::route_host::execute_dynamic_tree_route_host(
+            tree_context,
+            &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
+            fusion_block_workspace,
+            fusion_scratch.route_scratch(),
+            artifact,
+            (dst_structure, dst_data),
+            lhs_data,
+            rhs_data,
+            1,
+            alpha,
+            init,
+            profile,
+        )
+    }
+
     /// [`Self::execute_contract_route_host`] with each stage timed into
     /// `profile`; `CopyC`'s permute counts as the output transform.
     #[allow(clippy::too_many_arguments)]
@@ -1975,28 +2004,15 @@ where
             }
             ContractRoute::DynamicTree(artifact) => {
                 profile.route = TensorContractFusionRoute::DynamicTreeCore;
-                let Self {
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    ..
-                } = self;
-                super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
+                self.execute_dynamic_tree_host(
                     artifact,
                     dst_structure,
                     dst_data,
                     lhs.1,
                     rhs.1,
                     alpha,
-                    beta,
-                    profile,
+                    ContractDestinationInit::Axpby(beta),
+                    Some(profile),
                 )
             }
             ContractRoute::CopyC(copy) => {

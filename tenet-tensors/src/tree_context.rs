@@ -1082,38 +1082,6 @@ where
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_transform_structure_overwrite_into_raw_profiled(
-        &mut self,
-        structure: &TreeTransformStructure<C>,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        destination_scales: &[(usize, C)],
-        profile: &mut TreeTransformReplayProfile,
-    ) -> Result<(), OperationError>
-    where
-        D: RecouplingCoefficientAction<C>,
-    {
-        let Self {
-            backend, workspace, ..
-        } = self;
-        replay_structure_overwrite(
-            backend,
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-            destination_scales,
-            Some(profile),
-        )
-    }
-
     pub fn all_codomain_tree_transform_into<
         R,
         const DST_NOUT: usize,

@@ -166,7 +166,7 @@ where
     let len = dst.space().required_len().unwrap();
     let lhs_len = case.lhs.space().required_len().unwrap();
     let rhs_len = case.rhs.space().required_len().unwrap();
-    let mut workspace = crate::contract::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut workspace = crate::contract::DynamicTreeMembersWorkspace::default();
     let mut digest = FNV_START;
     for members in [1, 2, 1] {
         let lhs = exact_data(lhs_len * members, 1);
@@ -191,16 +191,17 @@ where
 pub(super) fn run_members(
     artifact: &DynamicTreeExecutionArtifact<f64>,
     dst_structure: &Arc<tenet_core::BlockStructure>,
-    workspace: &mut crate::contract::dynamic::DynamicTreeMembersWorkspace<f64>,
+    workspace: &mut crate::contract::DynamicTreeMembersWorkspace<f64>,
     dst: &mut [f64],
     lhs: &[f64],
     rhs: &[f64],
     members: usize,
 ) -> Result<(), crate::OperationError> {
-    crate::contract::dynamic::execute_dynamic_tree_execution_artifact_members_host(
-        &mut tenet_dense::DefaultDenseExecutor::new(),
+    crate::contract::route_host::execute_dynamic_tree_execution_artifact_members_host(
+        &mut DenseTreeTransformOperations::default(),
         &mut DenseTreeTransformOperations::default(),
         &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
         artifact,
         dst_structure,
         workspace,
@@ -208,7 +209,6 @@ pub(super) fn run_members(
         lhs,
         rhs,
         members,
-        1,
     )
 }
 
@@ -258,4 +258,179 @@ fn dynamic_tree_eager_and_member_bits_are_pinned() {
         member_digest(&fermionic),
     ));
     assert_eq!(observed, PINNED, "observed digests: {observed:#x?}");
+}
+
+/// Runs `members` copies of `case` on `workspace` and returns each stage's
+/// coefficient-pack conversions so far.
+fn member_pack_builds<R>(
+    case: &Case<R>,
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    workspace: &mut crate::contract::DynamicTreeMembersWorkspace<f64>,
+    members: usize,
+) -> [usize; 3]
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let dst = case.dst();
+    let lhs = host_data(case.lhs.space(), 3).repeat(members);
+    let rhs = host_data(case.rhs.space(), 5).repeat(members);
+    let mut out = vec![f64::NAN; members * dst.space().required_len().unwrap()];
+    run_members(
+        artifact,
+        dst.space().structure(),
+        workspace,
+        &mut out,
+        &lhs,
+        &rhs,
+        members,
+    )
+    .unwrap();
+    assert!(out.iter().all(|value| value.is_finite()));
+    workspace.coefficient_pack_builds()
+}
+
+#[test]
+fn a_warm_one_member_replay_converts_no_coefficient_pack() {
+    // Why (F1): each member stage replays into its own workspace at every B,
+    // so a warm B = 1 replay of Multi transforms finds all three packs
+    // installed instead of rebuilding them per stage.
+    let su2 = su2_rank5_case();
+    let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let v = || fermion_su2_leg(&provider, false);
+    let fermionic = Case {
+        lhs: space(&provider, vec![v(), v(), v()], vec![v(), v()]),
+        rhs: space(&provider, vec![v(), v()], vec![v(), v()]),
+        lhs_axes: vec![3, 1],
+        rhs_axes: vec![0, 3],
+        output_axes: vec![2, 0, 4, 1, 3],
+    };
+    fn check<R>(case: &Case<R>, what: &str)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        let resolution = planned_resolution(case);
+        let crate::contract::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+        else {
+            panic!("{what}: fixture must plan DynamicTree");
+        };
+        assert!(artifact.test_has_core_dst(), "{what}");
+        assert_eq!(artifact.borrowed_sources(), (false, false), "{what}");
+        let mut workspace = crate::contract::DynamicTreeMembersWorkspace::default();
+        let cold = member_pack_builds(case, artifact, &mut workspace, 1);
+        assert!(cold.iter().any(|&builds| builds > 0), "{what}: {cold:?}");
+        assert!(cold.iter().all(|&builds| builds <= 1), "{what}: {cold:?}");
+        for _ in 0..3 {
+            assert_eq!(
+                member_pack_builds(case, artifact, &mut workspace, 1),
+                cold,
+                "{what}"
+            );
+        }
+    }
+    check(&su2, "SU2");
+    check(&fermionic, "fZ2xSU2");
+}
+
+#[test]
+fn one_workspace_refills_its_core_destination_only_on_a_replay_change() {
+    // Plan and member-count changes on one workspace, B = 1 included:
+    // only a new replay (cold, B change, plan change) fills the inactive
+    // core-destination blocks; values are checked per member each call.
+    let mut cases = overwrite_cases();
+    let (_, workspace_dst, _) = cases.pop().unwrap();
+    let (_, caller_dst, _) = cases.remove(1);
+    let workspace_artifact = members_artifact(&workspace_dst);
+    let caller_artifact = members_artifact(&caller_dst);
+    let mut ws = crate::contract::DynamicTreeMembersWorkspace::default();
+    let mut fills = |case, artifact, members, salt| {
+        replay_members_checked(case, artifact, &mut ws, members, salt)
+    };
+    let a = (&workspace_dst, &*workspace_artifact);
+    let b = (&caller_dst, &*caller_artifact);
+    for ((case, artifact), members, expected) in [
+        (a, 2, 1),
+        (a, 17, 1),
+        (a, 17, 0),
+        (a, 1, 1),
+        (a, 1, 0),
+        (a, 2, 1),
+        (b, 2, 1),
+        (b, 1, 1),
+        (a, 1, 1),
+        (a, 1, 0),
+    ] {
+        assert_eq!(fills(case, artifact, members, 3 + members), expected);
+    }
+}
+
+#[test]
+fn a_failed_one_member_replay_rezeroes_on_retry() {
+    let (_, case, _) = overwrite_cases().pop().unwrap();
+    let artifact = members_artifact(&case);
+    let mut ws = crate::contract::DynamicTreeMembersWorkspace::default();
+    assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 1, 3), 1);
+    assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 1, 9), 0);
+    let fresh = members_artifact(&case);
+    ws.poison_dst_then_fail();
+    assert!(try_replay_members_checked(&case, &fresh, &mut ws, 1, 5).is_err());
+    assert_eq!(replay_members_checked(&case, &fresh, &mut ws, 1, 5), 1);
+    assert_eq!(replay_members_checked(&case, &fresh, &mut ws, 1, 7), 0);
+}
+
+#[test]
+fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes() {
+    use crate::contract::route_host::{execute_dynamic_tree_route_host, HostRouteScratch};
+    let (_, case, _) = overwrite_cases().pop().unwrap();
+    let artifact = members_artifact(&case);
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs = host_data(case.lhs.space(), 3).repeat(2);
+    let rhs = host_data(case.rhs.space(), 5).repeat(2);
+    let mut tree = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
+        DenseTreeTransformOperations::default(),
+    );
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+    let mut slot = crate::contract::route_host::CoreSlot::default();
+    let (mut a, mut b, mut c) = Default::default();
+    for (alpha, init, with_slot) in [
+        (2.0, ContractDestinationInit::Axpby(0.0), true),
+        (1.0, ContractDestinationInit::Zeroed, true),
+        (1.0, ContractDestinationInit::Axpby(1.0), true),
+        // The eager stage replays exactly one member.
+        (1.0, ContractDestinationInit::Axpby(0.0), true),
+        // A member replay needs a caller-owned core slot.
+        (1.0, ContractDestinationInit::Axpby(0.0), false),
+    ] {
+        let mut out = vec![f64::NAN; 2 * len];
+        let error = execute_dynamic_tree_route_host(
+            &mut tree,
+            &mut crate::contract::fusion_block::BackendRank2Gemm::<_, _, f64>::new(
+                &mut backend,
+                &mut backend_workspace,
+            ),
+            &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
+            HostRouteScratch {
+                lhs: &mut a,
+                rhs: &mut b,
+                core_dst: &mut c,
+                core: with_slot.then_some(&mut slot),
+            },
+            &artifact,
+            (dst.space().structure(), &mut out),
+            &lhs,
+            &rhs,
+            2,
+            alpha,
+            init,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::OperationError::UnsupportedTensorContractScope { .. }
+        ));
+        assert!(out.iter().all(|value| value.is_nan()));
+    }
 }

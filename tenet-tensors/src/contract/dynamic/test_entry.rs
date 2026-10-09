@@ -1,3 +1,4 @@
+use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
 use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap};
 
@@ -338,5 +339,125 @@ where
         rhs_data,
         alpha,
         beta,
+    )
+}
+
+/// The eager `DynamicTree` route executor at one member, over caller-owned
+/// test resources: the arm `execute_contract_route_host` runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    execute_dynamic_tree_execution_artifact_with_profile(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        artifact,
+        dst_structure,
+        dst_data,
+        lhs_data,
+        rhs_data,
+        alpha,
+        beta,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    execute_dynamic_tree_execution_artifact_with_profile(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        artifact,
+        dst_structure,
+        dst_data,
+        lhs_data,
+        rhs_data,
+        alpha,
+        beta,
+        Some(profile),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_dynamic_tree_execution_artifact_with_profile<RuleKey, BT, BC, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    super::super::route_host::execute_dynamic_tree_route_host(
+        tree_context,
+        &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
+        fusion_block_workspace,
+        scratch.route_scratch(),
+        artifact,
+        (dst_structure, dst_data),
+        lhs_data,
+        rhs_data,
+        1,
+        alpha,
+        tenet_operations::ContractDestinationInit::Axpby(beta),
+        profile,
     )
 }

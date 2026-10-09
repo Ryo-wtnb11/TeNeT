@@ -2,8 +2,7 @@
 //! eager and member (B = 1, 17), cold and warm, on one thread.
 //!
 //! Upper bounds, recorded on `d416b1a2` before the eager and member replays
-//! became one executor: eager calls and bytes stay equal to that base, member
-//! replays at most that base.
+//! became one executor: warm eager and member replays allocate at most that base.
 
 use std::sync::Arc;
 
@@ -50,7 +49,12 @@ fn space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
 
 fn u1_leg() -> SectorLeg {
     SectorLeg::new(
-        [-1, 0, 1].map(|charge| (U1Irrep::new(charge).sector_id(), 2 - charge.abs() as usize)),
+        [-1, 0, 1].map(|charge| {
+            (
+                U1Irrep::new(charge).sector_id(),
+                2 - charge.unsigned_abs() as usize,
+            )
+        }),
         false,
     )
 }
@@ -218,7 +222,74 @@ fn dynamic_tree_route_allocations_are_bounded_by_base() {
             row(&identity_output(SU2FusionRule, su2_leg)),
         ),
     ];
-    for (name, row) in &rows {
+    for ((name, row), (base_name, base)) in rows.iter().zip(BASE) {
         eprintln!("{name}: {row:?}");
+        assert_eq!(*name, base_name);
+        // What: the executor merge adds no eager allocation (the cold row,
+        // dominated by planning, is reported only); a member replay
+        // allocates no more than its base (no replay build at B = 1).
+        for (head, base) in [
+            (row.eager_warm, base.eager_warm),
+            (row.member1_cold, base.member1_cold),
+            (row.member1_warm, base.member1_warm),
+            (row.member17_cold, base.member17_cold),
+            (row.member17_warm, base.member17_warm),
+        ] {
+            assert!(head.0 <= base.0 && head.1 <= base.1, "{name}: {row:?}");
+        }
+        assert!(row.member1_retained <= base.member1_retained, "{name}");
+        assert_eq!(row.member17_warm, (0, 0), "{name}");
     }
 }
+
+/// `d416b1a2`, debug test build, one thread.
+const BASE: [(&str, Row); 4] = [
+    (
+        "U1 transformed",
+        Row {
+            eager_cold: (6533, 583202),
+            eager_warm: (18, 2592),
+            member1_cold: (10, 5280),
+            member1_warm: (0, 0),
+            member17_cold: (25, 87328),
+            member17_warm: (0, 0),
+            member1_retained: 4976,
+        },
+    ),
+    (
+        "U1 identity output",
+        Row {
+            eager_cold: (229, 67732),
+            eager_warm: (15, 1872),
+            member1_cold: (6, 624),
+            member1_warm: (0, 0),
+            member17_cold: (7, 7744),
+            member17_warm: (0, 0),
+            member1_retained: 368,
+        },
+    ),
+    (
+        "SU2 transformed",
+        Row {
+            eager_cold: (27012, 4877124),
+            eager_warm: (21, 5696),
+            member1_cold: (30, 21392),
+            member1_warm: (2, 3040),
+            member17_cold: (75, 565040),
+            member17_warm: (0, 0),
+            member1_retained: 19152,
+        },
+    ),
+    (
+        "SU2 identity output",
+        Row {
+            eager_cold: (412, 54020),
+            eager_warm: (15, 1872),
+            member1_cold: (6, 656),
+            member1_warm: (0, 0),
+            member17_cold: (7, 8288),
+            member17_warm: (0, 0),
+            member1_retained: 400,
+        },
+    ),
+];
