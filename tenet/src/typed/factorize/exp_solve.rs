@@ -1,5 +1,5 @@
 use super::*;
-use tenet_matrixalgebra::seam::FactorSpaceAuthority;
+use tenet_matrixalgebra::seam::{ExecutorLease, FactorSpaceAuthority};
 
 impl<R, D> TensorMap<R, D>
 where
@@ -8,7 +8,7 @@ where
     D: AdvancedLinalgScalar,
 {
     /// The one body of the exponential: a compact diagonal exponentiates its
-    /// entries, everything else takes the mode's dense route.
+    /// entries, everything else takes the dense route.
     pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
         // TensorKit `exp!`: `domain == codomain` before anything else.
         let homspace = self.logical_space().space().homspace();
@@ -18,7 +18,7 @@ where
             })
             .into());
         }
-        // A lazy adjoint is never compact; `exp_dense` materializes it.
+        // A lazy adjoint is never compact; the dense route materializes it.
         const {
             assert!(matches!(
                 FactorOp::Exp.adjoint_rule(),
@@ -38,7 +38,16 @@ where
         let output = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::authority(space)
             .same_homspace_output(space)
             .map_err(R::Mode::map_root_error)?;
-        R::Mode::exp_dense(self, output)
+        let _host_pool = self.runtime.enter_host_pool();
+        let local = matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| self.materialized_tensor_uncached())
+            .transpose()?;
+        let (space, data) = local.as_ref().unwrap_or(self).dense_operand()?;
+        let input = BoundDynamicTensorRef::try_new(space, &data).map_err(Error::from)?;
+        let factor = RuntimeDense(&self.runtime)
+            .run(|dense| tenet_matrixalgebra::seam::exp_direct_into_dyn(dense, &input, output))
+            .map_err(Error::from)?;
+        Ok(wrap_factor_on(&self.runtime, factor))
     }
 
     /// The one body of `self \ rhs`, solved sector by sector without forming
@@ -66,7 +75,7 @@ where
             // route materializes both operands.
             rhs.refuse_borrowed_view("solve")?;
             let output = self.factor_output_space(self.solve_homspace(rhs))?;
-            return R::Mode::solve_dense(self, rhs, output);
+            return self.dense_solve(rhs, output);
         };
         self.admit_compact(spectrum)?;
         reject_singular_compact_divisor(spectrum)?;
@@ -85,6 +94,35 @@ where
             return Err(Error::RuleMismatch.into());
         }
         Ok(())
+    }
+
+    /// The dense route of [`Self::factor_solve`]: both operands are
+    /// materialized and bound inside the Host pool, then the one lease runs
+    /// the sector solves into `output`.
+    fn dense_solve(
+        &self,
+        rhs: &Self,
+        output: BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let _host_pool = self.runtime.enter_host_pool();
+        let materialize = |tensor: &Self| {
+            matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+                .then(|| tensor.materialized_tensor_uncached())
+                .transpose()
+        };
+        let (divisor_local, rhs_local) = (materialize(self)?, materialize(rhs)?);
+        let (divisor_space, divisor_data) =
+            divisor_local.as_ref().unwrap_or(self).dense_operand()?;
+        let (rhs_space, rhs_data) = rhs_local.as_ref().unwrap_or(rhs).dense_operand()?;
+        let divisor =
+            BoundDynamicTensorRef::try_new(divisor_space, &divisor_data).map_err(Error::from)?;
+        let rhs = BoundDynamicTensorRef::try_new(rhs_space, &rhs_data).map_err(Error::from)?;
+        let factor = RuntimeDense(&self.runtime)
+            .run(|dense| {
+                tenet_matrixalgebra::seam::solve_left_direct_into_dyn(dense, &divisor, &rhs, output)
+            })
+            .map_err(Error::from)?;
+        Ok(wrap_factor_on(&self.runtime, factor))
     }
 
     /// `domain(self) <- domain(rhs)`, the space of `self \ rhs`.
@@ -168,44 +206,4 @@ where
             repr: owned_repr(TypedTensorBody::dense(output, data)),
         })
     }
-}
-
-pub(super) fn checked_generic_solve_into<R, D>(
-    tensor: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    divisor_authority: BoundDynamicFusionMapSpace<R>,
-    output: BoundDynamicFusionMapSpace<R>,
-) -> Result<BoundDynFactor<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion,
-    D: TensorScalar,
-{
-    let lhs = tensor
-        .materialized_tensor_uncached()
-        .map_err(GenericTensorError::from)?;
-    let rhs = rhs
-        .materialized_tensor_uncached()
-        .map_err(GenericTensorError::from)?;
-    let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
-    let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
-    let mut dense = tensor.runtime.lease_dense();
-    tenet_matrixalgebra::seam::solve_left_direct_into_dyn(
-        dense.dense(),
-        &BoundDynamicTensorRef::try_new(
-            &divisor_authority,
-            lhs_body.materialized_dense_data().as_ref(),
-        )
-        .map_err(Error::from)?,
-        &BoundDynamicTensorRef::try_new(
-            &rhs_body.space,
-            rhs_body.materialized_dense_data().as_ref(),
-        )
-        .map_err(Error::from)?,
-        output,
-    )
-    .map_err(Error::from)
-    .map_err(GenericTensorError::from)
 }
