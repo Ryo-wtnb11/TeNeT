@@ -93,7 +93,14 @@ fn replay(
 ) {
     backend
         .tree_transform_structure_overwrite_into_raw(
-            workspace, transform, structure, structure, dst, src, 1.0,
+            workspace,
+            transform,
+            structure,
+            structure,
+            dst,
+            src,
+            1.0,
+            &[],
         )
         .unwrap();
 }
@@ -116,6 +123,7 @@ fn profiled_replay(
             dst,
             src,
             1.0,
+            &[],
             &mut profile,
         )
         .unwrap();

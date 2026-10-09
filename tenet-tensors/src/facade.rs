@@ -770,7 +770,8 @@ where
         + Zero
         + One
         + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+        + tenet_operations::RecouplingCoefficientAction<C>,
     C: Copy,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -785,6 +786,7 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
+        &[],
     )
 }
 
@@ -999,7 +1001,7 @@ where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    D: TreeTransformScalar,
+    D: TreeTransformScalar + tenet_operations::RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
@@ -1085,7 +1087,7 @@ where
         + Zero
         + Send
         + Sync,
-    D: TreeTransformScalar,
+    D: TreeTransformScalar + tenet_operations::RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {

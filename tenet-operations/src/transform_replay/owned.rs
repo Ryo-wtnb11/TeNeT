@@ -538,6 +538,7 @@ mod owned_overwrite_tests {
             &mut expected,
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             3.0,
+            &[],
             1,
         )
         .unwrap();
@@ -786,6 +787,7 @@ mod owned_overwrite_tests {
             &mut oracle,
             &source,
             1.5,
+            &[],
             1,
         )
         .unwrap();

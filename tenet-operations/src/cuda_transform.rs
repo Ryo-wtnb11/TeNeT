@@ -909,21 +909,20 @@ impl CudaTreeTransformExecutor {
     /// lists `(destination block offset, θ_b)` sorted by strictly increasing
     /// offset; a block it does not list has `θ_b = 1`. This is the fermionic
     /// contraction twist of a general contraction on whichever operand is
-    /// materialized for it, which the host applies as a separate in-place
-    /// scale of the transformed operand (`execute_contract_twist`,
-    /// TensorKit's `twist!` after `tensoradd!` in `blas_contract!`,
-    /// tensoroperations.jl:419/429 @cfaa073) and QSpace folds into its per-block GEMM scalar
-    /// (QSpace_aux.cc:105-115 @dd2cc7e).
+    /// materialized for it — TensorKit's `twist!` after `tensoradd!` in
+    /// `blas_contract!` (tensoroperations.jl:419/429 @cfaa073), which QSpace
+    /// folds into its per-block GEMM scalar (QSpace_aux.cc:105-115 @dd2cc7e)
+    /// and the host folds into the same moves
+    /// (`tree_transform_structure_overwrite_with_structural_recoupling_raw`).
     ///
     /// The θ reaches only the descriptor alpha of the Single move or Multi
     /// scatter that writes block `b`, which becomes `alpha * θ_b`. Packs, the
     /// recoupling GEMM and the inactive-layout zero fills stay unscaled, so the
-    /// write pass the host follows with a scale pass does both: one pass
-    /// fewer than the host and TensorKit. A Multi block's GEMM is shared by
-    /// its destination layouts, and scaling each scatter by its own θ is exact
-    /// either way; the contraction compiler additionally asserts θ is uniform
-    /// per Multi block, which is what makes this the host's "scale after the
-    /// transform".
+    /// write pass also applies the twist: one pass fewer than TensorKit. A
+    /// Multi block's GEMM is shared by its destination layouts, and scaling
+    /// each scatter by its own θ is exact either way; the contraction
+    /// compiler additionally asserts θ is uniform per Multi block, which is
+    /// what makes this TensorKit's "scale after the transform".
     ///
     /// The prepared structure, its uploaded coefficient vector and its cache
     /// key are those of the unscaled replay — θ is in no key — and a scaled

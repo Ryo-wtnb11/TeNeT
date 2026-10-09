@@ -97,6 +97,7 @@ fn profiled_multi_attributes_recoupling_to_dense_gemm() {
                 &mut dst,
                 &[3.0, 4.0],
                 2.0,
+                &[],
                 threads,
                 &mut profile,
             )
@@ -162,6 +163,7 @@ fn profiled_overwrite_zeros_inactive_layout_without_touching_padding() {
         &mut dst,
         &[3.0],
         1.0,
+        &[],
         2,
         &mut profile,
     )

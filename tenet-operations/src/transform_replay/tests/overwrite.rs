@@ -184,6 +184,7 @@ fn overwrite_single_does_not_read_nan_destinations_in_any_driver() {
         dst.data_mut(),
         src.data(),
         1.0,
+        &[],
         1,
         &mut TreeTransformReplayProfile::default(),
     )
@@ -230,6 +231,7 @@ fn overwrite_multi_c64_does_not_read_nan_destinations() {
                 num_complex::Complex64::new(4.0, -1.0),
             ],
             num_complex::Complex64::new(2.0, 0.0),
+            &[],
             threads,
         )
         .unwrap();
@@ -278,6 +280,7 @@ fn overwrite_threaded_single_and_multi_ignore_destination_bits() {
             &mut dst,
             &src,
             1.0,
+            &[],
             threads,
         )
         .unwrap();
@@ -303,6 +306,7 @@ fn overwrite_multi_recovers_from_dirty_packed_scratch_after_failure() {
             &mut dst,
             &[3.0, 4.0],
             2.0,
+            &[],
             1,
         )
         .is_err()
@@ -324,6 +328,7 @@ fn overwrite_multi_recovers_from_dirty_packed_scratch_after_failure() {
         &mut dst,
         &[3.0, 4.0],
         2.0,
+        &[],
         1,
     )
     .unwrap();
@@ -367,6 +372,7 @@ fn overwrite_validates_before_mutation_and_accepts_rank_boundaries() {
         dst.data_mut(),
         &[],
         1.0,
+        &[],
         1,
     );
     assert!(result.is_err());

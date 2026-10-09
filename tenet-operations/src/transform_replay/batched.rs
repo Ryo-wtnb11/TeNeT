@@ -57,7 +57,7 @@ pub(super) fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
     structure_identity: &Arc<()>,
     dst_data: &mut [D],
     src_data: &[D],
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     mut profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
@@ -95,7 +95,7 @@ where
                 task.storage_conjugate(),
                 dst_data,
                 src_data,
-                alpha,
+                alpha.at(layouts.entry(dst_layout).offset),
                 mode,
             )?;
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -142,7 +142,7 @@ where
             task.storage_conjugate(),
             dst_data,
             src_data,
-            alpha,
+            alpha.at(layouts.entry(dst_layout).offset),
             mode,
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -232,7 +232,7 @@ where
                 workspace.packed.destination().as_slice(),
                 dst_index * element_count,
                 dst_data,
-                alpha,
+                alpha.at(layouts.entry(dst_layout_start + dst_index).offset),
                 mode,
             )?;
         }
@@ -344,7 +344,7 @@ pub(super) fn replay_single_blocks<A, D, C>(
     dst_data: &mut [D],
     dst_start: isize,
     src_data: &[D],
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
@@ -362,7 +362,10 @@ where
         for &item in items {
             let (dst_layout, src_layout, coefficient) = scheduled_single(blocks, item)?;
             let role = layouts.role(dst_layout)?;
-            let scale = TransformScale::new(alpha, coefficients[coefficient]);
+            let scale = TransformScale::new(
+                alpha.at(layouts.entry(dst_layout).offset),
+                coefficients[coefficient],
+            );
             kernels.transform_strided_baked(
                 &mut zero_strides,
                 dst_data,
@@ -457,7 +460,7 @@ pub(super) fn scheduled_single(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn replay_scatter_columns<A, D>(
+fn replay_scatter_columns<A, D, C>(
     mut kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
@@ -467,13 +470,14 @@ fn replay_scatter_columns<A, D>(
     dst_start: isize,
     packed_destination: &[D],
     packed_start: usize,
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D> + Clone + Send + Sync,
-    D: DenseRecouplingScalar + ConjugateValue,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
 {
     if items.is_empty() {
         return Ok(());
@@ -492,7 +496,7 @@ where
                     role.src_strides(),
                     offset,
                     offset_to_isize(item.packed_offset - packed_start)?,
-                    alpha,
+                    alpha.at(layouts.entry(item.dst_layout).offset),
                     beta,
                     Some(role),
                     Some(&mut *fused_index),
@@ -506,7 +510,7 @@ where
                     offset,
                     offset_to_isize(item.packed_offset - packed_start)?,
                     false,
-                    alpha,
+                    alpha.at(layouts.entry(item.dst_layout).offset),
                     Some(role),
                     Some(&mut *fused_index),
                 )?,
@@ -564,7 +568,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn replay_scatter_groups<A, D>(
+pub(super) fn replay_scatter_groups<A, D, C>(
     kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
@@ -576,13 +580,14 @@ pub(super) fn replay_scatter_groups<A, D>(
     dst_start: isize,
     packed_destination: &[D],
     packed_start: usize,
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D> + Clone + Send + Sync,
-    D: DenseRecouplingScalar + ConjugateValue,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
 {
     if groups.is_empty() {
         return Ok(());
@@ -837,7 +842,7 @@ pub(super) fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>
     structure_identity: &Arc<()>,
     dst_data: &mut [D],
     src_data: &[D],
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
     mut profile: Option<&mut TreeTransformReplayProfile>,
@@ -905,7 +910,7 @@ where
                     storage_conjugate,
                     dst_data,
                     src_data,
-                    alpha,
+                    alpha.at(layouts.entry(dst_layout).offset),
                     mode,
                 )?;
             }
@@ -973,7 +978,7 @@ where
                         packed_destination,
                         item.packed_offset - destination_start,
                         dst_data,
-                        alpha,
+                        alpha.at(layouts.entry(item.dst_layout).offset),
                         mode,
                     )?;
                 }

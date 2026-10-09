@@ -41,6 +41,7 @@ fn finite_task_view_serial_matches_per_block_replay() -> Result<(), OperationErr
                 &mut actual,
                 &source,
                 0.5,
+                &[],
                 1,
             )?;
         } else {

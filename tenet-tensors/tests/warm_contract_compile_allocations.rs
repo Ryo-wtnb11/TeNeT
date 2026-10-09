@@ -182,12 +182,13 @@ fn warm_contract_compile_allocations_do_not_scale_with_rank() {
         // plus its `Arc`. Plan: one shared slice per transform operation.
         // DynamicTree: that plan and its `Arc`; per transformed source its
         // permuted HomSpace and the two `Arc`s the replay scratch shares; the
-        // same for the core destination; the core plan; the empty twist list;
-        // the artifact. The layout lookup key is no longer one of them
+        // same for the core destination; the core plan; the artifact. An
+        // empty twist list is an empty scale list and allocates nothing
+        // (#1975). The layout lookup key is no longer one of them
         // (#1367): it borrows the HomSpace content.
         assert_eq!(core, 5, "core route at rank {rank}");
         assert_eq!(plan, 3, "plan at rank {rank}");
-        assert_eq!(dynamic_tree, 19, "dynamic-tree route at rank {rank}");
+        assert_eq!(dynamic_tree, 18, "dynamic-tree route at rank {rank}");
     }
 }
 
@@ -230,9 +231,9 @@ fn crossing_compile_allocations(
 /// `(1 + domain) + 2` legs while forming permuted HomSpaces.
 fn crossing_compile_base(codomain: usize, domain: usize) -> usize {
     if (codomain, domain) == (1, 2) {
-        19
+        18
     } else {
-        16
+        15
     }
 }
 

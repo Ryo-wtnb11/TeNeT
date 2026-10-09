@@ -658,6 +658,7 @@ fn rank_five_su2_member_transform_matches_physical_permutation_and_ordinary_repl
         &source,
         2,
         1,
+        &[],
     )
     .unwrap();
     for member in 0..2 {
@@ -726,6 +727,7 @@ fn rank_five_su2_member_transform_matches_physical_permutation_and_ordinary_repl
             &mut expected,
             &source[member * source_len..(member + 1) * source_len],
             1.0,
+            &[],
             1,
         )
         .unwrap();
@@ -1060,8 +1062,8 @@ fn host_data(space: &crate::DynamicFusionMapSpace, salt: usize) -> Vec<f64> {
         .collect()
 }
 
-/// The Host's per-block twist of one physical operand's transformed source,
-/// recomputed from that space alone (`lhs` names the side) by the Host twist
+/// The per-block twist of one physical operand's transformed source,
+/// recomputed from that space alone (`lhs` names the side) by the twist
 /// compiler, as the sorted `(offset, θ)` of its non-empty twisted blocks.
 fn physical_twist<R>(
     case: &Case<R>,
@@ -1074,7 +1076,7 @@ where
 {
     let core_right_is_lhs = orientation == FusionContractOrientation::RhsLhs;
     let lhs = artifact.twists_lhs();
-    super::dynamic::contract_twist_scales(
+    super::dynamic::compile_contract_twist(
         case.lhs.provider(),
         artifact.physical_core_space(lhs),
         artifact.physical_core_space(core_right_is_lhs).homspace(),
@@ -1112,11 +1114,10 @@ where
 
 /// Every forced candidate and orientation of one fermionic case:
 ///
-/// - the destination-scale list is the Host's per-block twist of the
-///   *physical* operand the artifact twists — core-right or, when only
-///   core-left is already copied (or is the smaller), core-left — recomputed
-///   from that space and the core-right dual flags alone, and equals the
-///   artifact's own in-place twist actions;
+/// - the destination-scale list is the per-block twist of the *physical*
+///   operand the artifact twists — core-right or, when only core-left is
+///   already copied (or is the smaller), core-left — recomputed from that
+///   space and the core-right dual flags alone;
 /// - the compile-time uniform-per-Multi assertion passed;
 /// - the Host replay of the forced artifact equals the eager Host
 ///   `contract`, so every forced orientation is tied to the production
@@ -1150,7 +1151,6 @@ where
                 physical_twist(case, &artifact, orientation, &contracting).as_slice(),
                 "{where_}: not the twisted physical operand's twist"
             );
-            assert_eq!(scales, artifact.host_twist_scales().as_slice(), "{where_}");
             assert!(scales.windows(2).all(|pair| pair[0].0 < pair[1].0));
             assert!(scales.iter().all(|&(_, theta)| theta == -1.0));
             assert_eq!(host.len(), eager.len(), "{where_}");
@@ -1431,11 +1431,7 @@ where
         1,
     )
     .unwrap();
-    assert_eq!(
-        member_workspace.twist_actions_applied(),
-        artifact.source_twist_action_count()
-    );
-    assert!(artifact.source_twist_action_count() > 0);
+    assert!(artifact.requires_source_twist());
     assert_eq!(backend.dense_mut().submissions, [2 * jobs_per_member]);
     for (actual, expected) in member_result.iter().zip(eager.iter().cycle()) {
         assert!((actual - expected).abs() <= 1e-12 * (1.0 + scale), "{what}");
@@ -2244,11 +2240,11 @@ mod device {
 
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn a_twisted_artifact_replays_with_destination_scales_as_the_host_scales_in_place() {
+    fn a_twisted_artifact_replays_with_destination_scales_on_device_and_host_alike() {
         // What: for every forced candidate and both orientations — the
         // twisted operand is whichever one the artifact already materializes
-        // — the device's θ-scaled source transform
-        // equals the Host's transform followed by its in-place twist, on the
+        // — the device's θ-scaled source transform equals the Host's, both
+        // folding the same destination scales into their moves, on the
         // same artifact; fZ2 x U(1) and fZ2 (x) SU(2) (recoupling), the twist
         // on one or both contracted legs, and the canonical non-uniform form.
         for (what, case) in fermionic_cases() {

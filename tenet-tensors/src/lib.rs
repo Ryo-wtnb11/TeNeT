@@ -132,6 +132,7 @@ pub use tenet_operations::ContractDestinationInit;
 pub(crate) use tenet_operations::HostTreeTransformWorkspace;
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
+pub(crate) use tenet_operations::StridedHostKernelAdapter;
 pub use tenet_operations::TensorAddStructure;
 pub use tenet_operations::TensorOperationsBackend;
 pub(crate) use tenet_operations::TreeTransformReplayProfile;
@@ -149,7 +150,6 @@ pub use tenet_operations::{
 pub use tenet_operations::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TreeTransformBackend,
 };
-pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]

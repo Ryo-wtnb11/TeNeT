@@ -384,10 +384,11 @@ fn replay_structure_overwrite<D, C, B>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
+    destination_scales: &[(usize, C)],
     profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
 where
-    D: TreeTransformScalar,
+    D: TreeTransformScalar + RecouplingCoefficientAction<C>,
     C: Copy,
     B: TreeTransformBackend<D, C>,
 {
@@ -400,6 +401,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             profile,
         ),
         None => backend.tree_transform_structure_overwrite_into_raw(
@@ -410,6 +412,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
         ),
     }
 }
@@ -641,6 +644,7 @@ where
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
@@ -741,6 +745,7 @@ where
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: RecouplingCoefficientAction<C>,
     {
         self.compile_and_replay_overwrite(
             |context| {
@@ -907,6 +912,7 @@ where
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: RecouplingCoefficientAction<C>,
     {
         self.compile_and_replay_overwrite(
             |context| {
@@ -940,6 +946,7 @@ where
     ) -> Result<(), OperationError>
     where
         F: FnOnce(&mut Self) -> Result<TreeTransformStructure<C>, OperationError>,
+        D: RecouplingCoefficientAction<C>,
     {
         let structure = compile(self)?;
         let Self {
@@ -954,6 +961,7 @@ where
             dst_data,
             src_data,
             alpha,
+            &[],
             None,
         )
     }
@@ -1012,6 +1020,9 @@ where
         )
     }
 
+    /// Overwrite replay; the move writing destination block `b` is scaled by
+    /// `θ_b` from `destination_scales` (see
+    /// [`TreeTransformBackend::tree_transform_structure_overwrite_into_raw`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_structure_overwrite_into_raw(
         &mut self,
@@ -1021,7 +1032,11 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
-    ) -> Result<(), OperationError> {
+        destination_scales: &[(usize, C)],
+    ) -> Result<(), OperationError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
         let Self {
             backend, workspace, ..
         } = self;
@@ -1034,6 +1049,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             None,
         )
     }
@@ -1075,8 +1091,12 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
         let Self {
             backend, workspace, ..
         } = self;
@@ -1089,6 +1109,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             Some(profile),
         )
     }

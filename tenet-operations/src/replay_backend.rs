@@ -14,8 +14,8 @@ use crate::ReportsPlacement;
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
     tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
-    OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, TensorAddStructure,
-    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
+    HostKernelAdapter, OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter,
+    TensorAddStructure, TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
     TreeTransformWorkspace,
 };
 
@@ -78,9 +78,17 @@ where
         beta: D,
     ) -> Result<(), OperationError>;
 
+    /// Overwrites `dst` with `alpha * T(src)`, the move writing destination
+    /// block `b` scaled by `θ_b` from `destination_scales` (`(b, θ_b)`,
+    /// strictly increasing offsets; unlisted blocks have `θ_b = 1`).
+    ///
+    /// The provided implementation has no per-move access: after its zero
+    /// and accumulate passes it scales each listed block in place, one extra
+    /// pass over those blocks. The structural-recoupling backends fold the
+    /// scales into their moves instead.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the overwrite backend contract keeps workspace, replay structures, buffers, and alpha explicit"
+        reason = "the overwrite backend contract keeps workspace, replay structures, buffers, alpha and destination scales explicit"
     )]
     fn tree_transform_structure_overwrite_into_raw(
         &mut self,
@@ -91,7 +99,12 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
-    ) -> Result<(), OperationError> {
+        destination_scales: &[(usize, C)],
+    ) -> Result<(), OperationError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
+        validate_destination_scales(destination_scales)?;
         structure.validate_replay_structures(dst_structure, src_structure)?;
         crate::transform_replay::validate_replay_storage_len(src_structure, src_data.len())?;
         let mut kernels = StridedHostKernelAdapter::default();
@@ -111,7 +124,8 @@ where
             src_data,
             alpha,
             D::one(),
-        )
+        )?;
+        scale_destination_blocks(&mut kernels, dst_structure, dst_data, destination_scales)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -152,8 +166,12 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
         let start = std::time::Instant::now();
         let result = self.tree_transform_structure_overwrite_into_raw(
             workspace,
@@ -163,10 +181,56 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
         );
         profile.total += start.elapsed();
         result
     }
+}
+
+fn validate_destination_scales<C>(scales: &[(usize, C)]) -> Result<(), OperationError> {
+    if scales.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(OperationError::InvalidArgument {
+            message: "tree transform destination scales must have strictly increasing offsets",
+        });
+    }
+    Ok(())
+}
+
+/// Multiplies every non-empty destination block whose offset `scales` lists
+/// by its `θ_b` in place: the provided overwrite's explicit scale pass.
+fn scale_destination_blocks<D, C>(
+    kernels: &mut StridedHostKernelAdapter,
+    dst_structure: &BlockStructure,
+    dst_data: &mut [D],
+    scales: &[(usize, C)],
+) -> Result<(), OperationError>
+where
+    D: TreeTransformScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    if scales.is_empty() {
+        return Ok(());
+    }
+    for index in 0..dst_structure.block_count() {
+        let block = dst_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        if block.shape().contains(&0) {
+            continue;
+        }
+        let Ok(at) = scales.binary_search_by_key(&block.offset(), |&(offset, _)| offset) else {
+            continue;
+        };
+        kernels.scale_strided(
+            dst_data,
+            block.shape(),
+            &crate::strided::strides_to_isize(block.strides())?,
+            crate::strided::offset_to_isize(block.offset())?,
+            D::coefficient_as_data(scales[at].1),
+        )?;
+    }
+    Ok(())
 }
 
 /// Explicit marker for the legacy host-slice tree-transform backend family.
@@ -560,6 +624,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
         DenseTreeTransformOperations::default_executor()
             .tree_transform_structure_overwrite_into_raw(
@@ -570,6 +635,7 @@ where
                 dst_data,
                 src_data,
                 alpha,
+                destination_scales,
             )
     }
 }
@@ -659,6 +725,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
         let threads = self.effective_recoupling_threads(dst_data.len());
         crate::tree_transform_structure_overwrite_with_structural_recoupling_raw(
@@ -671,6 +738,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             threads,
         )
     }
@@ -713,6 +781,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let threads = self.effective_recoupling_threads(dst_data.len());
@@ -726,6 +795,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             threads,
             profile,
         )
@@ -866,10 +936,85 @@ mod tests {
                 &mut dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
 
         assert_eq!(dst, [6.0, 0.0]);
+    }
+
+    #[test]
+    fn provided_overwrite_scales_listed_blocks_as_a_folding_backend_does() {
+        // What: the provided overwrite's explicit scale pass gives the same
+        // destination as the structural backend folding θ_b into its moves,
+        // for a Single and both destinations of a Multi block; an unsorted
+        // list is rejected before the destination is touched.
+        let src = Arc::new(BlockStructure::packed_column_major(2, vec![vec![2, 2]; 3]).unwrap());
+        let dst = Arc::new(BlockStructure::packed_column_major(2, vec![vec![2, 2]; 4]).unwrap());
+        let structure = TreeTransformStructure::compile_structures(
+            &dst,
+            &src,
+            &[
+                crate::TreeTransformBlockSpec::single(0, 0, 2.0).with_source_axes([1, 0]),
+                crate::TreeTransformBlockSpec::multi(
+                    vec![1, 2],
+                    vec![1, 2],
+                    vec![1.0, 2.0, 3.0, 4.0],
+                ),
+            ],
+        )
+        .unwrap();
+        let source: Vec<f64> = (0..12).map(|index| 0.5 * index as f64 + 1.0).collect();
+        let scales = [(0, -1.0), (4, -1.0), (8, -1.0)];
+        let run = |provided: bool, scales: &[(usize, f64)]| {
+            let mut out = vec![f64::NAN; 16];
+            let mut workspace = TreeTransformWorkspace::default();
+            if provided {
+                RequiredMethodsOnlyBackend.tree_transform_structure_overwrite_into_raw(
+                    &mut workspace,
+                    &structure,
+                    &dst,
+                    &src,
+                    &mut out,
+                    &source,
+                    1.0,
+                    scales,
+                )
+            } else {
+                DenseTreeTransformOperations::default_executor()
+                    .tree_transform_structure_overwrite_into_raw(
+                        &mut workspace,
+                        &structure,
+                        &dst,
+                        &src,
+                        &mut out,
+                        &source,
+                        1.0,
+                        scales,
+                    )
+            }
+            .unwrap();
+            out
+        };
+        let expected = run(false, &scales);
+        assert_ne!(expected[..12], run(false, &[])[..12], "vacuous scales");
+        assert_eq!(run(true, &scales), expected);
+
+        let mut untouched = [5.0; 16];
+        let error = RequiredMethodsOnlyBackend
+            .tree_transform_structure_overwrite_into_raw(
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &dst,
+                &src,
+                &mut untouched,
+                &source,
+                1.0,
+                &[(4, -1.0), (0, -1.0)],
+            )
+            .unwrap_err();
+        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+        assert_eq!(untouched, [5.0; 16]);
     }
 
     #[test]
@@ -905,6 +1050,7 @@ mod tests {
                 &mut overwrite_dst,
                 &[3.0],
                 1.0,
+                &[],
                 &mut overwrite_profile,
             )
             .unwrap();
@@ -926,6 +1072,7 @@ mod tests {
                 &mut host_dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
         assert_eq!(host_dst, [6.0, 0.0]);
@@ -941,6 +1088,7 @@ mod tests {
                 &mut dense_dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
         assert_eq!(dense_dst, [6.0, 0.0]);
@@ -956,6 +1104,7 @@ mod tests {
                 &mut dense_dst,
                 &[3.0],
                 1.0,
+                &[],
                 &mut profile,
             )
             .unwrap();
