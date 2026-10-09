@@ -580,13 +580,14 @@ where
 /// [`overwrite_owned_blocks`] for `members` outputs of one structure stacked
 /// at stride `destination.required_len()`, read from a source whose members
 /// sit `source_member_stride` apart: each [`BlockOverwrite::copy`] writes its
-/// block for every member in one strided pass with a trailing member axis.
+/// block, and each piece of a [`BlockOverwrite::copy_runs`] gather its piece,
+/// for every member in one strided pass with a trailing member axis.
 ///
 /// The buffer is left uninitialized under the same tiling proof as
 /// [`overwrite_owned_blocks`], taken on the member structure: if its blocks
 /// partition `0..L`, the (block, member) rectangles partition `0..members * L`,
 /// member `m`'s image being the member-0 image shifted by `m * L`. Only
-/// [`BlockOverwrite::copy`] is supported.
+/// [`BlockOverwrite::copy`] and [`BlockOverwrite::copy_runs`] are supported.
 #[doc(hidden)]
 pub fn overwrite_owned_member_blocks<D>(
     destination: &BlockStructure,

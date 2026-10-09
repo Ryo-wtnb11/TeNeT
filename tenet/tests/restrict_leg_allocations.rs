@@ -477,9 +477,10 @@ fn stacked_restrict_leg_allocates_one_unfilled_payload_independent_of_the_member
 
 /// One restriction and one embedding of a leg whose kept positions are every
 /// other degeneracy index (`Σ_c ceil(n_c / 2)` runs, one per kept position,
-/// the `eig` worst case) with degeneracies `scale` times a base shape: the
-/// two warm measurements and the restricted payload bytes.
-fn alternate_runs_measurement(scale: usize) -> (Measurement, Measurement, usize) {
+/// the `eig` worst case: 4 at scale 1, 28 at scale 8) with degeneracies
+/// `scale` times a base shape: the two warm measurements and the restricted
+/// and embedded payload bytes.
+fn alternate_runs_measurement(scale: usize) -> (Measurement, Measurement, usize, usize) {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = u1(
@@ -511,15 +512,16 @@ fn alternate_runs_measurement(scale: usize) -> (Measurement, Measurement, usize)
         output.unwrap().dense_data().unwrap(),
         warm.dense_data().unwrap()
     );
+    let embedded_bytes = std::mem::size_of_val(warm_embedded.dense_data().unwrap());
     let mut embedded = None;
-    let embed = measure(0, || {
+    let embed = measure(embedded_bytes, || {
         embedded = Some(black_box(warm.embed_leg(0, &selection).unwrap()));
     });
     assert_eq!(
         embedded.unwrap().dense_data().unwrap(),
         warm_embedded.dense_data().unwrap()
     );
-    (restrict, embed, payload_bytes)
+    (restrict, embed, payload_bytes, embedded_bytes)
 }
 
 #[test]
@@ -529,8 +531,8 @@ fn a_many_run_selection_allocates_nothing_per_run() {
     // so the number of runs (here growing with the degeneracies) costs no
     // allocation: the restriction pays exactly what a contiguous one does,
     // and the embedding is independent of the run count.
-    let (small_restrict, small_embed, small_bytes) = alternate_runs_measurement(1);
-    let (large_restrict, large_embed, large_bytes) = alternate_runs_measurement(8);
+    let (small_restrict, small_embed, small_bytes, small_embedded) = alternate_runs_measurement(1);
+    let (large_restrict, large_embed, large_bytes, large_embedded) = alternate_runs_measurement(8);
     assert!(large_bytes > small_bytes);
     for (measurement, bytes) in [
         (&small_restrict, small_bytes),
@@ -549,4 +551,9 @@ fn a_many_run_selection_allocates_nothing_per_run() {
         "non-payload bytes must not depend on the run count"
     );
     assert_eq!(small_embed.allocations, large_embed.allocations);
+    assert_eq!(
+        small_embed.bytes - small_embedded,
+        large_embed.bytes - large_embedded,
+        "embedding non-payload bytes must not depend on the run count"
+    );
 }
