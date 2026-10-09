@@ -346,8 +346,9 @@ use cuda_factor::{
 use cuda_factor::{
     observe_cuda_arithmetic, observe_cuda_qr_output_upload,
     observe_cuda_svd_final_storage_creation, CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE,
-    CUDA_EIGH_FORCE_SELECTOR, CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION,
-    CUDA_REDUCTION_BUFFER_OBSERVATION, CUDA_SVD_OBSERVATION, CUDA_SVD_TREEWISE,
+    CUDA_EIGH_FORCE_SELECTOR, CUDA_EIGH_REVERSE_ODD_SECTORS, CUDA_EIGH_SELECTOR_UPLOADS,
+    CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION, CUDA_REDUCTION_BUFFER_OBSERVATION,
+    CUDA_SVD_OBSERVATION, CUDA_SVD_TREEWISE,
 };
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::seam::{compact_factor_routes, CompactFactorPlan, CompactFactorRoute};

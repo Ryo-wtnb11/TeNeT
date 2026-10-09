@@ -513,7 +513,7 @@ where
             let mut spectra = Vec::with_capacity(plan.source_regions().len());
             let mut orders = Vec::with_capacity(plan.source_regions().len());
             let mut permuted = false;
-            for region in plan.source_regions().iter() {
+            for (region, _sector_index) in plan.source_regions().iter().zip(0usize..) {
                 let n = region.rows();
                 let values = if n == 0 {
                     Vec::new()
@@ -528,8 +528,19 @@ where
                     ));
                 }
                 let mut order = vec![0; n];
-                let sorted = if tenet_matrixalgebra::seam::ascending_eigh_order(&values, &mut order)
-                {
+                let reorder = tenet_matrixalgebra::seam::ascending_eigh_order(&values, &mut order);
+                // Test-only: reverse every odd sector's order, so the selector
+                // path sees a real, non-identity permutation.
+                #[cfg(test)]
+                let reorder = reorder
+                    || (CUDA_EIGH_REVERSE_ODD_SECTORS.with(std::cell::Cell::get)
+                        && _sector_index % 2 == 1
+                        && n >= 2
+                        && {
+                            order.reverse();
+                            true
+                        });
+                let sorted = if reorder {
                     permuted = true;
                     order.iter().map(|&index| values[index]).collect()
                 } else {

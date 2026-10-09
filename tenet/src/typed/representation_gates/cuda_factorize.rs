@@ -571,6 +571,100 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore = "requires a real CUDA device"]
+fn typed_cuda_eigh_selector_applies_a_non_identity_order() {
+    // What: cuSOLVER's order is already ascending, so the selector assembly
+    // only runs for a non-identity order. Reversing every odd sector's order
+    // (test toggle) makes that permutation real next to identity sectors:
+    // values follow the injected order, every column pairs with its value
+    // (`t v = v d`), and one selector is uploaded, on aligned and per-tree
+    // routes alike.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 1),
+            (U1Irrep::new(1), 2),
+        ],
+    )
+    .unwrap();
+    let source =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 13)
+            .unwrap();
+    let source = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
+    let device = source.to_cuda().unwrap();
+    let sectors = sector_regions(
+        device.logical_space().space().structure(),
+        device.logical_space().space().nout(),
+    )
+    .unwrap();
+    let trees: usize = sectors.iter().map(|region| region.row_trees().len()).sum();
+    let reversed: Vec<bool> = sectors
+        .iter()
+        .enumerate()
+        .map(|(index, region)| index % 2 == 1 && region.rows() >= 2)
+        .collect();
+    assert!(reversed.iter().any(|&r| r) && reversed.iter().any(|&r| !r));
+    let eigh = |device: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>| {
+        let Eigh { d, v } = device
+            .eigh_full(
+                &codomain_axes(device),
+                &domain_axes(device),
+                HermitianTol::DEFAULT,
+            )
+            .unwrap();
+        (d.to_host().unwrap(), v.to_host().unwrap())
+    };
+    let (ascending, _) = eigh(&device);
+    let ascending = ascending.diagview().unwrap();
+    // The spectra list the sectors in source-region order.
+    assert_eq!(
+        ascending
+            .iter()
+            .map(|entry| entry.values.len())
+            .collect::<Vec<_>>(),
+        sectors
+            .iter()
+            .map(|region| region.rows())
+            .collect::<Vec<_>>()
+    );
+
+    for (treewise, gemms) in [(false, sectors.len()), (true, trees)] {
+        CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
+        CUDA_EIGH_REVERSE_ODD_SECTORS.with(|flag| flag.set(true));
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
+        let (d, v) = eigh(&device);
+        CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
+        CUDA_EIGH_REVERSE_ODD_SECTORS.with(|flag| flag.set(false));
+        assert_eq!(
+            CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
+            Some(1)
+        );
+        CUDA_QR_OBSERVATION.with(|observation| {
+            let (_, factor_copies, _, _, assembly_gemms, _, _) = observation.get().unwrap();
+            assert_eq!((factor_copies, assembly_gemms), (0, gemms));
+            observation.set(None);
+        });
+        for ((entry, want), &reverse) in d.diagview().unwrap().iter().zip(&ascending).zip(&reversed)
+        {
+            let mut want = want.values.clone();
+            if reverse {
+                want.reverse();
+            }
+            assert_eq!(entry.values, want, "treewise {treewise}");
+        }
+        assert_typed_map_close(
+            &source.compose(&v).unwrap(),
+            &v.compose(&d).unwrap(),
+            1.0e-10,
+        );
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
 fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(SU2FusionRule);

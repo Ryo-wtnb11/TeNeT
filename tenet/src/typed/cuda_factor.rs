@@ -35,6 +35,10 @@ thread_local! {
     /// Forces the selector-GEMM EIGH assembly even when every order is the
     /// identity, so the column-copy path can be compared with it.
     pub(super) static CUDA_EIGH_FORCE_SELECTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Reverses the published order of every odd-indexed source sector of
+    /// device `eigh_full`, so the selector assembly runs a non-identity
+    /// permutation on solver output that is already ascending.
+    pub(super) static CUDA_EIGH_REVERSE_ODD_SECTORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Selector uploads made by device `eigh_full` assembly.
     pub(super) static CUDA_EIGH_SELECTOR_UPLOADS: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
