@@ -386,8 +386,10 @@ where
     ///
     /// No truncation decision is made: every eigenpair is kept. Eigenvalues are
     /// the only numerical payload that crosses to the host, where they are
-    /// sorted by descending `|λ|`; the eigenvectors stay on the device and
-    /// their columns are gathered into that order by the assembly selector.
+    /// put in the Host order (ascending per sector; cuSOLVER `syevd` already
+    /// returns it, so only an O(n) check runs); the eigenvectors stay on the
+    /// device and their columns are gathered into that order by the assembly
+    /// selector.
     ///
     /// Transfers, exactly:
     ///
@@ -400,7 +402,7 @@ where
     ///   stage 3 (nonzero, finite residual maximum): at most two per
     ///   sector.
     /// - Device to host: all sectors' eigenvalues (`Σ_c n_c` real values) in
-    ///   one download, which the non-finite check, the host `|λ|` order and
+    ///   one download, which the non-finite check, the host ascending order and
     ///   the factor-space plan consume.
     /// - Host to device: `d` as one dense upload of `Σ_c n_c²` elements with
     ///   the sorted eigenvalues already on its diagonal, one zero upload for
@@ -522,14 +524,13 @@ where
                         "CUDA EIGH returned a non-finite eigenvalue",
                     ));
                 }
-                let mut order: Vec<_> = (0..n).collect();
-                order.sort_by(|&left, &right| {
-                    values[right]
-                        .abs()
-                        .total_cmp(&values[left].abs())
-                        .then(left.cmp(&right))
-                });
-                let sorted = order.iter().map(|&index| values[index]).collect();
+                let mut order = vec![0; n];
+                let sorted = if tenet_matrixalgebra::seam::ascending_eigh_order(&values, &mut order)
+                {
+                    order.iter().map(|&index| values[index]).collect()
+                } else {
+                    values
+                };
                 spectra.push(tenet_matrixalgebra::SectorSpectrum {
                     sector: region.coupled(),
                     values: sorted,

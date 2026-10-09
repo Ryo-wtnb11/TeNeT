@@ -266,9 +266,9 @@ impl SpectrumMagnitude for num_complex::Complex32 {
     }
 }
 
-/// One coupled sector's factorization spectrum, stored descending by
-/// magnitude: singular values (`f64`), Hermitian eigenvalues (signed `f64`),
-/// or general eigenvalues (`Complex64`).
+/// One coupled sector's factorization spectrum: singular values (`f64`,
+/// descending), Hermitian eigenvalues (signed `f64`, ascending), or general
+/// eigenvalues (`Complex64`, ascending lexicographic `(re, im)`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectorSpectrum<V = f64> {
     pub sector: SectorId,

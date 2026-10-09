@@ -1183,7 +1183,7 @@ impl std::error::Error for BatchError {
 ///
 /// Member `i` of `d` and `v` is the eager `eigh_full` of the same placement
 /// on member `i` of the source; `spectra[i]` is that member's eigenvalues per
-/// coupled sector, in sector-label order, each descending by `|λ|` as in `d`.
+/// coupled sector, in sector-label order, each ascending as in `d`.
 /// `d` is stored dense: a stack holds dense payloads only, so the eager Host
 /// compact diagonal is materialized.
 pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
@@ -1209,7 +1209,8 @@ pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
 ///   alone, since `eigh_full` keeps every eigenpair. Each call then admits
 ///   the whole batch (at most three downloads), solves each coupled sector
 ///   of all members with one batched solver call, downloads every spectrum
-///   once, sorts each member by descending `|λ|` on the host as eager does,
+///   once, orders each member ascending on the host as eager does (an O(n)
+///   check: the solver already returns ascending values),
 ///   and assembles `v` by one batched column gather per coupled sector
 ///   followed by one strided copy per aligned sector (per codomain tree
 ///   otherwise). Submissions, host syncs and
@@ -2062,8 +2063,7 @@ where
             .map_err(dense_err)?;
         drop(device_spectra);
 
-        // Per member and route, eager's order: descending |λ|, index
-        // tie-break, on the solver's own (ascending) order.
+        // Per member and route, eager's order (one authority).
         let total = device.spectrum_len;
         workspace.sorted.clear();
         workspace.sorted.resize(total * members, 0.0);
@@ -2078,15 +2078,7 @@ where
                 let values = &raw[base..base + n];
                 finite &= values.iter().all(|value| value.is_finite());
                 let order = &mut workspace.orders[base..base + n];
-                for (index, slot) in order.iter_mut().enumerate() {
-                    *slot = index;
-                }
-                order.sort_by(|&left, &right| {
-                    values[right]
-                        .abs()
-                        .total_cmp(&values[left].abs())
-                        .then(left.cmp(&right))
-                });
+                tenet_matrixalgebra::seam::ascending_eigh_order(values, order);
                 for (slot, &index) in workspace.sorted[base..base + n]
                     .iter_mut()
                     .zip(order.iter())

@@ -64,14 +64,83 @@ impl HermitianTol {
 /// sending additional nearly-Hermitian inputs from Padé to that spectral route.
 pub(crate) const EXP_SPECTRAL_ROUTE_EPSILONS: f64 = 64.0;
 
+/// TeNeT's EIGH value order within one coupled sector (#1985): ascending.
+///
+/// Writes into `order` (`order.len() == values.len()`) the stable permutation
+/// with `values[order[k]]` ascending, and returns whether it is not the
+/// identity. Already-ascending input, the order every LAPACK/faer/cuSOLVER
+/// `syev`-family solver returns, costs one O(n) scan and no sort, so callers
+/// skip the value and eigenvector permutation on `false`.
+///
+/// Reference: MatrixAlgebraKit v0.6.8 dense `eigh_full!`/`eigh_vals!`
+/// forward LAPACK's ascending order unsorted, and `DiagonalAlgorithm`
+/// sorts by `real` with the stable `sortperm`
+/// (<https://github.com/QuantumKitHub/MatrixAlgebraKit.jl/blob/33d77fdf032d5ffa36310a04c21aef0c51a554f3/src/implementations/eigh.jl#L179>).
+pub fn ascending_eigh_order(values: &[f64], order: &mut [usize]) -> bool {
+    stable_ascending_order(values, order, f64::total_cmp)
+}
+
+/// TeNeT's EIG value order within one coupled sector (#1985): ascending
+/// lexicographic `(real(λ), imag(λ))`, approved 2026-10-07 for every route.
+///
+/// Same contract as [`ascending_eigh_order`]. Reference: MatrixAlgebraKit
+/// v0.6.8 `eig_sortby` for `DiagonalAlgorithm`
+/// (<https://github.com/QuantumKitHub/MatrixAlgebraKit.jl/blob/33d77fdf032d5ffa36310a04c21aef0c51a554f3/src/implementations/eig.jl#L162>).
+/// Why TeNeT also sorts dense sectors, where MAK `eig_full_qr_iteration!`
+/// keeps `geev`'s unspecified order: one representation-independent public
+/// order (approved deviation, #1985), at O(n log n) per sector next to the
+/// O(n³) solver.
+pub fn lexicographic_eig_order(values: &[Complex64], order: &mut [usize]) -> bool {
+    stable_ascending_order(values, order, lexicographic_eig_cmp)
+}
+
+fn lexicographic_eig_cmp(left: &Complex64, right: &Complex64) -> std::cmp::Ordering {
+    left.re
+        .total_cmp(&right.re)
+        .then(left.im.total_cmp(&right.im))
+}
+
+fn stable_ascending_order<T>(
+    values: &[T],
+    order: &mut [usize],
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
+) -> bool {
+    for (index, slot) in order.iter_mut().enumerate() {
+        *slot = index;
+    }
+    if values.is_sorted_by(|left, right| cmp(left, right).is_le()) {
+        return false;
+    }
+    order.sort_by(|&left, &right| cmp(&values[left], &values[right]));
+    #[cfg(test)]
+    EIG_ORDER_PERMUTATIONS.with(|count| count.set(count.get() + 1));
+    true
+}
+
+/// Values-only form of the same order: sorts `values` in place, skipping the
+/// sort when already ordered.
+fn sort_spectrum<T>(values: &mut [T], cmp: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    if !values.is_sorted_by(|left, right| cmp(left, right).is_le()) {
+        values.sort_by(cmp);
+        #[cfg(test)]
+        EIG_ORDER_PERMUTATIONS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Sectors whose eigenvalues the order authority had to permute.
+    pub(crate) static EIG_ORDER_PERMUTATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
 ///
 /// Requires an endomorphism (`codomain == domain`) with Hermitian coupled
-/// blocks. Bond states are stored descending by `|eigenvalue|` per sector
-/// (the shared `*_full` contract that makes truncation a prefix rule);
-/// `eigenvalues` keeps the signed values in that order and `D : W <- W` is
-/// their diagonal tensor.
+/// blocks. Bond states are stored ascending by eigenvalue per sector
+/// ([`ascending_eigh_order`]); `eigenvalues` keeps the signed values in that
+/// order and `D : W <- W` is their diagonal tensor.
 #[derive(Clone, Debug)]
 pub(crate) struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
     pub d: BoundTensorMap<R, D, 1, 1>,
@@ -350,20 +419,21 @@ where
     })
 }
 
-/// Sorts one admitted real diagonal sector into the dense EIGH order and
-/// writes the matching permutation into the zeroed column-major `n x n`
-/// `vectors`. Dense EIGH orders signed values ascending, then stably by
-/// descending magnitude, so `-x` precedes `+x`.
+/// Sorts one admitted real diagonal sector into [`ascending_eigh_order`]
+/// and writes the matching permutation into the zeroed column-major `n x n`
+/// `vectors` (MAK `eigh_full!(::Diagonal, …, ::DiagonalAlgorithm)`).
 fn compact_diagonal_eigh_sector<D: FactorScalar>(values: &[D], vectors: &mut [D]) -> Vec<f64> {
     let n = values.len();
-    let real = |index: usize| values[index].widen_complex().re;
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| real(a).total_cmp(&real(b)));
-    order.sort_by(|&a, &b| real(b).abs().total_cmp(&real(a).abs()));
+    let real: Vec<f64> = values
+        .iter()
+        .map(|value| value.widen_complex().re)
+        .collect();
+    let mut order = vec![0; n];
+    ascending_eigh_order(&real, &mut order);
     for (column, &row) in order.iter().enumerate() {
         vectors[column * n + row] = D::from_real(1.0);
     }
-    order.into_iter().map(real).collect()
+    order.into_iter().map(|index| real[index]).collect()
 }
 
 /// Checked-provider full eigenbasis of an owned compact diagonal; output
@@ -445,7 +515,7 @@ pub(crate) fn eigenvector_gauge<D: FactorScalar>(
 #[cfg(test)]
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
 /// `eig_full`): always complex, requires an endomorphism. Bond states are
-/// stored descending by `|eigenvalue|` per sector.
+/// stored per sector in [`lexicographic_eig_order`].
 #[derive(Clone, Debug)]
 pub(crate) struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
     pub d: BoundTensorMap<R, D::Eig, 1, 1>,
@@ -598,29 +668,23 @@ where
     })
 }
 
-/// Sorts one admitted complex diagonal sector by descending magnitude, with
-/// ties in stored order, and writes the matching permutation into the zeroed
-/// column-major `n x n` `vectors`.
+/// Sorts one admitted complex diagonal sector into
+/// [`lexicographic_eig_order`] and writes the matching permutation into the
+/// zeroed column-major `n x n` `vectors` (MAK `eig_full!(::Diagonal, …,
+/// ::DiagonalAlgorithm)`).
 fn compact_diagonal_eig_sector<D: FactorScalar>(
     values: &[D],
     vectors: &mut [D::Eig],
 ) -> Vec<Complex64> {
     let n = values.len();
-    let mut ordered: Vec<_> = values
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(row, value)| {
-            let value = value.widen_complex();
-            (row, value, value.norm())
-        })
-        .collect();
-    ordered.sort_by(|a, b| b.2.total_cmp(&a.2));
-    for (column, &(row, _, _)) in ordered.iter().enumerate() {
+    let complex: Vec<Complex64> = values.iter().map(|value| value.widen_complex()).collect();
+    let mut order = vec![0; n];
+    lexicographic_eig_order(&complex, &mut order);
+    for (column, &row) in order.iter().enumerate() {
         vectors[column * n + row] =
             <D::Eig as FactorScalar>::from_complex64(Complex64::new(1.0, 0.0));
     }
-    ordered.into_iter().map(|(_, value, _)| value).collect()
+    order.into_iter().map(|index| complex[index]).collect()
 }
 
 /// Checked-provider full general eigenbasis of an owned compact diagonal;
@@ -708,10 +772,7 @@ where
             .map(|&value| value.widen_complex().re)
             .collect();
         validate_real_eigenvalues(&values)?;
-        // Dense EIGH first orders signed values ascending, then stably sorts
-        // by magnitude. The first pass preserves its tie order for ±x.
-        values.sort_by(f64::total_cmp);
-        values.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
+        sort_spectrum(&mut values, f64::total_cmp);
         result.push(SectorSpectrum {
             sector: region.coupled(),
             values,
@@ -785,8 +846,7 @@ fn normwise_hermitian_diagonal<D: FactorScalar, R: HermitianReal>(values: &[D], 
 }
 
 /// General eigenvalues of a compact diagonal: the values themselves in
-/// TeNeT's eigenvalue order (descending magnitude, stable), after the dense
-/// route's eigenvalue check.
+/// [`lexicographic_eig_order`], after the dense route's eigenvalue check.
 fn eig_vals_diagonal<A, R, D>(
     authority: &A,
     space: &BoundDynamicFusionMapSpace<R>,
@@ -807,7 +867,7 @@ where
             .map(|&value| value.widen_complex())
             .collect();
         validate_complex_eigenvalues(&values)?;
-        values.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
+        sort_spectrum(&mut values, lexicographic_eig_cmp);
         result.push(SectorSpectrum {
             sector: region.coupled(),
             values,
@@ -823,7 +883,7 @@ fn missing_compact_plan() -> OperationError {
 }
 
 #[cfg(test)]
-/// All Hermitian eigenvalues per coupled sector, descending by magnitude
+/// All Hermitian eigenvalues per coupled sector, ascending
 /// (MatrixAlgebraKit `eigh_vals`).
 ///
 /// Admits Hermitian blocks at [`HermitianTol::DEFAULT`].
@@ -851,11 +911,9 @@ where
 {
     let space = input.space().space();
     // Values-only: per sector call the no-vector Hermitian eig (`eigh_vals`,
-    // LAPACK `job='N'`) and keep the spectrum sorted descending by magnitude.
-    // Skips the eigenvector space/buffer, the vector reorder, gauge-fixing, and
-    // the block scatter that `eigh_full_dyn` did only to discard here. The sort
-    // is stable, so equal-magnitude ties keep LAPACK order — bit-for-bit the
-    // ordering `eigh_full_dyn` produces (it breaks ties by original index).
+    // LAPACK `job='N'`) and publish the spectrum ascending. Skips the
+    // eigenvector space/buffer, the vector reorder, gauge-fixing, and the block
+    // scatter that `eigh_full_dyn` did only to discard here.
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(OperationError::SpaceMismatch {
             message: "eigh requires an endomorphism (codomain == domain)",
@@ -871,7 +929,7 @@ where
 }
 
 #[cfg(test)]
-/// All general eigenvalues per coupled sector, descending by magnitude
+/// All general eigenvalues per coupled sector in [`lexicographic_eig_order`]
 /// (MatrixAlgebraKit `eig_vals`).
 pub(crate) fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -896,11 +954,9 @@ where
 {
     let space = input.space().space();
     // Values-only: per sector call the no-vector general eig (`eig_vals`, LAPACK
-    // `job='N'`) and keep the complex spectrum sorted descending by magnitude.
+    // `job='N'`) and publish the complex spectrum in lexicographic order.
     // Skips the eigenvector reorder, gauge-fixing, and the factor-pair block
-    // assembly that `eig_full_dyn` did only to discard here. LAPACK's QR
-    // iteration yields the same eigenvalues regardless of `jobvr`, and the sort
-    // is stable, so this matches `eig_full_dyn`'s ordering bit-for-bit.
+    // assembly that `eig_full_dyn` did only to discard here.
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(OperationError::SpaceMismatch {
             message: "eig requires an endomorphism (codomain == domain)",
@@ -932,8 +988,8 @@ impl<D: FactorScalar> EighScratch<D> {
 }
 
 /// Hermitian eigendecomposition of one `n x n` coupled-sector matrix: values
-/// descending by magnitude (stable on ties), eigenvectors reordered to match
-/// and phase-gauged.
+/// in [`ascending_eigh_order`], eigenvectors reordered to match (only when
+/// the solver's order is not already ascending) and phase-gauged.
 #[inline]
 fn eigh_sector_stage<E, D>(
     dense: &mut E,
@@ -953,23 +1009,20 @@ where
         column,
     } = scratch;
     order.clear();
-    order.extend(0..n);
-    // Reorder bond states descending by |eigenvalue| (stable on ties).
-    order.sort_by(|&a, &b| {
-        real_values[b]
-            .abs()
-            .total_cmp(&real_values[a].abs())
-            .then(a.cmp(&b))
-    });
-    let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-    reorder_columns_in_place(&mut vectors, n, order, visited, column);
+    order.resize(n, 0);
+    let sorted_values = if ascending_eigh_order(&real_values, order) {
+        reorder_columns_in_place(&mut vectors, n, order, visited, column);
+        order.iter().map(|&index| real_values[index]).collect()
+    } else {
+        real_values
+    };
     eigenvector_gauge(&mut vectors, n, n, n);
     Ok((sorted_values, vectors))
 }
 
 /// General eigendecomposition of one `n x n` endomorphism sector, shared by
-/// both fusion modes: values descending by magnitude (stable on ties),
-/// eigenvectors reordered to match and phase-gauged.
+/// both fusion modes: values in [`lexicographic_eig_order`], eigenvectors
+/// reordered to match and phase-gauged.
 ///
 /// Borrowed contract: MatrixAlgebraKit v0.6.8 `eig_full_qr_iteration!`
 /// (<https://github.com/QuantumKitHub/MatrixAlgebraKit.jl/blob/33d77fdf032d5ffa36310a04c21aef0c51a554f3/src/implementations/eig.jl#L117>)
@@ -1011,13 +1064,8 @@ where
     let complex_values: Vec<Complex64> =
         values.iter().map(|&value| value.widen_complex()).collect();
     validate_complex_eigenvalues(&complex_values)?;
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        complex_values[b]
-            .norm()
-            .total_cmp(&complex_values[a].norm())
-            .then(a.cmp(&b))
-    });
+    let mut order = vec![0; n];
+    lexicographic_eig_order(&complex_values, &mut order);
     let sorted_values: Vec<Complex64> = order.iter().map(|&index| complex_values[index]).collect();
     let mut sorted_vectors = vec![<D::Eig as num_traits::Zero>::zero(); n * n];
     for (position, &index) in order.iter().enumerate() {
@@ -1029,7 +1077,7 @@ where
 }
 
 /// Hermitian eigenvalues of every sector through the no-vector solver,
-/// descending by magnitude (stable on ties, so LAPACK order breaks them).
+/// ascending.
 fn eigh_vals_spectra<E, D>(
     dense: &mut E,
     matrices: &(impl SectorMatrices<D> + ?Sized),
@@ -1052,7 +1100,7 @@ where
         let mut sorted = D::real_spectrum(&values_tensor).map_err(OperationError::Dense)?;
         sorted.truncate(n);
         validate_real_eigenvalues(&sorted)?;
-        sorted.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
+        sort_spectrum(&mut sorted, f64::total_cmp);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted,
@@ -1061,8 +1109,8 @@ where
     Ok(eigenvalues)
 }
 
-/// General eigenvalues of every sector through the no-vector solver,
-/// descending by magnitude (stable on ties).
+/// General eigenvalues of every sector through the no-vector solver, in
+/// [`lexicographic_eig_order`].
 fn eig_vals_spectra<E, D>(
     dense: &mut E,
     matrices: &(impl SectorMatrices<D> + ?Sized),
@@ -1087,7 +1135,7 @@ where
             <D::Eig as FactorScalar>::dense_slice(&values_tensor).map_err(OperationError::Dense)?;
         let mut sorted: Vec<Complex64> = values[..n].iter().map(|&v| v.widen_complex()).collect();
         validate_complex_eigenvalues(&sorted)?;
-        sorted.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
+        sort_spectrum(&mut sorted, lexicographic_eig_cmp);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted,
@@ -1613,8 +1661,8 @@ where
     Ok(EigFullDyn { v, eigenvalues })
 }
 
-/// Hermitian eigenvalues of `source` in fusion mode `M`, descending by
-/// magnitude per coupled sector. A compact diagonal is read directly; only
+/// Hermitian eigenvalues of `source` in fusion mode `M`, ascending per
+/// coupled sector. A compact diagonal is read directly; only
 /// dense storage leases an executor.
 #[doc(hidden)]
 pub fn eigh_vals_from_source<M, L, E, R, D>(
@@ -1637,8 +1685,8 @@ where
     )
 }
 
-/// General eigenvalues of `source` in fusion mode `M`, descending by
-/// magnitude per coupled sector. A compact diagonal is read directly; only
+/// General eigenvalues of `source` in fusion mode `M`, in
+/// [`lexicographic_eig_order`] per coupled sector. A compact diagonal is read directly; only
 /// dense storage leases an executor.
 #[doc(hidden)]
 pub fn eig_vals_from_source<M, L, E, R, D>(

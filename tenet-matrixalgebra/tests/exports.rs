@@ -206,11 +206,11 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
         names(
             "admit_compact_diagonal compact_factor_routes coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
              decide_bond_truncation_generic_checked \
-             diagonal_bond_data eig_full_dyn eig_full_from_source \
+             ascending_eigh_order diagonal_bond_data eig_full_dyn eig_full_from_source \
              eig_vals_dyn eig_vals_from_source \
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \
-             left_null_from_source \
+             left_null_from_source lexicographic_eig_order \
              left_polar_adjoint_from_parent left_polar_from_source left_polar_of_diagonal \
              lq_compact_from_source lq_full_from_source pinv_diagonal_spectrum \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
