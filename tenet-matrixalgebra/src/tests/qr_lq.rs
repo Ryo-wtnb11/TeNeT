@@ -1141,3 +1141,38 @@ fn lq_compact_positive_gauge_idempotent_on_isometry() {
     assert_svd_blocks_match(&q, &q2);
     assert_identity_sector_matrices(&dense_sector_matrices(1, &l2));
 }
+
+#[test]
+fn lazy_adjoint_lq_tree_route_publishes_the_region_route_factors() {
+    // What: without region admission, LQ of a lazy adjoint publishes by tree
+    // identity exactly the factors its region route publishes (#2070).
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let bound = bound.as_ref();
+    let parent = bound.dynamic();
+    let adjoint_space =
+        <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::CoefficientAlgebra<
+            Z2FusionRule,
+        >>::adjoint_space(parent.space())
+        .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for full in [false, true] {
+        let mut run = || {
+            if full {
+                crate::factorize::lq_full_adjoint_dyn(&mut dense, &parent, &adjoint_space)
+            } else {
+                crate::factorize::lq_compact_adjoint_dyn(&mut dense, &parent, &adjoint_space)
+            }
+            .unwrap()
+        };
+        let regions = run();
+        crate::factorize::reset_input_pack_bytes();
+        let by_tree = crate::factorize::with_forced_input_pack(&mut run);
+        assert!(crate::factorize::input_pack_bytes() > 0, "full {full}");
+        for (region, tree) in [(&regions.l, &by_tree.l), (&regions.q, &by_tree.q)] {
+            assert_eq!(region.space().space(), tree.space().space(), "full {full}");
+            assert_eq!(region.data(), tree.data(), "full {full}");
+        }
+    }
+}

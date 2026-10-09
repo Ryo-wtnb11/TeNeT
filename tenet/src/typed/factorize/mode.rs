@@ -62,21 +62,23 @@ impl FactorOp {
             // `A^H = V S U^H`: the mode's adjoint stage factors the parent and
             // gauges the final left factor `V`, as materialize-then-SVD
             // would; and `(A^H)^+ = U S^+ Vh` from the same parent SVD.
-            Self::SvdCompact | Self::SvdFull | Self::Pinv => AdjointRule::AdjointSeam,
+            // LQ of `A^H` is computed as the QR of its adjoint, which is the
+            // parent `A` itself, so the stage reads `A` and publishes
+            // `A^H = R^H Q^H` (#2070).
+            Self::SvdCompact | Self::SvdFull | Self::Pinv | Self::LqCompact | Self::LqFull => {
+                AdjointRule::AdjointSeam
+            }
             // The null space of `A^H` is the adjoint of the opposite null
             // space of `A`, `left_polar(A^H)` is the adjoint-swapped
             // `right_polar(A)` (and vice versa), and `(A^H)^-1 = (A^-1)^H`.
             Self::LeftNull | Self::RightNull | Self::LeftPolar | Self::RightPolar | Self::Inv => {
                 AdjointRule::Redirect
             }
-            // Why not redirect QR through LQ of the parent: LQ is itself the
-            // QR of the adjoint, so it would form this copy anyway and add
-            // two factor adjoints. Why not redirect LQ to QR of the parent:
-            // detaching `R^H` and `Q^H` copies at least `min(m, n) (m + n)
-            // >= m n` elements per sector, never fewer than this input copy.
-            Self::QrCompact | Self::QrFull | Self::LqCompact | Self::LqFull => {
-                AdjointRule::Materialize
-            }
+            // Why not read QR's parent through LQ (TensorKit's
+            // `qr_compact!` on an `AdjointTensorMap`): LQ is itself the QR of
+            // the adjoint, so it would form this copy anyway and add two
+            // factor adjoints.
+            Self::QrCompact | Self::QrFull => AdjointRule::Materialize,
             // Why not read the parent: an admitted near-Hermitian input
             // differs from its adjoint and the solver reads one triangle; the
             // values of `B^H` are `conj` of those of `B` only as a multiset,

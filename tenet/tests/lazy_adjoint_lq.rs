@@ -33,7 +33,9 @@ impl Distance for Complex64 {
     }
 }
 
-/// Same spaces, same storage, same values within dense rounding.
+/// Same spaces, same values in the same gauge. Both routes hand the same
+/// block to the same dense QR and gauge; the tolerance only admits a dense
+/// kernel whose rounding depends on buffer alignment.
 macro_rules! assert_factor_close {
     ($what:expr, $lazy:expr, $eager:expr) => {{
         let (what, lazy, eager) = ($what, &$lazy, &$eager);

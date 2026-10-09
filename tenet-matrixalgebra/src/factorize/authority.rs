@@ -124,6 +124,26 @@ pub trait FactorMode<R>: sealed::Sealed {
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
 
+    /// LQ of the lazy adjoint of `parent`, whose own layout is
+    /// `adjoint_space`, read in place (#2070).
+    fn lq_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn lq_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
     // SVD: the multiplicity-free and checked diagonal and dense stages
     // publish `U`/`Vh` through their own builders.
 
@@ -322,6 +342,30 @@ where
         lq_full_dyn(dense, input)
     }
 
+    fn lq_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_compact_adjoint_dyn(dense, parent, adjoint_space)
+    }
+
+    fn lq_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_full_adjoint_dyn(dense, parent, adjoint_space)
+    }
+
     fn eigh_full_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
@@ -482,6 +526,30 @@ where
         D: FactorScalar,
     {
         lq_full_dyn_checked_generic(dense, input)
+    }
+
+    fn lq_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_compact_adjoint_dyn_checked_generic(dense, parent, adjoint_space)
+    }
+
+    fn lq_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+        adjoint_space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_full_adjoint_dyn_checked_generic(dense, parent, adjoint_space)
     }
 
     fn eigh_full_diagonal<D: FactorScalar>(
