@@ -158,40 +158,68 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    let mut q = vec![D::zero(); rows * rows];
-    let mut r = if rows <= cols {
+    let (mut q, mut r) = if rows <= cols {
+        let mut q = vec![D::zero(); rows * rows];
         let mut r = vec![D::zero(); rows * cols];
         qr_into_workspace(
             dense, input, rows, cols, rows, &mut q, rows, rows, rows, &mut r, rows, cols, rows,
         )?;
-        r
+        (q, r)
     } else {
-        // The current full-Q completion retains augmentation until #1140 A3
-        // supplies a supported efficient dense-backend path.
-        let mut augmented = vec![D::zero(); rows * (cols + rows)];
-        augmented[..rows * cols].copy_from_slice(input);
-        for row in 0..rows {
-            augmented[rows * cols + row * rows + row] = D::one();
-        }
-        let mut work_r = vec![D::zero(); rows * (cols + rows)];
-        qr_into_workspace(
-            dense,
-            &augmented,
-            rows,
-            cols + rows,
-            rows,
-            &mut q,
-            rows,
-            rows,
-            rows,
-            &mut work_r,
-            rows,
-            cols + rows,
-            rows,
-        )?;
-        work_r[..rows * cols].to_vec()
+        let (q, work_r) = augmented_identity_qr(dense, rows, cols, |block| {
+            block.copy_from_slice(input);
+        })?;
+        (q, work_r[..rows * cols].to_vec())
     };
     positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
+    Ok((q, r))
+}
+
+/// The economy QR of the `m x (n + m)` matrix `[X | I_m]`, `X` the `m x n`
+/// block `fill` writes (column-major): returns its `m x m` unitary `Q` and
+/// its `m x (n + m)` upper-trapezoidal `R`. Because `R` is upper-trapezoidal,
+/// the first `n` columns of `Q` span a superspace of `X`'s columns whatever
+/// its rank, and the last `m - n` span their orthogonal complement.
+///
+/// This is the single owner of the full-`Q` cost the dense backend imposes
+/// until #1140 A3: it exposes only economy QR, so a full `Q` costs
+/// `O(m^2 (n + m))` here against MatrixAlgebraKit's `geqrf` + `unmqr`/`ungqr`
+/// `O(m n^2 + m n (m - n))`. Its consumers are the tall branch of
+/// [`full_qr_numerical_stage`] (`qr_full`, `lq_full`), the full-SVD
+/// [`orthonormal_completion`](super::svd::orthonormal_completion), and the
+/// shape-based `left_null`/`right_null` kernel (`qr_null_basis`).
+pub(super) fn augmented_identity_qr<E, D>(
+    dense: &mut E,
+    m: usize,
+    n: usize,
+    fill: impl FnOnce(&mut [D]),
+) -> Result<(Vec<D>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut augmented = vec![D::zero(); m * (n + m)];
+    fill(&mut augmented[..m * n]);
+    for row in 0..m {
+        augmented[m * n + row * m + row] = D::one();
+    }
+    let mut q = vec![D::zero(); m * m];
+    let mut r = vec![D::zero(); m * (n + m)];
+    qr_into_workspace(
+        dense,
+        &augmented,
+        m,
+        n + m,
+        m,
+        &mut q,
+        m,
+        m,
+        m,
+        &mut r,
+        m,
+        n + m,
+        m,
+    )?;
     Ok((q, r))
 }
 

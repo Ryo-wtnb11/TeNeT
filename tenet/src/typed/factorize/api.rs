@@ -849,8 +849,12 @@ where
     /// default `trunc` is `rtol = eps(real(T))^(2/3)`. Each sector keeps its
     /// `(m_c - n_c)₊` rectangular directions plus one per singular value at
     /// or below `max(atol, rtol * ‖s‖)`, the weighted 2-norm of every sector.
-    /// TensorKit's `trunc = notrunc()` keeps only the rectangular zeros, which
-    /// is this method.
+    /// TensorKit's `trunc = notrunc()` keeps only the rectangular zeros of the
+    /// sectors `s` has a block in (`MAK.truncate(::typeof(left_null!), (U, S),
+    /// ::NoTruncation)` ranges over `blocks(S)`), so it matches this method
+    /// only on sectors present in both codomain and domain: a codomain-only
+    /// sector is dropped there, while this method keeps its whole degeneracy,
+    /// as the QR-based default `qr_null` does.
     ///
     /// ```
     /// use std::sync::Arc;

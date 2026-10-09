@@ -266,3 +266,147 @@ fn extend_spectrum_pads_with_rectangular_zeros_and_rejects_malformed_input() {
         ));
     }
 }
+
+/// The coupled-sector blocks of a rank-(1,1) U(1) map, which for an abelian
+/// bosonic rule is its dense expansion: `(sector, rows, cols, column-major
+/// entries)`, read through the public block geometry.
+fn u1_blocks<D>(t: &TensorMap<U1FusionRule, D>) -> Vec<(U1Irrep, usize, usize, Vec<Complex64>)>
+where
+    D: tenet::typed::TensorScalar + Into<Complex64>,
+{
+    let data = t.dense_data().unwrap();
+    (0..t.subblock_count())
+        .map(|index| {
+            let block = t.subblock(index).unwrap();
+            let (rows, cols) = (block.shape()[0], block.shape()[1]);
+            let (row_stride, col_stride) = (block.strides()[0], block.strides()[1]);
+            let entries = (0..cols)
+                .flat_map(|col| (0..rows).map(move |row| (row, col)))
+                .map(|(row, col)| data[block.offset() + row * row_stride + col * col_stride].into())
+                .collect();
+            let sector = *t.subblock_fusion_trees(index).unwrap().coupled();
+            (sector, rows, cols, entries)
+        })
+        .collect()
+}
+
+/// Hand dense check of a left (`left = true`) or right null space `n` of `a`:
+/// per coupled sector `N^H A = 0` (`A N^H = 0`) and orthonormal columns
+/// (rows), with the null dimension `(m_c - n_c)+` (`(n_c - m_c)+`) and the
+/// whole degeneracy of a sector only on the null side.
+fn assert_dense_null<D>(a: &TensorMap<U1FusionRule, D>, n: &TensorMap<U1FusionRule, D>, left: bool)
+where
+    D: tenet::typed::TensorScalar + Into<Complex64>,
+{
+    let a_blocks = u1_blocks(a);
+    let null_side = if left { a.codomain() } else { a.domain() };
+    let leg = &null_side[0];
+    for sector in leg.sectors().unwrap() {
+        let extent = leg.degeneracy(&sector).unwrap();
+        let other = a_blocks
+            .iter()
+            .find(|(s, ..)| *s == sector)
+            .map_or(0, |&(_, rows, cols, _)| if left { cols } else { rows });
+        let bond = if left {
+            &n.domain()[0]
+        } else {
+            &n.codomain()[0]
+        };
+        assert_eq!(
+            bond.degeneracy(&sector).unwrap(),
+            extent.saturating_sub(other),
+            "null dimension of {sector:?}"
+        );
+    }
+    for (sector, n_rows, n_cols, n_data) in u1_blocks(n) {
+        // As a matrix on the null side: column `k` is a null vector.
+        let (extent, count) = if left {
+            (n_rows, n_cols)
+        } else {
+            (n_cols, n_rows)
+        };
+        let vector = |k: usize, i: usize| {
+            if left {
+                n_data[i + n_rows * k]
+            } else {
+                n_data[k + n_rows * i].conj()
+            }
+        };
+        for k in 0..count {
+            for l in 0..count {
+                let dot: Complex64 = (0..extent)
+                    .map(|i| vector(k, i).conj() * vector(l, i))
+                    .sum();
+                let expected = if k == l { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).norm() < 1e-12,
+                    "orthonormality in {sector:?}"
+                );
+            }
+        }
+        if let Some((_, a_rows, a_cols, a_data)) = a_blocks.iter().find(|(s, ..)| *s == sector) {
+            let others = if left { *a_cols } else { *a_rows };
+            for k in 0..count {
+                for j in 0..others {
+                    let dot: Complex64 = (0..extent)
+                        .map(|i| {
+                            let entry = if left {
+                                a_data[i + a_rows * j]
+                            } else {
+                                a_data[j + a_rows * i]
+                            };
+                            // `vector` is already conjugated on the right.
+                            if left {
+                                vector(k, i).conj() * entry
+                            } else {
+                                entry * vector(k, i)
+                            }
+                        })
+                        .sum();
+                    assert!(dot.norm() < 1e-12, "annihilation in {sector:?}: {dot}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn shape_based_null_spaces_on_dual_legs_annihilate_the_dense_blocks() {
+    // What: the default null spaces of maps with a dual codomain leg and a
+    // dual domain leg, real and complex, checked block by block against the
+    // input's dense coupled-sector matrices: `(rows - cols)+` orthonormal
+    // directions annihilating each block, and a whole side-only sector.
+    let runtime = host_runtime();
+    let rule = Arc::new(U1FusionRule);
+    let w = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 3),
+            (U1Irrep::new(2), 1),
+        ],
+    )
+    .unwrap();
+    let v = GradedSpace::try_new(rule, [(U1Irrep::new(0), 2), (U1Irrep::new(-1), 1)]).unwrap();
+    let w_dual = w.try_dual().unwrap();
+    let v_dual = v.try_dual().unwrap();
+    // Dual codomain: `w* <- v` couples 0 (3 x 2) and -1 (3 x 1); -2 is
+    // codomain-only. Dual domain: `w <- v*` couples 0 (3 x 2) and 1 (3 x 1);
+    // 2 is codomain-only.
+    for (codomain, domain, seed) in [(&w_dual, &v, 11), (&w, &v_dual, 12)] {
+        let real: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [codomain], [domain], seed).unwrap();
+        let complex: TensorMap<_, Complex64> =
+            TensorMap::rand_with_seed(&runtime, [codomain], [domain], seed).unwrap();
+        assert_dense_null(&real, &real.left_null(&[0], &[1]).unwrap(), true);
+        assert_dense_null(&real, &real.right_null(&[0], &[1]).unwrap(), false);
+        assert_dense_null(&complex, &complex.left_null(&[0], &[1]).unwrap(), true);
+        assert_dense_null(&complex, &complex.right_null(&[0], &[1]).unwrap(), false);
+        // The wide transpose of the same legs: the right null space is the
+        // nontrivial one.
+        let wide: TensorMap<_, Complex64> =
+            TensorMap::rand_with_seed(&runtime, [domain], [codomain], seed).unwrap();
+        assert_dense_null(&wide, &wide.right_null(&[0], &[1]).unwrap(), false);
+        assert_dense_null(&wide, &wide.left_null(&[0], &[1]).unwrap(), true);
+    }
+}

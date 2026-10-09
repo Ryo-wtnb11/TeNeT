@@ -364,8 +364,10 @@ pub struct TruncationDecision {
 /// per sector its positions in keep or discard order for the ordering
 /// policies — `O(n_c)` when the sector is monotone in magnitude in either
 /// direction, ties included (any SVD spectrum), `O(n_c log n_c)` otherwise
-/// — then `O(G + k log G)` to merge
-/// `k` kept (`Rank`) or discarded (`DiscardWeight`) candidates.
+/// — then `O(G + k log G)` to merge `k` kept (`Rank`, `RankSmallest`) or
+/// discarded (`DiscardWeight`) candidates. The threshold policies
+/// (`Tolerance`, `ToleranceInf`, `ToleranceBelow`) are one norm and one pass,
+/// `O(K)`.
 ///
 /// The decision does not depend on the order of `spectra`: it is taken in
 /// ascending `order_key(sector)` order and `kept` is reported in the

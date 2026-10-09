@@ -271,16 +271,10 @@ where
 
 /// The orthonormal complement `N` (`m x (m - n)`, column-major) of the
 /// column space of the `rows x cols` column-major `matrix` (`Left`, `m =
-/// rows`) or of its adjoint (`Right`, `m = cols`), for `m > n`.
-///
-/// The economy QR of `[B | I_m]` (`B` the `m x n` operand) has an `m x m`
-/// unitary `Q` whose first `n` columns span a superspace of `B`'s columns,
-/// whatever `B`'s rank, because `R` is upper-trapezoidal; the remaining
-/// `m - n` columns are `N`. This is MatrixAlgebraKit `qr_null!`'s
-/// `Q * [0; I]` up to a unitary gauge on the null block, which the null-space
-/// contract leaves free. Why the identity augmentation instead of
-/// `geqrf`+`unmqr`: the dense backend exposes only economy QR, the same
-/// constraint the full QR's completion carries.
+/// rows`) or of its adjoint (`Right`, `m = cols`), for `m > n`: the last
+/// `m - n` columns of [`augmented_identity_qr`]'s `Q`. This is
+/// MatrixAlgebraKit `qr_null!`'s `Q * [0; I]` up to a unitary gauge on the
+/// null block, which the null-space contract leaves free.
 fn qr_null_basis<E, D>(
     dense: &mut E,
     matrix: &[D],
@@ -296,31 +290,10 @@ where
         FactorSide::Left => (rows, cols),
         FactorSide::Right => (cols, rows),
     };
-    let mut augmented = vec![D::zero(); m * (n + m)];
-    match side {
-        FactorSide::Left => augmented[..m * n].copy_from_slice(matrix),
-        FactorSide::Right => adjoint_col_major_into(matrix, rows, cols, &mut augmented[..m * n]),
-    }
-    for row in 0..m {
-        augmented[m * n + row * m + row] = D::one();
-    }
-    let mut q = vec![D::zero(); m * m];
-    let mut r = vec![D::zero(); m * (n + m)];
-    qr_into_workspace(
-        dense,
-        &augmented,
-        m,
-        n + m,
-        m,
-        &mut q,
-        m,
-        m,
-        m,
-        &mut r,
-        m,
-        n + m,
-        m,
-    )?;
+    let (mut q, _) = augmented_identity_qr(dense, m, n, |block| match side {
+        FactorSide::Left => block.copy_from_slice(matrix),
+        FactorSide::Right => adjoint_col_major_into(matrix, rows, cols, block),
+    })?;
     q.drain(..m * n);
     Ok(q)
 }
