@@ -337,7 +337,7 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
 }
 
 /// `(h2d_calls, h2d_bytes, d2h_calls, device_allocs, gemm_calls, copy_calls,
-/// retained_bytes, plan-cache misses, plan-cache evictions)` of one call.
+/// 0 in place of retained bytes (checked as relations), plan-cache misses, plan-cache evictions)` of one call.
 type Counters = [u64; 9];
 
 fn counted<T>(runtime: &Runtime, body: impl FnOnce() -> T) -> (T, Counters) {
@@ -405,6 +405,7 @@ fn record_counters<R, D>(
     let mut workspace = plan.workspace().unwrap();
     let mut into = plan.workspace().unwrap();
     let claim = plans(&runtime).reserved_entries - reserved;
+    let mut metadata = std::collections::BTreeSet::new();
     rows.push((
         format!("{label} {} workspaces", D::NAME),
         [0, 0, 0, 0, 0, 0, 0, 0, claim as u64],
@@ -435,6 +436,14 @@ fn record_counters<R, D>(
         });
         written[6] = into.retained_bytes() as u64;
         let written_host = dst.to_host().unwrap();
+        let output_bytes = (count
+            * returned.member(0).unwrap().dense_data().unwrap().len()
+            * std::mem::size_of::<D>()) as u64;
+        // The execute workspace holds its device output plus the same Host
+        // metadata the execute_into workspace holds, independent of B.
+        metadata.insert((warm[6] - output_bytes, written[6]));
+        warm[6] = 0;
+        written[6] = 0;
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let eager = x.compose(y).unwrap();
             for (form, stack) in [("execute", &returned), ("execute_into", &written_host)] {
@@ -453,6 +462,18 @@ fn record_counters<R, D>(
             rows.push((format!("{key} {form}"), counters));
         }
     }
+    assert_eq!(
+        metadata.len(),
+        1,
+        "{label}: retained metadata depends on B: {metadata:?}"
+    );
+    let [(execute, into)] = metadata.into_iter().collect::<Vec<_>>()[..] else {
+        unreachable!()
+    };
+    assert_eq!(
+        execute, into,
+        "{label}: both workspaces hold the same metadata"
+    );
 }
 
 #[test]
@@ -471,114 +492,94 @@ fn device_counters_are_pinned_against_the_base() {
     }
     let pinned: Vec<_> = PINS
         .iter()
-        .map(|&(key, mut counters)| {
-            if key.ends_with(" execute warm") {
-                counters[6] += EXECUTE_REGION_METADATA;
-            } else if key.ends_with(" execute_into") {
-                counters[6] += INTO_REGION_METADATA_DELTA;
-            }
-            (key.to_string(), counters)
-        })
+        .map(|&(key, counters)| (key.to_string(), counters))
         .collect();
     assert_eq!(rows, pinned, "observed rows are printed above");
 }
 
-/// #1775: the head runs the shared member stage, which builds the core's
-/// zero-region list (one region per fixture: 56 inline bytes plus the
-/// heap capacity of its dims and strides) when it prepares a member count,
-/// whether or not the call fills. An `execute`-only workspace therefore
-/// retains these Host bytes, where the base built regions only for
-/// `execute_into`. They do not depend on `B`; no device byte, upload or
-/// kernel changes, since the zero template is still reserved only by a
-/// call that fills (#2123).
-const EXECUTE_REGION_METADATA: u64 = 120;
-
-/// #1775: the same region list on an `execute_into` workspace, which the
-/// base counted as `2 * dims.len()` words of heap instead of the vectors'
-/// capacity (the #1859 C2 accounting of `ContractPlan`). B-independent.
-const INTO_REGION_METADATA_DELTA: u64 = 32;
-
-/// Recorded on qg1 (A100) at the base `ec3dea5d` with these tests (`096ef9be`).
-/// The head differs only in retained bytes, as [`EXECUTE_REGION_METADATA`]
-/// and [`INTO_REGION_METADATA_DELTA`] state.
+/// Recorded on qg1 (A100) at the base `ec3dea5d` with these tests and
+/// unchanged by #1775. Every column is structural (transfers, allocations,
+/// submissions, plan-cache traffic, the ledger claim); retained bytes
+/// (column 6) are checked as relations in [`record_counters`] instead, so a
+/// struct layout change cannot fail this table.
 #[rustfmt::skip]
 const PINS: &[(&str, Counters)] = &[
     ("U1 f64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("U1 f64 call=0 B=1 execute first", [1, 312, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 312, 0, 0]),
-    ("U1 f64 call=0 B=1 execute_into", [2, 72, 0, 2, 3, 0, 88, 1, 0]),
+    ("U1 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 f64 call=0 B=1 execute_into", [2, 72, 0, 2, 3, 0, 0, 1, 0]),
     ("U1 f64 call=1 B=2 execute first", [1, 624, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 624, 0, 0]),
-    ("U1 f64 call=1 B=2 execute_into", [1, 128, 0, 1, 3, 0, 88, 1, 0]),
+    ("U1 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 f64 call=1 B=2 execute_into", [1, 128, 0, 1, 3, 0, 0, 1, 0]),
     ("U1 f64 call=2 B=17 execute first", [1, 5304, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 5304, 0, 0]),
-    ("U1 f64 call=2 B=17 execute_into", [1, 1088, 0, 1, 3, 0, 88, 1, 0]),
+    ("U1 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 f64 call=2 B=17 execute_into", [1, 1088, 0, 1, 3, 0, 0, 1, 0]),
     ("U1 f64 call=3 B=1 execute first", [1, 312, 0, 1, 2, 0, 0, 0, 0]),
-    ("U1 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 312, 0, 0]),
-    ("U1 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("U1 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
     ("U1 c64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("U1 c64 call=0 B=1 execute first", [1, 624, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 624, 0, 0]),
-    ("U1 c64 call=0 B=1 execute_into", [2, 144, 0, 2, 3, 0, 88, 1, 0]),
+    ("U1 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 c64 call=0 B=1 execute_into", [2, 144, 0, 2, 3, 0, 0, 1, 0]),
     ("U1 c64 call=1 B=2 execute first", [1, 1248, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 1248, 0, 0]),
-    ("U1 c64 call=1 B=2 execute_into", [1, 256, 0, 1, 3, 0, 88, 1, 0]),
+    ("U1 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 c64 call=1 B=2 execute_into", [1, 256, 0, 1, 3, 0, 0, 1, 0]),
     ("U1 c64 call=2 B=17 execute first", [1, 10608, 0, 1, 2, 0, 0, 2, 0]),
-    ("U1 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 10608, 0, 0]),
-    ("U1 c64 call=2 B=17 execute_into", [1, 2176, 0, 1, 3, 0, 88, 1, 0]),
+    ("U1 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 c64 call=2 B=17 execute_into", [1, 2176, 0, 1, 3, 0, 0, 1, 0]),
     ("U1 c64 call=3 B=1 execute first", [1, 624, 0, 1, 2, 0, 0, 0, 0]),
-    ("U1 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 624, 0, 0]),
-    ("U1 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("U1 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("U1 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
     ("SU2 f64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("SU2 f64 call=0 B=1 execute first", [1, 408, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 408, 0, 0]),
-    ("SU2 f64 call=0 B=1 execute_into", [2, 200, 0, 2, 3, 0, 88, 1, 0]),
+    ("SU2 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 f64 call=0 B=1 execute_into", [2, 200, 0, 2, 3, 0, 0, 1, 0]),
     ("SU2 f64 call=1 B=2 execute first", [1, 816, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 816, 0, 0]),
-    ("SU2 f64 call=1 B=2 execute_into", [1, 384, 0, 1, 3, 0, 88, 1, 0]),
+    ("SU2 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 f64 call=1 B=2 execute_into", [1, 384, 0, 1, 3, 0, 0, 1, 0]),
     ("SU2 f64 call=2 B=17 execute first", [1, 6936, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 6936, 0, 0]),
-    ("SU2 f64 call=2 B=17 execute_into", [1, 3264, 0, 1, 3, 0, 88, 1, 0]),
+    ("SU2 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 f64 call=2 B=17 execute_into", [1, 3264, 0, 1, 3, 0, 0, 1, 0]),
     ("SU2 f64 call=3 B=1 execute first", [1, 408, 0, 1, 2, 0, 0, 0, 0]),
-    ("SU2 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 408, 0, 0]),
-    ("SU2 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("SU2 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
     ("SU2 c64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("SU2 c64 call=0 B=1 execute first", [1, 816, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 816, 0, 0]),
-    ("SU2 c64 call=0 B=1 execute_into", [2, 400, 0, 2, 3, 0, 88, 1, 0]),
+    ("SU2 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 c64 call=0 B=1 execute_into", [2, 400, 0, 2, 3, 0, 0, 1, 0]),
     ("SU2 c64 call=1 B=2 execute first", [1, 1632, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 1632, 0, 0]),
-    ("SU2 c64 call=1 B=2 execute_into", [1, 768, 0, 1, 3, 0, 88, 1, 0]),
+    ("SU2 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 c64 call=1 B=2 execute_into", [1, 768, 0, 1, 3, 0, 0, 1, 0]),
     ("SU2 c64 call=2 B=17 execute first", [1, 13872, 0, 1, 2, 0, 0, 2, 0]),
-    ("SU2 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 13872, 0, 0]),
-    ("SU2 c64 call=2 B=17 execute_into", [1, 6528, 0, 1, 3, 0, 88, 1, 0]),
+    ("SU2 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 c64 call=2 B=17 execute_into", [1, 6528, 0, 1, 3, 0, 0, 1, 0]),
     ("SU2 c64 call=3 B=1 execute first", [1, 816, 0, 1, 2, 0, 0, 0, 0]),
-    ("SU2 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 816, 0, 0]),
-    ("SU2 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("SU2 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("SU2 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
     ("fZ2xU1 f64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("fZ2xU1 f64 call=0 B=1 execute first", [1, 288, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 288, 0, 0]),
-    ("fZ2xU1 f64 call=0 B=1 execute_into", [2, 136, 0, 2, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 f64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 f64 call=0 B=1 execute_into", [2, 136, 0, 2, 3, 0, 0, 1, 0]),
     ("fZ2xU1 f64 call=1 B=2 execute first", [1, 576, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 576, 0, 0]),
-    ("fZ2xU1 f64 call=1 B=2 execute_into", [1, 256, 0, 1, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 f64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 f64 call=1 B=2 execute_into", [1, 256, 0, 1, 3, 0, 0, 1, 0]),
     ("fZ2xU1 f64 call=2 B=17 execute first", [1, 4896, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 4896, 0, 0]),
-    ("fZ2xU1 f64 call=2 B=17 execute_into", [1, 2176, 0, 1, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 f64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 f64 call=2 B=17 execute_into", [1, 2176, 0, 1, 3, 0, 0, 1, 0]),
     ("fZ2xU1 f64 call=3 B=1 execute first", [1, 288, 0, 1, 2, 0, 0, 0, 0]),
-    ("fZ2xU1 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 288, 0, 0]),
-    ("fZ2xU1 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("fZ2xU1 f64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 f64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
     ("fZ2xU1 c64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
     ("fZ2xU1 c64 call=0 B=1 execute first", [1, 576, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 576, 0, 0]),
-    ("fZ2xU1 c64 call=0 B=1 execute_into", [2, 272, 0, 2, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 c64 call=0 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 c64 call=0 B=1 execute_into", [2, 272, 0, 2, 3, 0, 0, 1, 0]),
     ("fZ2xU1 c64 call=1 B=2 execute first", [1, 1152, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 1152, 0, 0]),
-    ("fZ2xU1 c64 call=1 B=2 execute_into", [1, 512, 0, 1, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 c64 call=1 B=2 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 c64 call=1 B=2 execute_into", [1, 512, 0, 1, 3, 0, 0, 1, 0]),
     ("fZ2xU1 c64 call=2 B=17 execute first", [1, 9792, 0, 1, 2, 0, 0, 2, 0]),
-    ("fZ2xU1 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 9792, 0, 0]),
-    ("fZ2xU1 c64 call=2 B=17 execute_into", [1, 4352, 0, 1, 3, 0, 88, 1, 0]),
+    ("fZ2xU1 c64 call=2 B=17 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 c64 call=2 B=17 execute_into", [1, 4352, 0, 1, 3, 0, 0, 1, 0]),
     ("fZ2xU1 c64 call=3 B=1 execute first", [1, 576, 0, 1, 2, 0, 0, 0, 0]),
-    ("fZ2xU1 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 576, 0, 0]),
-    ("fZ2xU1 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88, 0, 0]),
+    ("fZ2xU1 c64 call=3 B=1 execute warm", [0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    ("fZ2xU1 c64 call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 0, 0, 0]),
 ];

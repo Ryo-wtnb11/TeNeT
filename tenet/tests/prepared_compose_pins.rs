@@ -5,19 +5,20 @@
 //! the member counts B = 1, 2, 17, 1 with new dyadic values on every call.
 //! Every product and partial sum of the fixtures is exact, so the value
 //! digest (±0 and NaN folded) does not depend on the dense kernel's
-//! summation order. Each row pins, in this order:
-//! `[digest, retained after execute, retained after execute_into,
-//! first-execute allocation calls, warm-execute allocation calls,
-//! execute_into allocation calls]`. Bytes are reported, not pinned. The
-//! error matrix pins the variant and message of every rejected call.
+//! summation order. [`DIGESTS`] pins every value digest, recorded on the
+//! base and unchanged by #1775; [`ERRORS`] pins the variant and message of
+//! every rejected call, with the #1775 changes in [`CHANGED_ERRORS`].
 //!
-//! One test, so the process-wide caches warm in one fixed order and the
-//! allocation counts are reproducible.
+//! Allocation counts and retained bytes are structural contracts, not exact
+//! sizes, so a dense-backend release or a struct layout change cannot fail
+//! them: a warm `execute` and `execute_into` allocate at most once (the
+//! backend's grouped-GEMM validation), `execute_into` retains nothing new,
+//! retained bytes grow with `B` and return to the B = 1 footprint, and at
+//! B = 1 the workspace retains only its output (no stacked replay; the base
+//! kept a one-member replay there, 208 bytes and 8 allocations on these
+//! fixtures).
 //!
-//! [`ROWS`] and [`ERRORS`] are the base observations. Since #1775 the plan
-//! runs on `ContractPlan`'s executor, and the head differs from them only as
-//! [`B1_STACKED_REPLAY_BYTES`], [`B1_FIRST_CALLS`] and [`CHANGED_ERRORS`]
-//! state; every value digest and every row at B > 1 is the base's.
+//! One test, so the process-wide caches warm in one fixed order.
 
 #![cfg(all(
     feature = "cpu-faer",
@@ -49,8 +50,6 @@ use tenet::typed::{ComposePlan, GradedSpace, Runtime, StackedTensorMap};
 
 use common::Payload;
 use prepared::{filled, fz2u1_legs, members, su2_legs, u1_legs};
-
-type Row = [u64; 6];
 
 fn fold(state: &mut u64, values: impl IntoIterator<Item = f64>) {
     for value in values {
@@ -95,7 +94,7 @@ fn calls<T>(f: impl FnOnce() -> T) -> (T, u64, u64) {
 fn record<R, D>(
     label: &str,
     (v, w): (GradedSpace<R>, GradedSpace<R>),
-    rows: &mut Vec<(String, Row)>,
+    rows: &mut Vec<(String, u64)>,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     R::Sector: Debug,
@@ -120,6 +119,7 @@ fn record<R, D>(
         .unwrap();
     let plan = ComposePlan::new(&lhs, &rhs).unwrap();
     let mut workspace = plan.workspace().unwrap();
+    let mut retained_by_call = Vec::new();
     for (call, count) in [1usize, 2, 17, 1].into_iter().enumerate() {
         let key = format!("{label} {} call={call} B={count}", D::NAME);
         let (lhs, rhs) = stacks(count, 10 * call + 3);
@@ -133,28 +133,55 @@ fn record<R, D>(
         let (_, warm, warm_bytes) = calls(|| {
             plan.execute(&lhs, &rhs, &mut workspace).unwrap();
         });
-        let value = stack_digest(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
-        let retained = workspace.retained_bytes() as u64;
-        let mut into_calls = Vec::new();
-        for mut dst in fills {
+        let output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let value = stack_digest(output);
+        let output_bytes = output.len()
+            * output.member(0).unwrap().dense_data().unwrap().len()
+            * std::mem::size_of::<D>();
+        let retained = workspace.retained_bytes();
+        // The first `execute_into` may grow the Runtime context's fill
+        // scratch once; the second is warm.
+        for (warm_into, mut dst) in fills.into_iter().enumerate() {
             let (_, into, into_bytes) = calls(|| {
                 plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
                     .unwrap();
             });
             assert_eq!(stack_digest(&dst), value, "{key}: execute_into == execute");
-            into_calls.push((into, into_bytes));
+            assert!(
+                warm_into == 0 || into <= 1,
+                "{key}: warm execute_into allocated {into} ({into_bytes} B)"
+            );
         }
-        let retained_into = workspace.retained_bytes() as u64;
         eprintln!(
-            "    (\"{key}\", [{value:#x}, {retained}, {retained_into}, {first}, {warm}, {}]), \
-             // bytes first={first_bytes} warm={warm_bytes} into={:?}",
-            into_calls[1].0, into_calls
+            "    (\"{key}\", {value:#x}), // calls first={first} ({first_bytes} B) warm={warm} ({warm_bytes} B), retained {retained}"
         );
-        rows.push((
-            key,
-            [value, retained, retained_into, first, warm, into_calls[1].0],
-        ));
+        assert!(warm <= 1, "{key}: warm execute allocated {warm}");
+        assert!(first > warm, "{key}: the counter sees the cold call");
+        assert_eq!(
+            workspace.retained_bytes(),
+            retained,
+            "{key}: execute_into retains nothing"
+        );
+        if count == 1 {
+            assert_eq!(
+                retained, output_bytes,
+                "{key}: B = 1 retains only the output"
+            );
+        }
+        retained_by_call.push(retained);
+        rows.push((key, value));
     }
+    let [one, two, seventeen, again] = retained_by_call[..] else {
+        unreachable!()
+    };
+    assert!(
+        one <= two && two <= seventeen,
+        "{label}: retained grows with B"
+    );
+    assert_eq!(
+        again, one,
+        "{label}: B = 1 again retains the B = 1 footprint"
+    );
 }
 
 /// Every rejected call of `mismatched_stacks_are_typed_errors_before_any_work`
@@ -233,18 +260,11 @@ fn host_compose_plan_values_bytes_allocations_and_errors_are_pinned() {
     for (row, error) in &errors {
         eprintln!("    ({row:?}, {error:?}),");
     }
-    let pinned: Vec<_> = ROWS
+    let pinned: Vec<_> = DIGESTS
         .iter()
-        .map(|&(key, mut row)| {
-            if key.ends_with(" B=1") {
-                row[1] -= B1_STACKED_REPLAY_BYTES;
-                row[2] -= B1_STACKED_REPLAY_BYTES;
-                row[3] = B1_FIRST_CALLS;
-            }
-            (key.to_string(), row)
-        })
+        .map(|&(key, digest)| (key.to_string(), digest))
         .collect();
-    assert_eq!(rows, pinned, "observed rows are printed above");
+    assert_eq!(rows, pinned, "observed digests are printed above");
     let pinned_errors: Vec<_> = ERRORS
         .iter()
         .map(|&(row, base)| {
@@ -258,18 +278,6 @@ fn host_compose_plan_values_bytes_allocations_and_errors_are_pinned() {
     assert_eq!(errors, pinned_errors, "observed errors are printed above");
 }
 
-/// At B = 1 the base built a one-member stacked replay (its job list, runs
-/// and inactive layouts) in the workspace; the head runs the plan's own jobs,
-/// as `ContractPlan` does for one member, so the workspace retains these
-/// bytes less at B = 1 (the same 208 for every fixture: two direct jobs and
-/// one inactive block each) and B > 1 is unchanged.
-const B1_STACKED_REPLAY_BYTES: u64 = 208;
-
-/// The first `execute` at B = 1 allocates the output and Tenferro's grouped
-/// GEMM validation only; the base also allocated the eight buffers of the
-/// one-member stacked replay (10 calls).
-const B1_FIRST_CALLS: u64 = 2;
-
 /// Error rows the head changes (#1775, approved stricter errors A23): a
 /// member-count mismatch is rejected at `new`, the member-count messages are
 /// `ContractPlan`'s, and the foreign-workspace message names no operation.
@@ -282,33 +290,34 @@ const CHANGED_ERRORS: &[(&str, &str)] = &[
     ("execute: foreign workspace", "Some(InvalidArgument(\"workspace belongs to another plan\"))"),
 ];
 
-/// Base observations, `ec3dea5d` (macOS aarch64 and qg1 x86_64 Linux alike).
+/// Value digests, recorded on the base `ec3dea5d` (macOS aarch64 and qg1
+/// x86_64 Linux alike) and unchanged by #1775.
 #[rustfmt::skip]
-const ROWS: &[(&str, Row)] = &[
-    ("U1 f64 call=0 B=1", [0xd76442f7a019dd2, 520, 520, 10, 1, 1]),
-    ("U1 f64 call=1 B=2", [0xcc7f92611b071413, 928, 928, 10, 1, 1]),
-    ("U1 f64 call=2 B=17", [0x4aea74fa1b49b599, 7048, 7048, 11, 1, 1]),
-    ("U1 f64 call=3 B=1", [0x6b6d317cdac66a13, 520, 520, 10, 1, 1]),
-    ("U1 c64 call=0 B=1", [0x652cf4b4aef062b0, 832, 832, 10, 1, 1]),
-    ("U1 c64 call=1 B=2", [0x297cf63f68f0d68f, 1552, 1552, 10, 1, 1]),
-    ("U1 c64 call=2 B=17", [0x2dc5cbbc33f0b32e, 12352, 12352, 11, 1, 1]),
-    ("U1 c64 call=3 B=1", [0xb75dc3454851fb8b, 832, 832, 10, 1, 1]),
-    ("SU2 f64 call=0 B=1", [0x990d51ba85b0b569, 616, 616, 10, 1, 1]),
-    ("SU2 f64 call=1 B=2", [0x9e89efa27937d69d, 1120, 1120, 10, 1, 1]),
-    ("SU2 f64 call=2 B=17", [0x5bb560c4813e8837, 8680, 8680, 11, 1, 1]),
-    ("SU2 f64 call=3 B=1", [0x43ce177b7d3eedd5, 616, 616, 10, 1, 1]),
-    ("SU2 c64 call=0 B=1", [0x6d1183ab6294aee9, 1024, 1024, 10, 1, 1]),
-    ("SU2 c64 call=1 B=2", [0x14750eff5eb8112b, 1936, 1936, 10, 1, 1]),
-    ("SU2 c64 call=2 B=17", [0x5a1ded85d8111ec2, 15616, 15616, 11, 1, 1]),
-    ("SU2 c64 call=3 B=1", [0x93d59f926f684fe5, 1024, 1024, 10, 1, 1]),
-    ("fZ2xU1 f64 call=0 B=1", [0xe4b22a8e500beb3f, 496, 496, 10, 1, 1]),
-    ("fZ2xU1 f64 call=1 B=2", [0xa0dc11d634d2c0ec, 880, 880, 10, 1, 1]),
-    ("fZ2xU1 f64 call=2 B=17", [0x4b5950622b829e71, 6640, 6640, 11, 1, 1]),
-    ("fZ2xU1 f64 call=3 B=1", [0x8e144ba44bb62cb5, 496, 496, 10, 1, 1]),
-    ("fZ2xU1 c64 call=0 B=1", [0x6d763c21c6ac588b, 784, 784, 10, 1, 1]),
-    ("fZ2xU1 c64 call=1 B=2", [0xf59530db98534636, 1456, 1456, 10, 1, 1]),
-    ("fZ2xU1 c64 call=2 B=17", [0x758b6a9cb59609e, 11536, 11536, 11, 1, 1]),
-    ("fZ2xU1 c64 call=3 B=1", [0xdf19f94b2386f04c, 784, 784, 10, 1, 1]),
+const DIGESTS: &[(&str, u64)] = &[
+    ("U1 f64 call=0 B=1", 0xd76442f7a019dd2),
+    ("U1 f64 call=1 B=2", 0xcc7f92611b071413),
+    ("U1 f64 call=2 B=17", 0x4aea74fa1b49b599),
+    ("U1 f64 call=3 B=1", 0x6b6d317cdac66a13),
+    ("U1 c64 call=0 B=1", 0x652cf4b4aef062b0),
+    ("U1 c64 call=1 B=2", 0x297cf63f68f0d68f),
+    ("U1 c64 call=2 B=17", 0x2dc5cbbc33f0b32e),
+    ("U1 c64 call=3 B=1", 0xb75dc3454851fb8b),
+    ("SU2 f64 call=0 B=1", 0x990d51ba85b0b569),
+    ("SU2 f64 call=1 B=2", 0x9e89efa27937d69d),
+    ("SU2 f64 call=2 B=17", 0x5bb560c4813e8837),
+    ("SU2 f64 call=3 B=1", 0x43ce177b7d3eedd5),
+    ("SU2 c64 call=0 B=1", 0x6d1183ab6294aee9),
+    ("SU2 c64 call=1 B=2", 0x14750eff5eb8112b),
+    ("SU2 c64 call=2 B=17", 0x5a1ded85d8111ec2),
+    ("SU2 c64 call=3 B=1", 0x93d59f926f684fe5),
+    ("fZ2xU1 f64 call=0 B=1", 0xe4b22a8e500beb3f),
+    ("fZ2xU1 f64 call=1 B=2", 0xa0dc11d634d2c0ec),
+    ("fZ2xU1 f64 call=2 B=17", 0x4b5950622b829e71),
+    ("fZ2xU1 f64 call=3 B=1", 0x8e144ba44bb62cb5),
+    ("fZ2xU1 c64 call=0 B=1", 0x6d763c21c6ac588b),
+    ("fZ2xU1 c64 call=1 B=2", 0xf59530db98534636),
+    ("fZ2xU1 c64 call=2 B=17", 0x758b6a9cb59609e),
+    ("fZ2xU1 c64 call=3 B=1", 0xdf19f94b2386f04c),
 ];
 
 #[rustfmt::skip]

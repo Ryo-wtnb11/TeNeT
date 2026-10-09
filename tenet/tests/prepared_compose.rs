@@ -426,8 +426,8 @@ fn fermionic_composition_is_not_the_contraction_over_the_same_legs() {
         let composed = compose.execute(&lhs, &rhs, &mut compose_ws).unwrap();
         let eager = assert_members_compose(&label, composed, &a, &b);
         let contracted = contract.execute(&lhs, &rhs, &mut contract_ws).unwrap();
-        let mut flipped = 0;
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+            let mut flipped = 0;
             let expected = x.contract(y, &spec).unwrap();
             let member = contracted.member(index).unwrap();
             numerics::assert_nonzero_slices_close(
@@ -448,11 +448,11 @@ fn fermionic_composition_is_not_the_contraction_over_the_same_legs() {
                 );
                 flipped += 1;
             }
+            assert!(
+                flipped >= 1,
+                "{label}: member {index}: the supertrace sign flips an odd block"
+            );
         }
-        assert!(
-            flipped >= count,
-            "{label}: the supertrace sign flips a block"
-        );
     }
 }
 
