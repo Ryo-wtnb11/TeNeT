@@ -109,9 +109,13 @@ macro_rules! device_restrict {
             // A multi-axis set is one upload and one gather too (#1561),
             // bit-exact to one-axis restrictions applied in turn.
             let (on_a, on_dual) = (selections($a), selections($dual));
-            let sets: [Vec<(usize, &LegSelection<_>)>; 2] = [
+            let sets: [Vec<(usize, &LegSelection<_>)>; 3] = [
                 vec![(2, &on_a[1]), (0, &on_a[0]), (3, &on_dual[0]), (1, &on_dual[1])],
                 vec![(3, &on_dual[1]), (0, &on_a[0])],
+                // Non-contiguous kept positions on a codomain and a domain
+                // leg (#2095): the Host-built element table carries the
+                // gather, so still one upload and one gather.
+                vec![(1, &on_dual[2]), (2, &on_a[2])],
             ];
             for (choice, set) in sets.iter().enumerate() {
                 let label = format!("{} {} B={count} set {choice}", $label, stringify!($d));

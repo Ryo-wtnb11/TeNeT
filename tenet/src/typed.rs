@@ -105,7 +105,8 @@
 //! [`TensorMap::map_diagonal`] on compact diagonals), the truncation primitives
 //! a truncated factorization is composed from ([`TensorMap::diagview`],
 //! [`GradedSpace::find_truncated`], [`GradedSpace::truncspace`],
-//! [`TensorMap::restrict_leg`]), concatenation ([`TensorMap::cat`],
+//! [`TensorMap::restrict_leg`] with a [`LegSelection`] of kept degeneracy
+//! positions per sector, contiguous or not), concatenation ([`TensorMap::cat`],
 //! [`TensorMap::absorb`]) and explicit payload conversion
 //! ([`TensorMap::convert`], [`TensorMap::zeros_like`], [`TensorMap::re`],
 //! [`TensorMap::im`]; exact widenings and the two lossy narrowings, never
@@ -369,7 +370,7 @@ use checked_generic_contract::{trace_source, write_identity_blocks_generic};
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;
 use space::{
-    require_restriction_set, require_selected_leg_of, restricted_space, restriction_starts,
+    require_restriction_set, require_selected_leg_of, restricted_space, restriction_runs,
     space_with_replaced_legs,
 };
 pub use space::{GradedSpace, LegSelection, TruncatedSelection};

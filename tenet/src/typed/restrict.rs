@@ -67,10 +67,14 @@ where
     ///
     /// # Cost
     ///
-    /// One strided copy per destination block for all `k` legs at once,
-    /// `O(selected payload)` data movement, no matrix multiplication and no
-    /// recoupling. One payload allocation plus `O(rank + blocks)` structural
-    /// work, independent of the degeneracy dimensions. (TensorKit pays a
+    /// One strided copy per destination block and piece for all `k` legs at
+    /// once, where a block's pieces are the product of the kept-position runs
+    /// of its sectors (one for a contiguous selection, at most two per leg for
+    /// a selection of the largest `|λ|` of an ascending spectrum, at most the
+    /// kept count in general). `O(selected payload)` data movement, no matrix
+    /// multiplication and no recoupling. One payload allocation plus
+    /// `O(rank + blocks + rank · pieces)` structural work, independent of the
+    /// degeneracy dimensions. (TensorKit pays a
     /// contraction with an explicit isometry tensor for an arbitrary leg;
     /// TeNeT addresses the degeneracy axes inside each reduced block
     /// directly.) A compact input copies only the `O(sum_c k'_c)` kept
@@ -118,24 +122,29 @@ where
         let destination = restricted_space(self.logical_space(), legs)?;
         if let Some((spectrum, selection)) = compact {
             let mut kept = Vec::with_capacity(selection.entries.len());
-            for (sector, range) in &selection.entries {
+            for (sector, runs) in &selection.entries {
                 // Both lists are in canonical `SectorId` order, so this is a
                 // lookup, not a scan. A violated order can only make the
                 // search miss, which is the typed error below — never a match
                 // on the wrong sector, because the key is compared.
-                let values = spectrum
+                let source = spectrum
                     .binary_search_by_key(sector, |entry| entry.sector)
                     .ok()
-                    .and_then(|index| spectrum[index].values.get(range.clone()))
+                    .map(|index| &spectrum[index].values)
+                    .filter(|values| runs.last().is_some_and(|run| run.end <= values.len()))
                     .ok_or_else(|| {
                         TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
-                            "restrict_leg: the compact payload has no [{}, {}) for sector {:?}",
-                            range.start, range.end, sector
+                            "restrict_leg: the compact payload has no positions {runs:?} for \
+                             sector {sector:?}"
                         )))
                     })?;
                 kept.push(tenet_matrixalgebra::SectorSpectrum {
                     sector: *sector,
-                    values: values.to_vec(),
+                    values: runs
+                        .iter()
+                        .flat_map(|run| &source[run.clone()])
+                        .copied()
+                        .collect(),
                 });
             }
             return Ok(self.with_spectrum_on(destination, kept));
@@ -145,7 +154,7 @@ where
             destination.space().structure(),
             source,
             &source_data,
-            &restriction_starts(self.rank(), legs),
+            &restriction_runs(self.rank(), legs),
         )
         .map_err(Error::from)?;
         Ok(Self {
@@ -167,7 +176,9 @@ where
     /// # Cost
     ///
     /// `O(source payload)` data movement into an allocator-zeroed output of
-    /// `O(destination payload)`, no matrix multiplication and no recoupling.
+    /// `O(destination payload)`, no matrix multiplication and no recoupling:
+    /// one strided add per source block and piece of the kept-position runs,
+    /// as [`Self::restrict_leg`] reads them.
     ///
     /// Defined for Host payloads only, as [`Self::restrict_leg`].
     ///
@@ -196,8 +207,8 @@ where
             .map_err(Error::from)
             .map_err(TypedFacadeError::<R>::from)?;
         let mut data = tenet_tensors::zeroed_payload::<D>(len);
-        let mut ranges: Vec<tenet_tensors::SectorRangeTable<'_>> = vec![None; self.rank()];
-        ranges[axis] = Some(selection.entries.as_slice());
+        let mut runs: Vec<tenet_tensors::SectorRunTable<'_>> = vec![None; self.rank()];
+        runs[axis] = Some(selection.entries.as_slice());
         let (source, source_data) = self.fusion_operand_and_data();
         tenet_tensors::fusion_scatter_add_assign(
             destination.space().structure(),
@@ -205,7 +216,7 @@ where
             self.logical_space().space().structure(),
             source,
             &source_data,
-            &ranges,
+            &runs,
         )
         .map_err(Error::from)?;
         Ok(Self {

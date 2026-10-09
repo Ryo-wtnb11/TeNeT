@@ -612,6 +612,15 @@ rank budget.
   quantum-dimension-weighted decision over all sectors
   (`GradedSpace::find_truncated`), applied with `restrict_leg` (on both
   legs of the spectrum factor at once).
+- `restrict_leg` composes with the inclusion isometry of a `LegSelection`
+  `σ = { c ↦ P_c }`, a set of kept degeneracy positions
+  `P_c = {p_0 < … < p_{k_c − 1}}` per sector: the identity on every irrep
+  and the order-preserving coordinate inclusion `e_j ↦ e_{p_j}` on the
+  degeneracy space, so whole multiplets are kept or dropped and the kept
+  states stay in stored order. `embed_leg` is its adjoint (zeros at the
+  positions not kept). A contiguous range is one such set; the kept
+  largest-`|λ|` states of an ascending `eigh` spectrum or an arbitrary `eig`
+  set are others.
 
 The method `exp` is the sectorwise matrix exponential. For a Hermitian
 endomorphism `H`, an imaginary-time gate uses

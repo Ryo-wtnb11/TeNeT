@@ -277,8 +277,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "oriented_fusion_inner_with",
         "oriented_fusion_restrict_owned",
         "stacked_fusion_restrict_owned",
-        "SectorRangeTable",
-        "SectorStartTable",
+        "SectorRunTable",
+        "SelectedRuns",
         // physical
         "expand_physical_host",
         "project_physical_host",

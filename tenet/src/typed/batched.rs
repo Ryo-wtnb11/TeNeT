@@ -35,7 +35,7 @@ use tenet_tensors::{zeroed_payload, BoundDynamicTensorRef, FusionOperand, Operat
 #[cfg(feature = "cuda")]
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};
 use super::{
-    owned_repr, require_restriction_set, restricted_space, restriction_starts,
+    owned_repr, require_restriction_set, restricted_space, restriction_runs,
     BoundDynamicFusionMapSpace, FactorizationScalar, LegSelection, Runtime, SectorSpectrum,
     TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission, TypedTensorBody,
     TypedTensorRepr, TypedTensorRootDispatch,
@@ -469,7 +469,7 @@ where
             FusionOperand::direct(self.space.space()),
             &self.storage,
             self.members,
-            &restriction_starts(self.rank(), legs),
+            &restriction_runs(self.rank(), legs),
         )
         .map_err(Error::from)?;
         Ok(self.with_space(destination, data)?)
@@ -2252,7 +2252,7 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
                 destination.space().structure(),
                 FusionOperand::direct(self.space.space()),
                 &iota,
-                &restriction_starts(self.rank(), legs),
+                &restriction_runs(self.rank(), legs),
             )
             .map_err(Error::from)?
         };

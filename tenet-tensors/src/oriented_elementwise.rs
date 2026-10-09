@@ -1,11 +1,13 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
+use smallvec::SmallVec;
 use tenet_core::{BlockKey, BlockRef, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
-    bilinear_raw_strided_kernel_mapped, overwrite_owned_blocks, overwrite_owned_member_blocks,
-    BlockOverwrite, ConjugateValue, OperationError, RecouplingCoefficientAction,
-    StridedHostKernelAdapter, WideScalar,
+    bilinear_raw_strided_kernel_mapped, check_axis_runs, for_each_run_piece,
+    overwrite_owned_blocks, overwrite_owned_member_blocks, AxisRuns, BlockOverwrite,
+    ConjugateValue, OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter,
+    WideScalar,
 };
 
 use crate::FusionOperand;
@@ -89,33 +91,75 @@ fn selected_for_sector<T>(table: &[(SectorId, T)], sector: SectorId) -> Option<&
         .map(|index| &table[index].1)
 }
 
-/// One axis' destination ranges in a scatter, keyed by the sector the block
-/// carries on that axis, or `None` when the axis is not sliced.
+/// The kept degeneracy positions of one sector, as sorted, disjoint,
+/// nonempty runs. A contiguous selection is one run, held inline.
 #[doc(hidden)]
-pub type SectorRangeTable<'a> = Option<&'a [(SectorId, Range<usize>)]>;
+pub type SelectedRuns = SmallVec<[Range<usize>; 1]>;
 
-/// One axis' source starts in a restriction, keyed by the sector the
-/// destination block carries on that axis, or `None` for a start of zero.
-#[doc(hidden)]
-pub type SectorStartTable<'a> = Option<&'a [(SectorId, usize)]>;
-
-/// Copies one logical degeneracy rectangle per block from an owned or
-/// lazy-adjoint fusion tensor into a newly allocated `destination` payload.
+/// One axis' selected positions per sector, keyed by the sector a block
+/// carries on that axis and sorted by [`SectorId`], or `None` when the axis
+/// is not selected (every position, in order).
 ///
-/// `logical_starts` holds one entry per logical axis: `None` starts that axis
-/// at zero for every sector, `Some(table)` gives the start per uncoupled
-/// sector of the destination block's own key, sorted by [`SectorId`]. A block
-/// whose sector is absent from a `Some` table is a `StructureMismatch` rather
-/// than an implicit zero start, so a caller that forgot a sector cannot get a
-/// silently misaligned copy. The extent always comes from the destination
-/// block's own shape, and `start + destination extent <= source extent` is
-/// checked per block and axis.
+/// The positions are on the parent leg's side: the source of a restriction,
+/// the destination of a scatter. The other side holds them consecutively.
+#[doc(hidden)]
+pub type SectorRunTable<'a> = Option<&'a [(SectorId, SelectedRuns)]>;
+
+/// One block's per-axis runs out of the per-axis tables: `None` for an
+/// unselected axis, the runs of the block's own sector otherwise. A block
+/// whose sector is absent from a `Some` table is a `StructureMismatch`
+/// rather than an implicit whole axis, so a caller that forgot a sector
+/// cannot get a silently misaligned copy. The selected positions (all of
+/// `0..packed[axis]` for `None`) must end within `sparse_extent(axis)`, the
+/// parent-side extent; their count against `packed` is checked by the
+/// writer that consumes them.
+fn block_axis_runs<'a>(
+    key: &FusionTreePairKey,
+    packed: &[usize],
+    tables: &[SectorRunTable<'a>],
+    mut sparse_extent: impl FnMut(usize) -> Result<usize, OperationError>,
+    tensor: &'static str,
+) -> Result<SmallVec<[AxisRuns<'a>; 8]>, OperationError> {
+    if packed.len() != tables.len() {
+        return Err(OperationError::StructureMismatch { tensor });
+    }
+    let mut runs = SmallVec::with_capacity(tables.len());
+    for (axis, (&extent, table)) in packed.iter().zip(tables).enumerate() {
+        let selected = match table {
+            None => None,
+            Some(table) => Some(
+                selected_for_sector(table, logical_axis_sector(key, axis)?)
+                    .ok_or(OperationError::StructureMismatch { tensor })?
+                    .as_slice(),
+            ),
+        };
+        let end = match selected {
+            None => extent,
+            Some(selected) => selected.last().map_or(0, |run| run.end),
+        };
+        if end > sparse_extent(axis)? {
+            return Err(OperationError::StructureMismatch { tensor });
+        }
+        runs.push(selected);
+    }
+    Ok(runs)
+}
+
+/// Gathers the selected degeneracy positions of every block from an owned
+/// or lazy-adjoint fusion tensor into a newly allocated `destination`
+/// payload, in order.
+///
+/// `logical_runs` holds one entry per logical axis: `None` keeps the axis
+/// whole, `Some(table)` gives the source positions per uncoupled sector of
+/// the destination block's own key ([`SectorRunTable`]). The runs must end
+/// within the source extent and cover the destination block's extent
+/// exactly, both checked per block and axis before the block is written.
 #[doc(hidden)]
 pub fn oriented_fusion_restrict_owned<D>(
     destination: &BlockStructure,
     source: FusionOperand<'_>,
     source_data: &[D],
-    logical_starts: &[SectorStartTable<'_>],
+    logical_runs: &[SectorRunTable<'_>],
 ) -> Result<Vec<D>, OperationError>
 where
     D: Copy
@@ -128,20 +172,14 @@ where
         + strided_kernel::MaybeSendSync,
 {
     if source_data.len() != source.storage_space().required_len()?
-        || logical_starts.len() != destination.rank()
+        || logical_runs.len() != destination.rank()
     {
         return Err(OperationError::StructureMismatch {
             tensor: "oriented degeneracy restriction storage",
         });
     }
     overwrite_owned_blocks(destination, |destination_block, writer| {
-        restrict_block(
-            destination_block,
-            writer,
-            source,
-            source_data,
-            logical_starts,
-        )
+        restrict_block(destination_block, writer, source, source_data, logical_runs)
     })
 }
 
@@ -149,16 +187,16 @@ where
 /// structure stacked end to end in `source_data`: the output stacks the
 /// `members` restrictions at stride `destination.required_len()`.
 ///
-/// Each destination block is one strided copy for every member at once (the
-/// member axis is a trailing dimension of the copy), from the same per-block
-/// plan as the single-payload form.
+/// Each piece of a destination block is one strided copy for every member at
+/// once (the member axis is a trailing dimension of the copy), from the same
+/// per-block plan as the single-payload form.
 #[doc(hidden)]
 pub fn stacked_fusion_restrict_owned<D>(
     destination: &BlockStructure,
     source: FusionOperand<'_>,
     source_data: &[D],
     members: usize,
-    logical_starts: &[SectorStartTable<'_>],
+    logical_runs: &[SectorRunTable<'_>],
 ) -> Result<Vec<D>, OperationError>
 where
     D: Copy
@@ -172,7 +210,7 @@ where
 {
     let member_len = source.storage_space().required_len()?;
     if Some(source_data.len()) != member_len.checked_mul(members)
-        || logical_starts.len() != destination.rank()
+        || logical_runs.len() != destination.rank()
     {
         return Err(OperationError::StructureMismatch {
             tensor: "oriented degeneracy restriction storage",
@@ -183,25 +221,19 @@ where
         members,
         member_len,
         |destination_block, writer| {
-            restrict_block(
-                destination_block,
-                writer,
-                source,
-                source_data,
-                logical_starts,
-            )
+            restrict_block(destination_block, writer, source, source_data, logical_runs)
         },
     )
 }
 
 /// Writes one destination block of a restriction: the source block of the
-/// same key, entered at the selected start on every axis.
+/// same key, read at the selected positions on every axis.
 fn restrict_block<D>(
     destination_block: BlockRef<'_>,
     writer: &mut BlockOverwrite<'_, D>,
     source: FusionOperand<'_>,
     source_data: &[D],
-    logical_starts: &[SectorStartTable<'_>],
+    logical_runs: &[SectorRunTable<'_>],
 ) -> Result<(), OperationError>
 where
     D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
@@ -215,43 +247,20 @@ where
         .storage_space()
         .structure()
         .block(source.storage_block_index(logical_key)?)?;
-    let mut source_offset = source_block.offset();
-    for (axis, (&extent, table)) in destination_block
-        .shape()
-        .iter()
-        .zip(logical_starts)
-        .enumerate()
-    {
-        let logical_start = match table {
-            None => 0,
-            Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
-                .ok_or_else(|| OperationError::StructureMismatch {
-                    tensor: "oriented degeneracy restriction sector",
-                })?,
-        };
-        let storage_axis = source.storage_axis(axis)?;
-        let end = logical_start
-            .checked_add(extent)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        if end > source_block.shape()[storage_axis] {
-            return Err(OperationError::StructureMismatch {
-                tensor: "oriented degeneracy restriction rectangle",
-            });
-        }
-        source_offset = source_offset
-            .checked_add(
-                logical_start
-                    .checked_mul(source_block.strides()[storage_axis])
-                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
-            )
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-    }
-    writer.copy(
+    let runs = block_axis_runs(
+        logical_key,
+        destination_block.shape(),
+        logical_runs,
+        |axis| Ok(source_block.shape()[source.storage_axis(axis)?]),
+        "oriented degeneracy restriction rectangle",
+    )?;
+    writer.copy_runs(
         |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
         source_data,
-        source_offset,
+        source_block.offset(),
         source.storage_conjugate(),
         D::one(),
+        &runs,
     )
 }
 
@@ -299,16 +308,41 @@ fn preflight_scatter_bounds(
     Ok(())
 }
 
-/// Adds source fusion-tree blocks into logical rectangles of a full destination.
+/// One block of a scatter: one stride record for the block and its per-axis
+/// destination runs; the pieces are walked from the runs at write time, so a
+/// `k`-run selection costs no allocation per piece.
+struct ScatterRunsBlock<'a> {
+    block: ScatterBlock,
+    runs: SmallVec<[AxisRuns<'a>; 8]>,
+}
+
+/// `origin + sum_a position[a] * stride[a]` in signed offsets, checked.
+fn piece_offset(origin: isize, position: &[usize], strides: &[isize]) -> Option<isize> {
+    position
+        .iter()
+        .zip(strides)
+        .try_fold(origin, |offset, (&position, &stride)| {
+            isize::try_from(position)
+                .ok()?
+                .checked_mul(stride)
+                .and_then(|step| offset.checked_add(step))
+        })
+}
+
+/// Adds source fusion-tree blocks into the selected degeneracy positions of
+/// a full destination, in order: the adjoint of
+/// [`oriented_fusion_restrict_owned`].
 ///
-/// All keys, ranks, shapes, ranges, strides, offsets, and storage bounds are
+/// All keys, ranks, shapes, runs, strides, offsets, and storage bounds are
 /// preflighted for every block before the first destination element is changed.
 ///
-/// `ranges` holds one entry per logical axis: `None` requires the source and
-/// destination extents to be equal, `Some(table)` gives the destination range
-/// per uncoupled sector of the source block's own key, sorted by [`SectorId`].
-/// A block whose sector is absent from a `Some` table is a preflight
-/// `StructureMismatch`. Accumulation is `beta = 1`.
+/// `runs` holds one entry per logical axis: `None` requires the source and
+/// destination extents to be equal, `Some(table)` gives the destination
+/// positions per uncoupled sector of the source block's own key
+/// ([`SectorRunTable`]); they must cover the source extent exactly and end
+/// within the destination extent. A block whose sector is absent from a
+/// `Some` table is a preflight `StructureMismatch`. Accumulation is
+/// `beta = 1`. One strided add per piece of the per-axis runs' product.
 #[doc(hidden)]
 pub fn fusion_scatter_add_assign<D>(
     destination: &BlockStructure,
@@ -316,7 +350,7 @@ pub fn fusion_scatter_add_assign<D>(
     logical_source: &BlockStructure,
     source: FusionOperand<'_>,
     source_data: &[D],
-    ranges: &[SectorRangeTable<'_>],
+    runs: &[SectorRunTable<'_>],
 ) -> Result<(), OperationError>
 where
     D: Copy
@@ -331,7 +365,7 @@ where
     if destination_data.len() != destination.required_len()?
         || source_data.len() != source.storage_space().required_len()?
         || destination.rank() != logical_source.rank()
-        || ranges.len() != destination.rank()
+        || runs.len() != destination.rank()
     {
         return Err(OperationError::StructureMismatch {
             tensor: "fusion scatter accumulation storage",
@@ -363,46 +397,26 @@ where
                 tensor: "fusion scatter accumulation block rank",
             });
         }
-        let mut destination_offset = destination_block.offset();
-        for (axis, table) in ranges.iter().enumerate() {
-            let source_extent = logical_block.shape()[axis];
-            let destination_extent = destination_block.shape()[axis];
-            let range = match table {
-                None => None,
-                Some(table) => Some(
-                    selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
-                        .ok_or_else(|| OperationError::StructureMismatch {
-                            tensor: "fusion scatter sliced sector",
-                        })?,
-                ),
-            };
-            let start = match range {
-                None if source_extent == destination_extent => 0,
-                None => {
-                    return Err(OperationError::StructureMismatch {
-                        tensor: "fusion scatter unsliced extent",
-                    });
-                }
-                Some(range)
-                    if range.end.checked_sub(range.start) == Some(source_extent)
-                        && range.end <= destination_extent =>
-                {
-                    range.start
-                }
-                Some(_) => {
-                    return Err(OperationError::StructureMismatch {
-                        tensor: "fusion scatter sliced extent",
-                    });
-                }
-            };
-            destination_offset = destination_offset
-                .checked_add(
-                    start
-                        .checked_mul(destination_block.strides()[axis])
-                        .ok_or_else(|| OperationError::ElementCountOverflow)?,
-                )
-                .ok_or_else(|| OperationError::ElementCountOverflow)?;
+        let block_runs = block_axis_runs(
+            logical_key,
+            logical_block.shape(),
+            runs,
+            |axis| Ok(destination_block.shape()[axis]),
+            "fusion scatter sliced extent",
+        )?;
+        for (axis, selected) in block_runs.iter().enumerate() {
+            if selected.is_none() && logical_block.shape()[axis] != destination_block.shape()[axis]
+            {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "fusion scatter unsliced extent",
+                });
+            }
         }
+        check_axis_runs(logical_block.shape(), &block_runs).map_err(|_| {
+            OperationError::StructureMismatch {
+                tensor: "fusion scatter sliced extent",
+            }
+        })?;
         let destination_strides = destination_block
             .strides()
             .iter()
@@ -418,11 +432,21 @@ where
                     .map_err(|_| OperationError::StrideOverflow { value: stride })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let destination_offset = checked_offset(destination_offset)?;
+        let destination_offset = checked_offset(destination_block.offset())?;
         let source_offset = checked_offset(storage_block.offset())?;
+        // Strides are non-negative, so the pieces' destination envelope is
+        // the block origin up to every axis' last selected position.
+        let envelope: SmallVec<[usize; 8]> = block_runs
+            .iter()
+            .zip(logical_block.shape())
+            .map(|(selected, &extent)| match selected {
+                None => extent,
+                Some(selected) => selected.last().map_or(0, |run| run.end),
+            })
+            .collect();
         preflight_scatter_bounds(
             destination_data.len(),
-            logical_block.shape(),
+            &envelope,
             &destination_strides,
             destination_offset,
         )?;
@@ -432,28 +456,40 @@ where
             &source_strides,
             source_offset,
         )?;
-        blocks.push(ScatterBlock {
-            shape: logical_block.shape().to_vec(),
-            destination_strides,
-            source_strides,
-            destination_offset,
-            source_offset,
+        blocks.push(ScatterRunsBlock {
+            block: ScatterBlock {
+                shape: logical_block.shape().to_vec(),
+                destination_strides,
+                source_strides,
+                destination_offset,
+                source_offset,
+            },
+            runs: block_runs,
         });
     }
     let mut kernels = StridedHostKernelAdapter::default();
-    for block in &blocks {
-        kernels.tensoradd_strided_checked(
-            destination_data,
-            source_data,
-            &block.shape,
-            &block.destination_strides,
-            &block.source_strides,
-            block.destination_offset,
-            block.source_offset,
-            source.storage_conjugate(),
-            D::one(),
-            D::one(),
-        )?;
+    for ScatterRunsBlock { block, runs } in &blocks {
+        for_each_run_piece(&block.shape, runs, |piece, packed, sparse| {
+            // Within the preflighted envelopes, so neither can overflow.
+            let (Some(destination_offset), Some(source_offset)) = (
+                piece_offset(block.destination_offset, sparse, &block.destination_strides),
+                piece_offset(block.source_offset, packed, &block.source_strides),
+            ) else {
+                return Err(OperationError::ElementCountOverflow);
+            };
+            kernels.tensoradd_strided_checked(
+                destination_data,
+                source_data,
+                piece,
+                &block.destination_strides,
+                &block.source_strides,
+                destination_offset,
+                source_offset,
+                source.storage_conjugate(),
+                D::one(),
+                D::one(),
+            )
+        })?;
     }
     Ok(())
 }
@@ -799,8 +835,15 @@ mod tests {
 
     /// Both Z2 sectors sliced to the same destination range, sorted by id, as
     /// every scatter caller passes it.
-    fn sliced_both_sectors() -> [(SectorId, Range<usize>); 2] {
-        [(SectorId::new(0), 1..2), (SectorId::new(1), 1..2)]
+    fn runs(runs: &[Range<usize>]) -> SelectedRuns {
+        runs.iter().cloned().collect()
+    }
+
+    fn sliced_both_sectors() -> [(SectorId, SelectedRuns); 2] {
+        [
+            (SectorId::new(0), SelectedRuns::from_elem(1..2, 1)),
+            (SectorId::new(1), SelectedRuns::from_elem(1..2, 1)),
+        ]
     }
 
     fn two_key_destination() -> BlockStructure {
@@ -933,7 +976,10 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&source),
                 &[1.0, 2.0, 3.0, 4.0],
-                &[Some(&[(SectorId::new(0), 1..2)][..]), None],
+                &[
+                    Some(&[(SectorId::new(0), SelectedRuns::from_elem(1..2, 1))][..]),
+                    None
+                ],
             ),
             Err(OperationError::StructureMismatch { .. })
         ));
@@ -944,10 +990,50 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&destination_operand()),
                 &[0.0; 12],
-                &[Some(&[(SectorId::new(0), 1)][..]), None],
+                &[
+                    Some(&[(SectorId::new(0), SelectedRuns::from_elem(1..2, 1))][..]),
+                    None
+                ],
             ),
             Err(OperationError::StructureMismatch { .. })
         ));
+    }
+
+    /// What: a two-run selection gathers rows `{0, 2}` of every sector in
+    /// order, and the scatter puts them back there (zeros elsewhere): the
+    /// dense row gather and its adjoint, by hand.
+    #[test]
+    fn two_run_selection_gathers_and_scatters_rows_in_order() {
+        let full = destination_operand();
+        let kept = [
+            (SectorId::new(0), runs(&[0..1, 2..3])),
+            (SectorId::new(1), runs(&[0..1, 2..3])),
+        ];
+        let restricted = source_with_shapes(&two_key_destination(), &[vec![2, 2], vec![2, 2]]);
+        // Column-major 3x2 per sector: block 0 holds 0..6, block 1 6..12.
+        let data: Vec<f64> = (0..12).map(f64::from).collect();
+        let gathered = oriented_fusion_restrict_owned(
+            restricted.structure(),
+            FusionOperand::direct(&full),
+            &data,
+            &[Some(&kept[..]), None],
+        )
+        .unwrap();
+        assert_eq!(gathered, vec![0.0, 2.0, 3.0, 5.0, 6.0, 8.0, 9.0, 11.0]);
+        let mut scattered = vec![0.0; 12];
+        fusion_scatter_add_assign(
+            full.structure(),
+            &mut scattered,
+            restricted.structure(),
+            FusionOperand::direct(&restricted),
+            &gathered,
+            &[Some(&kept[..]), None],
+        )
+        .unwrap();
+        assert_eq!(
+            scattered,
+            vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 8.0, 9.0, 0.0, 11.0]
+        );
     }
 
     /// The full two-sector space, read as a restriction source.

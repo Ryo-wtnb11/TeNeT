@@ -474,3 +474,86 @@ fn stacked_restrict_leg_allocates_one_unfilled_payload_independent_of_the_member
         "non-payload bytes must not depend on the member count"
     );
 }
+
+/// One restriction and one embedding of a leg whose kept positions are every
+/// other degeneracy index (`Σ_c ceil(n_c / 2)` runs, one per kept position,
+/// the `eig` worst case: 4 at scale 1, 28 at scale 8) with degeneracies
+/// `scale` times a base shape: the two warm measurements and the restricted
+/// and embedded payload bytes.
+fn alternate_runs_measurement(scale: usize) -> (Measurement, Measurement, usize, usize) {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(
+        &provider,
+        &[(-1, 2 * scale), (0, 3 * scale), (1, 2 * scale)],
+    );
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &other], [&other], 71).unwrap();
+    let every_other = |degeneracy: usize| (0..degeneracy).step_by(2).collect::<Vec<_>>();
+    let selection = LegSelection::try_new(
+        &leg,
+        [
+            (U1Irrep::new(-1), every_other(2 * scale)),
+            (U1Irrep::new(0), every_other(3 * scale)),
+            (U1Irrep::new(1), every_other(2 * scale)),
+        ],
+    )
+    .unwrap();
+
+    let warm = source.restrict_leg(&[(0, &selection)]).unwrap();
+    let warm_embedded = warm.embed_leg(0, &selection).unwrap();
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
+    let mut output = None;
+    let restrict = measure(payload_bytes, || {
+        output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
+    });
+    assert_eq!(
+        output.unwrap().dense_data().unwrap(),
+        warm.dense_data().unwrap()
+    );
+    let embedded_bytes = std::mem::size_of_val(warm_embedded.dense_data().unwrap());
+    let mut embedded = None;
+    let embed = measure(embedded_bytes, || {
+        embedded = Some(black_box(warm.embed_leg(0, &selection).unwrap()));
+    });
+    assert_eq!(
+        embedded.unwrap().dense_data().unwrap(),
+        warm_embedded.dense_data().unwrap()
+    );
+    (restrict, embed, payload_bytes, embedded_bytes)
+}
+
+#[test]
+fn a_many_run_selection_allocates_nothing_per_run() {
+    let _guard = counting_alloc::serial();
+    // What (#2095): the run gather and scatter walk their pieces in place,
+    // so the number of runs (here growing with the degeneracies) costs no
+    // allocation: the restriction pays exactly what a contiguous one does,
+    // and the embedding is independent of the run count.
+    let (small_restrict, small_embed, small_bytes, small_embedded) = alternate_runs_measurement(1);
+    let (large_restrict, large_embed, large_bytes, large_embedded) = alternate_runs_measurement(8);
+    assert!(large_bytes > small_bytes);
+    for (measurement, bytes) in [
+        (&small_restrict, small_bytes),
+        (&large_restrict, large_bytes),
+    ] {
+        assert_eq!(
+            measurement.zeroed_payloads, 0,
+            "no payload-sized zeroed allocation, got {measurement:?} for {bytes} bytes"
+        );
+    }
+    assert_eq!(small_restrict.allocations, 8);
+    assert_eq!(small_restrict.allocations, large_restrict.allocations);
+    assert_eq!(
+        small_restrict.bytes - small_bytes,
+        large_restrict.bytes - large_bytes,
+        "non-payload bytes must not depend on the run count"
+    );
+    assert_eq!(small_embed.allocations, large_embed.allocations);
+    assert_eq!(
+        small_embed.bytes - small_embedded,
+        large_embed.bytes - large_embedded,
+        "embedding non-payload bytes must not depend on the run count"
+    );
+}
