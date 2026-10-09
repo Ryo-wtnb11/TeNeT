@@ -16,10 +16,10 @@
 //! are pinned in [`PINS`]: the stage sequence may regroup the kernels, never add
 //! or remove one, with two #1859 C2 exceptions that [`Recorder::check`]
 //! states exactly: member CopyC no longer refills its temporary
-//! ([`MEMBER_COPY_C`]), and member Core/CopyC retained bytes now use the one
-//! member workspace's Host region accounting, so they may differ from the
-//! base by a per-case constant while every device byte, which grows with
-//! `B`, is equal. The counters are process-wide, hence `--test-threads=1`:
+//! ([`MEMBER_COPY_C`]), and member retained bytes now use the one member
+//! workspace's Host region accounting, so they differ from the base by a
+//! pinned per-case constant ([`RETAINED_METADATA_DELTA`]) while every device
+//! byte, which grows with `B`, is equal. The counters are process-wide, hence `--test-threads=1`:
 //!
 //! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
 //! --test typed_cuda_contract_stages -- --ignored --test-threads=1`.
@@ -115,7 +115,6 @@ impl Recorder {
             pinned.len(),
             "{prefix}: observed and pinned counter sets differ in size"
         );
-        let mut metadata: Vec<(&str, i64)> = Vec::new();
         for ((key, observed), (pinned_key, pinned)) in self.0.iter().zip(&pinned) {
             assert_eq!(key, pinned_key, "{prefix}: pin order");
             let mut expected = *pinned;
@@ -139,19 +138,12 @@ impl Recorder {
                 );
                 expected[4] = fewest;
             }
-            if (copy_c.is_some() || key.starts_with("direct member ")) && pinned[6] != 0 {
-                let delta = observed[6] as i64 - pinned[6] as i64;
-                match metadata.iter().find(|(seen, _)| *seen == group) {
-                    Some(&(_, first)) => assert_eq!(
-                        delta, first,
-                        "{key}: retained bytes moved by more than a B-independent metadata delta"
-                    ),
-                    None => {
-                        eprintln!("retained Host metadata delta vs base: {group}: {delta}");
-                        metadata.push((group, delta));
-                    }
-                }
-                expected[6] = observed[6];
+            if pinned[6] != 0 {
+                let delta = RETAINED_METADATA_DELTA
+                    .iter()
+                    .find(|(seen, _)| *seen == group)
+                    .map_or(0, |&(_, delta)| delta);
+                expected[6] = expected[6].checked_add_signed(delta).unwrap();
             }
             if let Some((_, [calls, bytes])) =
                 ZERO_TEMPLATE_GROWTH.iter().find(|(row, _)| row == key)
@@ -188,6 +180,35 @@ const ZERO_TEMPLATE_GROWTH: &[(&str, [i64; 2])] = &[
         [-1, -816],
     ),
     ("member fA f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 256]),
+];
+
+/// Per-case change of a member workspace's retained bytes against the base
+/// (#1859 C2), the same on every row of the case at every `B`; device bytes,
+/// which grow with `B`, are therefore equal. One accounting now covers every
+/// member region list: inline vector bytes (56 per `CudaRegion`) plus each
+/// region's heap capacity.
+/// - DynamicTree with core zero regions: +56 per region, the inline bytes
+///   the base left out (fA/fB: three regions).
+/// - Core with one inactive region: +32, heap capacity where the base
+///   counted `2 * dims.len()` words.
+/// - CopyC with one inactive region: -88, the base's zero-region list for the
+///   temporary, which no longer exists.
+const RETAINED_METADATA_DELTA: &[(&str, i64)] = &[
+    ("direct member U(1) core route, inactive block f64", 32),
+    ("direct member signed core f64", 32),
+    ("direct member signed swapped core f64", 32),
+    ("direct member signed copyC f64", -88),
+    ("direct member signed swapped copyC f64", -88),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64",
+        56,
+    ),
+    (
+        "member U(1) output transform over an inactive core block f64",
+        -88,
+    ),
+    ("member fA f64", 168),
+    ("member fB f64", 168),
 ];
 
 const MEMBER_COPY_C: &[(&str, u64)] = &[
