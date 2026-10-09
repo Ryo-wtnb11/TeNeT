@@ -1281,6 +1281,25 @@ mod tests {
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage() {
+        // Isolated: a concurrent cache clear would force a rebuild.
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_PACKS_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated pack test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         // Why (#2101): each stage replays into its own context workspace, so
         // no stage evicts another's Multi pack: a warm call converts at most
         // one pack per stage (a shared workspace would convert three into one
