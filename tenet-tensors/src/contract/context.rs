@@ -7,6 +7,7 @@ use tenet_core::{
     HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap, TensorStorage,
 };
 
+use super::route_host::Stage;
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
@@ -17,7 +18,9 @@ use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
-use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::{
+    ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned, TreeTransformWorkspace,
+};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::{
@@ -558,24 +561,6 @@ where
         self.copy_c_scratch.len()
     }
 
-    /// Allocated Host capacity retained by fusion lhs/rhs/destination scratch
-    /// and the `copyC` temporary.
-    #[doc(hidden)]
-    pub fn retained_host_scratch_bytes(&self) -> usize {
-        self.fusion_scratch.retained_bytes().saturating_add(
-            self.copy_c_scratch
-                .capacity()
-                .saturating_mul(std::mem::size_of::<D>()),
-        )
-    }
-
-    /// Releases this context's retained Host fusion and `copyC` buffers.
-    #[doc(hidden)]
-    pub fn trim_host_scratch(&mut self) {
-        self.fusion_scratch.clear();
-        self.copy_c_scratch = HostScratchBuffer::default();
-    }
-
     pub(crate) fn checked_generic_resources_mut(
         &mut self,
     ) -> (
@@ -634,7 +619,7 @@ where
     #[cfg(test)]
     pub(crate) fn eager_coefficient_pack_builds(&self) -> [usize; 3]
     where
-        BT: TreeTransformBackend<D, C, Workspace = tenet_operations::TreeTransformWorkspace<D>>,
+        BT: TreeTransformBackend<D, C, Workspace = TreeTransformWorkspace<D>>,
     {
         std::array::from_fn(|stage| self.stage_workspaces[stage].coefficient_pack_builds())
     }
@@ -672,6 +657,43 @@ where
             self.contract_backend,
             self.contract_workspace,
         )
+    }
+}
+
+impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    BT: TreeTransformBackend<D, C, Workspace = TreeTransformWorkspace<D>>,
+    BC: TensorContractBackend<D, C>,
+{
+    /// Allocated Host capacity retained by fusion lhs/rhs/destination scratch,
+    /// the `copyC` temporary, and the tree-transform workspaces (the tree
+    /// context's and one per contraction stage, coefficient packs included).
+    #[doc(hidden)]
+    pub fn retained_host_scratch_bytes(&self) -> usize {
+        std::iter::once(self.tree_context.workspace())
+            .chain(&self.stage_workspaces)
+            .map(TreeTransformWorkspace::retained_bytes)
+            .fold(
+                self.fusion_scratch.retained_bytes().saturating_add(
+                    self.copy_c_scratch
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<D>()),
+                ),
+                usize::saturating_add,
+            )
+    }
+
+    /// Releases this context's retained Host fusion, `copyC` and
+    /// tree-transform buffers.
+    #[doc(hidden)]
+    pub fn trim_host_scratch(&mut self) {
+        self.fusion_scratch.clear();
+        self.copy_c_scratch = HostScratchBuffer::default();
+        *self.tree_context.backend_workspace_mut().1 = TreeTransformWorkspace::default();
+        self.stage_workspaces = Default::default();
     }
 }
 
@@ -2290,14 +2312,25 @@ where
             alpha,
             D::zero(),
         )?;
-        self.tree_context.tree_transform_into(
+        let structure = self.tree_context.tree_structure(
             rule,
-            plan.output_transform().clone(),
-            dst,
-            core_dst,
-            D::one(),
-            beta,
-        )
+            plan.output_transform(),
+            dst.structure(),
+            TreeStructureSource::Stored {
+                structure: core_dst.structure(),
+                storage_conjugate: false,
+            },
+        )?;
+        self.tree_context
+            .backend_mut()
+            .tree_transform_structure_into(
+                &mut self.stage_workspaces[Stage::Output as usize],
+                &structure,
+                dst,
+                core_dst,
+                D::one(),
+                beta,
+            )
     }
 
     #[expect(
@@ -2352,6 +2385,7 @@ where
 
         self.transform_source_into_core(
             rule,
+            Stage::Lhs,
             plan.lhs_transform().clone(),
             plan.lhs_source_conjugate(),
             lhs_core,
@@ -2359,6 +2393,7 @@ where
         )?;
         self.transform_source_into_core(
             rule,
+            Stage::Rhs,
             plan.rhs_transform().clone(),
             plan.rhs_source_conjugate(),
             rhs_core,
@@ -2418,6 +2453,7 @@ where
     >(
         &mut self,
         rule: &R,
+        stage: Stage,
         operation: crate::TreeTransformOperation,
         source_conjugate: bool,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -2455,16 +2491,18 @@ where
                 },
             )?
         };
-        self.tree_context
-            .tree_transform_structure_overwrite_into_raw(
-                &structure,
-                &dst_structure,
-                src.structure(),
-                dst.data_mut(),
-                src.data(),
-                D::one(),
-                &[],
-            )
+        crate::tree_context::replay_structure_overwrite(
+            self.tree_context.backend_mut(),
+            &mut self.stage_workspaces[stage as usize],
+            &structure,
+            &dst_structure,
+            src.structure(),
+            dst.data_mut(),
+            src.data(),
+            D::one(),
+            &[],
+            None,
+        )
     }
 }
 
