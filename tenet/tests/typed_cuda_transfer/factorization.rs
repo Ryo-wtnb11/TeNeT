@@ -342,7 +342,8 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         .unwrap();
     assert!(matches!(
         u1_device.inner(&mismatched),
-        Err(tenet::typed::Error::InvalidArgument(_))
+        Err(tenet::typed::Error::Operation(operation))
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert_eq!(
         u1_device.to_host().unwrap().dense_data().unwrap(),
