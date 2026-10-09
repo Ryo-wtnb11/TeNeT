@@ -21,6 +21,7 @@ use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap, TensorScalar};
 mod numerics;
 
 type Space = GradedSpace<SUNFusionRule>;
+type Sectors = Vec<(Vec<i64>, usize)>;
 
 /// Contract the codomain leg `lhs` of `x` with the leg `rhs` through
 /// `id(space(x, lhs))`, keeping the remaining legs in their partitions.
@@ -89,7 +90,7 @@ fn assert_trace_matches<D>(
 
 fn spaces(n: usize) -> (Space, Space) {
     let rule = Arc::new(SUNFusionRule::new(n).unwrap());
-    let (v, w): (Vec<(Vec<i64>, usize)>, Vec<(Vec<i64>, usize)>) = if n == 2 {
+    let (v, w): (Sectors, Sectors) = if n == 2 {
         (
             vec![(vec![0], 2), (vec![1], 1), (vec![2], 2)],
             vec![(vec![0], 1), (vec![1], 2), (vec![3], 1)],
