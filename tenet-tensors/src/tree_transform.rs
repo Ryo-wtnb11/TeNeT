@@ -7,7 +7,7 @@ pub use cache::{
     TreeTransformOperationView,
 };
 pub(crate) use cache::{
-    lookup_bound, publish_committed, publishable, resolve, CheckedPendingCoefficients,
+    lookup_bound, publish_committed, publishable, CheckedPendingCoefficients,
     CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups,
     TraceColumnReuse, TransformerMode, TreeTransformPlanning, TreeTransformScope,
 };

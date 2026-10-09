@@ -68,6 +68,23 @@ impl CheckedStagedOperand<'_> {
             Self::Transformed { structure, .. } => structure,
         }
     }
+
+    /// `(preview, committed)`; a borrowed operand is already committed.
+    fn commit(
+        self,
+    ) -> (
+        Arc<tenet_core::BlockStructure>,
+        Arc<tenet_core::BlockStructure>,
+    ) {
+        match self {
+            Self::Borrowed(space) => (Arc::clone(space.structure()), Arc::clone(space.structure())),
+            Self::Transformed {
+                prepared,
+                structure,
+                ..
+            } => (structure, prepared.commit_structure()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -815,7 +832,19 @@ where
         )?;
     }
     let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    coefficients.flush();
+    // Only after the fallible destination commit: a failed call commits no
+    // intermediate and publishes nothing. These commits cannot fail; a lost
+    // or refused admission leaves its preview unpublishable.
+    let committed = [
+        (
+            destination_structure,
+            Arc::clone(destination.space().structure()),
+        ),
+        lhs_prepared.commit(),
+        rhs_prepared.commit(),
+        (core_structure, core_destination.commit_structure()),
+    ];
+    coefficients.flush_committed(&committed);
     Ok((destination, data))
 }
 
