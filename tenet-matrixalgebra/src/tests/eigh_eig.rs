@@ -821,7 +821,7 @@ fn eigh_preserves_endomorphism_error_precedence() {
 
     assert_eq!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "eigh requires an endomorphism (codomain == domain)",
         }
     );
@@ -1042,9 +1042,11 @@ fn eigh_rejects_non_finite_owned_eigenvalues_before_sorting() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(
             crate::factorize::validate_real_eigenvalues_for_test(&[value]),
-            Err(OperationError::InvalidArgument {
-                message: "eigenvalues must be finite",
-            })
+            Err(OperationError::Dense(DenseError::NumericalFailure {
+                backend: DenseBackend::Tenferro,
+                op: crate::factorize::EIGH_EIGENVALUE_CHECK,
+                message: "eigenvalues must be finite".to_string(),
+            }))
         );
     }
 }
@@ -1205,32 +1207,47 @@ fn compact_owned_eigh_preserves_eigh_into_output_precedence() {
     let tensor = one_sector_matrix(vec![2.0, 0.0, 0.0, 3.0]);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let input = bound.as_ref();
-    let check = |outputs: Vec<DenseTensor>, expected: &str| {
+    let check = |outputs: Vec<DenseTensor>, expected: DenseError| {
         let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
             outputs: Some(outputs),
             ..Default::default()
         });
         let error = eigh_full(&mut dense, &input).unwrap_err();
-        assert!(format!("{error}").contains(expected), "{error:?}");
+        assert_eq!(error, OperationError::Dense(expected));
     };
 
     check(
         vec![f64_eigh_outputs(2).remove(0)],
-        "dense EIGH must return exactly (values, vectors)",
+        arity_mismatch("eigh_into", 2, 1),
     );
     check(
         f64_eigh_outputs(1),
-        "output shape mismatch: source [1], destination [2]",
+        DenseError::ShapeMismatch {
+            op: "eigh_into",
+            expected: vec![2],
+            actual: vec![1],
+        },
     );
     let mut outputs = f64_eigh_outputs(2);
     outputs[1] = f64_eigh_outputs(1).remove(1);
     check(
         outputs,
-        "output shape mismatch: source [1, 1], destination [2, 2]",
+        DenseError::ShapeMismatch {
+            op: "eigh_into",
+            expected: vec![2, 2],
+            actual: vec![1, 1],
+        },
     );
     let mut outputs = f64_eigh_outputs(2);
     outputs[0] = c64_eigh_outputs(2).remove(1);
     let expected = outputs[0].as_f64_slice().unwrap_err();
+    assert!(matches!(
+        expected,
+        DenseError::DTypeMismatch {
+            actual: tenet_dense::DenseDType::C64,
+            ..
+        }
+    ));
     let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
         outputs: Some(outputs),
         ..Default::default()
@@ -1241,6 +1258,13 @@ fn compact_owned_eigh_preserves_eigh_into_output_precedence() {
     let mut outputs = f64_eigh_outputs(2);
     outputs[1] = c64_eigh_outputs(2).remove(1);
     let expected = outputs[1].as_f64_slice().unwrap_err();
+    assert!(matches!(
+        expected,
+        DenseError::DTypeMismatch {
+            actual: tenet_dense::DenseDType::C64,
+            ..
+        }
+    ));
     let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
         outputs: Some(outputs),
         ..Default::default()

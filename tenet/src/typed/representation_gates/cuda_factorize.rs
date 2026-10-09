@@ -297,7 +297,7 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
         Err(Error::Operation(error))
             if matches!(
                 error.as_ref(),
-                tenet_tensors::OperationError::UnsupportedTensorContractScope { .. }
+                tenet_tensors::OperationError::InvalidArgument { .. }
             )
     ));
 }

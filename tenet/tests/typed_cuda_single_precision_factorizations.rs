@@ -895,10 +895,13 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
                 .err(),
         ),
     ] {
-        let message = format!("{error:?}");
         assert!(
-            error.is_some() && message.contains("Hermitian"),
-            "{name}: a non-Hermitian block must be rejected as such, got {message}"
+            matches!(
+                &error,
+                Some(tenet::typed::Error::Operation(error))
+                    if matches!(**error, tenet::typed::OperationError::InvalidArgument { .. })
+            ),
+            "{name}: a non-Hermitian block must be rejected as a precondition, got {error:?}"
         );
     }
 }

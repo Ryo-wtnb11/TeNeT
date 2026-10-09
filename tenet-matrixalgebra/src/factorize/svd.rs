@@ -425,7 +425,7 @@ fn compact_diagonal_svd_factor_data<D: FactorScalar>(
     by_sector: &FxHashMap<SectorId, &SectorSpectrum<D>>,
 ) -> Result<(Vec<D>, Vec<D>, Vec<SectorSpectrum>), OperationError> {
     if by_sector.len() != routes.len() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::InvalidArgument {
             message: "compact diagonal spectrum does not match source sectors",
         });
     }
@@ -433,15 +433,14 @@ fn compact_diagonal_svd_factor_data<D: FactorScalar>(
     let mut vh_regions = vec![None; right_region_count];
     let mut singular_values = Vec::with_capacity(routes.len());
     for route in routes {
-        let entry =
-            by_sector
-                .get(&route.sector)
-                .ok_or(OperationError::UnsupportedTensorContractScope {
-                    message: "compact diagonal spectrum is missing a source sector",
-                })?;
+        let entry = by_sector
+            .get(&route.sector)
+            .ok_or(OperationError::InvalidArgument {
+                message: "compact diagonal spectrum is missing a source sector",
+            })?;
         let k = route.rank;
         if entry.values.len() != k {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::InvalidArgument {
                 message: "compact diagonal spectrum length does not match source region",
             });
         }
@@ -1363,11 +1362,11 @@ where
         .svd_full_owned(input, rows, cols)
         .map_err(OperationError::Dense)?;
     if outputs.len() != 3 {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_full_owned",
-            message: "dense full SVD must return exactly (U, S, Vh)".to_string(),
-        }));
+        return Err(OperationError::Dense(arity_mismatch(
+            "svd_full_owned",
+            3,
+            outputs.len(),
+        )));
     }
     let u = compact_factor_output_owned(outputs.remove(0), &[rows, rows], "svd_full_owned")?;
     let singular_values =
@@ -2059,11 +2058,11 @@ pub(super) fn compact_svd_outputs<D: FactorScalar>(
 ) -> Result<(Vec<D>, Vec<f64>, Vec<D>), OperationError> {
     let rank = rows.min(cols);
     if outputs.len() != 3 {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "dense SVD must return exactly (U, S, Vt)".to_string(),
-        }));
+        return Err(OperationError::Dense(arity_mismatch(
+            "svd_into",
+            3,
+            outputs.len(),
+        )));
     }
     let u = compact_factor_output_owned::<D>(outputs.remove(0), &[rows, rank], "svd_into")?;
     let singular_values = compact_real_spectrum_owned::<D>(outputs.remove(0), &[rank], "svd_into")?;

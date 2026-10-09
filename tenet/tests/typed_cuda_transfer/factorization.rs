@@ -897,7 +897,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             tenet::typed::Error::Operation(error)
                 if matches!(
                     **error,
-                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. }
+                    tenet::typed::OperationError::InvalidArgument { .. }
                 )
         ),
         "unexpected error: {device_error:?}"

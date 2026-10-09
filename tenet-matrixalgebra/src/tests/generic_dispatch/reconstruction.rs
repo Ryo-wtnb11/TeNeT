@@ -927,8 +927,8 @@ impl Observer for MalformedBatch {
 #[test]
 fn compact_factorizations_reject_a_malformed_executor_batch() {
     // What: a batch with a missing input entry, or an entry missing a factor,
-    // is a typed backend error, never a dropped sector or a panic. A missing
-    // factor keeps the per-matrix path's "exactly (...)" error.
+    // is TeNeT's own typed arity error, never a dropped sector, a panic or a
+    // backend error. A missing factor keeps the per-matrix path's error.
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let bound = bound_tensor(Arc::new(rule), &tensor);
@@ -938,15 +938,15 @@ fn compact_factorizations_reject_a_malformed_executor_batch() {
         (false, "qr_into", "svd_into"),
     ] {
         let mut dense = ScriptedExecutor::new(MalformedBatch { drop_entry });
-        let is_backend_error = |error: &OperationError, expected: &str| {
+        let is_arity_error = |error: &OperationError, expected: &str| {
             matches!(
                 error,
-                OperationError::Dense(DenseError::Backend { op, .. }) if *op == expected
+                OperationError::Dense(DenseError::ShapeMismatch { op, .. }) if *op == expected
             )
         };
         let qr = qr_compact(&mut dense, &input).map(|_| ()).unwrap_err();
-        assert!(is_backend_error(&qr, qr_op), "qr_compact: {qr:?}");
+        assert!(is_arity_error(&qr, qr_op), "qr_compact: {qr:?}");
         let svd = svd_compact(&mut dense, &input).map(|_| ()).unwrap_err();
-        assert!(is_backend_error(&svd, svd_op), "svd_compact: {svd:?}");
+        assert!(is_arity_error(&svd, svd_op), "svd_compact: {svd:?}");
     }
 }

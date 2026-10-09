@@ -462,7 +462,7 @@ where
         });
     }
     if divisor_space.homspace().codomain() != rhs_space.homspace().codomain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "solve requires equal divisor and right-hand-side codomains",
         });
     }
@@ -489,7 +489,7 @@ where
     for region in divisor_regions.iter() {
         validate_region_range(region, divisor.data().len())?;
         if region.rows() != region.cols() {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "solve coupled-sector divisor matrices must be square",
             });
         }
@@ -554,16 +554,20 @@ pub(super) fn compile_solve_left_region_routes(
     let mut routes = Vec::with_capacity(output.len());
     for (output_index, output_region) in output.iter().enumerate() {
         let sector = output_region.coupled();
-        let divisor_index = divisor_by_sector.get(&sector).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "solve divisor is missing an output coupled sector",
-            },
-        )?;
-        let rhs_index = rhs_by_sector.get(&sector).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "solve right-hand side is missing an output coupled sector",
-            },
-        )?;
+        let divisor_index =
+            divisor_by_sector
+                .get(&sector)
+                .copied()
+                .ok_or(OperationError::SpaceMismatch {
+                    message: "solve divisor is missing an output coupled sector",
+                })?;
+        let rhs_index =
+            rhs_by_sector
+                .get(&sector)
+                .copied()
+                .ok_or(OperationError::SpaceMismatch {
+                    message: "solve right-hand side is missing an output coupled sector",
+                })?;
         let divisor_region = &divisor[divisor_index];
         let rhs_region = &rhs[rhs_index];
         if divisor_region.rows() != divisor_region.cols()
@@ -571,7 +575,7 @@ pub(super) fn compile_solve_left_region_routes(
             || output_region.rows() != divisor_region.cols()
             || output_region.cols() != rhs_region.cols()
         {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "solve coupled-sector matrix dimensions are incompatible",
             });
         }
@@ -579,7 +583,7 @@ pub(super) fn compile_solve_left_region_routes(
             || divisor_region.col_trees() != output_region.row_trees()
             || rhs_region.col_trees() != output_region.col_trees()
         {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "solve coupled-sector tree bases are incompatible",
             });
         }
@@ -593,7 +597,7 @@ pub(super) fn compile_solve_left_region_routes(
         });
     }
     if rhs_by_sector.len() != routes.len() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "solve right-hand side contains a sector absent from the output",
         });
     }
@@ -674,7 +678,7 @@ where
 {
     let source_space = input.space().space();
     if source_space.homspace() != output_space.space().homspace() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "matrix function output must preserve the input homspace",
         });
     }
@@ -745,7 +749,7 @@ pub(super) fn compile_inverse_region_routes(
         let output_index = output_by_sector
             .get(&source_region.coupled())
             .copied()
-            .ok_or(OperationError::UnsupportedTensorContractScope {
+            .ok_or(OperationError::SpaceMismatch {
                 message: "inverse output is missing a source coupled sector",
             })?;
         validate_inverse_region(source_region, &output[output_index])?;
@@ -758,7 +762,7 @@ pub(super) fn compile_inverse_region_routes(
         });
     }
     if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse output contains a coupled sector absent from the source",
         });
     }
@@ -791,12 +795,12 @@ pub(super) fn validate_inverse_region(
         || output.rows() != source.cols()
         || output.cols() != source.rows()
     {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse coupled-sector matrix is not square",
         });
     }
     if source.col_trees() != output.row_trees() || source.row_trees() != output.col_trees() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse output tree basis does not transpose the source basis",
         });
     }
@@ -827,7 +831,7 @@ pub(super) fn compile_inverse_matrix_routes<D>(
     let mut routes = Vec::with_capacity(source.len());
     for (source_index, source_matrix) in source.iter().enumerate() {
         let output_index = output_by_sector.get(&source_matrix.sector).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "inverse output is missing a source coupled sector",
             },
         )?;
@@ -836,7 +840,7 @@ pub(super) fn compile_inverse_matrix_routes<D>(
             || output_region.rows() != source_matrix.cols
             || output_region.cols() != source_matrix.rows
         {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "inverse coupled-sector matrix is not square",
             });
         }
@@ -854,7 +858,7 @@ pub(super) fn compile_inverse_matrix_routes<D>(
         });
     }
     if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse output contains a coupled sector absent from the source",
         });
     }

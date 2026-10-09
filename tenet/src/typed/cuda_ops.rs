@@ -450,12 +450,10 @@ where
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
-            return Err(
-                tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                    message: "eigh requires an endomorphism (codomain == domain)",
-                }
-                .into(),
-            );
+            return Err(tenet_tensors::OperationError::SpaceMismatch {
+                message: "eigh requires an endomorphism (codomain == domain)",
+            }
+            .into());
         }
         let required_len = source_space.required_len()?;
         let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
@@ -500,12 +498,10 @@ where
                 .collect();
             let tol = hermitian_tol.resolve(<D as FactorScalar>::epsilon());
             if cuda_hermitian_regions::<D>(cuda, &source.0, &regions, tol)?.contains(&false) {
-                return Err(
-                    tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                        message: "eigh requires every coupled-sector block to be Hermitian",
-                    }
-                    .into(),
-                );
+                return Err(tenet_tensors::OperationError::InvalidArgument {
+                    message: "eigh requires Hermitian coupled-sector blocks",
+                }
+                .into());
             }
         }
 

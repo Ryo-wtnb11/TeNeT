@@ -142,14 +142,25 @@ impl SpyCounts {
 }
 
 /// Fails the `nth` call (1-based, counted over `kernels` together), or every
-/// call when `nth` is `None`: with `DenseError::Backend { op, message }`, or
-/// with `DenseError::Unsupported` when `unsupported` (a missing capability).
+/// call when `nth` is `None`, with the `DenseError` named by `kind`.
 #[allow(dead_code)]
 struct SpyFault {
     kernels: &'static [Kernel],
     nth: Option<usize>,
     message: &'static str,
-    unsupported: bool,
+    kind: SpyFaultKind,
+}
+
+/// The `DenseError` a [`SpyFault`] reports.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum SpyFaultKind {
+    /// `Backend { op, message }`.
+    Backend,
+    /// `Unsupported`: a missing capability.
+    Unsupported,
+    /// `NumericalFailure`: the backend's own numerical failure.
+    Numerical,
 }
 
 #[allow(dead_code)]
@@ -190,7 +201,23 @@ impl SpyExecutor {
             kernels,
             nth,
             message,
-            unsupported: false,
+            kind: SpyFaultKind::Backend,
+        });
+        self
+    }
+
+    /// Like [`Self::failing`], with `DenseError::NumericalFailure`.
+    fn failing_numerically(
+        mut self,
+        kernels: &'static [Kernel],
+        nth: Option<usize>,
+        message: &'static str,
+    ) -> Self {
+        self.faults.push(SpyFault {
+            kernels,
+            nth,
+            message,
+            kind: SpyFaultKind::Numerical,
         });
         self
     }
@@ -202,7 +229,7 @@ impl SpyExecutor {
             kernels,
             nth: None,
             message,
-            unsupported: true,
+            kind: SpyFaultKind::Unsupported,
         });
         self
     }
@@ -219,14 +246,18 @@ impl SpyExecutor {
                     .is_none_or(|nth| self.counts.of(fault.kernels) == nth)
             {
                 let (op, message) = (kernel.op(), fault.message.to_string());
-                return Err(if fault.unsupported {
-                    DenseError::Unsupported { op, message }
-                } else {
-                    DenseError::Backend {
+                return Err(match fault.kind {
+                    SpyFaultKind::Unsupported => DenseError::Unsupported { op, message },
+                    SpyFaultKind::Backend => DenseError::Backend {
                         backend: DenseBackend::Tenferro,
                         op,
                         message,
-                    }
+                    },
+                    SpyFaultKind::Numerical => DenseError::NumericalFailure {
+                        backend: DenseBackend::Tenferro,
+                        op,
+                        message,
+                    },
                 });
             }
         }

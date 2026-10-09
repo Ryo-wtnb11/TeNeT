@@ -165,6 +165,8 @@ fn tenet_dense_exports_exactly_the_pinned_names() {
         "DenseWrite",
         "MatrixOp",
         "SharedCpuContext",
+        "arity_mismatch",
+        "check_contiguous_output",
         "cpu_session_stats",
         "cuda_conj",
         "cuda_copy_region_into",

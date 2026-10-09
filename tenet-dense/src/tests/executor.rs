@@ -2401,6 +2401,25 @@ fn default_copy_into_reports_dtype_and_shape_mismatch() {
         }
     );
 
+    // A float destination of another precision is the same own dtype check,
+    // ahead of the Tenferro slice accessor (#1765), never a backend error.
+    let mut qf = [0.0_f32; 4];
+    let error = executor
+        .qr_into(
+            read(),
+            DenseWrite::F32(DenseViewMut::new(&mut qf, &shape, &strides, 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut r, &shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DenseError::DTypeMismatch {
+            op: "qr_into",
+            expected: DenseDType::F64,
+            actual: DenseDType::F32,
+        }
+    );
+
     // Wrong destination shape for the same tensor.
     let mut q = [0.0_f64; 2];
     let error = executor

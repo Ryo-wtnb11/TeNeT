@@ -15,13 +15,11 @@ use tenet_core::ZNFusionRule;
 
 const RUNTIME: &str = "operands belong to different runtimes";
 const RULE: &str = "operands use different fusion rules";
-const CODOMAIN: &str =
-    "invalid argument: solve requires equal divisor and right-hand-side codomains";
-const NOT_ISO_SOLVE: &str = "unsupported tensor contraction scope: solve requires an isomorphic divisor codomain and domain";
-const NOT_ISO_INV: &str =
-    "unsupported tensor contraction scope: inv requires isomorphic codomain and domain";
-const NOT_ENDO: &str =
-    "unsupported tensor contraction scope: exp requires an endomorphism (codomain == domain)";
+const CODOMAIN: &str = "space mismatch: solve requires equal divisor and right-hand-side codomains";
+const NOT_ISO_SOLVE: &str =
+    "space mismatch: solve requires an isomorphic divisor codomain and domain";
+const NOT_ISO_INV: &str = "space mismatch: inv requires isomorphic codomain and domain";
+const NOT_ENDO: &str = "space mismatch: exp requires an endomorphism (codomain == domain)";
 
 fn unsupported_solve() -> String {
     Error::Unsupported {

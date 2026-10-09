@@ -27,7 +27,8 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    DenseBackend, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor, DenseWrite,
+    arity_mismatch, DenseBackend, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor,
+    DenseWrite,
 };
 
 macro_rules! bound_tensor_ref {

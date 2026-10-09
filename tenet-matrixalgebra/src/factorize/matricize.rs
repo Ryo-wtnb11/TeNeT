@@ -267,7 +267,7 @@ pub(super) fn matricization_of<'a, M>(
     matricizations
         .get(&sector)
         .copied()
-        .ok_or(OperationError::UnsupportedTensorContractScope {
+        .ok_or(OperationError::SpaceMismatch {
             message: "factor tree references a coupled sector absent from the source tensor",
         })
 }

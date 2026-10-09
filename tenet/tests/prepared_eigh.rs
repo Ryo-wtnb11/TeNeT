@@ -17,11 +17,11 @@ use tenet::typed::HermitianTol;
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::sector::{SU2FusionRule, SU2Irrep};
-use tenet::typed::Error;
 use tenet::typed::{
     BatchError, Eigh, EighFullPlan, EighFullWorkspace, GradedSpace, MemberFault, Runtime,
     SignatureField, StackedTensorMap, TensorMap,
 };
+use tenet::typed::{Error, OperationError};
 
 use prepared::eigh::{
     check_member, degenerate_entry, has_degenerate_group, has_plus_minus_tie, hermitian_members,
@@ -239,13 +239,15 @@ where
             HermitianTol::DEFAULT,
         )
         .err()?;
-    let message = format!("{error:?}");
-    Some(if message.contains("Hermitian") {
-        MemberFault::NotHermitian
-    } else if message.contains("finite") {
-        MemberFault::NonFiniteEigenvalue
-    } else {
-        panic!("unexpected eager error {message}")
+    let Error::Operation(error) = error else {
+        panic!("unexpected eager error {error:?}")
+    };
+    Some(match *error {
+        OperationError::InvalidArgument { .. } => MemberFault::NotHermitian,
+        OperationError::Dense(tenet_dense::DenseError::NumericalFailure { .. }) => {
+            MemberFault::NonFiniteEigenvalue
+        }
+        other => panic!("unexpected eager error {other:?}"),
     })
 }
 

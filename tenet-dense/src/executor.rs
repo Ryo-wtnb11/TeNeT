@@ -398,7 +398,11 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
 }
 
 /// Executor-returned output count disagrees with the decomposition's arity.
-pub(crate) fn arity_mismatch(op: &'static str, expected: usize, actual: usize) -> DenseError {
+///
+/// Shared with the matrix-algebra crate: a short or long executor answer is
+/// TeNeT's own check, so it is a [`DenseError::ShapeMismatch`] wherever it is
+/// detected, never a backend error.
+pub fn arity_mismatch(op: &'static str, expected: usize, actual: usize) -> DenseError {
     DenseError::ShapeMismatch {
         op,
         expected: vec![expected],
@@ -433,6 +437,13 @@ fn copy_dense_tensor_into(
     output: DenseWrite<'_>,
     op: &'static str,
 ) -> Result<(), DenseError> {
+    if tensor.dtype() != output.dtype() {
+        return Err(DenseError::DTypeMismatch {
+            op,
+            expected: tensor.dtype(),
+            actual: output.dtype(),
+        });
+    }
     match output {
         DenseWrite::F32(output) => {
             copy_contiguous_tensor_into_view(tensor.as_f32_slice()?, tensor.shape(), output, op)
@@ -446,26 +457,31 @@ fn copy_dense_tensor_into(
         DenseWrite::C64(output) => {
             copy_contiguous_tensor_into_view(tensor.as_c64_slice()?, tensor.shape(), output, op)
         }
-        output @ (DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_)) => {
-            Err(DenseError::DTypeMismatch {
+        DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_) => {
+            Err(DenseError::Unsupported {
                 op,
-                expected: tensor.dtype(),
-                actual: output.dtype(),
+                message: format!("{:?} factorization outputs", tensor.dtype()),
             })
         }
     }
 }
 
-pub(crate) fn copy_contiguous_tensor_into_view<T: Copy>(
-    source: &[T],
-    source_shape: &[usize],
-    mut output: DenseViewMut<'_, T>,
+/// Checks an executor-returned contiguous output against the destination
+/// shape the caller derived, returning its element count.
+///
+/// Shared with the matrix-algebra crate: the comparison is TeNeT's own, so a
+/// mismatch is [`DenseError::ShapeMismatch`] (expected = destination), never a
+/// backend error.
+pub fn check_contiguous_output(
     op: &'static str,
-) -> Result<(), DenseError> {
-    if source_shape != output.shape() {
+    source_len: usize,
+    source_shape: &[usize],
+    expected_shape: &[usize],
+) -> Result<usize, DenseError> {
+    if source_shape != expected_shape {
         return Err(DenseError::ShapeMismatch {
             op,
-            expected: output.shape().to_vec(),
+            expected: expected_shape.to_vec(),
             actual: source_shape.to_vec(),
         });
     }
@@ -476,13 +492,23 @@ pub(crate) fn copy_contiguous_tensor_into_view<T: Copy>(
                 Some(count) => Ok(count),
                 None => Err(DenseError::ElementCountOverflow),
             })?;
-    if source.len() != expected {
+    if source_len != expected {
         return Err(DenseError::ShapeMismatch {
             op,
             expected: vec![expected],
-            actual: vec![source.len()],
+            actual: vec![source_len],
         });
     }
+    Ok(expected)
+}
+
+pub(crate) fn copy_contiguous_tensor_into_view<T: Copy>(
+    source: &[T],
+    source_shape: &[usize],
+    mut output: DenseViewMut<'_, T>,
+    op: &'static str,
+) -> Result<(), DenseError> {
+    let expected = check_contiguous_output(op, source.len(), source_shape, output.shape())?;
     if expected == 0 {
         return Ok(());
     }

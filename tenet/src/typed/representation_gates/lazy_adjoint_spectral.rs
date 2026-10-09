@@ -799,7 +799,8 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         .unwrap();
     assert!(matches!(
         lazy.solve(&[0], &[1], &bad, &[0], &[1]),
-        Err(Error::InvalidArgument(_))
+        Err(Error::Operation(error))
+            if matches!(*error, tenet_tensors::OperationError::SpaceMismatch { .. })
     ));
 
     let singular_dense = divisor.scale(0.0).adjoint().unwrap();

@@ -94,6 +94,13 @@ pub enum OperationError {
     UnsupportedTensorContractScope {
         message: &'static str,
     },
+    /// A hom-space relation the operation requires does not hold (TensorKit
+    /// `SpaceMismatch`): an endomorphism or an isomorphism, matching
+    /// codomains, or an output or factor space that disagrees with its
+    /// source. A misuse, unlike [`Self::UnsupportedTensorContractScope`].
+    SpaceMismatch {
+        message: &'static str,
+    },
     /// A tree transform the device executor cannot replay: a recoupling
     /// (Multi) block, a destination mode outside its capability, or a layout
     /// the device region primitive cannot express. The host executor replays
@@ -230,6 +237,7 @@ impl fmt::Display for OperationError {
             Self::UnsupportedTensorContractScope { message } => {
                 write!(f, "unsupported tensor contraction scope: {message}")
             }
+            Self::SpaceMismatch { message } => write!(f, "space mismatch: {message}"),
             Self::UnsupportedDeviceTreeTransform { message } => {
                 write!(f, "unsupported device tree transform: {message}")
             }

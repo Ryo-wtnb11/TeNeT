@@ -84,10 +84,7 @@ where
         {
             return Ok(());
         }
-        Err(
-            Error::from(tenet_tensors::OperationError::UnsupportedTensorContractScope { message })
-                .into(),
-        )
+        Err(Error::from(tenet_tensors::OperationError::SpaceMismatch { message }).into())
     }
 
     /// The mode's output space of `homspace` on this tensor's provider: the

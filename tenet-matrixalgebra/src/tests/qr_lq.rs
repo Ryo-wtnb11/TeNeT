@@ -237,28 +237,46 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
     let tensor = rectangular_svd_tensor(2, 2);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let input = bound.as_ref();
-    let check = |outputs: Vec<DenseTensor>, expected: &str| {
+    let check = |outputs: Vec<DenseTensor>, expected: DenseError| {
         let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
             outputs: Some(outputs),
             ..Default::default()
         });
         let error = qr_compact(&mut dense, &input).unwrap_err();
-        assert!(format!("{error}").contains(expected), "{error:?}");
+        assert_eq!(error, OperationError::Dense(expected));
     };
 
-    check(vec![f64_qr_outputs(2, 2).remove(0)], "exactly (Q, R)");
+    check(
+        vec![f64_qr_outputs(2, 2).remove(0)],
+        arity_mismatch("qr_into", 2, 1),
+    );
     check(
         f64_qr_outputs(1, 1),
-        "output shape mismatch: source [1, 1], destination [2, 2]",
+        DenseError::ShapeMismatch {
+            op: "qr_into",
+            expected: vec![2, 2],
+            actual: vec![1, 1],
+        },
     );
     let mut outputs = f64_qr_outputs(2, 2);
     outputs[1] = f64_qr_outputs(1, 1).remove(1);
     check(
         outputs,
-        "output shape mismatch: source [1, 1], destination [2, 2]",
+        DenseError::ShapeMismatch {
+            op: "qr_into",
+            expected: vec![2, 2],
+            actual: vec![1, 1],
+        },
     );
     let outputs = c64_qr_outputs(2, 2);
     let expected = outputs[0].as_f64_slice().unwrap_err();
+    assert!(matches!(
+        expected,
+        DenseError::DTypeMismatch {
+            actual: tenet_dense::DenseDType::C64,
+            ..
+        }
+    ));
     let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         outputs: Some(outputs),
         ..Default::default()
