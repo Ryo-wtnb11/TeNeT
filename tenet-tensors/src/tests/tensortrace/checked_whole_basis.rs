@@ -409,3 +409,65 @@ fn checked_trace_terms_match_eager_per_source_composition() {
         crate::test_numerics::numerics::assert_close("trace term", actual, *value, 16);
     }
 }
+
+/// What (#2054, Option A): a fusion group is admitted and recoupled whole
+/// before its first member is lowered, as TensorKit `_trace_permute!`
+/// builds one permutation matrix per fusion block before any trace
+/// lowering. Inside one group, a later member's admission or recoupling
+/// error therefore precedes an earlier member's lowering error; the
+/// cross-group order is pinned above.
+#[test]
+fn group_admission_and_recoupling_precede_its_first_members_lowering() {
+    let fixture = fixture();
+    let [twist, _, recoupling, admission] = keys(&fixture);
+    assert_eq!(
+        first_error(&fixture, vec![twist, recoupling], None),
+        recoupling
+    );
+    assert_eq!(
+        first_error(&fixture, vec![twist, admission], None),
+        admission
+    );
+}
+
+/// What: each fusion group is permuted once, at its first member; the
+/// first trace provider queries after the preflight are one checked
+/// validation of each member of block 0's group, in block order, and the
+/// group is not validated again before its recoupling.
+#[test]
+fn group_admission_validates_each_member_once_in_block_order() {
+    let fixture = fixture();
+    let provider = &*fixture.provider;
+    provider.reset(Vec::new());
+    crate::tensortrace_fusion_dyn_preflight_generic_checked(&fixture.src, axes(), 1).unwrap();
+    let preflight = provider.calls.borrow().len();
+
+    let structure = fixture.src.space().structure();
+    let mut per_member = Vec::new();
+    for &block in group_of(structure, 0) {
+        provider.reset(Vec::new());
+        tenet_core::validate_generic_fusion_tree_pair_checked(
+            provider,
+            source_key(structure, block),
+        )
+        .unwrap();
+        per_member.push(provider.calls.borrow().clone());
+    }
+    let admission = per_member.concat();
+
+    provider.reset(Vec::new());
+    crate::tensortrace::reset_trace_transform_invocations();
+    compile(&fixture).unwrap();
+    // One whole-group permute per fusion group, at its first member.
+    let mut openers = structure
+        .fusion_tree_group_slice()
+        .iter()
+        .map(|group| group.block_indices()[0])
+        .collect::<Vec<_>>();
+    openers.sort_unstable();
+    assert_eq!(crate::tensortrace::take_trace_transform_sources(), openers);
+    let calls = provider.calls.borrow();
+    let after = preflight + admission.len();
+    assert_eq!(calls[preflight..after], admission[..]);
+    assert_ne!(calls[after..after + per_member[0].len()], per_member[0][..]);
+}
