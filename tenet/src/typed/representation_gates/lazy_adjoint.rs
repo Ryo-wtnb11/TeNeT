@@ -366,11 +366,11 @@ fn checked_generic_lazy_adjoint_factorizations_follow_the_rule_table() {
     );
     assert_eq!(
         materializations(&|| drop(lazy.lq_compact(&[0], &[1, 2]).unwrap())),
-        1
+        0
     );
     assert_eq!(
         materializations(&|| drop(lazy.lq_full(&[0], &[1, 2]).unwrap())),
-        1
+        0
     );
     assert_eq!(
         materializations(&|| drop(lazy.left_null(&[0], &[1, 2]).unwrap())),

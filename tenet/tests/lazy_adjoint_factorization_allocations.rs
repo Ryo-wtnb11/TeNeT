@@ -1,6 +1,6 @@
 //! A lazy adjoint's factorization allocates no more payload than
 //! materializing the adjoint and factoring that (#1755). The parent-reading
-//! stages (`svd_vals`, SVD, `pinv`) save the `O(stored_len)` input copy; a
+//! stages (`svd_vals`, SVD, `pinv`, LQ) save the `O(stored_len)` input copy; a
 //! redirect trades it for one copy of each adjointed output, plus the
 //! adjoint factor spaces, which are metadata. So the excess over
 //! materialize-then-factor, if any, must not grow with the degeneracies.
@@ -32,11 +32,34 @@ mod counting_alloc;
 #[global_allocator]
 static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
+/// Warm `f` once, then return its allocations.
+fn warm_allocs(f: impl Fn()) -> counting_alloc::Allocs {
+    f();
+    counting_alloc::measure(&f).1
+}
+
 /// Warm `f` once, then return its allocated bytes.
 fn warm_bytes(f: impl Fn()) -> i64 {
-    f();
-    let ((), allocs) = counting_alloc::measure(&f);
-    allocs.bytes as i64
+    warm_allocs(f).bytes as i64
+}
+
+/// Allocation calls of `op` on `lazy` and of materialize-then-`op`.
+macro_rules! calls {
+    ($lazy:expr, |$t:ident| $op:expr) => {{
+        let lazy = &$lazy;
+        let lazy_calls = warm_allocs(|| {
+            let $t = lazy;
+            black_box($op);
+        })
+        .calls;
+        let eager_calls = warm_allocs(|| {
+            let materialized = lazy.materialize().unwrap();
+            let $t = &materialized;
+            black_box($op);
+        })
+        .calls;
+        (lazy_calls, eager_calls)
+    }};
 }
 
 /// Bytes of `op` on `lazy` minus those of materialize-then-`op`.
@@ -61,11 +84,15 @@ macro_rules! excess {
 macro_rules! assert_excess_is_metadata {
     ($mode:expr, $runtime:expr, $leg:expr) => {{
         let mut rows = Vec::new();
+        let mut payload_bytes = Vec::new();
         for scale in [1usize, 3] {
             let leg = $leg(scale);
             let parent =
                 TensorMap::<_, Complex64>::rand_with_seed(&$runtime, [&leg, &leg], [&leg, &leg], 7)
                     .unwrap();
+            payload_bytes.push(
+                (parent.dense_data().unwrap().len() * std::mem::size_of::<Complex64>()) as i64,
+            );
             let lazy = parent.adjoint().unwrap();
             let (r, c) = (&[0, 1][..], &[2, 3][..]);
             rows.push([
@@ -83,6 +110,35 @@ macro_rules! assert_excess_is_metadata {
                 ("left_polar", excess!(lazy, |t| t.left_polar(r, c).unwrap())),
                 ("inv", excess!(lazy, |t| t.inv(r, c).unwrap())),
             ]);
+            for (name, (lazy_calls, eager_calls)) in [
+                ("lq_compact", calls!(lazy, |t| t.lq_compact(r, c).unwrap())),
+                ("lq_full", calls!(lazy, |t| t.lq_full(r, c).unwrap())),
+            ] {
+                eprintln!(
+                    "{} {name}: lazy/materialize-then-factor calls {lazy_calls}/{eager_calls} \
+                     (scale {scale})",
+                    $mode
+                );
+                assert!(
+                    lazy_calls <= eager_calls,
+                    "{} {name}: more allocation calls than materialize-then-factor",
+                    $mode
+                );
+            }
+        }
+        // The LQ seam (#2070) reads the parent in place: materialize-then-LQ
+        // pays at least the adjoint copy of the payload on top of it.
+        for (scale_rows, &payload) in rows.iter().zip(&payload_bytes) {
+            for (name, (lazy, eager)) in scale_rows {
+                if name.starts_with("lq_") {
+                    assert!(
+                        eager - lazy >= payload,
+                        "{} {name}: lazy {lazy} bytes, materialize-then-factor {eager}, \
+                         payload {payload}",
+                        $mode
+                    );
+                }
+            }
         }
         for (small, large) in rows[0].iter().zip(&rows[1]) {
             let (name, (small_lazy, small_eager)) = small;

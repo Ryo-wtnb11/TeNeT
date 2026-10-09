@@ -361,22 +361,7 @@ where
     let space = input.space().space();
     let matrices =
         multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
-    let mut pairs = Vec::with_capacity(matrices.len());
-    for index in 0..matrices.len() {
-        let matrix = matrices.get(index)?;
-        let rows = matrix.rows;
-        let cols = matrix.cols;
-        let transposed = adjoint_col_major(matrix.data, rows, cols);
-        let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)?;
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: cols,
-            left: adjoint_col_major(&r_prime, cols, rows),
-            left_rows: rows,
-            right: adjoint_col_major(&q_prime, cols, cols),
-            right_leading: cols,
-        });
-    }
+    let mut pairs = full_lq_pairs(dense, &matrices, FactorPlacement::Direct)?;
     let dimensions = MfAuthority(input.space()).coupled_dimensions(space.homspace().domain())?;
     with_input_geometry!(&matrices, |geometry| Ok(Lq {
         l: build_bound_factor(
@@ -490,12 +475,33 @@ where
     Ok(pairs)
 }
 
+/// The `rows x cols` matrix `X` whose LQ a sector computes, and `X^H`, the
+/// matrix its QR reads: under [`FactorPlacement::Adjoint`] `matrix` is the
+/// parent block `A` of the lazy adjoint `X = A^H`, read in place (#2070);
+/// otherwise `matrix` is `X` and `X^H` is copied into `adjoint`.
+fn lq_qr_input<'a, D: FactorScalar>(
+    matrix: &SectorMatrixRef<'a, D>,
+    placement: FactorPlacement,
+    adjoint: &'a mut Vec<D>,
+) -> (usize, usize, &'a [D]) {
+    match placement {
+        FactorPlacement::Direct => {
+            *adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
+            (matrix.rows, matrix.cols, adjoint)
+        }
+        FactorPlacement::Adjoint => (matrix.cols, matrix.rows, matrix.data),
+    }
+}
+
 /// Compact LQ of every coupled-sector matrix through the adjoint's QR, in the
-/// positive-diagonal gauge, as `l` (left) and `q` (right) factor pairs.
-/// `observe` sees each matrix with its adjoint before the dense call.
+/// positive-diagonal gauge, as `l` (left) and `q` (right) factor pairs; under
+/// [`FactorPlacement::Adjoint`] the matrices are the parent blocks of a lazy
+/// adjoint (see [`lq_qr_input`]). `observe` sees each direct matrix with its
+/// adjoint before the dense call.
 pub(super) fn compact_lq_pairs<E, D>(
     dense: &mut E,
     matrices: &(impl SectorMatrices<D> + Sync + ?Sized),
+    placement: FactorPlacement,
     mut observe: impl FnMut(&SectorMatrixRef<'_, D>, &[D]) + Send,
 ) -> Result<Vec<FactorPair<D>>, OperationError>
 where
@@ -507,31 +513,401 @@ where
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
             let rank = matrix.rows.min(matrix.cols);
-            let adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
-            observe(&matrix, &adjoint);
-            let (mut q_prime, mut r_prime) =
-                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
+            let mut adjoint = Vec::new();
+            let (rows, cols, qr_input) = lq_qr_input(&matrix, placement, &mut adjoint);
+            if matches!(placement, FactorPlacement::Direct) {
+                observe(&matrix, qr_input);
+            }
+            let (mut q_prime, mut r_prime) = compact_qr_owned(dense, qr_input, cols, rows)?;
             positive_diagonal_gauge_strided(
                 &mut q_prime,
-                matrix.cols,
-                matrix.cols,
+                cols,
+                cols,
                 &mut r_prime,
                 rank,
                 rank,
-                matrix.rows,
+                rows,
             );
             pairs.push(FactorPair {
                 sector: matrix.sector,
                 kept: rank,
-                left: adjoint_col_major(&r_prime, rank, matrix.rows),
-                left_rows: matrix.rows,
-                right: adjoint_col_major(&q_prime, matrix.cols, rank),
+                left: adjoint_col_major(&r_prime, rank, rows),
+                left_rows: rows,
+                right: adjoint_col_major(&q_prime, cols, rank),
                 right_leading: rank,
             });
         }
         Ok(())
     })?;
     Ok(pairs)
+}
+
+/// Full LQ of every coupled-sector matrix through the full QR of its adjoint,
+/// as `l` (left) and square `q` (right) factor pairs; `placement` as for
+/// [`compact_lq_pairs`].
+fn full_lq_pairs<E, D>(
+    dense: &mut E,
+    matrices: &(impl SectorMatrices<D> + ?Sized),
+    placement: FactorPlacement,
+) -> Result<Vec<FactorPair<D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
+        let mut adjoint = Vec::new();
+        let (rows, cols, qr_input) = lq_qr_input(&matrix, placement, &mut adjoint);
+        let (q_prime, r_prime) = full_qr_numerical_stage(dense, qr_input, cols, rows)?;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: cols,
+            left: adjoint_col_major(&r_prime, cols, rows),
+            left_rows: rows,
+            right: adjoint_col_major(&q_prime, cols, cols),
+            right_leading: cols,
+        });
+    }
+    Ok(pairs)
+}
+
+/// The parent blocks of a lazy adjoint `X = A^H`, listed in the region order
+/// of the adjoint's own layout: region `i` of that layout is `X_c`, and
+/// `get(i)` is the parent block `A_c = X_c^H` that LQ of `X_c` hands to QR.
+pub(super) struct AdjointParentMatrices<'a, D> {
+    data: &'a [D],
+    regions: &'a [CoupledSectorRegion],
+    by_adjoint: &'a [usize],
+}
+
+impl<D: FactorScalar> SectorMatrices<D> for AdjointParentMatrices<'_, D> {
+    fn len(&self) -> usize {
+        self.by_adjoint.len()
+    }
+
+    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
+        let region = &self.regions[self.by_adjoint[index]];
+        Ok(SectorMatrixRef {
+            sector: region_sector(region),
+            rows: region.rows(),
+            cols: region.cols(),
+            data: data_region(self.data, &region.range())?,
+        })
+    }
+}
+
+/// A parent's coupled-sector regions and, per adjoint region, the index of
+/// the parent region it adjoints.
+type ParentRegions = (Arc<[CoupledSectorRegion]>, Vec<usize>);
+
+/// The parent's coupled-sector regions and, for each region of the adjoint
+/// layout `adjoint`, the parent region it is the adjoint of: same sector,
+/// rows the parent's column trees and columns its row trees, tree for tree.
+/// `None` when the parent is not region-tiled or the trees are not so
+/// transposed; the caller then publishes by tree identity instead.
+fn adjoint_parent_regions(
+    parent: &BlockStructure,
+    parent_nout: usize,
+    adjoint: &[CoupledSectorRegion],
+) -> Result<Option<ParentRegions>, OperationError> {
+    let Some(regions) = input_regions(parent, parent_nout)? else {
+        return Ok(None);
+    };
+    if regions.len() != adjoint.len() {
+        return Ok(None);
+    }
+    let mut by_adjoint = Vec::with_capacity(adjoint.len());
+    {
+        let index = SectorRegionIndex::new(&regions)?;
+        for region in adjoint {
+            let Some(parent_index) = index.get(region_sector(region)) else {
+                return Ok(None);
+            };
+            let source = &regions[parent_index];
+            if source.rows() != region.cols()
+                || source.cols() != region.rows()
+                || source.row_trees() != region.col_trees()
+                || source.col_trees() != region.row_trees()
+            {
+                return Ok(None);
+            }
+            by_adjoint.push(parent_index);
+        }
+    }
+    Ok(Some((regions, by_adjoint)))
+}
+
+/// LQ of the lazy adjoint `X = A^H` of the dense `parent = A` in fusion mode
+/// `M`, read in place and published by tree identity on the swapped hom
+/// space: the route for a parent or adjoint layout that is not
+/// region-tiled.
+///
+/// Sector by sector, LQ of the materialized `X` is computed as the QR of
+/// `X^H = A`; here that QR (the same dense kernel, input and positive-diagonal
+/// gauge) reads `A` itself, and `X = R^H Q^H` publishes `l = R^H`,
+/// `q = Q^H`. TensorKit (`src/factorizations/adjoint.jl`, `lq_compact!` /
+/// `lq_full!` on an `AdjointTensorMap`) likewise factors the parent by QR and
+/// adjoints the factors.
+///
+/// Why not a redirect to the facade QR of the parent: detaching `R^H` and
+/// `Q^H` copies `k (m + n) >= m n` elements per sector; here they are written
+/// once, as LQ of the materialized adjoint writes them.
+fn lq_adjoint_by_tree<M, E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    full: bool,
+) -> Result<Lq<BoundDynFactor<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let space = parent.space().space();
+    let matrices = generic_input_matricizations(space.structure(), parent.data(), space.nout())?;
+    let mut pairs = if full {
+        full_lq_pairs(dense, &matrices, FactorPlacement::Adjoint)?
+    } else {
+        compact_lq_pairs(dense, &matrices, FactorPlacement::Adjoint, |_, _| {})?
+    };
+    let authority = M::authority(parent.space());
+    // The bond of full LQ is the domain of `A^H`, the codomain of `A`.
+    let dimensions = if full {
+        authority.coupled_dimensions(space.homspace().codomain())?
+    } else {
+        pairs.iter().map(|pair| (pair.sector, pair.kept)).collect()
+    };
+    let adjoint = FusionTreeHomSpace::new(
+        space.homspace().domain().clone(),
+        space.homspace().codomain().clone(),
+    );
+    with_input_geometry!(&matrices, |geometry| {
+        let mut publish = |side| {
+            publish_one_sided_factor(
+                &authority,
+                &adjoint,
+                geometry,
+                &mut pairs,
+                &dimensions,
+                side,
+                FactorPlacement::Adjoint,
+            )
+        };
+        Ok(Lq {
+            l: publish(FactorSide::Left)?,
+            q: publish(FactorSide::Right)?,
+        })
+    })
+}
+
+/// Multiplicity-free compact LQ of the lazy adjoint of `parent`, whose own
+/// layout is `adjoint_space`: when both are region-tiled with transposed
+/// trees, the direct-region plan of `adjoint_space` (the plan LQ of the
+/// materialized adjoint runs) reads each QR input from the parent in place;
+/// otherwise [`lq_adjoint_by_tree`].
+pub(crate) fn lq_compact_adjoint_dyn<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let parent_space = parent.space().space();
+    if let Some(plan) = compact_factor_plan(adjoint_space)? {
+        if let Some((regions, by_adjoint)) = adjoint_parent_regions(
+            parent_space.structure(),
+            parent_space.nout(),
+            &plan.source_regions,
+        )? {
+            let reader = LqRegionSource::Parent(AdjointParentMatrices {
+                data: parent.data(),
+                regions: &regions,
+                by_adjoint: &by_adjoint,
+            });
+            return lq_compact_direct_regions(dense, adjoint_space, reader, &plan)
+                .map(|(l, q)| Lq { l, q });
+        }
+    }
+    lq_adjoint_by_tree::<MultiplicityFreeAdmissionMode, _, _, _>(dense, parent, false)
+}
+
+/// A lazy adjoint's own region tiling and the parent regions it adjoints.
+struct AdjointLayout {
+    regions: Arc<[CoupledSectorRegion]>,
+    parent: ParentRegions,
+}
+
+/// The region tiling of `adjoint_space` and the parent blocks it adjoints,
+/// when both layouts are region-tiled with transposed trees.
+fn adjoint_layout_parent<R, D>(
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<AdjointLayout>, OperationError> {
+    let space = adjoint_space.space();
+    let Some(adjoint_regions) = input_regions(space.structure(), space.nout())? else {
+        return Ok(None);
+    };
+    let parent_space = parent.space().space();
+    Ok(adjoint_parent_regions(
+        parent_space.structure(),
+        parent_space.nout(),
+        &adjoint_regions,
+    )?
+    .map(|parent| AdjointLayout {
+        regions: adjoint_regions,
+        parent,
+    }))
+}
+
+/// Multiplicity-free full LQ of the lazy adjoint of `parent`: pairs from the
+/// parent blocks in place, published on `adjoint_space` as LQ of the
+/// materialized adjoint publishes them; otherwise [`lq_adjoint_by_tree`].
+pub(crate) fn lq_full_adjoint_dyn<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let Some(AdjointLayout {
+        regions: geometry,
+        parent: (regions, by_adjoint),
+    }) = adjoint_layout_parent(parent, adjoint_space)?
+    else {
+        return lq_adjoint_by_tree::<MultiplicityFreeAdmissionMode, _, _, _>(dense, parent, true);
+    };
+    let matrices = AdjointParentMatrices {
+        data: parent.data(),
+        regions: &regions,
+        by_adjoint: &by_adjoint,
+    };
+    let mut pairs = full_lq_pairs(dense, &matrices, FactorPlacement::Adjoint)?;
+    let space = adjoint_space.space();
+    let dimensions = MfAuthority(adjoint_space).coupled_dimensions(space.homspace().domain())?;
+    let mut publish = |side| {
+        build_bound_factor(
+            adjoint_space,
+            space.homspace(),
+            geometry.as_ref(),
+            &mut pairs,
+            &dimensions,
+            side,
+        )
+    };
+    Ok(Lq {
+        l: publish(FactorSide::Left)?,
+        q: publish(FactorSide::Right)?,
+    })
+}
+
+/// Checked-Generic compact LQ of the lazy adjoint of `parent`; see
+/// [`lq_full_adjoint_dyn`].
+pub(crate) fn lq_compact_adjoint_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let Some(AdjointLayout {
+        regions: geometry,
+        parent: (regions, by_adjoint),
+    }) = adjoint_layout_parent(parent, adjoint_space)?
+    else {
+        return lq_adjoint_by_tree::<CheckedGenericAdmissionMode, _, _, _>(dense, parent, false);
+    };
+    let matrices = AdjointParentMatrices {
+        data: parent.data(),
+        regions: &regions,
+        by_adjoint: &by_adjoint,
+    };
+    let pairs = compact_lq_pairs(dense, &matrices, FactorPlacement::Adjoint, |_, _| {})?;
+    build_left_right_bound_pair_generic_checked(
+        adjoint_space.provider_arc(),
+        adjoint_space.space().homspace(),
+        geometry.as_ref(),
+        pairs,
+    )
+    .map(|(l, q)| Lq { l, q })
+}
+
+/// Checked-Generic full LQ of the lazy adjoint of `parent`; see
+/// [`lq_full_adjoint_dyn`].
+pub(crate) fn lq_full_adjoint_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let Some(AdjointLayout {
+        regions: geometry,
+        parent: (regions, by_adjoint),
+    }) = adjoint_layout_parent(parent, adjoint_space)?
+    else {
+        return lq_adjoint_by_tree::<CheckedGenericAdmissionMode, _, _, _>(dense, parent, true);
+    };
+    let matrices = AdjointParentMatrices {
+        data: parent.data(),
+        regions: &regions,
+        by_adjoint: &by_adjoint,
+    };
+    let pairs = full_lq_pairs(dense, &matrices, FactorPlacement::Adjoint)?;
+    let provider = adjoint_space.provider_arc();
+    let homspace = adjoint_space.space().homspace();
+    let dimensions = CheckedAuthority(provider).coupled_dimensions(homspace.domain())?;
+    checked_full_factor_pair(provider, homspace, geometry.as_ref(), pairs, &dimensions)
+        .map(|(l, q)| Lq { l, q })
+}
+
+/// Compact LQ of the lazy adjoint of the dense `parent`, read in place, in
+/// fusion mode `M`; `adjoint_space` is the adjoint's own layout, on which LQ
+/// of the materialized adjoint would publish (see [`lq_adjoint_by_tree`]).
+#[doc(hidden)]
+pub fn lq_compact_adjoint_from_parent<M, L, E, R, D>(
+    lease: L,
+    parent: BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    // The adjoint is finite exactly when its parent is.
+    require_finite_factor_input(parent.data().iter().copied(), FactorFamily::Lq)?;
+    lease.run(|dense| M::lq_compact_adjoint_dense(dense, &parent, adjoint_space))
+}
+
+/// Full LQ of the lazy adjoint of the dense `parent`, read in place, in
+/// fusion mode `M` (see [`lq_compact_adjoint_from_parent`]).
+#[doc(hidden)]
+pub fn lq_full_adjoint_from_parent<M, L, E, R, D>(
+    lease: L,
+    parent: BoundDynamicTensorRef<'_, R, D>,
+    adjoint_space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Lq<BoundDynFactor<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    require_finite_factor_input(parent.data().iter().copied(), FactorFamily::Lq)?;
+    lease.run(|dense| M::lq_full_adjoint_dense(dense, &parent, adjoint_space))
 }
 
 pub(super) fn qr_compact_direct_regions<E, R, D>(
@@ -631,13 +1007,24 @@ where
     D: FactorScalar,
 {
     if let Some(plan) = compact_factor_plan(input.space())? {
-        return lq_compact_direct_regions(dense, input, &plan).map(|(l, q)| Lq { l, q });
+        return lq_compact_direct_regions(
+            dense,
+            input.space(),
+            LqRegionSource::Input(input.data()),
+            &plan,
+        )
+        .map(|(l, q)| Lq { l, q });
     }
     let space = input.space().space();
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_lq_input_pack(&matricizations);
-    let mut pairs = compact_lq_pairs(dense, matricizations.as_slice(), |_, _| {})?;
+    let mut pairs = compact_lq_pairs(
+        dense,
+        matricizations.as_slice(),
+        FactorPlacement::Direct,
+        |_, _| {},
+    )?;
     #[cfg(test)]
     for pair in &pairs {
         record_compact_lq_output_scatter::<D>(pair.left.len());
@@ -647,9 +1034,19 @@ where
         .map(|(l, q)| Lq { l, q })
 }
 
+/// What the QR of each compact-LQ route reads.
+pub(super) enum LqRegionSource<'a, D> {
+    /// The input payload: the QR reads the adjoint of each source region.
+    Input(&'a [D]),
+    /// A lazy adjoint's parent blocks, already the QR input (#2070).
+    Parent(AdjointParentMatrices<'a, D>),
+}
+
+/// Compact LQ of `input_space` over the direct-region `plan`, reading `reader`.
 pub(super) fn lq_compact_direct_regions<E, R, D>(
     dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
+    input_space: &BoundDynamicFusionMapSpace<R>,
+    reader: LqRegionSource<'_, D>,
     plan: &CompactFactorPlan,
 ) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
@@ -657,10 +1054,10 @@ where
     R: FusionRule,
     D: FactorScalar,
 {
-    let space = input.space().space();
-    debug_assert_eq!(plan.source_layout, input.space().validated_layout());
-    let left_space = input.space().rebind_validated(&plan.left_layout)?;
-    let right_space = input.space().rebind_validated(&plan.right_layout)?;
+    let space = input_space.space();
+    debug_assert_eq!(plan.source_layout, input_space.validated_layout());
+    let left_space = input_space.rebind_validated(&plan.left_layout)?;
+    let right_space = input_space.rebind_validated(&plan.right_layout)?;
     let left_len = plan.left_layout.required_len()?;
     let right_len = plan.right_layout.required_len()?;
     // Every output element is written once by the final adjoints. When the
@@ -676,17 +1073,19 @@ where
         (vec![D::zero(); left_len], vec![D::zero(); right_len])
     };
 
-    let max_adjoint_len = plan
-        .routes
-        .iter()
-        .map(|route| plan.source_regions[route.source_region].range().len())
-        .max()
-        .unwrap_or(0);
+    let max_adjoint_len = match reader {
+        LqRegionSource::Input(_) => plan
+            .routes
+            .iter()
+            .map(|route| plan.source_regions[route.source_region].range().len())
+            .max()
+            .unwrap_or(0),
+        LqRegionSource::Parent(_) => 0,
+    };
     let mut adjoint_scratch = Vec::with_capacity(max_adjoint_len);
     #[cfg(test)]
     record_compact_lq_scratch::<D>(max_adjoint_len);
 
-    let data = input.data();
     in_linalg_scope(dense, |dense| {
         for route in plan.routes.iter().copied() {
             if route.rank == 0 {
@@ -697,19 +1096,25 @@ where
                 &plan.left_regions[route.left_region.expect("nonzero route has left region")];
             let right =
                 &plan.right_regions[route.right_region.expect("nonzero route has right region")];
-            let source_data = &data[source.range()];
-            adjoint_scratch.clear();
-            extend_adjoint_col_major(
-                &mut adjoint_scratch,
-                source_data,
-                source.rows(),
-                source.cols(),
-            );
-            #[cfg(test)]
-            record_compact_lq_adjoint_fill::<D>(source_data.len());
+            let qr_input = match &reader {
+                LqRegionSource::Input(data) => {
+                    let source_data = &data[source.range()];
+                    adjoint_scratch.clear();
+                    extend_adjoint_col_major(
+                        &mut adjoint_scratch,
+                        source_data,
+                        source.rows(),
+                        source.cols(),
+                    );
+                    #[cfg(test)]
+                    record_compact_lq_adjoint_fill::<D>(source_data.len());
+                    adjoint_scratch.as_slice()
+                }
+                LqRegionSource::Parent(parent) => parent.get(route.source_region)?.data,
+            };
 
             let (mut q_prime, mut r_prime) =
-                compact_qr_owned(dense, &adjoint_scratch, source.cols(), source.rows())?;
+                compact_qr_owned(dense, qr_input, source.cols(), source.rows())?;
             positive_diagonal_gauge_strided(
                 &mut q_prime,
                 source.cols(),
@@ -1042,18 +1447,23 @@ where
     }
     #[cfg(test)]
     let data = input.data();
-    let pairs = compact_lq_pairs(dense, &matrices, |_matrix, _adjoint| {
-        #[cfg(test)]
-        {
-            record_compact_lq_adjoint_fill::<D>(_matrix.data.len());
-            record_checked_compact_input(
-                CheckedCompactOperation::Lq,
-                data,
-                _matrix.data,
-                Some(_adjoint),
-            );
-        }
-    })?;
+    let pairs = compact_lq_pairs(
+        dense,
+        &matrices,
+        FactorPlacement::Direct,
+        |_matrix, _adjoint| {
+            #[cfg(test)]
+            {
+                record_compact_lq_adjoint_fill::<D>(_matrix.data.len());
+                record_checked_compact_input(
+                    CheckedCompactOperation::Lq,
+                    data,
+                    _matrix.data,
+                    Some(_adjoint),
+                );
+            }
+        },
+    )?;
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
         .map(|(l, q)| Lq { l, q })
 }
@@ -1117,25 +1527,8 @@ where
     let space = input.space().space();
     let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut pairs = Vec::with_capacity(matrices.len());
-    for index in 0..matrices.len() {
-        let matrix = matrices
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let rows = matrix.rows;
-        let cols = matrix.cols;
-        let transposed = adjoint_col_major(matrix.data, rows, cols);
-        let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: cols,
-            left: adjoint_col_major(&r_prime, cols, rows),
-            left_rows: rows,
-            right: adjoint_col_major(&q_prime, cols, cols),
-            right_leading: cols,
-        });
-    }
+    let pairs = full_lq_pairs(dense, &matrices, FactorPlacement::Direct)
+        .map_err(CheckedGenericFactorPlanError::from)?;
     let dimensions = CheckedAuthority(provider).coupled_dimensions(space.homspace().domain())?;
     with_input_geometry!(&matrices, |geometry| checked_full_factor_pair(
         provider,
