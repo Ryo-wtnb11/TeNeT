@@ -355,8 +355,9 @@ fn rescaled<R: DeviceRule, D: DevicePayload>(
 }
 
 /// One member plan over the B sequences 1, 2, 17, 1 and 4, 2, 4
-/// with fresh values on every call: `execute` (twice, the second warm) and
-/// `execute_into` a NaN-poisoned destination through a second workspace.
+/// with fresh values on every call: `execute` (twice, the second warm, on
+/// changed inputs after a rejected call) and `execute_into` a NaN-poisoned
+/// destination through a second workspace.
 /// Every member is bit-equal to the Host member replay of the same plan and
 /// to eager device `contract`.
 fn members<R: DeviceRule, D: DevicePayload>(
@@ -393,9 +394,27 @@ fn members<R: DeviceRule, D: DevicePayload>(
             };
             let (host_lhs, host_rhs) = (stack(|m| &m.lhs), stack(|m| &m.rhs));
             let (lhs, rhs) = (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap());
+            // The first call writes stale values (a later call's scaling) into
+            // the output the warm call reuses; a rejected call in between keeps
+            // that buffer as the spare (#2123).
+            let stale: Vec<_> = (0..count).map(|i| rescaled(case, call + 8, i)).collect();
+            let stale_stack = |pick: fn(&Case<R, D>) -> &TensorMap<R, D>| {
+                StackedTensorMap::pack(&stale.iter().map(pick).collect::<Vec<_>>())
+                    .unwrap()
+                    .to_cuda()
+                    .unwrap()
+            };
+            let (stale_lhs, stale_rhs) = (stale_stack(|m| &m.lhs), stale_stack(|m| &m.rhs));
+            let longer = StackedTensorMap::pack(&vec![&case.rhs; count + 1])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
             let (_, first) = delta(|| {
-                plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+                plan.execute(&stale_lhs, &stale_rhs, &mut workspace)
+                    .unwrap();
             });
+            assert!(plan.execute(&lhs, &longer, &mut workspace).is_err());
+            assert!(workspace.take_output().is_none());
             let (_, mut warm) = delta(|| {
                 plan.execute(&lhs, &rhs, &mut workspace).unwrap();
             });

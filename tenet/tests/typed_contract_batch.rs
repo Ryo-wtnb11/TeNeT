@@ -1209,6 +1209,120 @@ fn partitioned_output_uses_requested_codomain_rank() {
     assert!(ContractPlan::new(&lhs, &rhs, &malformed).is_err());
 }
 
+/// `case` with each member's operands rescaled: `lhs` by `lhs_scale`, `rhs`
+/// by a member-dependent real factor.
+fn rescaled_members<R, D>(case: &Case<R, D>, count: usize, lhs_scale: f64) -> Vec<Case<R, D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    (0..count)
+        .map(|i| Case {
+            name: case.name,
+            lhs: case
+                .lhs
+                .scale(D::entry(lhs_scale - i as f64 / 64.0, (i + 1) as f64 / 32.0)),
+            rhs: case.rhs.scale(D::entry(1.25 + i as f64 / 16.0, 0.0)),
+            lhs_axes: case.lhs_axes.clone(),
+            rhs_axes: case.rhs_axes.clone(),
+            output_axes: case.output_axes.clone(),
+            dense: case.dense,
+        })
+        .collect()
+}
+
+/// Changed-input reuse of the workspace-owned output (#1732, #2123): over
+/// the B sequences 1, 2, 17, 1 and 4, 2, 4 on one workspace, each call
+/// executes stale inputs, then a rejected call (its buffer becomes the
+/// unobservable spare), then fresh inputs into that same buffer, and finally
+/// `execute_into` a NaN-poisoned destination. Every member equals TensorKit
+/// `blas_contract!` on its own fresh operands, so a block the reused buffer
+/// kept from the stale call, including an inactive block, would differ.
+fn check_reused_output<R, D>(case: &Case<R, D>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let spec = case.spec();
+    let one = |tensor: &TensorMap<R, D>| StackedTensorMap::pack(&[tensor]).unwrap();
+    let plan = ContractPlan::new(&one(&case.lhs), &one(&case.rhs), &spec).unwrap();
+    let stack = |members: &[Case<R, D>], pick: fn(&Case<R, D>) -> &TensorMap<R, D>| {
+        StackedTensorMap::pack(&members.iter().map(pick).collect::<Vec<_>>()).unwrap()
+    };
+    for sequence in [&[1usize, 2, 17, 1][..], &[4, 2, 4]] {
+        let mut workspace = plan.workspace().unwrap();
+        for (call, &count) in sequence.iter().enumerate() {
+            let what = format!("{} {} seq={sequence:?} B={count}", case.name, D::NAME);
+            let stale = rescaled_members(case, count, 2.0 + call as f64);
+            plan.execute(
+                &stack(&stale, |m| &m.lhs),
+                &stack(&stale, |m| &m.rhs),
+                &mut workspace,
+            )
+            .unwrap();
+            let longer = rescaled_members(case, count + 1, 1.0);
+            assert!(plan
+                .execute(
+                    &stack(&stale, |m| &m.lhs),
+                    &stack(&longer, |m| &m.rhs),
+                    &mut workspace
+                )
+                .is_err());
+            assert!(workspace.take_output().is_none(), "{what}");
+            let fresh = rescaled_members(case, count, -0.75 - call as f64 / 8.0);
+            let (lhs, rhs) = (stack(&fresh, |m| &m.lhs), stack(&fresh, |m| &m.rhs));
+            let returned = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+            let oracles: Vec<_> = fresh.iter().map(blas_contract_oracle).collect();
+            for (i, oracle) in oracles.iter().enumerate() {
+                numerics::assert_nonzero_slices_close(
+                    &format!("{what} execute member {i}"),
+                    returned.member(i).unwrap().dense_data().unwrap(),
+                    oracle.dense_data().unwrap(),
+                    case.terms(),
+                );
+            }
+            let poison: Vec<_> = fresh.iter().map(poisoned_destination).collect();
+            let mut dst = StackedTensorMap::pack(&poison).unwrap();
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                .unwrap();
+            for (i, oracle) in oracles.iter().enumerate() {
+                numerics::assert_nonzero_slices_close(
+                    &format!("{what} execute_into member {i}"),
+                    dst.member(i).unwrap().dense_data().unwrap(),
+                    oracle.dense_data().unwrap(),
+                    case.terms(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reused_output_follows_changed_inputs_on_every_route() {
+    // Core with an inactive block, CopyC (U(1) both orientations, one over
+    // an inactive core block, and SU(2)), DynamicTree with an identity output
+    // over an inactive block and with source and output transforms.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    fn cases<D: Payload>(runtime: &Runtime) {
+        for case in u1_inactive_cases::<D>(runtime) {
+            check_reused_output(&case);
+        }
+        for (case, _) in contract_cases::copy_c_probes::<_, D>(runtime, &u1_non_self_dual()) {
+            if matches!(case.name, "C1p" | "C2p") {
+                check_reused_output(&case);
+            }
+        }
+        for (case, _) in contract_cases::copy_c_probes::<_, D>(runtime, &su2()) {
+            if case.name == "C1p" {
+                check_reused_output(&case);
+            }
+        }
+        check_reused_output(&u1_reordered::<D>(runtime));
+    }
+    cases::<f64>(&runtime);
+    cases::<tenet::typed::Complex64>(&runtime);
+}
+
 fn reject_braiding<const ANYONIC: bool>(runtime: &Runtime) -> bool {
     let leg =
         GradedSpace::try_new(Arc::new(RealBraidingProbe::<ANYONIC>), [(ProbeSector, 2)]).unwrap();
