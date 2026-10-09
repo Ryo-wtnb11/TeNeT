@@ -40,6 +40,19 @@ pub struct ContractPlan<R, D, S = Vec<D>> {
 }
 
 /// Caller-owned output and execution resources for a [`ContractPlan`].
+///
+/// The workspace-owned output's inactive blocks (those no core GEMM writes)
+/// are zero for the buffer's whole life, so `execute` never refills them
+/// (#2123), as TensorKit `mul!` with `β = 0` never touches a block it does
+/// not write: the buffer is born zero, and a changed member count replaces
+/// it with a fresh zero buffer; the inactive set is fixed, because the
+/// workspace is bound to one resolution (`Arc::ptr_eq`); a Core route's
+/// GEMMs write only the active blocks, a disjoint tiling, so a failure
+/// part-way leaves only partial active writes, which the next call
+/// overwrites; a CopyC or DynamicTree output transform overwrites the whole
+/// destination; and the caller never reaches the buffer mutably until
+/// `take_output` moves it out for good. `execute_into` cannot rely on any of
+/// this for a caller's destination and rewrites every inactive block.
 pub struct ContractWorkspace<R, D, S = Vec<D>> {
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     runtime: Runtime,
@@ -237,6 +250,7 @@ where
         dst: &mut [D],
         members: usize,
         workspace: &mut ContractWorkspace<R, D>,
+        init: tenet_tensors::ContractDestinationInit<D>,
     ) -> Result<(), Error> {
         let mut lease = self.runtime.lease_context()?;
         lease
@@ -249,12 +263,15 @@ where
                 (rhs.space.space().structure(), &rhs.storage),
                 &mut workspace.members,
                 members,
+                init,
             )?;
         Ok(())
     }
 
     /// Overwrites the workspace-owned output and borrows it until the next
-    /// call. Any error follows the batched module's failure rule.
+    /// call. Any error follows the batched module's failure rule. The
+    /// output's inactive blocks are not rewritten: they are already zero
+    /// (see [`ContractWorkspace`]).
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D>,
@@ -281,7 +298,14 @@ where
                 member_len: self.member_len,
                 _payload: PhantomData,
             });
-        let result = self.run(lhs, rhs, &mut output.storage, members, workspace);
+        let result = self.run(
+            lhs,
+            rhs,
+            &mut output.storage,
+            members,
+            workspace,
+            tenet_tensors::ContractDestinationInit::Zeroed,
+        );
         workspace.output.settle(output, result)
     }
 
@@ -299,7 +323,14 @@ where
         self.check_workspace(workspace)?;
         let result = self.check(lhs, rhs).and_then(|members| {
             self.check_destination(dst, members)?;
-            self.run(lhs, rhs, &mut dst.storage, members, workspace)
+            self.run(
+                lhs,
+                rhs,
+                &mut dst.storage,
+                members,
+                workspace,
+                tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
+            )
         });
         result.map_err(|error| workspace.output.hide(error))
     }
@@ -380,9 +411,9 @@ where
 
     /// Overwrites workspace-owned device output; any error follows the
     /// batched module's failure rule. A new member count uploads one zeroed
-    /// output buffer (#740); that buffer already has zero inactive regions.
-    /// A reused buffer, including one kept after a failed call, has its
-    /// inactive regions zeroed in place, and transfers no payload.
+    /// output buffer (#740). A reused buffer, including one kept after a
+    /// failed call, transfers no payload, and no call fills its inactive
+    /// regions: they are already zero (see [`ContractWorkspace`]).
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -400,9 +431,7 @@ where
             Ok(prepared) => prepared,
             Err(error) => return Err(workspace.output.fail(buffers, error)),
         };
-        let reused = buffers.filter(|output| output.members == members);
-        let fresh = reused.is_none();
-        let mut output = match reused {
+        let mut output = match buffers.filter(|output| output.members == members) {
             Some(output) => output,
             None => StackedTensorMap {
                 runtime: self.runtime.clone(),
@@ -419,14 +448,22 @@ where
                 _payload: PhantomData,
             },
         };
-        let result = self.run(workspace, &mut lease, lhs, rhs, &mut output.storage, fresh);
+        let result = self.run(
+            workspace,
+            &mut lease,
+            lhs,
+            rhs,
+            &mut output.storage,
+            tenet_tensors::ContractDestinationInit::Zeroed,
+        );
         drop(lease);
         workspace.output.settle(output, result)
     }
 
-    /// Overwrites a checked caller device destination. After the zero
-    /// template has been reserved for this member count, replay transfers no
-    /// payload and zeroes each inactive region across all members.
+    /// Overwrites a checked caller device destination and zeroes each
+    /// inactive region across all members. The first such call at a new
+    /// high-water member count reserves the context zero template; later
+    /// calls transfer no payload.
     pub fn execute_into(
         &self,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -439,7 +476,14 @@ where
             self.check_destination(dst, members)?;
             let runtime = self.runtime.clone();
             let mut lease = runtime.lease_cuda()?;
-            self.run(workspace, &mut lease, lhs, rhs, &mut dst.storage, false)
+            self.run(
+                workspace,
+                &mut lease,
+                lhs,
+                rhs,
+                &mut dst.storage,
+                tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
+            )
         });
         result.map_err(|error| workspace.output.hide(error))
     }
@@ -451,7 +495,7 @@ where
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         dst: &mut CudaStorage<D>,
-        dst_zeroed: bool,
+        init: tenet_tensors::ContractDestinationInit<D>,
     ) -> Result<(), Error> {
         tenet_tensors::execute_storage_contract_members_cuda(
             ctx,
@@ -461,11 +505,7 @@ where
             (rhs.space.space().structure(), &rhs.storage),
             &mut workspace.members_cuda,
             lhs.members,
-            if dst_zeroed {
-                tenet_tensors::ContractDestinationInit::Zeroed
-            } else {
-                tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0))
-            },
+            init,
         )?;
         Ok(())
     }

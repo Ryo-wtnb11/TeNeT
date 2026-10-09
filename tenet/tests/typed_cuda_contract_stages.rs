@@ -145,6 +145,13 @@ impl Recorder {
                     .map_or(0, |&(_, delta)| delta);
                 expected[6] = expected[6].checked_add_signed(delta).unwrap();
             }
+            if key.ends_with(" execute warm") {
+                if let Some(&(_, inactive)) =
+                    BORN_ZERO_OUTPUT.iter().find(|(name, _)| group == *name)
+                {
+                    expected[4] -= inactive;
+                }
+            }
             if let Some((_, [calls, bytes])) =
                 ZERO_TEMPLATE_GROWTH.iter().find(|(row, _)| row == key)
             {
@@ -209,6 +216,24 @@ const RETAINED_METADATA_DELTA: &[(&str, i64)] = &[
     ),
     ("member fA f64", 168),
     ("member fB f64", 168),
+];
+
+/// Member cases whose core writes the output directly, and the inactive
+/// destination regions of their core plan (#2123). The base zeroed those
+/// regions of a reused `execute` output on every warm call; the head never
+/// does, because that output is born zero and only the core GEMMs write it.
+/// Every warm `execute` row therefore submits exactly `R` fewer; CopyC and
+/// output-transform rows keep their (#1859 C2) counts.
+const BORN_ZERO_OUTPUT: &[(&str, u64)] = &[
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64",
+        1,
+    ),
+    ("member fA f64", 3),
+    ("member fB f64", 3),
+    ("direct member U(1) core route, inactive block f64", 1),
+    ("direct member signed core f64", 1),
+    ("direct member signed swapped core f64", 1),
 ];
 
 const MEMBER_COPY_C: &[(&str, u64)] = &[

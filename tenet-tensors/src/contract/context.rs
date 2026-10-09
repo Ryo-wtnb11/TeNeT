@@ -446,7 +446,9 @@ where
     /// Replays an admitted route (Core, CopyC or DynamicTree) over uniform
     /// member-major Host stacks through the one Host route executor, with
     /// this lane's tree and contract resources and the caller's workspace:
-    /// `dst = contract(lhs, rhs)` per member.
+    /// `dst = contract(lhs, rhs)` per member. `init` is
+    /// [`ContractDestinationInit::Zeroed`] only when `dst`'s inactive blocks
+    /// are already zero, else `Axpby(0)`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn execute_storage_contract_members_host(
@@ -457,6 +459,7 @@ where
         rhs: (&Arc<BlockStructure>, &[D]),
         workspace: &mut super::route_host::HostContractMembersWorkspace<D, C>,
         members: usize,
+        init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError>
     where
         C: std::ops::Neg<Output = C>,
@@ -478,6 +481,7 @@ where
             lhs.1,
             rhs.1,
             members,
+            init,
         )
     }
 }
