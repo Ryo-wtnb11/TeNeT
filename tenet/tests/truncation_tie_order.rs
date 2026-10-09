@@ -12,6 +12,12 @@
 //! for the end-to-end cases) on the same fixture. It also follows by hand from
 //! the `isless` order quoted beside each case. No expectation is read back from
 //! TeNeT.
+//!
+//! Ties *within* a sector (#2095) go to the lower position in the same flat
+//! order, so `truncrank` keeps the earlier position and `truncerror` discards
+//! it. Those expected positions were produced by TensorKit `cfaa073e`
+//! (0.17.0) with MatrixAlgebraKit 0.6.8, `MAK.findtruncated` over a
+//! `SectorVector` holding the fixture's values in the listed (stored) order.
 
 use std::sync::Arc;
 use tenet::typed::HermitianTol;
@@ -47,6 +53,38 @@ macro_rules! kept {
             .map(|(sector, _)| found.selection.subspace().degeneracy(sector).unwrap())
             .collect::<Vec<usize>>()
     }};
+}
+
+/// Kept positions per entry, in entry order, from `GradedSpace::find_truncated`
+/// and `LegSelection::positions`.
+macro_rules! positions {
+    ($rule:expr, [$(($sector:expr, [$($value:expr),*])),* $(,)?], $truncation:expr) => {{
+        let entries = vec![$(($sector, vec![$($value),*])),*];
+        let leg = GradedSpace::try_new(
+            Arc::new($rule),
+            entries.iter().map(|(sector, values)| (sector.clone(), values.len())),
+        )
+        .unwrap();
+        let spectra: Vec<SectorSpectrum<_>> = entries
+            .iter()
+            .map(|(sector, values)| SectorSpectrum {
+                sector: sector.clone(),
+                values: values.clone(),
+            })
+            .collect();
+        let found = leg.find_truncated(&spectra, &$truncation).unwrap();
+        entries
+            .iter()
+            .map(|(sector, _)| found.selection.positions(sector).unwrap())
+            .collect::<Vec<Vec<usize>>>()
+    }};
+}
+
+/// `relative_error` with TeNeT budget `(rtol * norm)^2 = atol^2`, i.e.
+/// TensorKit's `truncerror(; atol)`, for a spectrum of weighted squared norm
+/// `norm_squared`.
+fn truncerror_atol(atol: f64, norm_squared: f64) -> Truncation {
+    Truncation::relative_error(atol / norm_squared.sqrt()).unwrap()
 }
 
 fn u1(charge: i32) -> U1Irrep {
@@ -254,4 +292,88 @@ fn u1_order_keys_are_tensorkit_findindex_positions() {
         ),
         SectorOrderKey::position(4)
     );
+}
+
+#[test]
+fn u1_ties_within_and_across_sectors_discard_the_earliest_flat_entry() {
+    // Flat ascending order of the three 0.1s: (0, 1), (0, 2), (+1, 0). The
+    // budget 0.12^2 fits one, so TensorKit discards position 1 of charge 0.
+    let kept = positions!(
+        U1FusionRule,
+        [(u1(0), [1.0, 0.1, 0.1]), (u1(1), [0.1])],
+        truncerror_atol(0.12, 1.03)
+    );
+    assert_eq!(kept, [vec![0, 2], vec![0]]);
+}
+
+#[test]
+fn su2_within_sector_tie_discards_the_earlier_position_with_dim_weights() {
+    // Spin 0 (weight 1) holds both 0.1s; spin 1/2 weighs 2. norm^2 = 3.02.
+    // Discard (0, 0) for 0.01; (0, 2) would bring 0.02 > 0.0144.
+    let kept = positions!(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), [0.1, 1.0, 0.1]),
+            (SU2Irrep::from_twice_spin(1), [1.0]),
+        ],
+        truncerror_atol(0.12, 3.02)
+    );
+    assert_eq!(kept, [vec![1, 2], vec![0]]);
+}
+
+#[test]
+fn rank_keeps_the_largest_magnitudes_wherever_they_are_stored() {
+    // eigh-like ascending storage: the 2.0 of charge 0 is its last entry.
+    let kept = positions!(
+        U1FusionRule,
+        [(u1(0), [0.5, 2.0]), (u1(1), [2.0, 1.0])],
+        Truncation::rank(2)
+    );
+    assert_eq!(kept, [vec![1], vec![0]]);
+    // Signed values select by |v|: 3 (0, 2), then the 2s in flat order,
+    // (0, 3) before (+1, 0) before (+1, 1).
+    let kept = positions!(
+        U1FusionRule,
+        [(u1(0), [-1.0, 0.5, 3.0, -2.0]), (u1(1), [2.0, -2.0])],
+        Truncation::rank(3)
+    );
+    assert_eq!(kept, [vec![2, 3], vec![0]]);
+    // SU(2): 2.0 (spin 0, weight 1) then 2.0 (spin 1/2, weight 2) fill rank 3.
+    let kept = positions!(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), [1.0, 2.0]),
+            (SU2Irrep::from_twice_spin(1), [2.0, 0.5]),
+        ],
+        Truncation::rank(3)
+    );
+    assert_eq!(kept, [vec![1], vec![0]]);
+}
+
+#[test]
+fn truncspace_keeps_tensorkits_set_in_stored_order() {
+    // TensorKit `findtruncated(::SectorVector, truncspace(0 => 3, 1 => 1))`
+    // returns `sortperm(d; by = abs, rev = true)[1:k]`: 0-based `[1, 3, 0]`
+    // for charge 0 and `[1]` for charge 1, and so also permutes the kept
+    // columns into magnitude order. TeNeT keeps the same set in stored order
+    // (`Truncation::Space`); sorting it by the keep order recovers
+    // TensorKit's index vector exactly.
+    let values = [vec![2.0, -3.0, 0.5, -2.5], vec![1.0, -1.5]];
+    let target = GradedSpace::try_new(Arc::new(U1FusionRule), [(u1(0), 3), (u1(1), 1)]).unwrap();
+    let kept = positions!(
+        U1FusionRule,
+        [(u1(0), [2.0, -3.0, 0.5, -2.5]), (u1(1), [1.0, -1.5])],
+        Truncation::space(target.truncspace())
+    );
+    assert_eq!(kept, [vec![0, 1, 3], vec![1]]);
+    let tensorkit = [vec![1, 3, 0], vec![1]];
+    for ((mut positions, values), expected) in kept.into_iter().zip(&values).zip(tensorkit) {
+        // Keep order: |v| descending, then position ascending.
+        positions.sort_by(|&a, &b| {
+            f64::abs(values[b])
+                .total_cmp(&f64::abs(values[a]))
+                .then(a.cmp(&b))
+        });
+        assert_eq!(positions, expected);
+    }
 }

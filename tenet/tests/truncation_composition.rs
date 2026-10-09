@@ -186,7 +186,7 @@ macro_rules! assert_svd_composition {
         let offered: usize = offers.iter().map(|o| o.magnitudes.len()).sum();
         assert_eq!(
             selection.is_full(),
-            kept.iter().sum::<usize>() == offered,
+            kept.iter().map(Vec::len).sum::<usize>() == offered,
             "{case}: is_full agrees with the kept count"
         );
         found
@@ -249,7 +249,7 @@ macro_rules! assert_eigh_composition {
         let offered: usize = offers.iter().map(|o| o.magnitudes.len()).sum();
         assert_eq!(
             selection.is_full(),
-            kept.iter().sum::<usize>() == offered,
+            kept.iter().map(Vec::len).sum::<usize>() == offered,
             "{case}: is_full agrees with the kept count"
         );
         found
@@ -1006,17 +1006,21 @@ fn find_truncated_rejects_a_malformed_input_spectrum() {
         ));
     }
 
-    for values in [
-        &[1.0, 2.0, 3.0][..],
-        &[f64::NAN, 2.0, 1.0][..],
-        &[f64::INFINITY, 2.0, 1.0][..],
-    ] {
+    for values in [&[f64::NAN, 2.0, 1.0][..], &[f64::INFINITY, 2.0, 1.0][..]] {
         let bad = [spectrum(0, values), spectrum(1, &[2.0, 1.0])];
         assert!(
             leg.find_truncated(&bad, &full).is_err(),
-            "ascending, NaN and infinite spectra must be rejected: {values:?}"
+            "NaN and infinite spectra must be rejected: {values:?}"
         );
     }
+    // Stored order is not malformed (#2095): an ascending spectrum is a
+    // valid input and keeps everything under `Full`.
+    let ascending = [spectrum(0, &[1.0, 2.0, 3.0]), spectrum(1, &[2.0, 1.0])];
+    assert!(leg
+        .find_truncated(&ascending, &full)
+        .unwrap()
+        .selection
+        .is_full());
 }
 
 #[test]

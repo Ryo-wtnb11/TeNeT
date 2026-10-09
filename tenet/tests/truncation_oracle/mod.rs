@@ -19,8 +19,9 @@
 //!   `u^H u = 1`, `t * v = v * d`, ...), so an exactly degenerate spectrum,
 //!   whose kept basis is a free choice, is covered by the same assertions.
 //! * [`select`] is a hand implementation of each policy's documented rule
-//!   (`tenet::typed::Truncation`), written over a flat sorted candidate
-//!   list rather than `select_truncation`'s heap.
+//!   (`tenet::typed::Truncation`, TensorKit's `findtruncated`), written over
+//!   a flat sorted candidate list rather than `select_truncation`'s
+//!   per-sector sorts and heap; it returns kept positions per sector.
 
 #![allow(dead_code)]
 
@@ -343,8 +344,8 @@ pub fn assert_error_close<T: crate::numerics::Numeric>(
     );
 }
 
-/// One coupled sector's offered spectrum: quantum dimension and descending
-/// magnitudes.
+/// One coupled sector's offered spectrum: quantum dimension and magnitudes,
+/// in the order the fixture lists them.
 #[derive(Clone, Debug)]
 pub struct Offer<S> {
     pub sector: S,
@@ -377,123 +378,142 @@ fn weighted_norm<S>(offers: &[Offer<S>]) -> f64 {
         .sqrt()
 }
 
-/// Kept prefix length per offer. An exact cross-sector tie goes to the sector
-/// that sorts first under `S: Ord`, which is TensorKit's order for every
-/// fixture that has a tie (non-negative U(1) charges, SU(2) spins).
-pub fn select<S: Ord + Clone>(offers: &[Offer<S>], policy: &Policy<S>) -> Vec<usize> {
+/// Kept positions per offer, ascending, over the offer's magnitudes in the
+/// order they are listed (TensorKit `findtruncated` over a `SectorVector`).
+/// The flat candidate list is sorted with the whole key spelled out: keep
+/// order `(v desc, sector, position asc)`, discard order
+/// `(v asc, sector, position asc)`. An exact cross-sector tie goes to the
+/// sector that sorts first under `S: Ord`, which is TensorKit's order for
+/// every fixture that has a tie (non-negative U(1) charges, SU(2) spins).
+pub fn select<S: Ord + Clone>(offers: &[Offer<S>], policy: &Policy<S>) -> Vec<Vec<usize>> {
+    let all = |o: &Offer<S>| (0..o.magnitudes.len()).collect::<Vec<usize>>();
+    let candidates = || -> Vec<(f64, &S, usize, usize)> {
+        offers
+            .iter()
+            .enumerate()
+            .flat_map(|(i, o)| {
+                o.magnitudes
+                    .iter()
+                    .enumerate()
+                    .map(move |(p, &v)| (v, &o.sector, p, i))
+            })
+            .collect()
+    };
+    let filter = |threshold: f64| -> Vec<Vec<usize>> {
+        offers
+            .iter()
+            .map(|o| (0..o.magnitudes.len()).filter(|&p| o.magnitudes[p] >= threshold).collect())
+            .collect()
+    };
     match policy {
-        Policy::Full => offers.iter().map(|o| o.magnitudes.len()).collect(),
+        Policy::Full => offers.iter().map(all).collect(),
         Policy::Rank(rank) => {
-            let mut candidates: Vec<(f64, &S, usize, usize)> = offers
-                .iter()
-                .enumerate()
-                .flat_map(|(i, o)| {
-                    o.magnitudes
-                        .iter()
-                        .enumerate()
-                        .map(move |(p, &v)| (v, &o.sector, p, i))
-                })
-                .collect();
+            let mut candidates = candidates();
             candidates.sort_by(|a, b| {
                 b.0.total_cmp(&a.0)
                     .then_with(|| a.1.cmp(b.1))
                     .then(a.2.cmp(&b.2))
             });
-            let mut kept = vec![0; offers.len()];
+            let mut kept = vec![Vec::new(); offers.len()];
             let mut used = 0.0;
-            for (_, _, _, i) in candidates {
+            for (_, _, p, i) in candidates {
                 if used + offers[i].dim > *rank as f64 + 1e-12 {
                     break;
                 }
                 used += offers[i].dim;
-                kept[i] += 1;
+                kept[i].push(p);
+            }
+            for positions in &mut kept {
+                positions.sort_unstable();
             }
             kept
         }
-        Policy::RelativeCutoff(rtol) => {
-            let threshold = rtol * weighted_norm(offers);
-            offers
-                .iter()
-                .map(|o| o.magnitudes.iter().filter(|&&v| v >= threshold).count())
-                .collect()
-        }
+        Policy::RelativeCutoff(rtol) => filter(rtol * weighted_norm(offers)),
         Policy::RelativeInfCutoff(rtol) => {
             let max = offers
                 .iter()
                 .flat_map(|o| o.magnitudes.iter().copied())
                 .fold(0.0, f64::max);
-            offers
-                .iter()
-                .map(|o| o.magnitudes.iter().filter(|&&v| v >= rtol * max).count())
-                .collect()
+            filter(rtol * max)
         }
         Policy::RelativeError(rtol) => {
             let bound = rtol * weighted_norm(offers);
             let values: usize = offers.iter().map(|o| o.magnitudes.len()).sum();
             let limit = bound * bound * (1.0 + (values + 5) as f64 * f64::EPSILON);
-            let mut candidates: Vec<(f64, &S, usize, usize)> = offers
-                .iter()
-                .enumerate()
-                .flat_map(|(i, o)| {
-                    o.magnitudes
-                        .iter()
-                        .enumerate()
-                        .map(move |(p, &v)| (v, &o.sector, p, i))
-                })
-                .collect();
+            let mut candidates = candidates();
             candidates.sort_by(|a, b| {
                 a.0.total_cmp(&b.0)
                     .then_with(|| a.1.cmp(b.1))
-                    .then(b.2.cmp(&a.2))
+                    .then(a.2.cmp(&b.2))
             });
-            let mut kept: Vec<usize> = offers.iter().map(|o| o.magnitudes.len()).collect();
-            let mut discarded = 0.0;
-            for (v, _, _, i) in candidates {
-                let next = discarded + offers[i].dim * v * v;
+            let mut discarded = vec![Vec::new(); offers.len()];
+            let mut total = 0.0;
+            for (v, _, p, i) in candidates {
+                let next = total + offers[i].dim * v * v;
                 if next > limit {
                     break;
                 }
-                discarded = next;
-                kept[i] -= 1;
+                total = next;
+                discarded[i].push(p);
             }
-            kept
+            offers
+                .iter()
+                .zip(&discarded)
+                .map(|(o, gone)| all(o).into_iter().filter(|p| !gone.contains(p)).collect())
+                .collect()
         }
         Policy::Space(ranks) => offers
             .iter()
             .map(|o| {
-                ranks
+                let rank = ranks
                     .iter()
                     .find(|(s, _)| *s == o.sector)
-                    .map_or(0, |&(_, r)| r)
-                    .min(o.magnitudes.len())
+                    .map_or(0, |&(_, r)| r);
+                let mut order = all(o);
+                order.sort_by(|&a, &b| {
+                    o.magnitudes[b]
+                        .total_cmp(&o.magnitudes[a])
+                        .then(a.cmp(&b))
+                });
+                order.truncate(rank);
+                order.sort_unstable();
+                order
             })
             .collect(),
         Policy::And(left, right) => select(offers, left)
             .into_iter()
             .zip(select(offers, right))
-            .map(|(a, b)| a.min(b))
+            .map(|(a, b)| a.into_iter().filter(|p| b.contains(p)).collect())
             .collect(),
     }
 }
 
 /// `sqrt(sum_c dim(c) sum_{discarded} v^2)`.
-pub fn discarded_norm<S>(offers: &[Offer<S>], kept: &[usize]) -> f64 {
+pub fn discarded_norm<S>(offers: &[Offer<S>], kept: &[Vec<usize>]) -> f64 {
     offers
         .iter()
         .zip(kept)
-        .map(|(o, &k)| o.dim * o.magnitudes[k..].iter().map(|v| v * v).sum::<f64>())
+        .map(|(o, k)| {
+            o.dim
+                * o.magnitudes
+                    .iter()
+                    .enumerate()
+                    .filter(|(p, _)| !k.contains(p))
+                    .map(|(_, v)| v * v)
+                    .sum::<f64>()
+        })
         .sum::<f64>()
         .sqrt()
 }
 
 /// The expected kept bond as `(sector, count)` pairs sorted by sector, zero
 /// counts dropped.
-pub fn kept_pairs<S: Ord + Clone>(offers: &[Offer<S>], kept: &[usize]) -> Vec<(S, usize)> {
+pub fn kept_pairs<S: Ord + Clone>(offers: &[Offer<S>], kept: &[Vec<usize>]) -> Vec<(S, usize)> {
     let mut pairs: Vec<(S, usize)> = offers
         .iter()
         .zip(kept)
-        .filter(|&(_, &k)| k > 0)
-        .map(|(o, &k)| (o.sector.clone(), k))
+        .filter(|(_, k)| !k.is_empty())
+        .map(|(o, k)| (o.sector.clone(), k.len()))
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
