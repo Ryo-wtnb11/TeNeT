@@ -48,7 +48,8 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     binding: Arc<StorageContractResolution<f64>>,
     output: OutputSlot<StackedTensorMap<R, D, S>>,
     members: HostContractMembersWorkspace<D>,
-    /// The CopyC temporary stack and its member count.
+    /// The CopyC temporary stack and the members it holds: the high-water
+    /// `B`, of which a call uses the first `B` members.
     #[cfg(feature = "cuda")]
     copy_c_temporary: Option<(S, usize)>,
     #[cfg(feature = "cuda")]
@@ -539,9 +540,9 @@ where
             let existing = workspace
                 .copy_c_temporary
                 .take()
-                .filter(|(_, members)| *members == lhs.members);
+                .filter(|(_, capacity)| *capacity >= lhs.members);
             Some(match existing {
-                Some((storage, _)) => (false, storage),
+                Some((storage, capacity)) => (false, storage, capacity),
                 None => (
                     true,
                     CudaStorage::upload_members(
@@ -550,6 +551,7 @@ where
                         temporary_len,
                         lhs.members,
                     )?,
+                    lhs.members,
                 ),
             })
         } else {
@@ -560,7 +562,7 @@ where
         // call never makes the next one upload it again.
         let result = (|| {
             let (core_storage, core_len, zero_core) = match (&mut temporary, temporary_len) {
-                (Some((fresh, storage)), Some(len)) => (storage, len, !*fresh),
+                (Some((fresh, storage, _)), Some(len)) => (storage, len, !*fresh),
                 _ => (&mut *dst, self.member_len, zero_inactive),
             };
             let mut core_destination =
@@ -581,7 +583,7 @@ where
                 &left,
                 &right,
             )?;
-            if let Some((_, storage)) = &temporary {
+            if let Some((_, storage, _)) = &temporary {
                 let regions = device.copy_regions.as_ref().ok_or_else(|| {
                     Error::InvalidArgument("CopyC device regions are unprepared".into())
                 })?;
@@ -589,8 +591,8 @@ where
             }
             Ok(())
         })();
-        if let Some((_, storage)) = temporary {
-            workspace.copy_c_temporary = Some((storage, lhs.members));
+        if let Some((_, storage, capacity)) = temporary {
+            workspace.copy_c_temporary = Some((storage, capacity));
         }
         result
     }

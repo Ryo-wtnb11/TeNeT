@@ -1195,6 +1195,7 @@ fn copy_c_nonzero_single_public_admission() {
                     blas_contract_oracle,
                 );
             }
+            check_high_water(&plan, &case, &blas_contract_oracle);
             let held_with_eager = runtime
                 .cuda_plan_cache_stats()
                 .unwrap()
@@ -1398,6 +1399,120 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
             D::NAME,
             workspace.retained_bytes()
         );
+    }
+    check_high_water(&plan, case, &oracle);
+}
+
+/// High-water member stacks across B changes (#1746): the DynamicTree
+/// workspace stacks and the CopyC temporary. Fresh workspaces run
+/// B = 4, 2, 4 and B = 1, 17, 3 with new values at every call, so a stale
+/// stack region left by an earlier, larger B would show. Each member of
+/// `execute` and of `execute_into` (NaN-poisoned destination, so every
+/// inactive output block must be written zero on device) matches `oracle`.
+/// Through `execute_into`, which owns no output, a B at or below the high
+/// water allocates and uploads nothing and keeps the retained bytes; through
+/// `execute` the only upload is the owned output of the new B (#740).
+fn check_high_water<R: DeviceRule, D: DevicePayload>(
+    plan: &ContractPlan<R, D, CudaStorage<D>>,
+    case: &Case<R, D>,
+    oracle: &impl Fn(&Case<R, D>) -> TensorMap<R, D>,
+) {
+    let stack = |members: &[Case<R, D>], pick: fn(&Case<R, D>) -> &TensorMap<R, D>| {
+        StackedTensorMap::pack(&members.iter().map(pick).collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap()
+    };
+    for sequence in [[4, 2, 4], [1, 17, 3]] {
+        let mut workspace = plan.workspace().unwrap();
+        let mut into = plan.workspace().unwrap();
+        let (mut high_water, mut high_bytes) = (0, 0);
+        for (call, count) in sequence.into_iter().enumerate() {
+            let call = call as f64;
+            let members: Vec<_> = (0..count)
+                .map(|i| Case {
+                    name: case.name,
+                    lhs: case.lhs.scale(D::entry(
+                        -0.75 - call / 8.0 + i as f64 / 64.0,
+                        (call + 1.0) / 16.0 - i as f64 / 128.0,
+                    )),
+                    rhs: case
+                        .rhs
+                        .scale(D::entry(1.5 + call / 4.0 + i as f64 / 32.0, 0.0)),
+                    lhs_axes: case.lhs_axes.clone(),
+                    rhs_axes: case.rhs_axes.clone(),
+                    output_axes: case.output_axes.clone(),
+                    dense: case.dense,
+                })
+                .collect();
+            let (lhs, rhs) = (stack(&members, |m| &m.lhs), stack(&members, |m| &m.rhs));
+            let (_, owned) = observe(|| {
+                plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+            });
+            let returned = plan
+                .execute(&lhs, &rhs, &mut workspace)
+                .unwrap()
+                .to_host()
+                .unwrap();
+            let poison: Vec<_> = members.iter().map(poisoned_destination).collect();
+            let mut dst = StackedTensorMap::pack(&poison.iter().collect::<Vec<_>>())
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            let (_, written_metrics) = observe(|| {
+                plan.execute_into(&lhs, &rhs, &mut dst, &mut into).unwrap();
+            });
+            let written = dst.to_host().unwrap();
+            for (i, member) in members.iter().enumerate() {
+                let expected = oracle(member);
+                for actual in [&returned, &written] {
+                    numerics::assert_nonzero_slices_close(
+                        case.name,
+                        actual.member(i).unwrap().dense_data().unwrap(),
+                        expected.dense_data().unwrap(),
+                        member.terms(),
+                    );
+                }
+            }
+            let into_counts = (
+                written_metrics.cuda.h2d_calls,
+                written_metrics.cuda.device_allocs,
+            );
+            if count <= high_water {
+                assert_eq!(
+                    into_counts,
+                    (0, 0),
+                    "{}: B={count} under high water {high_water} must not allocate",
+                    case.name
+                );
+                assert_eq!(
+                    into.retained_bytes(),
+                    high_bytes,
+                    "{}: B={count} keeps the high-water stacks",
+                    case.name
+                );
+                assert_eq!(
+                    (owned.cuda.h2d_calls, owned.cuda.device_allocs),
+                    (1, 1),
+                    "{}: B={count} execute uploads only its owned output",
+                    case.name
+                );
+            } else {
+                assert!(
+                    into_counts.0 >= 1,
+                    "{}: B={count} grows the stacks",
+                    case.name
+                );
+                assert!(into.retained_bytes() > high_bytes);
+                (high_water, high_bytes) = (count, into.retained_bytes());
+            }
+            eprintln!(
+                "high water {} {} B={count} (high water {high_water}): execute={owned}; execute_into={written_metrics}; retained_into_bytes={}",
+                case.name,
+                D::NAME,
+                into.retained_bytes()
+            );
+        }
     }
 }
 

@@ -21,20 +21,30 @@ use super::DynamicTreeExecutionArtifact;
 use crate::contract::resolution::{ContractRoute, StorageContractResolution};
 use crate::{OperationError, RecouplingCoefficientAction};
 
-/// Caller-owned device state of one member-batched `DynamicTree` replay at
-/// one `B`: validated member regions, scaled-move coefficients, and the
-/// transformed-source and core-destination stacks. `S` is the plan's device
+/// Caller-owned device state of one member-batched `DynamicTree` replay:
+/// validated member regions and core zero fills for the current `B`,
+/// scaled-move coefficients, and the transformed-source and core-destination
+/// stacks at their high-water member capacity. `S` is the plan's device
 /// storage, so the holder needs no payload bound.
+///
+/// Retained capacity has no reference counterpart: TensorKit `cfaa073e`
+/// `blas_contract!` takes its temporaries from a per-call allocator and QSpace
+/// `dd2cc7e` `contract_matchAB_groupC` builds its buffers per call; neither
+/// has a member axis to size.
 #[doc(hidden)]
 pub struct CudaDynamicTreeMembersWorkspace<S> {
-    /// The artifact and `B` everything below was prepared for.
+    /// The artifact and `B` the regions below were prepared for.
     artifact: Option<Arc<DynamicTreeExecutionArtifact<f64>>>,
     members: usize,
+    /// Members every stack in `buffers` holds; never below `members`.
+    capacity: usize,
     /// lhs source, rhs source and output transform regions.
     stages: [Option<CudaSingleMemberRegions>; 3],
     /// Scaled-move coefficients per stage; structure-only, kept across `B`.
     coefficients: [Option<CudaDenseStorage>; 3],
-    /// Transformed lhs, transformed rhs and core destination stacks.
+    /// Transformed lhs, transformed rhs and core destination stacks. A
+    /// member's offset is `B`-independent, so the first `members` members
+    /// are the active stack and the rest is idle capacity.
     buffers: [Option<S>; 3],
     /// Core inactive blocks of a directly written destination, per member.
     core_zeros: Vec<CudaRegion>,
@@ -45,6 +55,7 @@ impl<S> Default for CudaDynamicTreeMembersWorkspace<S> {
         Self {
             artifact: None,
             members: 0,
+            capacity: 0,
             stages: [None, None, None],
             coefficients: [None, None, None],
             buffers: [None, None, None],
@@ -106,7 +117,8 @@ impl<D> CudaDynamicTreeMembersWorkspace<CudaStorage<D>>
 where
     D: CudaScalar + RecouplingCoefficientAction<f64>,
 {
-    /// Retained device payload bytes plus Host region metadata.
+    /// Retained device payload bytes, at stack capacity, plus Host region
+    /// metadata.
     pub fn retained_bytes(&self) -> usize {
         let elements = self
             .buffers
@@ -135,7 +147,8 @@ where
     /// Overwrites `dst` with each member's contraction. `dst_zeroed` means
     /// `dst` is a fresh zero stack, so core inactive blocks need no fill.
     /// Every structural and region check finishes before the first device
-    /// submission; a warm call at an unchanged `B` transfers nothing.
+    /// submission; a warm call at an unchanged `B` transfers nothing, and a
+    /// changed `B` at or below the high-water capacity allocates no stack.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &mut self,
@@ -199,7 +212,8 @@ where
         let right = StackedStorageView::new::<D>(right, right_len, members, right_len)?;
         let (core, core_len) = match core_buffer {
             // A workspace core stack is born zero and only the core GEMMs
-            // write it, so its inactive blocks stay zero without a fill.
+            // write it, at the same member offsets for every `B`, so its
+            // inactive blocks stay zero without a fill.
             Some(buffer) => (buffer, core_buffer_len),
             None => {
                 if !dst_zeroed {
@@ -231,17 +245,19 @@ where
         dst_structure: &Arc<BlockStructure>,
         members: usize,
     ) -> Result<(), OperationError> {
+        if members == 0 {
+            return Err(OperationError::InvalidArgument {
+                message: "a CUDA member contraction needs at least one member",
+            });
+        }
+        // Member lengths and coefficients belong to the artifact. Emptying
+        // first means a failure below leaves nothing a later call trusts.
         if !self
             .artifact
             .as_ref()
             .is_some_and(|prepared| Arc::ptr_eq(prepared, artifact))
         {
-            self.coefficients = [None, None, None];
-        }
-        if members == 0 {
-            return Err(OperationError::InvalidArgument {
-                message: "a CUDA member contraction needs at least one member",
-            });
+            *self = Self::default();
         }
         let dst_len = dst_structure.required_len()?;
         let core_dst_structure = artifact.core_dst_structure(dst_structure);
@@ -319,26 +335,34 @@ where
                 }
             }
         }
+        // Stacks are kept at the high-water `B`; only growth replaces them.
         // Fresh device stacks cost one zero upload each (#740); their
         // contents are irrelevant except a core stack's inactive blocks.
-        let zeros = |len: usize| -> Result<CudaStorage<D>, OperationError> {
-            CudaStorage::upload_members(ctx, vec![D::ZERO; stack_len(len, members)?], len, members)
-        };
-        let buffers = [
-            (!artifact.lhs_borrowed)
-                .then(|| zeros(artifact.lhs_transform.space.required_len()?))
-                .transpose()?,
-            (!artifact.rhs_borrowed)
-                .then(|| zeros(artifact.rhs_transform.space.required_len()?))
-                .transpose()?,
-            artifact
-                .core_dst
-                .is_some()
-                .then(|| zeros(core_len))
-                .transpose()?,
-        ];
+        if members > self.capacity {
+            let zeros = |len: usize| -> Result<CudaStorage<D>, OperationError> {
+                CudaStorage::upload_members(
+                    ctx,
+                    vec![D::ZERO; stack_len(len, members)?],
+                    len,
+                    members,
+                )
+            };
+            self.buffers = [
+                (!artifact.lhs_borrowed)
+                    .then(|| zeros(artifact.lhs_transform.space.required_len()?))
+                    .transpose()?,
+                (!artifact.rhs_borrowed)
+                    .then(|| zeros(artifact.rhs_transform.space.required_len()?))
+                    .transpose()?,
+                artifact
+                    .core_dst
+                    .is_some()
+                    .then(|| zeros(core_len))
+                    .transpose()?,
+            ];
+            self.capacity = members;
+        }
         self.stages = stages;
-        self.buffers = buffers;
         self.core_zeros = core_zeros;
         self.members = members;
         self.artifact = Some(Arc::clone(artifact));
