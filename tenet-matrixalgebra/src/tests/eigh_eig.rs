@@ -906,8 +906,9 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
 }
 
 #[test]
-fn eigh_fallback_stably_orders_equal_magnitudes() {
-    // What: the noncanonical fallback preserves an exact real backend tie.
+fn eigh_fallback_publishes_the_provider_ascending_order() {
+    // What: the noncanonical fallback publishes the solver's ascending order,
+    // ±x ties included, unchanged.
     let rule = Arc::new(Z2FusionRule);
     let (source, _) = unequal_fallback_eigh_fixtures();
     let source_regions = source
@@ -937,25 +938,11 @@ fn eigh_fallback_stably_orders_equal_magnitudes() {
             .collect::<Vec<_>>(),
     );
     for (spectrum, raw) in eigh.eigenvalues.iter().zip(&dense.raw_values) {
-        assert!(spectrum
-            .values
-            .windows(2)
-            .all(|pair| pair[0].abs() >= pair[1].abs()));
-        let raw_tied = raw
-            .iter()
-            .copied()
-            .filter(|value| value.abs() == 2.0)
-            .collect::<Vec<_>>();
-        let published_tied = spectrum
-            .values
-            .iter()
-            .copied()
-            .filter(|value| value.abs() == 2.0)
-            .collect::<Vec<_>>();
-        assert_eq!(raw_tied.len(), 2);
-        assert!(raw_tied.iter().any(|value| *value < 0.0));
-        assert!(raw_tied.iter().any(|value| *value > 0.0));
-        assert_eq!(published_tied, raw_tied);
+        // The provider's ascending spectrum (with its ±2 pair) is published
+        // as returned, without a permutation.
+        assert!(raw.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(raw.contains(&-2.0) && raw.contains(&2.0));
+        assert_eq!(&spectrum.values, raw);
     }
 }
 
@@ -1328,10 +1315,7 @@ fn eigh_full_satisfies_the_eigen_equation() {
 
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(
-                pair[0].abs() >= pair[1].abs() - 1e-12,
-                "eigenvalues must be stored descending by magnitude"
-            );
+            assert!(pair[0] <= pair[1], "eigenvalues must be stored ascending");
         }
     }
     assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
@@ -1352,7 +1336,7 @@ where
     assert_factor_layout_matches_legacy_shapes(eigh.d.space());
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
+            assert!(pair[0] <= pair[1]);
         }
     }
     assert_eigen_equation(rule, &tensor, &eigh.v, &eigh.d);
@@ -1592,7 +1576,7 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
 
     for entry in &eig.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+            assert!((pair[0].re, pair[0].im) <= (pair[1].re, pair[1].im));
         }
     }
 
@@ -1722,8 +1706,8 @@ fn eigh_refuses_a_block_that_stays_hermitian_after_the_column_swap() {
     assert_eq!(reference.len(), 2);
     for spectrum in &reference {
         assert_eq!(spectrum.values.len(), 2);
-        assert!((spectrum.values[0] - 3.0).abs() < 1e-12, "{reference:?}");
-        assert!((spectrum.values[1] - 1.0).abs() < 1e-12, "{reference:?}");
+        assert!((spectrum.values[0] - 1.0).abs() < 1e-12, "{reference:?}");
+        assert!((spectrum.values[1] - 3.0).abs() < 1e-12, "{reference:?}");
     }
     let swapped = bound_tensor(provider, &swapped);
     assert_stacking_refusal(eigh_vals(&mut dense, &swapped.as_ref()), "eigh_vals ");
