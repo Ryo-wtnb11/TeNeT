@@ -35,7 +35,8 @@ impl Distance for Complex64 {
 
 /// Same spaces, same values in the same gauge. Both routes hand the same
 /// block to the same dense QR and gauge; the tolerance only admits a dense
-/// kernel whose rounding depends on buffer alignment.
+/// kernel whose rounding depends on buffer alignment; a different gauge
+/// (a phase on any bond column) would differ by O(1) and fail.
 macro_rules! assert_factor_close {
     ($what:expr, $lazy:expr, $eager:expr) => {{
         let (what, lazy, eager) = ($what, &$lazy, &$eager);

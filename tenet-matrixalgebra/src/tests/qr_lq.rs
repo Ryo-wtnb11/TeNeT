@@ -1176,3 +1176,44 @@ fn lazy_adjoint_lq_tree_route_publishes_the_region_route_factors() {
         }
     }
 }
+
+#[test]
+fn checked_lazy_adjoint_lq_tree_route_publishes_the_region_route_factors() {
+    // What: the checked-Generic counterpart of the multiplicity-free test
+    // above (#2070): the tree route publishes the region route's factors.
+    let (space, data) = generic_factorization_input();
+    let (_, space) = bind_checked_layout(&space);
+    let parent = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let adjoint_space = <CheckedGenericAdmissionMode as tenet_tensors::CoefficientAlgebra<
+        LateGenericSpy,
+    >>::adjoint_space(parent.space())
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for full in [false, true] {
+        let mut run = || {
+            if full {
+                crate::factorize::lq_full_adjoint_dyn_checked_generic(
+                    &mut dense,
+                    &parent,
+                    &adjoint_space,
+                )
+            } else {
+                crate::factorize::lq_compact_adjoint_dyn_checked_generic(
+                    &mut dense,
+                    &parent,
+                    &adjoint_space,
+                )
+            }
+            .unwrap()
+        };
+        crate::factorize::reset_input_pack_bytes();
+        let regions = run();
+        assert_eq!(crate::factorize::input_pack_bytes(), 0, "full {full}");
+        let by_tree = crate::factorize::with_forced_input_pack(&mut run);
+        assert!(crate::factorize::input_pack_bytes() > 0, "full {full}");
+        for (region, tree) in [(&regions.l, &by_tree.l), (&regions.q, &by_tree.q)] {
+            assert_eq!(region.space().space(), tree.space().space(), "full {full}");
+            assert_eq!(region.data(), tree.data(), "full {full}");
+        }
+    }
+}
