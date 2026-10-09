@@ -394,14 +394,27 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
     let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
     let mut slot = crate::contract::route_host::CoreSlot::default();
     let (mut a, mut b, mut c) = Default::default();
-    for (alpha, init, with_slot) in [
-        (2.0, ContractDestinationInit::Axpby(0.0), true),
-        (1.0, ContractDestinationInit::Zeroed, true),
-        (1.0, ContractDestinationInit::Axpby(1.0), true),
+    // Each row names the boundary that must reject it, so removing the
+    // overwrite-contract guard fails the first three rows.
+    const GUARD: &str = "member contraction overwrites its destination with unit alpha";
+    for (alpha, init, with_slot, expected) in [
+        (2.0, ContractDestinationInit::Axpby(0.0), true, GUARD),
+        (1.0, ContractDestinationInit::Zeroed, true, GUARD),
+        (1.0, ContractDestinationInit::Axpby(1.0), true, GUARD),
         // The eager stage replays exactly one member.
-        (1.0, ContractDestinationInit::Axpby(0.0), true),
+        (
+            1.0,
+            ContractDestinationInit::Axpby(0.0),
+            true,
+            "eager Host contraction replays exactly one member",
+        ),
         // A member replay needs a caller-owned core slot.
-        (1.0, ContractDestinationInit::Axpby(0.0), false),
+        (
+            1.0,
+            ContractDestinationInit::Axpby(0.0),
+            false,
+            "member contraction needs a caller-owned core slot",
+        ),
     ] {
         let mut out = vec![f64::NAN; 2 * len];
         let error = execute_dynamic_tree_route_host(
@@ -427,10 +440,14 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
             None,
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            crate::OperationError::UnsupportedTensorContractScope { .. }
-        ));
+        assert!(
+            matches!(
+                error,
+                crate::OperationError::UnsupportedTensorContractScope { message }
+                    if message == expected
+            ),
+            "{error:?}"
+        );
         assert!(out.iter().all(|value| value.is_nan()));
     }
 }
