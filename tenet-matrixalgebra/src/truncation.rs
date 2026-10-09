@@ -318,9 +318,10 @@ pub struct TruncationDecision {
 /// # Complexity
 ///
 /// For `K` values in `G` sectors: `O(K)` to validate and for the error, plus
-/// per sector a stable sort of its positions for the ordering policies —
-/// `O(n_c)` when the sector is already monotone in magnitude (any SVD
-/// spectrum), `O(n_c log n_c)` otherwise — then `O(G + k log G)` to merge
+/// per sector its positions in keep or discard order for the ordering
+/// policies — `O(n_c)` when the sector is monotone in magnitude in either
+/// direction, ties included (any SVD spectrum), `O(n_c log n_c)` otherwise
+/// — then `O(G + k log G)` to merge
 /// `k` kept (`Rank`) or discarded (`DiscardWeight`) candidates.
 ///
 /// The decision does not depend on the order of `spectra`: it is taken in
@@ -684,13 +685,42 @@ const DISCARD: bool = false;
 /// [`KEEP`], ascending for [`DISCARD`]), equal magnitudes by ascending
 /// position.
 ///
-/// The sort is stable, so the position tie-break needs no key of its own, and
-/// adaptive: a sector already monotone in that order (a descending SVD
-/// spectrum, a strictly ascending one reversed) costs `O(n)` comparisons,
-/// an arbitrary one `O(n log n)`. `partial_cmp` rather than `total_cmp`, so
-/// `-0.0` ties `0.0` as under `by = abs`; NaN never reaches here
-/// (`validate_spectra`).
+/// `O(n)` for every monotone sector, ties included, in either direction, and
+/// `O(n log n)` otherwise:
+/// - monotone in the requested direction (a descending SVD spectrum under
+///   `KEEP`): the stable sort sees one run, `n - 1` comparisons;
+/// - monotone the other way (ascending magnitudes under `KEEP`, a
+///   descending spectrum under `DISCARD`): the positions reversed, with each group
+///   of equal values reversed back so ties stay position-ascending. Why not
+///   leave this to the sort: it reverses only *strictly* descending runs, so
+///   a run with exact ties (degenerate eigenvalues, `[5, 5, 4, 4]`) would
+///   cost `O(n log n)`.
+///
+/// `partial_cmp` / `==` rather than `total_cmp`, so `-0.0` ties `0.0` as
+/// under `by = abs`; NaN never reaches here (`validate_spectra`).
 fn sector_order(values: &[f64], keep: bool) -> Vec<usize> {
+    let reversed = values.windows(2).all(|pair| {
+        if keep {
+            pair[0] <= pair[1]
+        } else {
+            pair[0] >= pair[1]
+        }
+    });
+    if reversed {
+        let mut order: Vec<usize> = (0..values.len()).rev().collect();
+        let mut start = 0;
+        while start < order.len() {
+            let value = values[order[start]];
+            let end = start
+                + order[start..]
+                    .iter()
+                    .take_while(|&&position| values[position] == value)
+                    .count();
+            order[start..end].reverse();
+            start = end;
+        }
+        return order;
+    }
     let mut order: Vec<usize> = (0..values.len()).collect();
     order.sort_by(|&a, &b| {
         let ascending = values[a].partial_cmp(&values[b]).unwrap_or(Ordering::Equal);
@@ -1435,6 +1465,50 @@ mod tests {
     }
 
     #[test]
+    fn monotone_orders_equal_the_full_key_sort_with_ties() {
+        // What: the `O(n)` reversal for a sector monotone the other way gives
+        // exactly the full-key order `(value, position asc)`, on tie-heavy
+        // spectra in both directions, plus unordered ones (the sort path).
+        let full_key = |values: &[f64], keep: bool| {
+            let mut order: Vec<usize> = (0..values.len()).collect();
+            order.sort_by(|&a, &b| {
+                let by_value = if keep {
+                    values[b].partial_cmp(&values[a])
+                } else {
+                    values[a].partial_cmp(&values[b])
+                };
+                by_value.unwrap().then(a.cmp(&b))
+            });
+            order
+        };
+        let descending = [
+            vec![],
+            vec![1.0],
+            vec![5.0, 5.0, 4.0, 4.0, 4.0, 1.0, 0.0, -0.0, 0.0],
+            vec![2.0, 2.0, 2.0],
+            vec![3.0, 2.0, 2.0, 1.0, 1.0],
+        ];
+        let mut cases = 0;
+        for values in descending {
+            let mut ascending = values.clone();
+            ascending.reverse();
+            let mut shuffled = values.clone();
+            shuffled.rotate_left(values.len() / 2);
+            for values in [&values, &ascending, &shuffled] {
+                for keep in [KEEP, DISCARD] {
+                    assert_eq!(
+                        sector_order(values, keep),
+                        full_key(values, keep),
+                        "{values:?} keep {keep}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 5 * 3 * 2);
+    }
+
+    #[test]
     fn an_ascending_out_of_range_spectrum_scales_by_its_maximum() {
         // What (#1440 with stored order): `1e200^2` overflows, so the norm is
         // rescaled. Scaled by the first value (`1.0`) the sum stays `Inf`, the
@@ -1456,6 +1530,38 @@ mod tests {
         // `1e200` is discarded and the `1.0` kept.
         let error = discarded_norm(&ascending, &[mask(2, &[0])]);
         assert!((error - 1e200).abs() <= 1e200 * f64::EPSILON, "{error:e}");
+    }
+
+    /// `sqrt(Σ weight · Σ value²)` over the selected values, summed in units
+    /// of their maximum: the oracle's own norm, not `weighted_norm`.
+    fn oracle_norm(
+        spectra: &[WeightedSpectrum<'_>],
+        selected: impl Fn(usize, usize) -> bool,
+    ) -> f64 {
+        let picked = || {
+            spectra
+                .iter()
+                .enumerate()
+                .flat_map(move |(sector, spectrum)| {
+                    spectrum
+                        .values
+                        .iter()
+                        .enumerate()
+                        .map(move |(position, &value)| (sector, position, value))
+                })
+        };
+        let max = picked()
+            .filter(|&(s, p, _)| selected(s, p))
+            .map(|(_, _, value)| value)
+            .fold(0.0, f64::max);
+        if max == 0.0 {
+            return 0.0;
+        }
+        let sum: f64 = picked()
+            .filter(|&(s, p, _)| selected(s, p))
+            .map(|(s, _, value)| spectra[s].weight * (value / max) * (value / max))
+            .sum();
+        max * sum.sqrt()
     }
 
     /// Independent oracle for the ordering policies, TensorKit's
@@ -1505,7 +1611,7 @@ mod tests {
                 kept
             }
             Truncation::DiscardWeight { rtol } => {
-                let norm = full_norm(spectra);
+                let norm = oracle_norm(spectra, |_, _| true);
                 let budget = (rtol * norm) * (rtol * norm);
                 let count: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
                 let limit = budget * (1.0 + (count + 5) as f64 * f64::EPSILON);
@@ -1677,7 +1783,7 @@ mod tests {
                         let kept = flat_oracle(&weighted, &policy);
                         let decision = select(&weighted, &policy).unwrap();
                         assert_eq!(decision.kept, kept, "entries {entries:?} {policy:?}");
-                        let error = discarded_norm(&weighted, &kept);
+                        let error = oracle_norm(&weighted, |s, p| !kept[s][p]);
                         assert!((decision.error - error).abs() <= 1e-12);
                         cases += 1;
                     }

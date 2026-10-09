@@ -430,9 +430,12 @@ where
     ///
     /// Spectrum-sized only, never payload-sized, for `K = sum_c n_c` values
     /// in `G` sectors: `O(K)` to copy and validate; for [`Truncation::Rank`],
-    /// [`Truncation::DiscardWeight`] and [`Truncation::Space`] a stable sort
-    /// per sector, `O(n_c)` when that sector is already monotone in magnitude
-    /// (an SVD spectrum) and `O(n_c log n_c)` otherwise, then
+    /// [`Truncation::DiscardWeight`] and [`Truncation::Space`] each sector's
+    /// positions in magnitude order, `O(n_c)` when that sector is monotone in
+    /// magnitude in either direction, ties included (an SVD spectrum, or a
+    /// spectrum stored by ascending magnitude), and `O(n_c log n_c)`
+    /// otherwise (signed `eigh` eigenvalues stored ascending are two
+    /// monotone runs in magnitude; the stable sort merges them), then
     /// `O(G + k log G)` to merge `k` kept (`Rank`) or discarded
     /// (`DiscardWeight`) values; `O(K)` for the other policies and for the
     /// error; and `O(K + G log G)` to build the selection.

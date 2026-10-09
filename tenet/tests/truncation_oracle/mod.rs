@@ -421,7 +421,7 @@ pub fn select<S: Ord + Clone>(offers: &[Offer<S>], policy: &Policy<S>) -> Vec<Ve
             let mut kept = vec![Vec::new(); offers.len()];
             let mut used = 0.0;
             for (_, _, p, i) in candidates {
-                if used + offers[i].dim > *rank as f64 + 1e-12 {
+                if used + offers[i].dim > *rank as f64 {
                     break;
                 }
                 used += offers[i].dim;
