@@ -46,9 +46,47 @@ fn spectrum_walk_scans_nothing_and_scatters_every_sector() {
     for groups in [1000, 2000] {
         let (misses, data) = misses_and_data(groups);
         assert_eq!(misses, 0, "G = {groups}");
-        let mut sorted = data.clone();
-        sorted.sort_by(f64::total_cmp);
         let expected: Vec<f64> = (0..groups).map(|i| 2.0 * (1.0 + i as f64)).collect();
-        assert_eq!(sorted, expected, "G = {groups}");
+        assert_eq!(data, expected, "G = {groups}");
     }
+}
+
+#[test]
+fn cursor_pairs_by_sector_on_shuffled_gapped_spectrum() {
+    use super::fusion_tree::SpectrumCursor;
+    use tenet_matrixalgebra::SectorSpectrum as Entry;
+    let id = |k: i32| crate::sector::SectorId::from(U1Irrep::new(k));
+    // Entries for 3, 1, 5 (shuffled); sector 9 has no entry, 7 has no block.
+    let spectrum: Vec<Entry<f64>> = [3, 1, 5, 7]
+        .iter()
+        .map(|&k| Entry {
+            sector: id(k),
+            values: vec![f64::from(k)],
+        })
+        .collect();
+    let mut cursor = SpectrumCursor::default();
+    let mut got = Vec::new();
+    for k in [1, 3, 5, 9] {
+        got.push(cursor.find(&spectrum, id(k)).map(|e| e.values[0]));
+    }
+    // 1: miss (next is 3) -> scan, cursor 2; 3: miss (next is 5) -> scan;
+    // 5: cursor now 1 -> entry 1 != 5, miss; 9: miss, absent.
+    assert_eq!(got, [Some(1.0), Some(3.0), Some(5.0), None]);
+    assert_eq!(cursor.misses, 4);
+    // In order, every lookup hits.
+    let mut cursor = SpectrumCursor::default();
+    let ordered: Vec<Entry<f64>> = [1, 3, 5]
+        .iter()
+        .map(|&k| Entry {
+            sector: id(k),
+            values: vec![f64::from(k)],
+        })
+        .collect();
+    for k in [1, 3, 5] {
+        assert_eq!(
+            cursor.find(&ordered, id(k)).unwrap().values[0],
+            f64::from(k)
+        );
+    }
+    assert_eq!(cursor.misses, 0);
 }

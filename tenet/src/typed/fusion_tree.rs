@@ -858,6 +858,10 @@ where
             data[position] = data[position] + scale_value(value, diagonal_factor);
         }
     }
+    debug_assert_eq!(
+        cursor.misses, 0,
+        "blocks and spectrum entries must both run in ascending sector order"
+    );
     Ok(cursor.misses)
 }
 
