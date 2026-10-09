@@ -275,3 +275,333 @@ fn eager_core_and_copy_c_bits_are_pinned() {
         "observed digests: {observed:#x?}"
     );
 }
+
+/// The Host member entry over default dense executors, for any route.
+/// The route `ContractPlan::new` resolves (the planner with the direct-core
+/// executor).
+fn member_resolution<R>(case: &Case<R>) -> crate::contract::StorageContractResolution<f64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    Context::<f64>::default()
+        .plan_contract::<crate::DirectCoreExecutor, _>(
+            &case.dst(),
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+        )
+        .unwrap()
+}
+
+fn run_route_members<R>(
+    resolution: &crate::contract::StorageContractResolution<f64>,
+    case: &Case<R>,
+    workspace: &mut crate::contract::HostContractMembersWorkspace<f64>,
+    dst: &mut [f64],
+    lhs: &[f64],
+    rhs: &[f64],
+    members: usize,
+) -> Result<(), crate::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    crate::contract::route_host::execute_members_host(
+        &mut DenseTreeTransformOperations::default(),
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &mut FusionBlockContractWorkspace::default(),
+        crate::contract::route_host::MemberRoute::Resolution {
+            resolution,
+            lhs: case.lhs.space().structure(),
+            rhs: case.rhs.space().structure(),
+        },
+        case.dst().space().structure(),
+        workspace,
+        dst,
+        lhs,
+        rhs,
+        members,
+    )
+}
+
+/// `e6e9cac8`'s `ContractPlan` Host member sequence: the exact-sign stacked
+/// replay of the core (`zero_inactive`) into the destination, or into a
+/// zeroed temporary followed by the member overwrite transform (CopyC).
+#[allow(clippy::too_many_arguments)]
+fn base_members(
+    resolution: &crate::contract::StorageContractResolution<f64>,
+    dst_structure: &Arc<tenet_core::BlockStructure>,
+    dst: &mut [f64],
+    lhs: &[f64],
+    rhs: &[f64],
+    members: usize,
+) {
+    use tenet_operations::stacked::{
+        StackedDirectReplay, StackedStorageView, StackedStorageViewMut,
+    };
+    let stacked = |plan: &Arc<tenet_operations::fusion_replay::FusionBlockContractPlan<f64>>,
+                   swapped: bool,
+                   out: &mut [f64]| {
+        let replay = StackedDirectReplay::new_signed(Arc::clone(plan), members).unwrap();
+        let [dst_len, left_len, right_len] = replay.member_lens();
+        let (left, right) = if swapped { (rhs, lhs) } else { (lhs, rhs) };
+        let (left, right) = (left.to_vec(), right.to_vec());
+        let mut out_storage = out.to_vec();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+        replay
+            .execute_signed_host(
+                &mut crate::StridedHostKernelAdapter::default(),
+                &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut backend_workspace),
+                &mut StackedStorageViewMut::new::<f64>(&mut out_storage, dst_len, members, dst_len)
+                    .unwrap(),
+                &StackedStorageView::new::<f64>(&left, left_len, members, left_len).unwrap(),
+                &StackedStorageView::new::<f64>(&right, right_len, members, right_len).unwrap(),
+                true,
+            )
+            .unwrap();
+        out.copy_from_slice(&out_storage);
+    };
+    match &resolution.route {
+        crate::contract::resolution::ContractRoute::Core { plan, swapped } => {
+            stacked(plan, *swapped, dst)
+        }
+        crate::contract::resolution::ContractRoute::CopyC(copy) => {
+            let mut temporary = vec![0.0; copy.temporary_len * members];
+            stacked(&copy.core, copy.swapped, &mut temporary);
+            tenet_operations::tree_transform_members_overwrite_raw(
+                &mut crate::StridedHostKernelAdapter::default(),
+                &mut tenet_dense::DefaultDenseExecutor::new(),
+                &mut tenet_operations::TreeTransformWorkspace::default(),
+                &copy.transform,
+                dst_structure,
+                &copy.temporary,
+                dst,
+                &temporary,
+                members,
+                1,
+                &[],
+            )
+            .unwrap();
+        }
+        crate::contract::resolution::ContractRoute::DynamicTree(_) => {
+            panic!("Core / CopyC fixture planned DynamicTree")
+        }
+    }
+}
+
+/// The uniform-twist fZ2×U(1) `mul!` form: its twist rides the Core GEMMs
+/// as ±1 per-job alpha.
+fn fermionic_core_fixture() -> Case<FermionU1> {
+    let fu1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let case = Case {
+        lhs: space(
+            &fu1,
+            vec![fermion_u1_leg(&fu1, false)],
+            vec![fermion_u1_leg(&fu1, true)],
+        ),
+        rhs: space(
+            &fu1,
+            vec![fermion_u1_leg(&fu1, true)],
+            vec![fermion_u1_leg(&fu1, false)],
+        ),
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+    };
+    assert_eq!(owned_routes(&case), (RouteKind::Core, RouteKind::Core));
+    case
+}
+
+fn check_member_bits<R>(name: &str, case: &Case<R>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let resolution = member_resolution(case);
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let mut workspace = crate::contract::HostContractMembersWorkspace::default();
+    for members in [1, 2, 17, 1, 2] {
+        let lhs = exact_data(lhs_len * members, 1 + members);
+        let rhs = exact_data(rhs_len * members, 3 + members);
+        let mut actual = vec![f64::NAN; len * members];
+        run_route_members(
+            &resolution,
+            case,
+            &mut workspace,
+            &mut actual,
+            &lhs,
+            &rhs,
+            members,
+        )
+        .unwrap();
+        let mut expected = vec![f64::NAN; len * members];
+        base_members(
+            &resolution,
+            dst.space().structure(),
+            &mut expected,
+            &lhs,
+            &rhs,
+            members,
+        );
+        assert_eq!(bits(&actual), bits(&expected), "{name}, B = {members}");
+    }
+}
+
+#[test]
+fn member_core_and_copy_c_replays_match_the_base_member_sequence() {
+    // What: on one workspace across B = 1, 2, 17, 1, 2, every Core and
+    // CopyC member replay is bit-identical, on this machine, to the
+    // `ContractPlan` Host sequence it replaces (exact data; NaN-poisoned
+    // destinations; a retained CopyC temporary across B changes).
+    for (name, case, _) in core_fixtures() {
+        check_member_bits(name, &case);
+    }
+    check_member_bits("fermionic core", &fermionic_core_fixture());
+}
+
+fn check_member_oracle<R>(name: &str, case: &Case<R>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_core::PhysicalFusionBasis<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let resolution = member_resolution(case);
+    assert!(!resolution.is_dynamic_tree(), "{name}");
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let mut workspace = crate::contract::HostContractMembersWorkspace::default();
+    for members in [1, 2, 17] {
+        let lhs = (0..members)
+            .flat_map(|i| host_data(case.lhs.space(), 3 + 2 * i))
+            .collect::<Vec<_>>();
+        let rhs = (0..members)
+            .flat_map(|i| host_data(case.rhs.space(), 7 + 4 * i))
+            .collect::<Vec<_>>();
+        let mut actual = vec![f64::NAN; len * members];
+        run_route_members(
+            &resolution,
+            case,
+            &mut workspace,
+            &mut actual,
+            &lhs,
+            &rhs,
+            members,
+        )
+        .unwrap();
+        for member in [0, members / 2, members - 1] {
+            let (oracle_shape, oracle) = physical_oracle(
+                case,
+                &lhs[member * lhs_len..(member + 1) * lhs_len],
+                &rhs[member * rhs_len..(member + 1) * rhs_len],
+            );
+            let (shape, found) = crate::expand_physical_host(
+                crate::BoundDynamicTensorRef::try_new(
+                    &dst,
+                    &actual[member * len..(member + 1) * len],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(shape, oracle_shape, "{name}");
+            for (&value, &want) in found.iter().zip(&oracle) {
+                assert!(
+                    (value - want).abs() < 1e-9 * (1.0 + want.abs()),
+                    "{name}, B = {members}, member {member}: {value} vs {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn member_core_and_copy_c_replays_match_the_dense_oracle() {
+    // What: each member of a B = 1, 2, 17 stack equals the dense
+    // physical-basis contraction of its own operands (an oracle independent
+    // of every replay path), U(1) and SU(2), Core and CopyC.
+    for (name, case, _) in core_fixtures() {
+        check_member_oracle(name, &case);
+    }
+    let su2 = Arc::new(SU2FusionRule);
+    let su2_copy_c = square_case(&su2, su2_leg, [3, 2], [1, 0], [1, 0, 3, 2]);
+    assert_eq!(
+        owned_routes(&su2_copy_c),
+        (RouteKind::CopyC, RouteKind::CopyC)
+    );
+    check_member_oracle("SU2 copyC C1p", &su2_copy_c);
+    let su2_core = square_case(&su2, su2_leg, [2, 3], [0, 1], [0, 1, 2, 3]);
+    assert_eq!(owned_routes(&su2_core), (RouteKind::Core, RouteKind::Core));
+    check_member_oracle("SU2 core", &su2_core);
+}
+
+#[test]
+fn a_failed_copy_c_member_replay_refills_its_temporary_on_retry() {
+    // Why: CopyC's temporary shares the workspace core destination and its
+    // #1747 proof. A replay that dirties it and fails (the fault hook) must
+    // leave the retry to refill the inactive blocks; a warm replay of the
+    // same plan does not refill.
+    let (_, case, route) = core_fixtures().remove(2);
+    assert_eq!(route, RouteKind::CopyC);
+    let resolution = member_resolution(&case);
+    let dst = case.dst();
+    let len = dst.space().required_len().unwrap();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let mut workspace = crate::contract::HostContractMembersWorkspace::default();
+    let fills = |members: usize, poison: bool, workspace: &mut _| {
+        let lhs = exact_data(lhs_len * members, 1);
+        let rhs = exact_data(rhs_len * members, 3);
+        let mut actual = vec![f64::NAN; len * members];
+        let mut expected = vec![f64::NAN; len * members];
+        base_members(
+            &resolution,
+            dst.space().structure(),
+            &mut expected,
+            &lhs,
+            &rhs,
+            members,
+        );
+        let workspace: &mut crate::contract::HostContractMembersWorkspace<f64> = workspace;
+        if poison {
+            workspace.poison_dst_then_fail();
+        }
+        let before = workspace.core_inactive_fills();
+        let result = run_route_members(
+            &resolution,
+            &case,
+            workspace,
+            &mut actual,
+            &lhs,
+            &rhs,
+            members,
+        );
+        if poison {
+            assert!(result.is_err());
+            assert!(actual.iter().all(|value| value.is_nan()));
+            return None;
+        }
+        result.unwrap();
+        assert_eq!(bits(&actual), bits(&expected), "B = {members}");
+        Some(workspace.core_inactive_fills() - before)
+    };
+    for members in [2, 1] {
+        assert_eq!(fills(members, false, &mut workspace), Some(1));
+        assert_eq!(fills(members, false, &mut workspace), Some(0));
+        let mut fresh = crate::contract::HostContractMembersWorkspace::default();
+        assert_eq!(fills(members, false, &mut fresh), Some(1));
+        // A fresh workspace dirtied by the fault hook before its first
+        // proof refills on retry.
+        let mut dirty = crate::contract::HostContractMembersWorkspace::default();
+        assert_eq!(fills(members, true, &mut dirty), None);
+        assert_eq!(fills(members, false, &mut dirty), Some(1));
+        assert_eq!(fills(members, false, &mut dirty), Some(0));
+    }
+}

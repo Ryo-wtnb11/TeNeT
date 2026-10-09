@@ -1,4 +1,5 @@
-//! The one Host executor of a `DynamicTree` contraction route (#1859).
+//! The one Host executor of every contraction route — Core, CopyC and
+//! DynamicTree (#1859).
 //!
 //! Eager and member replays run the same stage sequence: install the core
 //! slot, source transforms, core GEMMs, output transform. An eager call is a
@@ -39,8 +40,9 @@ use crate::{
     TreeTransformBackend, TreeTransformStructure,
 };
 
-use super::dynamic::DynamicTreeExecutionArtifact;
+use super::dynamic::{DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact};
 use super::fusion_block::FusionBlockContractWorkspace;
+use super::resolution::{ContractRoute, StorageContractResolution};
 
 /// One tree-transform stage of a route; each owns its member workspace.
 #[derive(Clone, Copy, Debug)]
@@ -511,8 +513,109 @@ where
     }
 }
 
-/// Replays `artifact` over `members` member-major stacks:
-/// `dst = alpha * contract(lhs, rhs) + init(dst)` per member.
+/// An owned source copy: the transform writing a core operand from the
+/// caller's payload (TensorKit `blas_contract!`'s `copyA`/`copyB`).
+struct SourceStage<'r, C> {
+    transform: &'r TreeTransformStructure<C>,
+    payload_structure: &'r Arc<BlockStructure>,
+    scales: &'r [(usize, C)],
+}
+
+/// The stage sequence of one route, read from its resolution: which
+/// operands are copied, the core plan and operand order, and the output
+/// transform out of a workspace core destination, if any.
+struct RouteView<'r, C> {
+    /// The structures the core GEMMs read for the physical lhs and rhs.
+    lhs_core: &'r Arc<BlockStructure>,
+    rhs_core: &'r Arc<BlockStructure>,
+    /// `None`: the core reads the caller's payload in place.
+    lhs_source: Option<SourceStage<'r, C>>,
+    rhs_source: Option<SourceStage<'r, C>>,
+    /// The core's left operand is the physical rhs.
+    swapped: bool,
+    plan: &'r Arc<FusionBlockContractPlan<C>>,
+    /// `(output transform, core-destination structure)`; `None` when the
+    /// core writes the caller's destination.
+    output: Option<(&'r TreeTransformStructure<C>, &'r Arc<BlockStructure>)>,
+    /// Alpha rides the output transform (CopyC: `mul!` into the temporary,
+    /// then `tensoradd!(C, Cnew, α, β)`), else the core GEMMs.
+    output_alpha: bool,
+    /// Profiler attribution: a DynamicTree core destination's preparation
+    /// is `dst_scratch_prepare`; the CopyC temporary has no field.
+    times_core_dst_prepare: bool,
+}
+
+impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
+    fn dynamic_tree(artifact: &'r DynamicTreeExecutionArtifact<C>) -> Self {
+        let [lhs_scales, rhs_scales] = artifact.stage_scales();
+        let source = |entry: &'r DynamicFusionTransformedSourceEntry<C>,
+                      borrowed: bool,
+                      scales: &'r [(usize, C)]| {
+            (!borrowed).then_some(SourceStage {
+                transform: &entry.transform_structure,
+                payload_structure: &entry.replay_structure,
+                scales,
+            })
+        };
+        Self {
+            lhs_core: artifact.lhs_transform.space.structure(),
+            rhs_core: artifact.rhs_transform.space.structure(),
+            lhs_source: source(&artifact.lhs_transform, artifact.lhs_borrowed, lhs_scales),
+            rhs_source: source(&artifact.rhs_transform, artifact.rhs_borrowed, rhs_scales),
+            swapped: artifact.core_order(false, true).0,
+            plan: &artifact.block_plan,
+            output: artifact
+                .core_dst
+                .as_ref()
+                .map(|entry| (&entry.output_transform_structure, entry.space.structure())),
+            output_alpha: false,
+            times_core_dst_prepare: true,
+        }
+    }
+
+    fn of(
+        route: &'r ContractRoute<C>,
+        lhs: &'r Arc<BlockStructure>,
+        rhs: &'r Arc<BlockStructure>,
+    ) -> Self {
+        let direct = |plan, swapped, output| Self {
+            lhs_core: lhs,
+            rhs_core: rhs,
+            lhs_source: None,
+            rhs_source: None,
+            swapped,
+            plan,
+            output,
+            // CopyC (an output transform) carries alpha in its `tensoradd!`.
+            output_alpha: output.is_some(),
+            times_core_dst_prepare: false,
+        };
+        match route {
+            ContractRoute::Core { plan, swapped } => direct(plan, *swapped, None),
+            ContractRoute::CopyC(copy) => direct(
+                &copy.core,
+                copy.swapped,
+                Some((&copy.transform, &copy.temporary)),
+            ),
+            ContractRoute::DynamicTree(artifact) => Self::dynamic_tree(artifact),
+        }
+    }
+
+    #[inline]
+    fn core_order<T>(&self, lhs: T, rhs: T) -> (T, T) {
+        if self.swapped {
+            (rhs, lhs)
+        } else {
+            (lhs, rhs)
+        }
+    }
+}
+
+/// Replays one route over `members` member-major stacks:
+/// `dst = alpha * contract(lhs, rhs) + init(dst)` per member, as TensorKit
+/// `blas_contract!` orders it — copy (and twist) the sources, `mul!` into
+/// the destination or a temporary, `tensoradd!` the temporary into the
+/// destination.
 ///
 /// `B > 1` admits only the member overwrite contract (`alpha = 1`,
 /// `Axpby(0)`) with a caller-owned core slot, and checks every structure,
@@ -520,15 +623,16 @@ where
 /// validates its inputs before its first write and only the last stage writes
 /// `dst`, so a validation error leaves `dst` unchanged at every `B`.
 ///
-/// Alpha rides the core GEMMs; beta rides the stage that writes `dst` — the
-/// core for an identity output, else the output transform.
+/// Beta rides the stage that writes `dst`: the core for Core and an identity
+/// output, else the output transform. Alpha rides the core GEMMs, except
+/// for CopyC, where it rides the output transform.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_dynamic_tree_route_host<S, G, D, C>(
+fn execute_route_view<S, G, D, C>(
     stage: &mut S,
     gemm: &mut G,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: HostRouteScratch<'_, D, C>,
-    artifact: &DynamicTreeExecutionArtifact<C>,
+    route: RouteView<'_, C>,
     (dst_structure, dst_data): (&Arc<BlockStructure>, &mut [D]),
     lhs_data: &[D],
     rhs_data: &[D],
@@ -550,16 +654,19 @@ where
         core_dst,
         mut core,
     } = scratch;
-    let lhs_transform = &artifact.lhs_transform;
-    let rhs_transform = &artifact.rhs_transform;
-    let lhs_core = lhs_transform.space.structure();
-    let rhs_core = rhs_transform.space.structure();
-    let output = artifact.core_dst.as_ref();
-    let core_dst_structure = artifact.core_dst_structure(dst_structure);
-    let plan = &artifact.block_plan;
+    let (lhs_core, rhs_core) = (route.lhs_core, route.rhs_core);
+    let core_dst_structure = route
+        .output
+        .map_or(dst_structure, |(_, structure)| structure);
+    let plan = route.plan;
     let lhs_core_len = member_len::<D>(lhs_core, members)?;
     let rhs_core_len = member_len::<D>(rhs_core, members)?;
     let core_dst_len = member_len::<D>(core_dst_structure, members)?;
+    let (core_alpha, output_alpha) = if route.output_alpha {
+        (D::one(), alpha)
+    } else {
+        (alpha, D::one())
+    };
 
     let mut stacked = None;
     if members != 1 {
@@ -575,11 +682,16 @@ where
             .ok_or(OperationError::UnsupportedTensorContractScope {
                 message: "member contraction needs a caller-owned core slot",
             })?;
-        let lhs_src = &lhs_transform.replay_structure;
-        let rhs_src = &rhs_transform.replay_structure;
         let dst_len = member_len::<D>(dst_structure, members)?;
-        exact_len(lhs_data.len(), member_len::<D>(lhs_src, members)?)?;
-        exact_len(rhs_data.len(), member_len::<D>(rhs_src, members)?)?;
+        for (source, core, data) in [
+            (&route.lhs_source, lhs_core, lhs_data),
+            (&route.rhs_source, rhs_core, rhs_data),
+        ] {
+            let payload = source
+                .as_ref()
+                .map_or(core, |source| source.payload_structure);
+            exact_len(data.len(), member_len::<D>(payload, members)?)?;
+        }
         exact_len(dst_data.len(), dst_len)?;
         if !slot.replay.replays(plan, members) {
             stacked = Some(stage.stacked_replay(plan, members)?);
@@ -588,44 +700,50 @@ where
             (Some(replay), _) | (None, CoreReplay::Stacked(replay)) => replay,
             (None, _) => unreachable!("a matching B > 1 replay is stacked"),
         };
-        let (left_structure, right_structure) = artifact.core_order(lhs_core, rhs_core);
+        let (left_structure, right_structure) = route.core_order(lhs_core, rhs_core);
         replay.plan().validate_replay_structures(
             core_dst_structure,
             left_structure,
             right_structure,
         )?;
-        let (left_len, right_len) = artifact.core_order(lhs_core_len, rhs_core_len);
+        let (left_len, right_len) = route.core_order(lhs_core_len, rhs_core_len);
         if replay.member_lens().map(|len| len * members) != [core_dst_len, left_len, right_len] {
             return Err(OperationError::InvalidArgument {
-                message: "member artifact core structure does not match its replay",
+                message: "member route core structure does not match its replay",
             });
         }
-        if !artifact.lhs_borrowed {
-            stage.admit_members(
+        for (slot, source, core, core_len, data_len) in [
+            (
                 Stage::Lhs,
-                &lhs_transform.transform_structure,
+                &route.lhs_source,
                 lhs_core,
-                lhs_src,
                 lhs_core_len,
                 lhs_data.len(),
-                members,
-            )?;
-        }
-        if !artifact.rhs_borrowed {
-            stage.admit_members(
+            ),
+            (
                 Stage::Rhs,
-                &rhs_transform.transform_structure,
+                &route.rhs_source,
                 rhs_core,
-                rhs_src,
                 rhs_core_len,
                 rhs_data.len(),
-                members,
-            )?;
+            ),
+        ] {
+            if let Some(source) = source {
+                stage.admit_members(
+                    slot,
+                    source.transform,
+                    core,
+                    source.payload_structure,
+                    core_len,
+                    data_len,
+                    members,
+                )?;
+            }
         }
-        if let Some(output) = output {
+        if let Some((transform, _)) = route.output {
             stage.admit_members(
                 Stage::Output,
-                &output.output_transform_structure,
+                transform,
                 dst_structure,
                 core_dst_structure,
                 dst_len,
@@ -644,14 +762,14 @@ where
         }
     }
 
-    if !artifact.lhs_borrowed {
+    if route.lhs_source.is_some() {
         timed(
             &mut profile,
             |p| &mut p.lhs_scratch_prepare,
             |_| prepare(lhs_scratch, lhs_core_len),
         );
     }
-    if !artifact.rhs_borrowed {
+    if route.rhs_source.is_some() {
         timed(
             &mut profile,
             |p| &mut p.rhs_scratch_prepare,
@@ -660,17 +778,21 @@ where
     }
     // Workspace core destination: refill its inactive blocks unless the slot
     // proves them zero for this replay and length.
-    let core_init = if output.is_none() {
+    let core_init = if route.output.is_none() {
         init
     } else {
         let proved = core
             .as_deref()
             .is_some_and(|slot| slot.inactive_zero && core_dst.len() == core_dst_len);
-        timed(
-            &mut profile,
-            |p| &mut p.dst_scratch_prepare,
-            |_| prepare(core_dst, core_dst_len),
-        );
+        if route.times_core_dst_prepare {
+            timed(
+                &mut profile,
+                |p| &mut p.dst_scratch_prepare,
+                |_| prepare(core_dst, core_dst_len),
+            );
+        } else {
+            prepare(core_dst, core_dst_len);
+        }
         if proved {
             ContractDestinationInit::Zeroed
         } else {
@@ -687,8 +809,7 @@ where
         }
     }
 
-    let [lhs_scales, rhs_scales] = artifact.stage_scales();
-    if !artifact.lhs_borrowed {
+    if let Some(source) = &route.lhs_source {
         timed(
             &mut profile,
             |p| &mut p.lhs_transform,
@@ -696,13 +817,13 @@ where
                 overwrite_stage(
                     stage,
                     Stage::Lhs,
-                    &lhs_transform.transform_structure,
+                    source.transform,
                     lhs_core,
-                    &lhs_transform.replay_structure,
+                    source.payload_structure,
                     lhs_scratch.as_mut_slice(),
                     lhs_data,
                     members,
-                    lhs_scales,
+                    source.scales,
                     replay_profile,
                 )
             },
@@ -711,7 +832,7 @@ where
             profile.lhs_transform_calls += 1;
         }
     }
-    if !artifact.rhs_borrowed {
+    if let Some(source) = &route.rhs_source {
         timed(
             &mut profile,
             |p| &mut p.rhs_transform,
@@ -719,13 +840,13 @@ where
                 overwrite_stage(
                     stage,
                     Stage::Rhs,
-                    &rhs_transform.transform_structure,
+                    source.transform,
                     rhs_core,
-                    &rhs_transform.replay_structure,
+                    source.payload_structure,
                     rhs_scratch.as_mut_slice(),
                     rhs_data,
                     members,
-                    rhs_scales,
+                    source.scales,
                     replay_profile,
                 )
             },
@@ -735,19 +856,19 @@ where
         }
     }
 
-    let physical_lhs = if artifact.lhs_borrowed {
-        lhs_data
-    } else {
+    let physical_lhs = if route.lhs_source.is_some() {
         lhs_scratch.as_slice()
-    };
-    let physical_rhs = if artifact.rhs_borrowed {
-        rhs_data
     } else {
-        rhs_scratch.as_slice()
+        lhs_data
     };
-    let (left, right) = artifact.core_order(physical_lhs, physical_rhs);
-    let (left_structure, right_structure) = artifact.core_order(lhs_core, rhs_core);
-    let core_out = if output.is_some() {
+    let physical_rhs = if route.rhs_source.is_some() {
+        rhs_scratch.as_slice()
+    } else {
+        rhs_data
+    };
+    let (left, right) = route.core_order(physical_lhs, physical_rhs);
+    let (left_structure, right_structure) = route.core_order(lhs_core, rhs_core);
+    let core_out = if route.output.is_some() {
         core_dst.as_mut_slice()
     } else {
         &mut *dst_data
@@ -771,7 +892,7 @@ where
                     left,
                     right_structure,
                     right,
-                    alpha,
+                    core_alpha,
                     init.active_beta(),
                     profile,
                 )
@@ -786,7 +907,7 @@ where
                 left,
                 right_structure,
                 right,
-                alpha,
+                core_alpha,
             ),
             (None, ContractDestinationInit::Axpby(beta)) => plan.execute_raw(
                 &mut kernels,
@@ -798,7 +919,7 @@ where
                 left,
                 right_structure,
                 right,
-                alpha,
+                core_alpha,
                 beta,
             ),
         }?;
@@ -816,7 +937,7 @@ where
         )?;
     }
 
-    let Some(output) = output else {
+    let Some((transform, _)) = route.output else {
         return Ok(());
     };
     if let Some(slot) = core {
@@ -829,7 +950,7 @@ where
             if members != 1 {
                 return stage.overwrite_members(
                     Stage::Output,
-                    &output.output_transform_structure,
+                    transform,
                     dst_structure,
                     core_dst_structure,
                     dst_data,
@@ -839,39 +960,38 @@ where
                 );
             }
             let (backend, workspace) = stage.ordinary(Stage::Output);
-            let structure = &output.output_transform_structure;
             let source = core_dst.as_slice();
             match (replay_profile, init) {
                 (None, ContractDestinationInit::Zeroed) => backend
                     .tree_transform_structure_overwrite_into_raw(
                         workspace,
-                        structure,
+                        transform,
                         dst_structure,
                         core_dst_structure,
                         dst_data,
                         source,
-                        D::one(),
+                        output_alpha,
                         &[],
                     ),
                 (None, ContractDestinationInit::Axpby(beta)) => backend
                     .tree_transform_structure_into_raw(
                         workspace,
-                        structure,
+                        transform,
                         dst_structure,
                         core_dst_structure,
                         dst_data,
                         source,
-                        D::one(),
+                        output_alpha,
                         beta,
                     ),
                 (Some(replay_profile), init) => backend.tree_transform_structure_into_raw_profiled(
                     workspace,
-                    structure,
+                    transform,
                     dst_structure,
                     core_dst_structure,
                     dst_data,
                     source,
-                    D::one(),
+                    output_alpha,
                     init.active_beta(),
                     replay_profile,
                 ),
@@ -884,10 +1004,92 @@ where
     result
 }
 
-/// Caller-owned Host payload and replay state for one member route at
-/// varying `B`.
+/// Replays `resolution` through the one stage sequence of every route; the
+/// physical operands' structures are read only by a route whose core reads
+/// the caller's payload in place.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_route_host<S, G, D, C>(
+    stage: &mut S,
+    gemm: &mut G,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: HostRouteScratch<'_, D, C>,
+    resolution: &StorageContractResolution<C>,
+    dst: (&Arc<BlockStructure>, &mut [D]),
+    (lhs_structure, lhs_data): (&Arc<BlockStructure>, &[D]),
+    (rhs_structure, rhs_data): (&Arc<BlockStructure>, &[D]),
+    members: usize,
+    alpha: D,
+    init: ContractDestinationInit<D>,
+    profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<(), OperationError>
+where
+    S: HostTreeStage<D, C>,
+    G: Rank2Gemm<D>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    execute_route_view(
+        stage,
+        gemm,
+        fusion_block_workspace,
+        scratch,
+        RouteView::of(&resolution.route, lhs_structure, rhs_structure),
+        dst,
+        lhs_data,
+        rhs_data,
+        members,
+        alpha,
+        init,
+        profile,
+    )
+}
+
+/// [`execute_route_host`] of one `DynamicTree` artifact, whose sources are
+/// read through its own core structures.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_dynamic_tree_route_host<S, G, D, C>(
+    stage: &mut S,
+    gemm: &mut G,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: HostRouteScratch<'_, D, C>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst: (&Arc<BlockStructure>, &mut [D]),
+    lhs_data: &[D],
+    rhs_data: &[D],
+    members: usize,
+    alpha: D,
+    init: ContractDestinationInit<D>,
+    profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<(), OperationError>
+where
+    S: HostTreeStage<D, C>,
+    G: Rank2Gemm<D>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+{
+    execute_route_view(
+        stage,
+        gemm,
+        fusion_block_workspace,
+        scratch,
+        RouteView::dynamic_tree(artifact),
+        dst,
+        lhs_data,
+        rhs_data,
+        members,
+        alpha,
+        init,
+        profile,
+    )
+}
+
+/// Caller-owned Host payload and replay state for the member replays of one
+/// contraction route at varying `B`: owned source copies, the workspace core
+/// destination (a DynamicTree core destination or the CopyC temporary), the
+/// core slot, and one transform workspace per stage.
 #[doc(hidden)]
-pub struct DynamicTreeMembersWorkspace<D, C = f64> {
+pub struct HostContractMembersWorkspace<D, C = f64> {
     lhs: HostScratchBuffer<D>,
     rhs: HostScratchBuffer<D>,
     core_dst: HostScratchBuffer<D>,
@@ -896,7 +1098,7 @@ pub struct DynamicTreeMembersWorkspace<D, C = f64> {
     transforms: [TreeTransformWorkspace<D>; 3],
 }
 
-impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
+impl<D, C> Default for HostContractMembersWorkspace<D, C> {
     fn default() -> Self {
         Self {
             lhs: HostScratchBuffer::default(),
@@ -908,7 +1110,7 @@ impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
     }
 }
 
-impl<D, C: Copy + PartialEq + One> DynamicTreeMembersWorkspace<D, C> {
+impl<D, C: Copy + PartialEq + One> HostContractMembersWorkspace<D, C> {
     pub fn retained_bytes(&self) -> usize {
         (self.lhs.capacity() + self.rhs.capacity() + self.core_dst.capacity())
             .saturating_mul(std::mem::size_of::<D>())
@@ -941,18 +1143,29 @@ impl<D, C: Copy + PartialEq + One> DynamicTreeMembersWorkspace<D, C> {
     }
 }
 
-/// Replays one DynamicTree artifact over uniform member-major Host stacks
-/// through the route executor, with this workspace's slot and per-stage
-/// transform workspaces.
+/// The member route view: the resolved route, or a test's lone artifact.
+pub(super) enum MemberRoute<'r, C> {
+    Resolution {
+        resolution: &'r StorageContractResolution<C>,
+        lhs: &'r Arc<BlockStructure>,
+        rhs: &'r Arc<BlockStructure>,
+    },
+    #[cfg(test)]
+    DynamicTree(&'r DynamicTreeExecutionArtifact<C>),
+}
+
+/// Replays one route over uniform member-major Host stacks through the
+/// route executor, with this workspace's slot and per-stage transform
+/// workspaces: `dst = contract(lhs, rhs)` per member.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, EC, D, C>(
+pub(super) fn execute_members_host<E, EC, D, C>(
     tree_backend: &mut DenseTreeTransformOperations<E>,
     contract_backend: &mut DenseTreeTransformOperations<EC>,
     contract_workspace: &mut super::backend::TensorContractWorkspace<D>,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact<C>,
+    route: MemberRoute<'_, C>,
     dst_structure: &Arc<BlockStructure>,
-    workspace: &mut DynamicTreeMembersWorkspace<D, C>,
+    workspace: &mut HostContractMembersWorkspace<D, C>,
     dst: &mut [D],
     lhs: &[D],
     rhs: &[D],
@@ -964,14 +1177,23 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar + Neg<Output = C>,
 {
-    let DynamicTreeMembersWorkspace {
+    let HostContractMembersWorkspace {
         lhs: lhs_scratch,
         rhs: rhs_scratch,
         core_dst,
         core,
         transforms,
     } = workspace;
-    execute_dynamic_tree_route_host(
+    let route = match route {
+        MemberRoute::Resolution {
+            resolution,
+            lhs,
+            rhs,
+        } => RouteView::of(&resolution.route, lhs, rhs),
+        #[cfg(test)]
+        MemberRoute::DynamicTree(artifact) => RouteView::dynamic_tree(artifact),
+    };
+    execute_route_view(
         &mut MemberTreeStage {
             backend: tree_backend,
             workspaces: transforms,
@@ -987,7 +1209,7 @@ where
             core_dst,
             core: Some(core),
         },
-        artifact,
+        route,
         (dst_structure, dst),
         lhs,
         rhs,
@@ -995,5 +1217,42 @@ where
         D::one(),
         ContractDestinationInit::Axpby(D::zero()),
         None,
+    )
+}
+
+/// The member replay of one DynamicTree artifact (the pre-H2 test seam).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, EC, D, C>(
+    tree_backend: &mut DenseTreeTransformOperations<E>,
+    contract_backend: &mut DenseTreeTransformOperations<EC>,
+    contract_workspace: &mut super::backend::TensorContractWorkspace<D>,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact<C>,
+    dst_structure: &Arc<BlockStructure>,
+    workspace: &mut HostContractMembersWorkspace<D, C>,
+    dst: &mut [D],
+    lhs: &[D],
+    rhs: &[D],
+    members: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    EC: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar + Neg<Output = C>,
+{
+    execute_members_host(
+        tree_backend,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        MemberRoute::DynamicTree(artifact),
+        dst_structure,
+        workspace,
+        dst,
+        lhs,
+        rhs,
+        members,
     )
 }

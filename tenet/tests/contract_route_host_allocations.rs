@@ -55,7 +55,7 @@ fn row(codomain: &[usize]) -> Row {
     a.contract_into(&b, &spec, &mut out, 1.0, 0.0).unwrap();
     let eager_warm = measure(|| a.contract_into(&b, &spec, &mut out, 1.0, 0.0).unwrap());
 
-    let mut member = |members: usize| {
+    let member = |members: usize| {
         let lhs = StackedTensorMap::pack(&vec![&a; members]).unwrap();
         let rhs = StackedTensorMap::pack(&vec![&b; members]).unwrap();
         let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();

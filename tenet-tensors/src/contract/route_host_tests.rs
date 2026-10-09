@@ -318,7 +318,7 @@ where
     let len = dst.space().required_len().unwrap();
     let lhs_len = case.lhs.space().required_len().unwrap();
     let rhs_len = case.rhs.space().required_len().unwrap();
-    let mut workspace = crate::contract::DynamicTreeMembersWorkspace::default();
+    let mut workspace = crate::contract::HostContractMembersWorkspace::default();
     let mut digest = FNV_START;
     for members in [1, 2, 1] {
         let lhs = exact_data(lhs_len * members, 1);
@@ -367,7 +367,7 @@ where
 pub(super) fn run_members(
     artifact: &DynamicTreeExecutionArtifact<f64>,
     dst_structure: &Arc<tenet_core::BlockStructure>,
-    workspace: &mut crate::contract::DynamicTreeMembersWorkspace<f64>,
+    workspace: &mut crate::contract::HostContractMembersWorkspace<f64>,
     dst: &mut [f64],
     lhs: &[f64],
     rhs: &[f64],
@@ -443,7 +443,7 @@ fn dynamic_tree_eager_and_member_bits_are_pinned() {
 fn member_pack_builds<R>(
     case: &Case<R>,
     artifact: &DynamicTreeExecutionArtifact<f64>,
-    workspace: &mut crate::contract::DynamicTreeMembersWorkspace<f64>,
+    workspace: &mut crate::contract::HostContractMembersWorkspace<f64>,
     members: usize,
 ) -> [usize; 3]
 where
@@ -494,7 +494,7 @@ fn a_warm_one_member_replay_converts_no_coefficient_pack() {
         };
         assert!(artifact.test_has_core_dst(), "{what}");
         assert_eq!(artifact.borrowed_sources(), (false, false), "{what}");
-        let mut workspace = crate::contract::DynamicTreeMembersWorkspace::default();
+        let mut workspace = crate::contract::HostContractMembersWorkspace::default();
         let cold = member_pack_builds(case, artifact, &mut workspace, 1);
         assert!(cold.iter().any(|&builds| builds > 0), "{what}: {cold:?}");
         assert!(cold.iter().all(|&builds| builds <= 1), "{what}: {cold:?}");
@@ -520,7 +520,7 @@ fn one_workspace_refills_its_core_destination_only_on_a_replay_change() {
     let (_, caller_dst, _) = cases.remove(1);
     let workspace_artifact = members_artifact(&workspace_dst);
     let caller_artifact = members_artifact(&caller_dst);
-    let mut ws = crate::contract::DynamicTreeMembersWorkspace::default();
+    let mut ws = crate::contract::HostContractMembersWorkspace::default();
     let mut fills = |case, artifact, members, salt| {
         replay_members_checked(case, artifact, &mut ws, members, salt)
     };
@@ -546,7 +546,7 @@ fn one_workspace_refills_its_core_destination_only_on_a_replay_change() {
 fn a_failed_one_member_replay_rezeroes_on_retry() {
     let (_, case, _) = overwrite_cases().pop().unwrap();
     let artifact = members_artifact(&case);
-    let mut ws = crate::contract::DynamicTreeMembersWorkspace::default();
+    let mut ws = crate::contract::HostContractMembersWorkspace::default();
     assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 1, 3), 1);
     assert_eq!(replay_members_checked(&case, &artifact, &mut ws, 1, 9), 0);
     let fresh = members_artifact(&case);

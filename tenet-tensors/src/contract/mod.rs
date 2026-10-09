@@ -22,7 +22,7 @@ pub(crate) use dynamic::{
     source_layout_homspace_id_comparisons, tensorcontract_fusion_dynamic_plan_into_with,
 };
 #[doc(hidden)]
-pub use route_host::DynamicTreeMembersWorkspace;
+pub use route_host::HostContractMembersWorkspace;
 mod dynamic_space;
 mod fusion;
 #[cfg(test)]

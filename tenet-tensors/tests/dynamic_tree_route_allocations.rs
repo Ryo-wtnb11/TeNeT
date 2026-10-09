@@ -11,7 +11,7 @@ use tenet_core::{
     SectorLeg, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DirectCoreExecutor, DynamicTreeMembersWorkspace, FusionOperand,
+    BoundDynamicFusionMapSpace, DirectCoreExecutor, FusionOperand, HostContractMembersWorkspace,
     OutputAxisOrder, RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
     TreeTransformRuleCacheKey,
 };
@@ -169,20 +169,19 @@ where
         )
         .unwrap();
     assert!(resolution.is_dynamic_tree());
-    let mut workspace = DynamicTreeMembersWorkspace::<f64>::default();
+    let mut workspace = HostContractMembersWorkspace::<f64>::default();
     let mut out = vec![0.0; 17 * dst_len];
-    let mut member = |members: usize, workspace: &mut DynamicTreeMembersWorkspace<f64>| {
+    let mut member = |members: usize, workspace: &mut HostContractMembersWorkspace<f64>| {
         let out = &mut out[..members * dst_len];
         calls(
             counting_alloc::measure(|| {
                 context
                     .execute_storage_contract_members_host(
                         &resolution,
-                        dst.space().structure(),
+                        (dst.space().structure(), out),
+                        (case.lhs.space().structure(), &lhs[..members * lhs_len]),
+                        (case.rhs.space().structure(), &rhs[..members * rhs_len]),
                         workspace,
-                        out,
-                        &lhs[..members * lhs_len],
-                        &rhs[..members * rhs_len],
                         members,
                     )
                     .unwrap()
@@ -193,7 +192,7 @@ where
     let member1_cold = member(1, &mut workspace);
     let member1_warm = member(1, &mut workspace);
     let member1_retained = workspace.retained_bytes();
-    let mut workspace = DynamicTreeMembersWorkspace::<f64>::default();
+    let mut workspace = HostContractMembersWorkspace::<f64>::default();
     let member17_cold = member(17, &mut workspace);
     let member17_warm = member(17, &mut workspace);
     Row {
