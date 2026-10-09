@@ -42,6 +42,28 @@ pub(super) fn fermion_parity_matrix_space_with_homspace(
     .unwrap()
 }
 
+/// The device eager compose's route on Host storage: [`crate::plan_compose`]
+/// for a direct-core executor, then the core's storage replay into a
+/// zero-filled destination.
+pub(super) fn compose_direct_on_storage<R, G>(
+    gemm: &mut G,
+    dst_space: &crate::BoundDynamicFusionMapSpace<R>,
+    dst: &mut Vec<f64>,
+    lhs: crate::FusionOperand<'_>,
+    lhs_storage: &Vec<f64>,
+    rhs: crate::FusionOperand<'_>,
+    rhs_storage: &Vec<f64>,
+) -> Result<(), OperationError>
+where
+    R: tenet_core::MultiplicityFreeRigidSymbols<Scalar = f64>,
+    G: tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>,
+{
+    let resolution = crate::plan_compose::<crate::DirectCoreExecutor, _>(dst_space, lhs, rhs)?;
+    let (plan, swapped) = resolution.direct_core().expect("compose plans the core");
+    assert!(!swapped);
+    plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
+}
+
 #[test]
 fn bosonic_tensorcompose_matches_ordinary_contract() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
@@ -92,8 +114,6 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
             &lhs,
             crate::FusionOperand::direct(&source),
             &rhs,
-            &[1],
-            &[0],
             1.0,
             0.0,
         )
@@ -153,8 +173,6 @@ fn bosonic_tensorcompose_with_an_adjoint_operand_matches_the_materialized_adjoin
             &adjoint_data,
             crate::FusionOperand::direct(&source),
             &rhs,
-            &[1],
-            &[0],
             1.0,
             0.0,
         )
@@ -169,8 +187,6 @@ fn bosonic_tensorcompose_with_an_adjoint_operand_matches_the_materialized_adjoin
             &lhs,
             crate::FusionOperand::direct(&source),
             &rhs,
-            &[1],
-            &[0],
             1.0,
             0.0,
         )
@@ -205,16 +221,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     let mut valid = vec![0.0; dst.required_len().unwrap()];
     context
         .tensorcompose_fusion_dyn_into(
-            &dst_bound,
-            &mut valid,
-            operand,
-            &lhs,
-            operand,
-            &rhs,
-            &[1],
-            &[0],
-            1.0,
-            0.0,
+            &dst_bound, &mut valid, operand, &lhs, operand, &rhs, 1.0, 0.0,
         )
         .unwrap();
 
@@ -228,8 +235,6 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
             &lhs[..lhs.len() - 1],
             operand,
             &rhs,
-            &[1],
-            &[0],
             1.0,
             0.5,
         )
@@ -247,8 +252,6 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
             &lhs,
             operand,
             &rhs,
-            &[1],
-            &[0],
             1.0,
             0.5,
         )
@@ -324,8 +327,6 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
                 &[2.0],
                 crate::FusionOperand::direct(&rhs),
                 &[3.0],
-                &[1],
-                &[0],
                 1.0,
                 0.0,
             )
@@ -409,7 +410,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let lhs_values = vec![2.0];
     let rhs_values = vec![3.0];
     let mut direct_composed = vec![0.0; dst.required_len().unwrap()];
-    crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+    compose_direct_on_storage(
         &mut VecGemm::default(),
         &dst_bound,
         &mut direct_composed,
@@ -417,8 +418,6 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
         &lhs_values,
         crate::FusionOperand::direct(rhs_bound.space()),
         &rhs_values,
-        &[1],
-        &[0],
     )
     .unwrap();
     assert_eq!(direct_composed, [6.0]);

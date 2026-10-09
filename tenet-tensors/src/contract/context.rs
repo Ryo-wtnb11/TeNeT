@@ -37,9 +37,8 @@ use super::fusion::{
 use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
 use super::resolution::try_compile_oriented_storage_contract_plan;
 use super::resolution::{
-    compile_composition_plan, compile_core_plan, try_compile_oriented_storage_composition_plan,
-    try_compile_oriented_storage_contract_candidate_plan, ContractKind, ContractRoute, CopyCRoute,
-    CoreMiss, CoreRoute, ExecCaps, StorageContractResolution,
+    compile_core_plan, try_compile_oriented_storage_contract_candidate_plan, ContractKind,
+    ContractRoute, CopyCRoute, CoreMiss, CoreRoute, ExecCaps, StorageContractResolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -1122,17 +1121,12 @@ where
         )
     }
 
-    /// Categorical map composition on the coupled-sector block matrices.
-    ///
-    /// Unlike `tensorcontract!`, TensorKit `mul!` does not insert a
-    /// fermionic supertrace twist. The logical/storage split still carries
-    /// lazy adjoints without materializing either operand.
-    ///
-    /// Nothing on this path decodes typed sectors: the operand preparation,
-    /// [`compile_composition_plan`] and the execution are all bounded at the
-    /// multiplicity-free rigid symbols, so an externally defined provider
-    /// composes here. The bound space's layout capability selects encoded,
-    /// lowered, or checked metadata preparation.
+    /// Categorical map composition on the coupled-sector block matrices,
+    /// TensorKit `mul!`: A's domain against B's codomain, no fermionic
+    /// supertrace twist, every braiding style. It plans through
+    /// [`plan_compose`], as `ComposePlan` does, for the Host eager executor,
+    /// whose irregular core packs a non-canonical tiling. Lazy adjoints stay
+    /// storage-conjugate operands; neither is materialized.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcompose_fusion_dyn_into<R>(
@@ -1143,8 +1137,6 @@ where
         lhs_data: &[D],
         rhs: FusionOperand<'_>,
         rhs_data: &[D],
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
@@ -1159,8 +1151,6 @@ where
             lhs_data,
             rhs,
             rhs_data,
-            lhs_axes,
-            rhs_axes,
             alpha,
             ContractDestinationInit::Axpby(beta),
         )
@@ -1178,8 +1168,6 @@ where
         lhs_data: &[D],
         rhs: FusionOperand<'_>,
         rhs_data: &[D],
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
         alpha: D,
         init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError>
@@ -1187,33 +1175,12 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let rule = dst_space.provider();
-        let axes = TensorContractSpec::new_with_conjugation(
-            lhs_axes,
-            rhs_axes,
-            tenet_operations::OutputAxisOrder::identity(),
-            lhs.storage_conjugate(),
-            rhs.storage_conjugate(),
-        );
-        // Why not branch bosonic composition: without a supertrace twist it is
-        // exactly the ordinary contraction operation.
-        if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
-            return self.tensorcontract_fusion_dyn_prelowered_into_with_init(
-                dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, init,
-            );
-        }
-        let lhs_layout = lhs.prepare(rule, dst_space.layout_primer())?;
-        let rhs_layout = rhs.prepare(rule, dst_space.layout_primer())?;
-        let plan =
-            compile_composition_plan(rule, dst_space.space(), &lhs_layout, &rhs_layout, axes)?;
+        let resolution =
+            plan_compose::<super::resolution::HostEagerExecutor, R>(dst_space, lhs, rhs)?;
         #[cfg(test)]
-        {
-            self.last_top_level_resolution_was_core = true;
-            self.last_top_level_resolution_orientation = None;
-        }
-        self.execute_core_plan_host(
-            &plan,
-            false,
+        self.record_contract_route(&resolution);
+        self.execute_contract_route_host(
+            &resolution,
             dst_space.space().structure(),
             dst_data,
             (lhs.storage_space().structure(), lhs_data),
@@ -1772,63 +1739,6 @@ where
         Ok(StorageContractResolution::new(ContractRoute::DynamicTree(
             Arc::new(artifact),
         )))
-    }
-
-    /// The core GEMMs of `plan` on the Host, the operands swapped for the B·A
-    /// candidate; a not fully direct plan packs and scatters around them.
-    #[allow(clippy::too_many_arguments)]
-    fn execute_core_plan_host(
-        &mut self,
-        plan: &tenet_operations::FusionBlockContractPlan<C>,
-        swapped: bool,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        lhs: (&Arc<BlockStructure>, &[D]),
-        rhs: (&Arc<BlockStructure>, &[D]),
-        alpha: D,
-        init: ContractDestinationInit<D>,
-    ) -> Result<(), OperationError>
-    where
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) =
-            if swapped { (rhs, lhs) } else { (lhs, rhs) };
-        let Self {
-            contract_backend,
-            contract_workspace,
-            fusion_block_workspace,
-            ..
-        } = self;
-        let mut kernels = crate::StridedHostKernelAdapter::default();
-        let mut gemm =
-            super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
-        match init {
-            ContractDestinationInit::Zeroed => plan.execute_raw_zeroed(
-                &mut kernels,
-                &mut gemm,
-                fusion_block_workspace,
-                dst_structure,
-                dst_data,
-                lhs_structure,
-                lhs_data,
-                rhs_structure,
-                rhs_data,
-                alpha,
-            ),
-            ContractDestinationInit::Axpby(beta) => plan.execute_raw(
-                &mut kernels,
-                &mut gemm,
-                fusion_block_workspace,
-                dst_structure,
-                dst_data,
-                lhs_structure,
-                lhs_data,
-                rhs_structure,
-                rhs_data,
-                alpha,
-                beta,
-            ),
-        }
     }
 
     /// Replays a planned route ([`Self::plan_contract`] with
@@ -2857,70 +2767,4 @@ where
             "storage-direct contraction supports only canonical fully-direct oriented operands",
     })?;
     plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
-}
-
-/// Twist-free storage composition over the same parent/orientation seam, and
-/// a free function for the same reason.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn tensorcompose_fusion_dyn_prelowered_direct_on_storage<R, G, D, DDst, DLhs, DRhs>(
-    gemm: &mut G,
-    dst_space: &BoundDynamicFusionMapSpace<R>,
-    dst: &mut DDst,
-    lhs: FusionOperand<'_>,
-    lhs_storage: &DLhs,
-    rhs: FusionOperand<'_>,
-    rhs_storage: &DRhs,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-    D: DenseBlockScalar + RecouplingCoefficientAction<R::Scalar>,
-    G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
-    DDst: TensorStorage<D>,
-    DLhs: TensorStorage<D>,
-    DRhs: TensorStorage<D>,
-{
-    compile_direct_composition_plan(dst_space, lhs, rhs, lhs_axes, rhs_axes)?
-        .execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
-}
-
-/// The fully-direct coupled-block plan of a twist-free storage composition:
-/// the plan [`tensorcompose_fusion_dyn_prelowered_direct_on_storage`]
-/// replays, compiled alone so a prepared handle can hold it. Any other plan
-/// is `UnsupportedTensorContractScope`.
-#[doc(hidden)]
-pub fn compile_direct_composition_plan<R>(
-    dst_space: &BoundDynamicFusionMapSpace<R>,
-    lhs: FusionOperand<'_>,
-    rhs: FusionOperand<'_>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-) -> Result<Arc<tenet_operations::FusionBlockContractPlan<R::Scalar>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let rule = dst_space.provider();
-    validate_fusion_contract_rule(
-        rule,
-        dst_space.space(),
-        lhs.storage_space(),
-        rhs.storage_space(),
-    )?;
-    let axes = TensorContractSpec::new_with_conjugation(
-        lhs_axes,
-        rhs_axes,
-        tenet_operations::OutputAxisOrder::identity(),
-        lhs.storage_conjugate(),
-        rhs.storage_conjugate(),
-    );
-    try_compile_oriented_storage_composition_plan(rule, dst_space.space(), lhs, rhs, axes)?
-        .filter(|plan| plan.is_fully_direct())
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message:
-                "storage-direct composition supports only canonical fully-direct oriented operands",
-        })
 }

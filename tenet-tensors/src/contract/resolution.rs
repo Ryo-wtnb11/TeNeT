@@ -18,9 +18,7 @@ use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TreeTransformStructure;
 
-use super::dynamic_space::{
-    DynamicFusionMapSpace, FusionOperand, FusionOperandLayout, LayoutKeyBuilder,
-};
+use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, LayoutKeyBuilder};
 use super::fusion::{
     contracted_axis_order_candidates, external_axis_is_dual,
     min_dynamic_tree_materialized_elements, FusionContractOrientation, CACHED_ORIENTATIONS,
@@ -615,37 +613,6 @@ where
     )
 }
 
-/// Twist-free counterpart used only by tensor-map composition.
-pub(crate) fn try_compile_oriented_storage_composition_plan<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: FusionOperand<'_>,
-    rhs: FusionOperand<'_>,
-    axes: TensorContractSpec<'_>,
-) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let preflight = CoreContractPreflight::compile_oriented(
-        rule,
-        dst.homspace(),
-        lhs.oriented_homspace(),
-        rhs.oriented_homspace(),
-        axes,
-    )?;
-    let Some(validated) = preflight.validate_core_geometry()? else {
-        return Ok(None);
-    };
-    try_compile_oriented_canonical_core_plan(
-        &validated,
-        dst,
-        lhs.storage_space(),
-        rhs.storage_space(),
-    )
-    .map(|plan| plan.map(Arc::new))
-}
-
 /// Compiles the coupled block plan for already-materialized core operands.
 pub(crate) fn compile_core_plan<R>(
     rule: &R,
@@ -698,31 +665,6 @@ where
     #[cfg(not(debug_assertions))]
     let _ = core_axes;
     compile_fusion_block_contract_plan_core_geometry(rule, dst, lhs, rhs).map(Arc::new)
-}
-
-/// Compiles TensorKit `mul!` composition without inserting a fermionic
-/// supertrace twist.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_composition_plan<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &FusionOperandLayout<'_>,
-    rhs: &FusionOperandLayout<'_>,
-    axes: TensorContractSpec<'_>,
-) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let validated = CoreContractPreflight::compile_oriented(
-        rule,
-        dst.homspace(),
-        lhs.oriented_homspace(),
-        rhs.oriented_homspace(),
-        axes,
-    )?
-    .require_core_geometry()?;
-    compile_fusion_block_contract_plan_prelowered_validated(validated, dst, lhs, rhs).map(Arc::new)
 }
 
 /// True when the fermionic supertrace twist can be nontrivial: such

@@ -840,8 +840,6 @@ where
             lhs_data,
             rhs,
             rhs_data,
-            lhs_axes,
-            rhs_axes,
             D::from_real(1.0),
             init,
         ),
@@ -1425,8 +1423,6 @@ where
         lhs.data(),
         FusionOperand::direct(rhs.space().space()),
         rhs.data(),
-        lhs_axes,
-        rhs_axes,
         D::from_real(1.0),
         ContractDestinationInit::Zeroed,
     )?;

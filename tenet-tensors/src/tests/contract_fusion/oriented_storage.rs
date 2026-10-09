@@ -295,7 +295,7 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
         );
 
         let mut composed = vec![0.0; dst.space().required_len().unwrap()];
-        crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+        super::compose_direct_on_storage(
             &mut CpuOrientedGemm::default(),
             &dst,
             &mut composed,
@@ -303,8 +303,6 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
             &lhs_values,
             rhs_operand,
             &rhs_values,
-            &[1],
-            &[0],
         )
         .unwrap();
         assert_eq!(composed, expected);
@@ -321,20 +319,28 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
             let sentinel = vec![42.0; outer_dst.space().required_len().unwrap()];
             let mut rejected = sentinel.clone();
             let mut rejected_gemm = CpuOrientedGemm::default();
-            assert!(matches!(
-                crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
-                    &mut rejected_gemm,
-                    &outer_dst,
-                    &mut rejected,
-                    lhs_operand,
-                    &lhs_values,
-                    rhs_operand,
-                    &rhs_values,
-                    &[],
-                    &[],
+            let error = super::compose_direct_on_storage(
+                &mut rejected_gemm,
+                &outer_dst,
+                &mut rejected,
+                lhs_operand,
+                &lhs_values,
+                rhs_operand,
+                &rhs_values,
+            )
+            .unwrap_err();
+            // Composition derives its axes, so an outer-product destination
+            // is a rank mismatch, rejected before any write or projection.
+            assert!(
+                matches!(
+                    error,
+                    OperationError::StructureRankMismatch {
+                        expected: 2,
+                        actual: 4
+                    }
                 ),
-                Err(OperationError::UnsupportedTensorContractScope { .. })
-            ));
+                "{error:?}"
+            );
             assert!(rejected_gemm.calls.is_empty());
             assert_eq!(rejected, sentinel);
             assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
@@ -429,7 +435,7 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
         assert_eq!(contract_gemm.calls[0].4, -1.0);
 
         let mut composed = vec![0.0];
-        crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+        super::compose_direct_on_storage(
             &mut CpuOrientedGemm::default(),
             &dst,
             &mut composed,
@@ -437,8 +443,6 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
             &lhs_values,
             rhs,
             &rhs_values,
-            &[1],
-            &[0],
         )
         .unwrap();
         assert_eq!(composed, [6.0]);

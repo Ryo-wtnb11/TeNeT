@@ -180,13 +180,11 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "exact_layout_tree_pair_hit",
         // contract
         "tensorcontract_structure",
-        "compile_direct_composition_plan",
         "execute_storage_contract_members_cuda",
         "execute_storage_contract_resolution_on_cuda",
         "plan_compose",
         "prepare_tensorcontract_fusion_plan",
         "prepare_tensorcontract_fusion_plan_dyn",
-        "tensorcompose_fusion_dyn_prelowered_direct_on_storage",
         "tensorcompose_owned_checked_generic_in_context",
         "tensorcontract_execute_with",
         "tensorcontract_fusion_block_specs",

@@ -865,33 +865,25 @@ fn a_non_canonical_composition_misses_the_direct_core_with_the_unchanged_message
 fn adjoint_operand_without_canonical_regions_uses_exact_fallback() {
     let rule = Z2FusionRule;
     let (logical, storage) = z2_adjoint_mapping_spaces();
+    let dst = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        logical,
+        std::sync::Arc::new(rule),
+    )
+    .unwrap();
     super::super::dynamic_space::reset_fusion_operand_projection_prepares();
-    let lhs = crate::FusionOperand::adjoint(&storage)
-        .prepare(
-            &rule,
-            super::super::dynamic_space::encoded_layout_primer::<Z2FusionRule>,
-        )
-        .unwrap();
-    let rhs = crate::FusionOperand::adjoint(&storage)
-        .prepare(
-            &rule,
-            super::super::dynamic_space::encoded_layout_primer::<Z2FusionRule>,
-        )
-        .unwrap();
-
     reset_layout_lookups();
-    let _plan = super::super::resolution::compile_composition_plan(
-        &rule,
-        &logical,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[0], true, true),
+    let resolution = crate::plan_compose::<crate::HostEagerExecutor, _>(
+        &dst,
+        crate::FusionOperand::adjoint(&storage),
+        crate::FusionOperand::adjoint(&storage),
     )
     .unwrap();
 
     // What: a transposed logical structure without canonical coupled
     // regions prepares the exact projection and retains the tree-mapped
-    // implementation.
+    // implementation: the irregular Host core.
+    let (core, swapped) = resolution.direct_core().unwrap();
+    assert!(!swapped && !core.is_fully_direct());
     assert_eq!(
         super::super::dynamic_space::fusion_operand_projection_prepares(),
         2
@@ -916,26 +908,19 @@ fn rank22_adjoint_reentry_keeps_matrix_orientation() {
     )
     .unwrap();
     let space = DynamicFusionMapSpace::from_typed(&typed);
-    let lhs = crate::FusionOperand::adjoint(&space)
-        .prepare(
-            &rule,
-            super::super::dynamic_space::encoded_layout_primer::<Z2FusionRule>,
-        )
-        .unwrap();
-    let rhs = crate::FusionOperand::adjoint(&space)
-        .prepare(
-            &rule,
-            super::super::dynamic_space::encoded_layout_primer::<Z2FusionRule>,
-        )
-        .unwrap();
-    let plan = super::super::resolution::compile_composition_plan(
-        &rule,
-        &space,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order_and_conjugation(&[2, 3], &[0, 1], true, true),
+    let dst = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        space.clone(),
+        std::sync::Arc::new(rule),
     )
     .unwrap();
+    let resolution = crate::plan_compose::<crate::HostEagerExecutor, _>(
+        &dst,
+        crate::FusionOperand::adjoint(&space),
+        crate::FusionOperand::adjoint(&space),
+    )
+    .unwrap();
+    let (plan, swapped) = resolution.direct_core().unwrap();
+    assert!(!swapped);
 
     let len = space.required_len().unwrap();
     let lhs_data = (0..len)

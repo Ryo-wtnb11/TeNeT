@@ -42,14 +42,6 @@ pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use contract::tensorcontract_structure;
 #[cfg(test)]
 pub(crate) use contract::TensorContractFusionRoute;
-#[doc(hidden)]
-pub use contract::{
-    compile_direct_composition_plan, plan_compose,
-    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
-    tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
-    HostContractMembersWorkspace, StorageContractResolution,
-};
 #[cfg(test)]
 pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
@@ -59,6 +51,12 @@ pub(crate) use contract::{
 pub use contract::{
     copy_c_output_transform, CopyCRoute, CoreMiss, CoreRoute, DirectCoreExecutor, ExecCaps,
     HostEagerExecutor,
+};
+#[doc(hidden)]
+pub use contract::{
+    plan_compose, tensorcompose_owned_checked_generic_in_context,
+    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
+    HostContractMembersWorkspace, StorageContractResolution,
 };
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
