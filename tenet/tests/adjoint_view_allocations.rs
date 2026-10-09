@@ -656,3 +656,40 @@ fn materialize_allocates_one_fresh_payload_per_call() {
         }
     }
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn warm_checked_generic_adjoint_does_not_scale_with_fusion_trees() {
+    let _measurement = counting_alloc::serial();
+    // What (#1942): a warm checked Generic adjoint of a complete tensor costs
+    // a constant number of header allocations, independent of how many fusion
+    // trees the HomSpace enumerates. Re-enumerating the adjoint trees with
+    // provider queries cost 810 and 1407 calls for the two spaces below.
+    use tenet::sector::SUNFusionRule;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let space = |sectors: &[(Vec<i64>, usize)]| {
+        GradedSpace::try_new(Arc::clone(&provider), sectors.iter().cloned()).unwrap()
+    };
+    let small = space(&[(vec![0, 0], 2), (vec![1, 0], 1), (vec![1, 1], 2)]);
+    let wide = space(&[
+        (vec![0, 0], 1),
+        (vec![1, 0], 1),
+        (vec![0, 1], 1),
+        (vec![1, 1], 1),
+    ]);
+    let mut costs = Vec::new();
+    for leg in [&small, &wide] {
+        let tensor: TensorMap<SUNFusionRule, f64> =
+            TensorMap::rand_with_seed(&runtime, [leg, leg], [leg, leg], 1942).unwrap();
+        black_box(tensor.adjoint().unwrap());
+        let (calls, _) = measure(|| {
+            black_box(tensor.adjoint().unwrap());
+        });
+        costs.push(calls);
+    }
+    assert!(
+        costs.iter().all(|&calls| calls <= 8) && costs[0] == costs[1],
+        "warm checked Generic adjoint calls: {costs:?}"
+    );
+}

@@ -420,6 +420,15 @@ where
             let homspace = space.space().homspace();
             let adjoint_hom =
                 FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+            // Why not enumerate for a Complete source: it holds every canonical
+            // key, so every swapped adjoint key is present, and a warm call would
+            // re-enumerate the trees with provider queries only to confirm it.
+            if matches!(
+                space.space().admission(),
+                tenet_core::FusionSpaceAdmission::Complete(_)
+            ) {
+                return Ok(adjoint_hom);
+            }
             let structure = Arc::clone(space.space().structure());
             let keys = adjoint_hom
                 .fusion_tree_keys_generic_checked(space.provider())
