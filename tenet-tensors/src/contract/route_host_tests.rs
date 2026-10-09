@@ -809,16 +809,22 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
     let mut slot = crate::contract::route_host::CoreSlot::default();
     let (mut a, mut b, mut c) = Default::default();
     // Each row names the boundary that must reject it, so removing the
-    // overwrite-contract guard fails the first three rows.
+    // overwrite-contract guard fails the first two rows.
     const GUARD: &str = "member contraction overwrites its destination with unit alpha";
     for (alpha, init, with_slot, expected) in [
         (2.0, ContractDestinationInit::Axpby(0.0), true, GUARD),
-        (1.0, ContractDestinationInit::Zeroed, true, GUARD),
         (1.0, ContractDestinationInit::Axpby(1.0), true, GUARD),
-        // The eager stage replays exactly one member.
+        // The eager stage replays exactly one member; `Zeroed` (a born-zero
+        // destination, #2123) passes the overwrite guard and reaches it.
         (
             1.0,
             ContractDestinationInit::Axpby(0.0),
+            true,
+            "eager Host contraction replays exactly one member",
+        ),
+        (
+            1.0,
+            ContractDestinationInit::Zeroed,
             true,
             "eager Host contraction replays exactly one member",
         ),
