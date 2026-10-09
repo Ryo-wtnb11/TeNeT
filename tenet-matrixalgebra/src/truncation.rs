@@ -119,10 +119,21 @@ pub enum Truncation {
     /// unweighted maximum value. This matches TensorKit `trunctol(..., p=Inf)`.
     #[non_exhaustive]
     ToleranceInf { atol: f64, rtol: f64 },
+    /// Keep the values at or below `max(atol, rtol * norm)`, `norm` the
+    /// weighted 2-norm of the full spectrum: MatrixAlgebraKit
+    /// `trunctol(; atol, rtol, keep_below = true)`, the complement side of
+    /// [`Truncation::Tolerance`] with the threshold itself kept.
+    #[non_exhaustive]
+    ToleranceBelow { atol: f64, rtol: f64 },
     /// Discard the smallest values while the weighted 2-norm of everything
     /// discarded stays at or below `rtol * norm`.
     #[non_exhaustive]
     DiscardWeight { rtol: f64 },
+    /// Keep the smallest values while the quantum-dimension-weighted total
+    /// dimension stays at or below the bound: MatrixAlgebraKit
+    /// `truncrank(rank; rev = false)`, [`Truncation::Rank`] in the discard
+    /// order.
+    RankSmallest(usize),
     /// Keep the requested number of largest magnitudes in every coupled
     /// sector, clamped to what the spectrum offers. TensorKit
     /// `TruncationSpace`.
@@ -209,6 +220,38 @@ impl Truncation {
             "tolerance relative cutoff must be finite and non-negative",
         )?;
         Ok(Self::Tolerance { atol: 0.0, rtol })
+    }
+
+    /// Keep values at or below `max(atol, rtol * norm)`, `norm` the weighted
+    /// 2-norm (MatrixAlgebraKit `trunctol(; atol, rtol, keep_below = true)`).
+    ///
+    /// Why one constructor for both tolerances, unlike
+    /// [`Self::absolute_cutoff`]/[`Self::relative_cutoff`]: kept-below sets
+    /// combine by union under `max`, and [`Self::and`] intersects.
+    ///
+    /// With [`Self::rank_smallest`] this is MatrixAlgebraKit's
+    /// `null_truncation_strategy(; atol, rtol, maxnullity)`
+    /// (`src/interface/truncation.jl`), the selection of a rank-revealing
+    /// null space over a full SVD's spectrum padded with its rectangular
+    /// zeros (TensorKit `src/factorizations/truncation.jl`
+    /// `MAK.truncate(::typeof(left_null!), ...)`). MatrixAlgebraKit's default
+    /// for that use is `rtol = eps(real(T))^(2/3)` (`defaulttol`).
+    pub fn below(atol: f64, rtol: f64) -> Result<Self, TruncationError> {
+        validate_nonnegative_finite(
+            atol,
+            "keep-below absolute cutoff must be finite and non-negative",
+        )?;
+        validate_nonnegative_finite(
+            rtol,
+            "keep-below relative cutoff must be finite and non-negative",
+        )?;
+        Ok(Self::ToleranceBelow { atol, rtol })
+    }
+
+    /// Keep at most `rank` weighted dimensions of the smallest values
+    /// (MatrixAlgebraKit `truncrank(rank; rev = false)`).
+    pub fn rank_smallest(rank: usize) -> Self {
+        Self::RankSmallest(rank)
     }
 
     /// Discard values below `rtol` times the largest value.
@@ -412,7 +455,20 @@ fn validate_truncation(truncation: &Truncation) -> Result<(), TruncationError> {
         // A `Space` profile carries only `usize` ranks and a rule identity;
         // the rule is checked by `validate_rule` and there is no numeric
         // domain left to reject here.
-        Truncation::Full | Truncation::Rank(_) | Truncation::Space(_) => Ok(()),
+        Truncation::Full
+        | Truncation::Rank(_)
+        | Truncation::RankSmallest(_)
+        | Truncation::Space(_) => Ok(()),
+        Truncation::ToleranceBelow { atol, rtol } => {
+            validate_nonnegative_finite(
+                *atol,
+                "keep-below absolute cutoff must be finite and non-negative",
+            )?;
+            validate_nonnegative_finite(
+                *rtol,
+                "keep-below relative cutoff must be finite and non-negative",
+            )
+        }
         Truncation::Tolerance { atol, rtol } => {
             validate_nonnegative_finite(
                 *atol,
@@ -472,43 +528,9 @@ fn kept_masks(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<
         // running `dim(c)` sum overflows. Here each sector's keep order is
         // merged by a heap whose head ties go to the lower sector, which is
         // the same flat order.
-        Truncation::Rank(rank) => {
-            let orders = ordered_positions(spectra, KEEP);
-            let mut kept = uniform_masks(spectra, false);
-            let mut heap: BinaryHeap<DescendingCandidate> = orders
-                .iter()
-                .enumerate()
-                .filter_map(|(sector, order)| {
-                    order.first().map(|&position| DescendingCandidate {
-                        value: spectra[sector].values[position],
-                        sector,
-                        cursor: 0,
-                    })
-                })
-                .collect();
-            let mut used = 0.0;
-            let budget = *rank as f64;
-            while let Some(DescendingCandidate { sector, cursor, .. }) = heap.pop() {
-                let weight = spectra[sector].weight;
-                // TensorKit `totaldim > howmany && break` compares the
-                // running `dim(c)` sum with no slack. The weights are exact
-                // `dim(c)` (#1871), so a tolerance here would only admit a
-                // state TensorKit rejects.
-                if used + weight > budget {
-                    break;
-                }
-                used += weight;
-                kept[sector][orders[sector][cursor]] = true;
-                if let Some(&position) = orders[sector].get(cursor + 1) {
-                    heap.push(DescendingCandidate {
-                        value: spectra[sector].values[position],
-                        sector,
-                        cursor: cursor + 1,
-                    });
-                }
-            }
-            kept
-        }
+        Truncation::Rank(rank) => rank_masks(spectra, *rank, KEEP),
+        // The same walk in TensorKit's `rev = false` order.
+        Truncation::RankSmallest(rank) => rank_masks(spectra, *rank, DISCARD),
         // MatrixAlgebraKit `findtruncated(::AbstractVector, ::TruncationByValue)`
         // is `findall(>=(atol) ∘ abs, d)`: a filter, whatever the order.
         Truncation::Tolerance { atol, rtol } => {
@@ -516,6 +538,20 @@ fn kept_masks(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<
         }
         Truncation::ToleranceInf { atol, rtol } => {
             threshold_masks(spectra, atol.max(rtol * full_norm_inf(spectra)))
+        }
+        // MatrixAlgebraKit's `keep_below` filter is `≤(atol)`.
+        Truncation::ToleranceBelow { atol, rtol } => {
+            let threshold = atol.max(rtol * full_norm(spectra));
+            spectra
+                .iter()
+                .map(|spectrum| {
+                    spectrum
+                        .values
+                        .iter()
+                        .map(|&value| value <= threshold)
+                        .collect()
+                })
+                .collect()
         }
         // TensorKit `findtruncated(::SectorVector, ::TruncationByError)`
         // (truncation.jl:227-256): ascending raw magnitude in the flat stable
@@ -653,6 +689,50 @@ fn kept_masks(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<
             kept
         }
     }
+}
+
+/// TensorKit `findtruncated(::SectorVector, ::TruncationByOrder)`
+/// (truncation.jl:171-203): walk the flat order (`KEEP`: `rev = true`,
+/// `DISCARD`: `rev = false`) and mark until the running `dim(c)` sum
+/// overflows. Each sector's order is merged by a heap whose head ties go to
+/// the lower sector, which is the same flat order.
+fn rank_masks(spectra: &[WeightedSpectrum<'_>], rank: usize, direction: bool) -> Vec<Vec<bool>> {
+    let orders = ordered_positions(spectra, direction);
+    // The heap pops the largest key, so the discard order negates it.
+    let key = |value: f64| if direction == KEEP { value } else { -value };
+    let mut kept = uniform_masks(spectra, false);
+    let mut heap: BinaryHeap<DescendingCandidate> = orders
+        .iter()
+        .enumerate()
+        .filter_map(|(sector, order)| {
+            order.first().map(|&position| DescendingCandidate {
+                value: key(spectra[sector].values[position]),
+                sector,
+                cursor: 0,
+            })
+        })
+        .collect();
+    let mut used = 0.0;
+    let budget = rank as f64;
+    while let Some(DescendingCandidate { sector, cursor, .. }) = heap.pop() {
+        let weight = spectra[sector].weight;
+        // TensorKit `totaldim > howmany && break` compares the running
+        // `dim(c)` sum with no slack. The weights are exact `dim(c)` (#1871),
+        // so a tolerance here would only admit a state TensorKit rejects.
+        if used + weight > budget {
+            break;
+        }
+        used += weight;
+        kept[sector][orders[sector][cursor]] = true;
+        if let Some(&position) = orders[sector].get(cursor + 1) {
+            heap.push(DescendingCandidate {
+                value: key(spectra[sector].values[position]),
+                sector,
+                cursor: cursor + 1,
+            });
+        }
+    }
+    kept
 }
 
 fn uniform_masks(spectra: &[WeightedSpectrum<'_>], keep: bool) -> Vec<Vec<bool>> {
@@ -861,10 +941,11 @@ impl Ord for TailCandidate {
     }
 }
 
-/// A sector's next keep candidate for `Rank`: `cursor` indexes that sector's
-/// keep order. The max-heap pops the largest value, lowest sector first —
-/// TensorKit's `sortperm(parent(values); rev=true)` over its own sector
-/// order once `select_truncation` has put the slice in that order.
+/// A sector's next candidate for `Rank` / `RankSmallest`: `cursor` indexes
+/// that sector's keep (discard) order and `value` is the heap key, the
+/// magnitude (its negation). The max-heap pops the largest key, lowest
+/// sector first — TensorKit's `sortperm(parent(values); rev)` over its own
+/// sector order once `select_truncation` has put the slice in that order.
 #[derive(Clone, Copy, Debug)]
 struct DescendingCandidate {
     value: f64,
@@ -1266,6 +1347,8 @@ mod tests {
             Truncation::relative_cutoff(f64::INFINITY),
             Truncation::relative_inf_cutoff(-1.0),
             Truncation::relative_error(f64::NAN),
+            Truncation::below(-1.0, 0.0),
+            Truncation::below(0.0, f64::NAN),
         ];
 
         for policy in policies {
@@ -1593,6 +1676,51 @@ mod tests {
                 .then(a.2.cmp(&b.2))
         };
         match truncation {
+            // MatrixAlgebraKit `truncrank(rank; rev = false)`: the flat
+            // stable ascending order, then the same `dim(c)` walk.
+            Truncation::RankSmallest(rank) => {
+                let mut kept: Vec<Vec<bool>> = spectra
+                    .iter()
+                    .map(|spectrum| vec![false; spectrum.values.len()])
+                    .collect();
+                let mut order = flat(None);
+                order.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap()
+                        .then(a.1.cmp(&b.1))
+                        .then(a.2.cmp(&b.2))
+                });
+                let mut total = 0.0;
+                for (_, sector, position) in order {
+                    total += spectra[sector].weight;
+                    if total > *rank as f64 {
+                        break;
+                    }
+                    kept[sector][position] = true;
+                }
+                kept
+            }
+            Truncation::ToleranceBelow { atol, rtol } => {
+                let threshold = atol.max(rtol * oracle_norm(spectra, |_, _| true));
+                spectra
+                    .iter()
+                    .map(|spectrum| spectrum.values.iter().map(|&v| v <= threshold).collect())
+                    .collect()
+            }
+            Truncation::All(components) => {
+                let mut kept: Vec<Vec<bool>> = spectra
+                    .iter()
+                    .map(|spectrum| vec![true; spectrum.values.len()])
+                    .collect();
+                for component in components {
+                    for (mask, other) in kept.iter_mut().zip(flat_oracle(spectra, component)) {
+                        for (slot, keep) in mask.iter_mut().zip(other) {
+                            *slot &= keep;
+                        }
+                    }
+                }
+                kept
+            }
             Truncation::Rank(rank) => {
                 let mut kept: Vec<Vec<bool>> = spectra
                     .iter()
@@ -1778,7 +1906,20 @@ mod tests {
                         .iter()
                         .map(|&rtol| Truncation::relative_error(rtol).unwrap())
                         .chain(RANKS.iter().map(|&rank| Truncation::rank(rank)))
-                        .chain([Truncation::space(profile.clone())]);
+                        .chain([Truncation::space(profile.clone())])
+                        // MatrixAlgebraKit `null_truncation_strategy` parts
+                        // and their intersection.
+                        .chain(
+                            RTOLS
+                                .iter()
+                                .map(|&rtol| Truncation::below(0.25, rtol).unwrap()),
+                        )
+                        .chain(RANKS.iter().map(|&rank| Truncation::rank_smallest(rank)))
+                        .chain(RANKS.iter().map(|&rank| {
+                            Truncation::below(0.0, 0.3)
+                                .unwrap()
+                                .and(Truncation::rank_smallest(rank))
+                        }));
                     for policy in policies {
                         let kept = flat_oracle(&weighted, &policy);
                         let decision = select(&weighted, &policy).unwrap();
@@ -1790,7 +1931,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cases, 5 * 40 * 2 * (RTOLS.len() + RANKS.len() + 1));
+        assert_eq!(cases, 5 * 40 * 2 * (2 * RTOLS.len() + 3 * RANKS.len() + 1));
     }
 
     #[test]

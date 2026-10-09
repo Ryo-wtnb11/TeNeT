@@ -854,7 +854,7 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
 }
 
 #[test]
-fn diagview_rejects_a_non_bond_map_and_a_lazy_adjoint() {
+fn diagview_reads_a_rectangular_map_and_rejects_a_non_bond_map_and_a_lazy_adjoint() {
     let leg = u1_leg(&[(0, 2), (1, 2)]);
     let other = u1_leg(&[(0, 3), (1, 1)]);
     let runtime = host_runtime();
@@ -865,11 +865,21 @@ fn diagview_rejects_a_non_bond_map_and_a_lazy_adjoint() {
         Err(Error::InvalidArgument(message)) if message.contains("rank-(1,1)")
     ));
 
-    let rectangular: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&other]).unwrap();
-    assert!(matches!(
-        rectangular.diagview(),
-        Err(Error::InvalidArgument(message)) if message.contains("equal codomain and domain legs")
-    ));
+    // A rectangular one-leg map is MatrixAlgebraKit's `diagview` input too
+    // (#1984): each block gives its leading `min(m_c, n_c)` diagonal.
+    let rectangular: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&other], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 1) as f64
+            } else {
+                7.0
+            }
+        })
+        .unwrap();
+    let read = rectangular.diagview().unwrap();
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[0].values, [1.0, 2.0]);
+    assert_eq!(read[1].values, [1.0]);
 
     let square: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     assert!(matches!(

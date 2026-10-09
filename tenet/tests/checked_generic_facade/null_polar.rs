@@ -801,7 +801,11 @@ fn assert_sun_checked_generic_null_spaces<D>(
     vertex_weights: [D; 2],
     close: impl Fn(D, D) -> f64,
 ) where
-    D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq + numerics::Numeric,
+    D: tenet::typed::FactorizationScalar
+        + tenet::typed::SpectrumMagnitude
+        + fmt::Debug
+        + PartialEq
+        + numerics::Numeric,
 {
     use tenet::sector::SUNFusionRule;
 
@@ -846,6 +850,54 @@ fn assert_sun_checked_generic_null_spaces<D>(
         }
     }
 
+    // The rank-revealing null space by composition (TensorKit
+    // `left_null(t; alg = :svd)`, default `rtol`): the rank-one multiplicity
+    // block keeps `8 - 1` directions, every codomain-only sector all of its
+    // states, as the shape-based basis does.
+    let tenet::typed::Svd { u, s, .. } = source.svd_full(&[0, 1], &[2]).unwrap();
+    let bond = u.domain()[0].clone();
+    let spectrum = bond.extend_spectrum(&s.diagview().unwrap()).unwrap();
+    let below = tenet::typed::Truncation::below(0.0, f64::EPSILON.powf(2.0 / 3.0)).unwrap();
+    let found = bond.find_truncated(&spectrum, &below).unwrap();
+    let revealed = u.restrict_leg(&[(2, &found.selection)]).unwrap();
+    assert!(std::ptr::eq(revealed.provider(), provider.as_ref()));
+    assert_eq!(
+        revealed.domain()[0].degeneracy(&label).unwrap(),
+        2 * 2 * 2 - 1
+    );
+    for sector in left.domain()[0].sectors().unwrap() {
+        if sector != label {
+            assert_eq!(
+                revealed.domain()[0].degeneracy(&sector).unwrap(),
+                left.domain()[0].degeneracy(&sector).unwrap()
+            );
+        }
+    }
+    let revealed_adjoint = revealed.adjoint().unwrap();
+    let revealed_adjoint = revealed_adjoint
+        .axpby(D::from_real(1.0), &revealed_adjoint, D::from_real(0.0))
+        .unwrap();
+    for value in revealed_adjoint
+        .compose(&source)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+    {
+        assert!(close(*value, D::from_real(0.0)) < 1e-9);
+    }
+    let gram = revealed_adjoint.compose(&revealed).unwrap();
+    for block_index in 0..gram.subblock_count() {
+        let block = gram.subblock(block_index).unwrap();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                let expected = D::from_real(f64::from(row == column));
+                let actual = gram.dense_data().unwrap()
+                    [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
+                assert!(close(actual, expected) < 1e-9);
+            }
+        }
+    }
+
     let lazy = source.adjoint().unwrap();
     let lazy_right = lazy.right_null(&[0], &[1, 2]).unwrap();
     assert!(std::ptr::eq(lazy_right.provider(), provider.as_ref()));
@@ -864,7 +916,8 @@ fn assert_sun_checked_generic_null_spaces<D>(
 fn sun_checked_generic_null_spaces_resolve_cross_mu_for_both_dtypes() {
     // What: SU(3)/SU(4) multiplicity blocks keep `rows - cols` orthonormal
     // directions annihilating a rank-deficient input whose rows mix both
-    // vertices, for real and complex payloads.
+    // vertices, and the composed rank-revealing null space adds the rank
+    // deficit, for real and complex payloads.
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
         assert_sun_checked_generic_null_spaces::<f64>(
             n,

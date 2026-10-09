@@ -808,8 +808,7 @@ where
     /// fresh non-dual one-leg bond `W` has `(m_c - n_c)+` directions, the
     /// trailing columns of the sector's full QR, whatever the input's rank.
     /// A rank-deficient input therefore has a null space smaller than its
-    /// numerical kernel; a rank-revealing (SVD-based) null space is not
-    /// provided here. Sectors present only in the codomain contribute their
+    /// numerical kernel. Sectors present only in the codomain contribute their
     /// whole degeneracy; sectors with zero nullity are absent.
     /// [`Self::right_null`] returns the corresponding basis on the domain side.
     ///
@@ -835,6 +834,47 @@ where
     /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
     /// let n = zero.left_null(&[0], &[1])?;
     /// assert!(n.adjoint()?.compose(&zero)?.norm(2.0)? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    ///
+    /// # Rank-revealing null space
+    ///
+    /// TensorKit's `left_null(t; alg = :svd, trunc = (; atol, rtol, maxnullity))`
+    /// is a composition, not a separate operation: [`Self::svd_full`], the
+    /// diagonal of its `s` padded with the rectangular zeros to `u`'s bond
+    /// ([`GradedSpace::extend_spectrum`](crate::typed::GradedSpace::extend_spectrum)), the keep-below selection
+    /// [`Truncation::below`](crate::typed::Truncation::below) (intersected with
+    /// [`Truncation::rank_smallest`](crate::typed::Truncation::rank_smallest)
+    /// for `maxnullity`), and [`Self::restrict_leg`] on `u`. MatrixAlgebraKit's
+    /// default `trunc` is `rtol = eps(real(T))^(2/3)`. Each sector keeps its
+    /// `(m_c - n_c)₊` rectangular directions plus one per singular value at
+    /// or below `max(atol, rtol * ‖s‖)`, the weighted 2-norm of every sector.
+    /// TensorKit's `trunc = notrunc()` keeps only the rectangular zeros, which
+    /// is this method.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap, Truncation};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let tall = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 3)])?;
+    /// let short = GradedSpace::try_new(rule, [(U1Irrep::new(0), 2)])?;
+    /// // Rank one: the shape gives one null direction, the rank two.
+    /// let a: TensorMap<_, f64> = TensorMap::from_subblock_fn(
+    ///     &runtime, [&tall], [&short], |_, i| ((i[0] + 1) * (i[1] + 1)) as f64,
+    /// )?;
+    /// assert_eq!(a.left_null(&[0], &[1])?.domain()[0].degeneracy(&U1Irrep::new(0))?, 1);
+    ///
+    /// let Svd { u, s, .. } = a.svd_full(&[0], &[1])?;
+    /// let bond = &u.domain()[0];
+    /// let spectrum = bond.extend_spectrum(&s.diagview()?)?;
+    /// let rtol = f64::EPSILON.powf(2.0 / 3.0);
+    /// let null = bond.find_truncated(&spectrum, &Truncation::below(0.0, rtol)?)?;
+    /// let n = u.restrict_leg(&[(u.codomain_rank(), &null.selection)])?;
+    /// assert_eq!(n.domain()[0].degeneracy(&U1Irrep::new(0))?, 2);
+    /// assert!(n.adjoint()?.compose(&a)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     ///
@@ -883,6 +923,36 @@ where
     /// adjoint uses the left null space of its owned parent without
     /// materializing the receiver. Checked results use the source provider instance, and a
     /// failure returns no tensor.
+    ///
+    /// The rank-revealing right null space (TensorKit
+    /// `right_null(t; alg = :svd, trunc)`) is the composition shown for
+    /// [`Self::left_null`] on `vh`'s bond: pad `s`'s diagonal to
+    /// `vh.codomain()[0]` and restrict `vh`'s leg `0`.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap, Truncation};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let short = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
+    /// let wide = GradedSpace::try_new(rule, [(U1Irrep::new(0), 3)])?;
+    /// let a: TensorMap<_, f64> = TensorMap::from_subblock_fn(
+    ///     &runtime, [&short], [&wide], |_, i| ((i[0] + 1) * (i[1] + 1)) as f64,
+    /// )?;
+    /// assert_eq!(a.right_null(&[0], &[1])?.codomain()[0].degeneracy(&U1Irrep::new(0))?, 1);
+    ///
+    /// let Svd { s, vh, .. } = a.svd_full(&[0], &[1])?;
+    /// let bond = &vh.codomain()[0];
+    /// let spectrum = bond.extend_spectrum(&s.diagview()?)?;
+    /// let rtol = f64::EPSILON.powf(2.0 / 3.0);
+    /// let null = bond.find_truncated(&spectrum, &Truncation::below(0.0, rtol)?)?;
+    /// let n = vh.restrict_leg(&[(0, &null.selection)])?;
+    /// assert_eq!(n.codomain()[0].degeneracy(&U1Irrep::new(0))?, 2);
+    /// assert!(a.compose(&n.adjoint()?)?.norm(2.0)? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
