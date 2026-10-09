@@ -318,7 +318,6 @@ const TYPED: &[&str] = &[
     "Lq",
     "MemberFault",
     "ComposePlan",
-    "ComposeWorkspace",
     "ContractPlan",
     "ContractWorkspace",
     "MultiplicityIndex",

@@ -4,6 +4,9 @@ use super::*;
 use tenet_tensors::{HostContractMembersWorkspace, OutputAxisOrder, StorageContractResolution};
 
 #[cfg(test)]
+#[path = "compose_plan_tests.rs"]
+mod compose_plan_tests;
+#[cfg(test)]
 #[path = "contract_batch_copy_c.rs"]
 mod copy_c;
 #[cfg(test)]
@@ -60,7 +63,7 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     runtime: Runtime,
     binding: Arc<StorageContractResolution<f64>>,
-    output: OutputSlot<StackedTensorMap<R, D, S>>,
+    pub(super) output: OutputSlot<StackedTensorMap<R, D, S>>,
     members: HostContractMembersWorkspace<D>,
     #[cfg(feature = "cuda")]
     members_cuda: tenet_tensors::CudaContractMembersWorkspace<S>,
@@ -84,6 +87,19 @@ where
         rhs: &StackedTensorMap<R, D, S>,
         spec: &super::super::ContractSpec<'_>,
     ) -> Result<Self, Error> {
+        Self::prepare(lhs, rhs, Some(spec))
+    }
+
+    /// The one constructor of both prepared operations: `Some(spec)` is the
+    /// contraction ([`Self::new`]), `None` the composition
+    /// ([`ComposePlan::new`]). The kind is fixed here, before planning,
+    /// because a fermionic composition and the contraction over the same
+    /// legs differ by the supertrace twist.
+    fn prepare(
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+        spec: Option<&super::super::ContractSpec<'_>>,
+    ) -> Result<Self, Error> {
         if !lhs.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -96,28 +112,53 @@ where
         if rhs.signature.placement != placement {
             return Err(Error::PlacementMismatch);
         }
-        tenet_tensors::reject_non_symmetric_contraction(lhs.space.provider().braiding_style())?;
         let _pool = lhs.runtime.enter_host_pool();
-        let output_axes = spec.output_axes();
-        let order = OutputAxisOrder::from_axes(&output_axes);
-        let space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
-            &lhs.space,
-            &rhs.space,
-            spec.lhs,
-            spec.rhs,
-            order,
-            spec.codomain.len(),
-        )?;
-        let mut lease = lhs.runtime.lease_context()?;
-        let lane = lease.context().multiplicity_free_lane::<D>()?;
-        let resolution = lane.plan_contract::<tenet_tensors::DirectCoreExecutor, _>(
-            &space,
+        let operands = (
             FusionOperand::direct(lhs.space.space()),
             FusionOperand::direct(rhs.space.space()),
-            spec.lhs,
-            spec.rhs,
-            &output_axes,
-        )?;
+        );
+        let (space, resolution) = match spec {
+            Some(spec) => {
+                tenet_tensors::reject_non_symmetric_contraction(
+                    lhs.space.provider().braiding_style(),
+                )?;
+                let output_axes = spec.output_axes();
+                let order = OutputAxisOrder::from_axes(&output_axes);
+                let space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+                    &lhs.space,
+                    &rhs.space,
+                    spec.lhs,
+                    spec.rhs,
+                    order,
+                    spec.codomain.len(),
+                )?;
+                let mut lease = lhs.runtime.lease_context()?;
+                let lane = lease.context().multiplicity_free_lane::<D>()?;
+                let resolution = lane.plan_contract::<tenet_tensors::DirectCoreExecutor, _>(
+                    &space,
+                    operands.0,
+                    operands.1,
+                    spec.lhs,
+                    spec.rhs,
+                    &output_axes,
+                )?;
+                (space, resolution)
+            }
+            None => {
+                // The composition's core needs no context state, so planning
+                // it takes no context lease (#1531).
+                let (left, right) = (lhs.space.space(), rhs.space.space());
+                let lhs_axes: Vec<usize> = (left.nout()..left.nout() + left.nin()).collect();
+                let rhs_axes: Vec<usize> = (0..right.nout()).collect();
+                let space = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+                    &lhs.space, &rhs.space, &lhs_axes, &rhs_axes,
+                )?;
+                let resolution = tenet_tensors::plan_compose::<tenet_tensors::DirectCoreExecutor, _>(
+                    &space, operands.0, operands.1,
+                )?;
+                (space, resolution)
+            }
+        };
         // One admission for every route and member count: a plan accepted at
         // B = 1 replays at any B.
         resolution
@@ -155,7 +196,7 @@ where
             Ok(())
         } else {
             Err(Error::InvalidArgument(
-                "contract workspace belongs to another plan".into(),
+                "workspace belongs to another plan".into(),
             ))
         }
     }
@@ -336,6 +377,183 @@ where
             )
         });
         result.map_err(|error| workspace.output.hide(error))
+    }
+}
+
+/// Immutable structural plan for composing every member pair of two stacks.
+///
+/// Per member it is the eager [`TensorMap::compose`]: TensorKit `mul!`
+/// (`linalg.jl:330-370` @cfaa073), `A`'s domain against `B`'s codomain in
+/// order, with no twist, for every braiding style. It is a [`ContractPlan`]
+/// whose kind is fixed to composition before planning, so it shares that
+/// plan's planner, executors, workspace and failure rule; the composition
+/// always resolves to the canonical fully-direct core with unit
+/// coefficients, compiled once here for every member count. The member
+/// axis exists only as a dense stride:
+///
+/// - **CUDA**: one batched GEMM per coupled sector per call, independent of
+///   the member count `B`.
+/// - **Host**: one grouped GEMM submission per call over all `B × blocks`
+///   matrices, through the Runtime's dense backend.
+///
+/// The plan is independent of `B` and can be shared across threads. Each
+/// caller owns a separate [`ContractWorkspace`] for the mutable output,
+/// replay layout and CUDA resource reservations. Inputs and an optional
+/// destination are bound and validated on every call.
+///
+/// # Supported scope
+///
+/// Identity orientation only: an adjoint operand must be materialized before
+/// it is packed. A composition whose plan is not the canonical fully-direct
+/// one (for example an expert-layer tiling whose tree stackings differ) is
+/// rejected by [`Self::new`] with the same `UnsupportedTensorContractScope`
+/// the eager device composition reports.
+///
+/// [`Self::workspace`] creates the B-dependent state. On CUDA each workspace
+/// owns and releases its exact ledger claim, even if this plan is dropped
+/// first. Runtime-level zero templates remain shared context effects.
+///
+/// ```
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{ComposePlan, Error, GradedSpace, Runtime, StackedTensorMap, TensorMap};
+///
+/// # fn main() -> Result<(), Error> {
+/// let runtime = Runtime::builder().build()?;
+/// let rule = Arc::new(U1FusionRule);
+/// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
+/// let w = GradedSpace::try_new(rule, [(U1Irrep::new(0), 3)])?;
+/// let lhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&v, &v], [&w],
+/// )?])?;
+/// let rhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&w], [&v],
+/// )?])?;
+/// let mut destination = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&v, &v], [&v],
+/// )?])?;
+///
+/// let plan = ComposePlan::new(&lhs, &rhs)?;
+/// let mut workspace = plan.workspace()?;
+/// let _output = plan.execute(&lhs, &rhs, &mut workspace)?;
+/// plan.execute_into(&lhs, &rhs, &mut destination, &mut workspace)?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct ComposePlan<R, D, S = Vec<D>>(ContractPlan<R, D, S>);
+
+#[allow(private_bounds)]
+impl<R, D, S> ComposePlan<R, D, S>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+    S: ContractBatchStorage<D>,
+{
+    /// Prepares the composition of stacks with `lhs`'s and `rhs`'s
+    /// signatures. Their payloads are not read, and `B` is not fixed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`] and [`Error::PlacementMismatch`] for
+    /// operands of different Runtimes or placements;
+    /// [`Error::InvalidArgument`] for stacks of different member counts; the
+    /// eager composition's structural errors for spaces that do not compose;
+    /// and `UnsupportedTensorContractScope` for a plan that is not fully
+    /// direct.
+    pub fn new(
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+    ) -> Result<Self, Error> {
+        ContractPlan::prepare(lhs, rhs, None).map(Self)
+    }
+
+    /// The signature of every output member.
+    pub fn output_signature(&self) -> &StructureSignature {
+        self.0.output_signature()
+    }
+}
+
+impl<R, D> ComposePlan<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    /// Creates independent mutable execution state for this plan.
+    pub fn workspace(&self) -> Result<ContractWorkspace<R, D>, Error> {
+        self.0.workspace()
+    }
+
+    /// Composes every member pair into the workspace-owned output and borrows
+    /// it for the workspace borrow's lifetime; [`ContractPlan::execute`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BatchSignatureMismatch`] with `member: None` for a stack of
+    /// another signature, and [`Error::InvalidArgument`] for operand stacks
+    /// of different member counts, all before any work. Any error follows
+    /// the batched module's failure rule.
+    pub fn execute<'a>(
+        &self,
+        lhs: &StackedTensorMap<R, D>,
+        rhs: &StackedTensorMap<R, D>,
+        workspace: &'a mut ContractWorkspace<R, D>,
+    ) -> Result<&'a StackedTensorMap<R, D>, Error> {
+        self.0.execute(lhs, rhs, workspace)
+    }
+
+    /// Composes every member pair into the caller's `dst`, overwriting it;
+    /// [`ContractPlan::execute_into`]. `dst` must carry
+    /// [`Self::output_signature`] and the operands' member count. Its prior
+    /// contents never reach the result: the blocks no GEMM writes are
+    /// zero-filled on every call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute`], plus the same typed errors for `dst`, before
+    /// any write; any error follows the batched module's failure rule.
+    pub fn execute_into(
+        &self,
+        lhs: &StackedTensorMap<R, D>,
+        rhs: &StackedTensorMap<R, D>,
+        dst: &mut StackedTensorMap<R, D>,
+        workspace: &mut ContractWorkspace<R, D>,
+    ) -> Result<(), Error> {
+        self.0.execute_into(lhs, rhs, dst, workspace)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D> ComposePlan<R, D, CudaStorage<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    /// Creates independent B-dependent output, zero-fill, and plan resources.
+    pub fn workspace(&self) -> Result<ContractWorkspace<R, D, CudaStorage<D>>, Error> {
+        self.0.workspace()
+    }
+
+    /// The device form of the Host [`ComposePlan::execute`]: one batched
+    /// GEMM per coupled sector, and no transfer on a warm call.
+    pub fn execute<'a>(
+        &self,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        workspace: &'a mut ContractWorkspace<R, D, CudaStorage<D>>,
+    ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
+        self.0.execute(lhs, rhs, workspace)
+    }
+
+    /// The device form of the Host [`ComposePlan::execute_into`]: one zero
+    /// fill per inactive block per call over all members.
+    pub fn execute_into(
+        &self,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        dst: &mut StackedTensorMap<R, D, CudaStorage<D>>,
+        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
+    ) -> Result<(), Error> {
+        self.0.execute_into(lhs, rhs, dst, workspace)
     }
 }
 
@@ -794,7 +1012,8 @@ mod fermionic_unit_tests {
             let mut jobs_per_member = 0;
             for members in [1, 2, 17] {
                 let (core, swapped) = plan.resolution.direct_core().expect("unit direct core");
-                let replay = StackedDirectReplay::new(Arc::clone(core), members).unwrap();
+                core.require_identity_direct_replay().unwrap();
+                let replay = StackedDirectReplay::new_signed(Arc::clone(core), members).unwrap();
                 if !copy_c {
                     assert_eq!(swapped, swapped_expected, "{name}");
                 }

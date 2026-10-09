@@ -284,9 +284,9 @@ use crate::tensor_core::{
 
 mod batched;
 pub use batched::{
-    BatchError, BatchMemberRepresentation, ComposePlan, ComposeWorkspace, ContractPlan,
-    ContractWorkspace, EighFullPlan, EighFullWorkspace, EighStackOutput, MemberFault,
-    SignatureField, StackedTensorMap, StructureSignature,
+    BatchError, BatchMemberRepresentation, ComposePlan, ContractPlan, ContractWorkspace,
+    EighFullPlan, EighFullWorkspace, EighStackOutput, MemberFault, SignatureField,
+    StackedTensorMap, StructureSignature,
 };
 
 #[cfg(test)]

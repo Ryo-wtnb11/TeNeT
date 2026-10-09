@@ -1,25 +1,45 @@
-//! Host gates of `ComposePlan`/`ComposeWorkspace` (#1639).
+//! Host gates of `ComposePlan` and its `ContractWorkspace` (#1639).
 //!
 //! Per member both public call shapes must equal eager `compose` of the same
 //! placement and the tree-keyed `mul!` oracle of `prepared/mod.rs`,
 //! over U(1), SU(2) and fZ2xU(1), f64 and c64, B in {1, 2, 17}, with inactive
 //! destination blocks. `execute_into` must give the same result over a
 //! destination prefilled with NaN or garbage (D2).
+//!
+//! #1775: the composition is its own kind, not a contraction inferred from
+//! its axes. A fermionic composition over a dual leg differs from the
+//! contraction over the same legs by the supertrace sign, and composition
+//! admits every braiding style while `ContractPlan` rejects non-symmetric
+//! ones.
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 mod prepared;
 
+#[path = "braiding_probe/mod.rs"]
+mod braiding_probe;
+
 use std::fmt::Debug;
 
 use num_complex::{Complex32, Complex64};
-use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use std::sync::Arc;
+
+use braiding_probe::{ProbeSector, RealBraidingProbe};
+use tenet::sector::{
+    product_sector, CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec, U1Irrep,
+    Z2Irrep,
+};
 use tenet::typed::Error;
-use tenet::typed::{ComposePlan, GradedSpace, Runtime, SignatureField, StackedTensorMap};
+use tenet::typed::{
+    ComposePlan, ContractPlan, ContractSpec, GradedSpace, Runtime, SignatureField,
+    StackedTensorMap, TensorMap,
+};
 
 use common::Payload;
-use prepared::{compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
+use prepared::{
+    block_matrix, compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs, Fz2U1Rule,
+};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 17];
 
@@ -323,4 +343,176 @@ fn mismatched_stacks_are_typed_errors_before_any_work() {
         1.0,
         "nothing was written"
     );
+}
+
+/// Every member of `output` against the eager composition and the tree-keyed
+/// `mul!` oracle; returns the eager results.
+fn assert_members_compose<R, D>(
+    label: &str,
+    output: &StackedTensorMap<R, D>,
+    a: &[TensorMap<R, D>],
+    b: &[TensorMap<R, D>],
+) -> Vec<TensorMap<R, D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R::Sector: Debug,
+    D: Payload,
+{
+    assert_eq!(output.len(), a.len());
+    a.iter()
+        .zip(b)
+        .enumerate()
+        .map(|(index, (x, y))| {
+            let eager = x.compose(y).unwrap();
+            let (oracle, _) = compose_oracle(x, y, &eager);
+            let terms = x.dense_data().unwrap().len();
+            let member = output.member(index).unwrap();
+            numerics::assert_nonzero_slices_close(
+                &format!("{label}: eager, member {index}"),
+                eager.dense_data().unwrap(),
+                &oracle,
+                terms,
+            );
+            numerics::assert_nonzero_slices_close(
+                &format!("{label}: plan, member {index}"),
+                member.dense_data().unwrap(),
+                &oracle,
+                terms,
+            );
+            eager
+        })
+        .collect()
+}
+
+#[test]
+fn fermionic_composition_is_not_the_contraction_over_the_same_legs() {
+    // What: `V <- W'` composed with `W' <- V` over fZ2 x U(1), whose rhs
+    // codomain is a dual leg. `ComposePlan` is eager `compose` and TensorKit
+    // `mul!` (no twist); `ContractPlan` over the same legs and output is
+    // eager `contract`, which carries the supertrace sign: every block is
+    // the composition's up to a sign, and the odd blocks flip.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let rule = Arc::new(Fz2U1Rule::new(
+        tenet::sector::FermionParityFusionRule,
+        tenet::sector::U1FusionRule,
+    ));
+    let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
+    let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
+    let v =
+        GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 2), (odd(-1), 1)]).unwrap();
+    let wd = GradedSpace::try_new(rule, [(even(0), 2), (odd(1), 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let spec = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    for count in MEMBER_COUNTS {
+        let label = format!("fZ2xU1 dual leg B={count}");
+        let a = members::<_, f64>(&runtime, &[&v], &[&wd], count, 7);
+        let b = members::<_, f64>(&runtime, &[&wd], &[&v], count, 8);
+        let (lhs, rhs) = (
+            StackedTensorMap::pack(&a).unwrap(),
+            StackedTensorMap::pack(&b).unwrap(),
+        );
+        let compose = ComposePlan::new(&lhs, &rhs).unwrap();
+        let contract = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+        assert!(*compose.output_signature() == *contract.output_signature());
+        let mut compose_ws = compose.workspace().unwrap();
+        let mut contract_ws = contract.workspace().unwrap();
+        let composed = compose.execute(&lhs, &rhs, &mut compose_ws).unwrap();
+        let eager = assert_members_compose(&label, composed, &a, &b);
+        let contracted = contract.execute(&lhs, &rhs, &mut contract_ws).unwrap();
+        for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+            let mut flipped = 0;
+            let expected = x.contract(y, &spec).unwrap();
+            let member = contracted.member(index).unwrap();
+            numerics::assert_nonzero_slices_close(
+                &format!("{label}: contract plan, member {index}"),
+                member.dense_data().unwrap(),
+                expected.dense_data().unwrap(),
+                x.dense_data().unwrap().len(),
+            );
+            for block in 0..eager[index].subblock_count() {
+                let (_, _, _, _, composed) = block_matrix(&eager[index], block);
+                let (_, _, _, _, contracted) = block_matrix(&member, block);
+                if composed == contracted {
+                    continue;
+                }
+                assert!(
+                    composed.iter().zip(&contracted).all(|(c, t)| *c == -*t),
+                    "{label}: member {index} block {block} differs by more than a sign"
+                );
+                flipped += 1;
+            }
+            assert!(
+                flipped >= 1,
+                "{label}: member {index}: the supertrace sign flips an odd block"
+            );
+        }
+    }
+}
+
+fn non_symmetric_composition<const ANYONIC: bool>() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let rule = Arc::new(RealBraidingProbe::<ANYONIC>);
+    let v = GradedSpace::try_new(Arc::clone(&rule), [(ProbeSector, 2)]).unwrap();
+    let w = GradedSpace::try_new(rule, [(ProbeSector, 3)]).unwrap();
+    for count in [1, 2] {
+        let label = format!("anyonic={ANYONIC} B={count}");
+        let a = members::<_, f64>(&runtime, &[&v, &v], &[&w], count, 3);
+        let b = members::<_, f64>(&runtime, &[&w], &[&v], count, 4);
+        let (lhs, rhs) = (
+            StackedTensorMap::pack(&a).unwrap(),
+            StackedTensorMap::pack(&b).unwrap(),
+        );
+        let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+        let mut workspace = plan.workspace().unwrap();
+        let output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        assert_members_compose(&label, output, &a, &b);
+        let mut dst = StackedTensorMap::pack(&filled::<_, f64>(
+            &runtime,
+            &[&v, &v],
+            &[&v],
+            count,
+            f64::NAN,
+        ))
+        .unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+            .unwrap();
+        assert_members_compose(&format!("{label} execute_into"), &dst, &a, &b);
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2],
+        };
+        assert!(
+            matches!(
+                ContractPlan::new(&lhs, &rhs, &spec),
+                Err(Error::Operation(error)) if matches!(
+                    *error,
+                    tenet::typed::OperationError::UnsupportedTensorContractScope {
+                        message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                    }
+                )
+            ),
+            "{label}"
+        );
+    }
+}
+
+/// F2 (#1775): composition admits every braiding style (TensorKit `mul!`
+/// checks only the spaces), and no shared planning or admission step rejects
+/// it, while `ContractPlan::new` rejects the same geometry. Fibonacci, the
+/// built-in anyonic rule, has complex symbols (`Scalar = Complex64`), which
+/// stacks do not take (`R: MultiplicityFreeRigidSymbols<Scalar = f64>`), so
+/// the real one-sector probes stand in for `Anyonic` and `NoBraiding`.
+#[test]
+fn non_symmetric_braiding_composes_and_contract_plan_rejects_it() {
+    non_symmetric_composition::<true>();
+    non_symmetric_composition::<false>();
 }
