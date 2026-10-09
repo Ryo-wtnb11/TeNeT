@@ -371,6 +371,41 @@ pub(crate) fn compile_checked_generic_core_plan(
         });
     }
 
+    if let Some(plan) =
+        FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
+            dst_structure,
+            dst_nout,
+            lhs_structure,
+            lhs_nout,
+            rhs_structure,
+            rhs_nout,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )?
+    {
+        return Ok(plan);
+    }
+    compile_checked_generic_core_plan_general(
+        dst_structure,
+        dst_nout,
+        lhs_structure,
+        lhs_nout,
+        rhs_structure,
+        rhs_nout,
+    )
+}
+
+/// The per-subblock checked core builder: re-bases expert tilings whose
+/// coupled-sector trees are not canonically aligned, or reports the same
+/// structure error as before the coupled-region route.
+pub(super) fn compile_checked_generic_core_plan_general(
+    dst_structure: &Arc<tenet_core::BlockStructure>,
+    dst_nout: usize,
+    lhs_structure: &Arc<tenet_core::BlockStructure>,
+    lhs_nout: usize,
+    rhs_structure: &Arc<tenet_core::BlockStructure>,
+    rhs_nout: usize,
+) -> Result<FusionBlockContractPlan, OperationError> {
     let lhs_layout = FusionBlockMatrixLayout::compile_parts(lhs_structure, lhs_nout)?;
     let rhs_layout = FusionBlockMatrixLayout::compile_parts(rhs_structure, rhs_nout)?;
     let dst_layout = FusionBlockMatrixLayout::compile_parts(dst_structure, dst_nout)?;
