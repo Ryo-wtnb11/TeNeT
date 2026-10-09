@@ -292,7 +292,7 @@ where
             storage_source.structure(),
         )
     };
-    let dst_preview = Arc::new(prepared.structure().clone());
+    let dst_preview = prepared.shared_structure();
     // A complete-cache hit makes the preview canonical, so its key can hit;
     // a staged candidate's fresh id never does, and is never published.
     let cached =
