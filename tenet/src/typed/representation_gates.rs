@@ -9,6 +9,7 @@ mod contract;
 #[cfg(feature = "cuda")]
 mod cuda;
 mod cuda_factorize;
+mod dense_lease;
 #[cfg(feature = "racah-generated")]
 mod factorize_checked;
 #[cfg(feature = "racah-generated")]
