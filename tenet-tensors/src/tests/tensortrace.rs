@@ -3070,3 +3070,4 @@ thread_local! {
 #[cfg(feature = "racah-generated")]
 mod checked_whole_basis;
 mod staged_publication;
+mod trace_cache4;

@@ -471,3 +471,26 @@ fn group_admission_validates_each_member_once_in_block_order() {
     assert_eq!(calls[preflight..after], admission[..]);
     assert_ne!(calls[after..after + per_member[0].len()], per_member[0][..]);
 }
+
+/// What: a cold checked compile makes exactly the provider queries, in the
+/// same order, and produces the same term bits as a04e59c2 (before #2072):
+/// routing through cache 4 changes nothing on a miss.
+#[test]
+fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
+    let fixture = fixture();
+    fixture.provider.reset(Vec::new());
+    let structure = compile(&fixture).unwrap();
+    let calls = fixture.provider.calls.borrow();
+    let ledger = super::trace_cache4::fingerprint(format!("{:?}", *calls).bytes().map(u64::from));
+    let terms = super::trace_cache4::fingerprint(structure.terms().iter().flat_map(|term| {
+        [
+            term.dst_block() as u64,
+            term.src_block() as u64,
+            term.coefficient().to_bits(),
+        ]
+    }));
+    assert_eq!(
+        (calls.len(), ledger, terms),
+        (2031, 12_939_473_490_702_431_790, 1_780_564_817_329_036_331)
+    );
+}
