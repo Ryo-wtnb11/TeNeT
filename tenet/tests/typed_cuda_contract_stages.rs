@@ -1,6 +1,6 @@
-//! Characterization pins of the CUDA contraction stage sequence (#1859 C1):
-//! eager `contract` / `contract_into` on every route (Core, CopyC,
-//! DynamicTree) and member `DynamicTree` replays of one `ContractPlan`.
+//! Characterization pins of the CUDA contraction stage sequence (#1859 C1,
+//! C2): eager `contract` / `contract_into` on every route (Core, CopyC,
+//! DynamicTree) and member replays of one `ContractPlan` on every route.
 //!
 //! The fixtures are exact in binary: dyadic entries, unit U(1) recoupling and
 //! ±1 fermionic twists, scaled by dyadic factors. Every product and partial
@@ -12,8 +12,8 @@
 //!
 //! Warm transfer and submission counters
 //! `(h2d_calls, h2d_bytes, d2h_calls, device_allocs, gemm_calls, copy_calls,
-//! retained_bytes)` were recorded on the base revision of #1859 C1 and are
-//! pinned in [`PINS`]: the stage sequence may regroup the kernels, never add
+//! retained_bytes)` were recorded on the base revisions of #1859 C1 and C2 and
+//! are pinned in [`PINS`]: the stage sequence may regroup the kernels, never add
 //! or remove one. The counters are process-wide, hence `--test-threads=1`:
 //!
 //! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
@@ -38,6 +38,7 @@ use contract_cases::{
 };
 use num_complex::Complex64;
 use tenet::expert::cuda_transfer_stats;
+use tenet::typed::GradedSpace;
 use tenet::typed::{ContractPlan, Runtime, StackedTensorMap, TensorMap};
 
 /// `(h2d_calls, h2d_bytes, d2h_calls, device_allocs, gemm_calls, copy_calls,
@@ -251,12 +252,16 @@ fn rescaled<R: DeviceRule, D: DevicePayload>(
     }
 }
 
-/// One member DynamicTree plan over the B sequences 1, 2, 17, 1 and 4, 2, 4
+/// One member plan over the B sequences 1, 2, 17, 1 and 4, 2, 4
 /// with fresh values on every call: `execute` (twice, the second warm) and
 /// `execute_into` a NaN-poisoned destination through a second workspace.
 /// Every member is bit-equal to the Host member replay of the same plan and
 /// to eager device `contract`.
-fn members<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>, recorder: &mut Recorder) {
+fn members<R: DeviceRule, D: DevicePayload>(
+    family: &str,
+    case: &Case<R, D>,
+    recorder: &mut Recorder,
+) {
     let pin = D::NAME == "f64";
     let spec = case.spec();
     let host_one =
@@ -276,7 +281,7 @@ fn members<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>, recorder: &mut Re
         let mut host_workspace = host_plan.workspace().unwrap();
         for (call, &count) in sequence.iter().enumerate() {
             let key = format!(
-                "member {} {} seq={sequence:?} call={call} B={count}",
+                "{family} {} {} seq={sequence:?} call={call} B={count}",
                 case.name,
                 D::NAME
             );
@@ -340,17 +345,19 @@ fn members<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>, recorder: &mut Re
 fn member_routes<D: DevicePayload>(recorder: &mut Recorder) {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let [_, identity_output, output_transform] = u1_inactive_cases::<D>(&runtime);
-    members(&identity_output, recorder);
-    members(&output_transform, recorder);
-    members(&u1_reordered::<D>(&runtime), recorder);
+    members("member", &identity_output, recorder);
+    // `ContractPlan` resolves this geometry to CopyC (an output transform
+    // over a direct core with one inactive block).
+    members("member", &output_transform, recorder);
+    members("member", &u1_reordered::<D>(&runtime), recorder);
     let [twisted_a, _, twisted_b, _] = fermionic_twist_roles::<FermionU1, D>(
         &runtime,
         &fermion_u1(),
         ["fA", "fcanonical", "fB", "fboth"],
         71,
     );
-    members(&twisted_a, recorder);
-    members(&twisted_b, recorder);
+    members("member", &twisted_a, recorder);
+    members("member", &twisted_b, recorder);
 }
 
 #[test]
@@ -362,8 +369,68 @@ fn member_dynamic_tree_is_bit_equal_to_host_and_eager_with_base_counters() {
     recorder.check("member ");
 }
 
-/// Recorded on qg1 (A100-SXM4-40GB) at base `fae73f1c` with these tests
-/// (`a91af835`/`bc8f5de9`); see the module documentation.
+/// Fermionic `V <- V'` against `V' <- V` over fZ2 x U(1): a direct core
+/// with exact +1 and -1 job coefficients and one inactive destination block,
+/// as Core (identity output) and CopyC (reversed output), unswapped and
+/// swapped.
+fn signed_cases<D: DevicePayload>(runtime: &Runtime) -> [Case<FermionU1, D>; 4] {
+    let v = fermion_u1();
+    let dual = v.try_dual().unwrap();
+    let map = |codomain: &GradedSpace<FermionU1>, domain: &GradedSpace<FermionU1>, salt| {
+        TensorMap::<_, D>::from_subblock_fn(runtime, [codomain], [domain], fill(salt)).unwrap()
+    };
+    let (a, b) = (map(&v, &dual, 211), map(&dual, &v, 212));
+    let case = |name, swapped: bool, output: [usize; 2]| Case {
+        name,
+        lhs: if swapped { b.clone() } else { a.clone() },
+        rhs: if swapped { a.clone() } else { b.clone() },
+        lhs_axes: vec![usize::from(!swapped)],
+        rhs_axes: vec![usize::from(swapped)],
+        output_axes: output.to_vec(),
+        dense: false,
+    };
+    [
+        case("signed core", false, [0, 1]),
+        case("signed copyC", false, [1, 0]),
+        case("signed swapped core", true, [1, 0]),
+        case("signed swapped copyC", true, [0, 1]),
+    ]
+}
+
+/// Member Core and CopyC (#1859 C2): unit and signed direct cores, swapped
+/// and unswapped, with and without inactive destination blocks.
+fn direct_member_routes<D: DevicePayload>(recorder: &mut Recorder) {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let v = u1_non_self_dual();
+    for (case, _) in candidate_core_probes::<_, D>(&runtime, &v) {
+        if matches!(case.name, "C0" | "C1" | "C2") {
+            members("direct member", &case, recorder);
+        }
+    }
+    for (case, _) in copy_c_probes::<_, D>(&runtime, &v) {
+        if matches!(case.name, "C1p" | "C2p") {
+            members("direct member", &case, recorder);
+        }
+    }
+    let [core_inactive, _, _] = u1_inactive_cases::<D>(&runtime);
+    members("direct member", &core_inactive, recorder);
+    for case in signed_cases::<D>(&runtime) {
+        members("direct member", &case, recorder);
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn member_core_and_copy_c_are_bit_equal_to_host_and_eager_with_base_counters() {
+    let mut recorder = Recorder::default();
+    direct_member_routes::<f64>(&mut recorder);
+    direct_member_routes::<Complex64>(&mut recorder);
+    recorder.check("direct member ");
+}
+
+/// Recorded on qg1 (A100-SXM4-40GB): eager and member DynamicTree rows at
+/// #1859 C1 base `fae73f1c` (`a91af835`/`bc8f5de9`), member Core and CopyC
+/// rows at #1859 C2 base `160187c7`; see the module documentation.
 #[rustfmt::skip]
 const PINS: &[(&str, Counters)] = &[
     ("eager core C0 f64 contract warm", [1, 2544, 0, 1, 5, 0, 0]),
@@ -571,4 +638,215 @@ const PINS: &[(&str, Counters)] = &[
     ("member fB f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 5888, 0, 1, 5, 7, 0]),
     ("member fB f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 8, 7, 9944]),
     ("member fB f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 8, 7, 4056]),
+    // Member Core and CopyC: recorded at #1859 C2 base `160187c7` (`74ffb5d7`).
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [1, 43248, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 5, 0, 43248]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C0 f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C0 f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [1, 43248, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 5, 0, 43248]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C1 f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C1 f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [1, 43248, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 5, 0, 43248]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 2544, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 5, 0, 2544]),
+    ("direct member C2 f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 0, 5088]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 10176, 0, 1, 5, 0, 0]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 5, 0, 10176]),
+    ("direct member C2 f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 5, 0, 0]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [2, 5088, 0, 2, 5, 19, 0]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 5, 19, 10872]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [1, 2544, 0, 1, 5, 19, 8328]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [2, 10176, 0, 2, 5, 19, 0]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [1, 5088, 0, 1, 5, 19, 10872]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [2, 86496, 0, 2, 5, 19, 0]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 5, 19, 92280]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [1, 43248, 0, 1, 5, 19, 49032]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 2544, 0, 1, 5, 19, 0]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 5, 19, 51576]),
+    ("direct member C1p f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 5, 19, 49032]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=0 B=4 execute first", [2, 20352, 0, 2, 5, 19, 0]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 5, 19, 26136]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=0 B=4 execute_into", [1, 10176, 0, 1, 5, 19, 15960]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 19, 0]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 19, 21048]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 10176, 0, 1, 5, 19, 0]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 5, 19, 26136]),
+    ("direct member C1p f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [2, 5088, 0, 2, 5, 19, 0]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 5, 19, 10872]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [1, 2544, 0, 1, 5, 19, 8328]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [2, 10176, 0, 2, 5, 19, 0]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [1, 5088, 0, 1, 5, 19, 10872]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [2, 86496, 0, 2, 5, 19, 0]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 5, 19, 92280]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [1, 43248, 0, 1, 5, 19, 49032]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 2544, 0, 1, 5, 19, 0]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 5, 19, 51576]),
+    ("direct member C2p f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 5, 19, 49032]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=0 B=4 execute first", [2, 20352, 0, 2, 5, 19, 0]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 5, 19, 26136]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=0 B=4 execute_into", [1, 10176, 0, 1, 5, 19, 15960]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 5088, 0, 1, 5, 19, 0]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 5, 19, 21048]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 10176, 0, 1, 5, 19, 0]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 5, 19, 26136]),
+    ("direct member C2p f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 5, 19, 15960]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [3, 176, 0, 3, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 3, 0, 208]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [2, 336, 0, 2, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 3, 0, 328]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [2, 2856, 0, 2, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 3, 0, 2128]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 120, 0, 1, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 3, 0, 208]),
+    ("direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 480, 0, 1, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 3, 0, 568]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 240, 0, 1, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 3, 0, 328]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 480, 0, 1, 2, 0, 0]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 3, 0, 568]),
+    ("direct member U(1) core route, inactive block f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 3, 0, 88]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [1, 80, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 4, 0, 168]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 160, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 4, 0, 248]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [1, 1360, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 4, 0, 1448]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 80, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 4, 0, 168]),
+    ("direct member signed core f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 320, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 4, 0, 408]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 160, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 4, 0, 248]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 320, 0, 1, 3, 0, 0]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 4, 0, 408]),
+    ("direct member signed core f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [3, 176, 0, 3, 5, 2, 0]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 6, 2, 1320]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [2, 96, 0, 2, 5, 2, 1240]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [2, 320, 0, 2, 5, 2, 0]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 6, 2, 1480]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [1, 160, 0, 1, 5, 2, 1320]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [2, 2720, 0, 2, 5, 2, 0]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 6, 2, 3880]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [1, 1360, 0, 1, 5, 2, 2520]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 80, 0, 1, 6, 2, 0]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 6, 2, 2600]),
+    ("direct member signed copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 6, 2, 2520]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=0 B=4 execute first", [3, 656, 0, 3, 5, 2, 0]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 6, 2, 1800]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=0 B=4 execute_into", [2, 336, 0, 2, 5, 2, 1480]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 160, 0, 1, 6, 2, 0]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 6, 2, 1640]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 6, 2, 1480]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 320, 0, 1, 6, 2, 0]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 6, 2, 1800]),
+    ("direct member signed copyC f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 6, 2, 1480]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [1, 80, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 4, 0, 168]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [1, 160, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 4, 0, 248]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [1, 1360, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 4, 0, 1448]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 80, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 4, 0, 168]),
+    ("direct member signed swapped core f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=0 B=4 execute first", [1, 320, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 4, 0, 408]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=0 B=4 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 160, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 4, 0, 248]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 320, 0, 1, 3, 0, 0]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 4, 0, 408]),
+    ("direct member signed swapped core f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 4, 0, 88]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute first", [3, 176, 0, 3, 5, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute warm", [0, 0, 0, 0, 6, 2, 1320]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=0 B=1 execute_into", [2, 96, 0, 2, 5, 2, 1240]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute first", [2, 320, 0, 2, 5, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute warm", [0, 0, 0, 0, 6, 2, 1480]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=1 B=2 execute_into", [1, 160, 0, 1, 5, 2, 1320]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute first", [2, 2720, 0, 2, 5, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute warm", [0, 0, 0, 0, 6, 2, 3880]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=2 B=17 execute_into", [1, 1360, 0, 1, 5, 2, 2520]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute first", [1, 80, 0, 1, 6, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute warm", [0, 0, 0, 0, 6, 2, 2600]),
+    ("direct member signed swapped copyC f64 seq=[1, 2, 17, 1] call=3 B=1 execute_into", [0, 0, 0, 0, 6, 2, 2520]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=0 B=4 execute first", [3, 656, 0, 3, 5, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=0 B=4 execute warm", [0, 0, 0, 0, 6, 2, 1800]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=0 B=4 execute_into", [2, 336, 0, 2, 5, 2, 1480]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=1 B=2 execute first", [1, 160, 0, 1, 6, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=1 B=2 execute warm", [0, 0, 0, 0, 6, 2, 1640]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=1 B=2 execute_into", [0, 0, 0, 0, 6, 2, 1480]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=2 B=4 execute first", [1, 320, 0, 1, 6, 2, 0]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=2 B=4 execute warm", [0, 0, 0, 0, 6, 2, 1800]),
+    ("direct member signed swapped copyC f64 seq=[4, 2, 4] call=2 B=4 execute_into", [0, 0, 0, 0, 6, 2, 1480]),
 ];
