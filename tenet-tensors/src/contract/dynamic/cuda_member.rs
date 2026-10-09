@@ -26,6 +26,11 @@ use crate::{OperationError, RecouplingCoefficientAction};
 /// scaled-move coefficients, and the transformed-source and core-destination
 /// stacks at their high-water member capacity. `S` is the plan's device
 /// storage, so the holder needs no payload bound.
+///
+/// Retained capacity has no reference counterpart: TensorKit `cfaa073e`
+/// `blas_contract!` takes its temporaries from a per-call allocator and QSpace
+/// `dd2cc7e` `contract_matchAB_groupC` builds its buffers per call; neither
+/// has a member axis to size.
 #[doc(hidden)]
 pub struct CudaDynamicTreeMembersWorkspace<S> {
     /// The artifact and `B` the regions below were prepared for.
