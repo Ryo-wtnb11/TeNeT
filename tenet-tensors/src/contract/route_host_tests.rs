@@ -573,6 +573,18 @@ fn a_warm_eager_contraction_converts_no_coefficient_pack() {
         for _ in 0..3 {
             assert_eq!(run(&mut context), cold, "{what}");
         }
+        // The stage workspaces are retained Host scratch: counted, and
+        // released by trim (a fresh workspace has converted no pack).
+        let stage_bytes = context.stage_workspace_retained_bytes();
+        assert!(stage_bytes > 0, "{what}");
+        assert!(
+            context.retained_host_scratch_bytes() >= stage_bytes,
+            "{what}"
+        );
+        context.trim_host_scratch();
+        assert_eq!(context.retained_host_scratch_bytes(), 0, "{what}");
+        assert_eq!(context.eager_coefficient_pack_builds(), [0; 3], "{what}");
+        assert_eq!(run(&mut context), cold, "{what}");
     }
     check(&su2_rank5_case(), "SU2");
     let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
@@ -587,6 +599,150 @@ fn a_warm_eager_contraction_converts_no_coefficient_pack() {
         },
         "fZ2xSU2",
     );
+}
+
+#[test]
+fn warm_prepared_plan_contractions_convert_no_coefficient_pack() {
+    // Why (#2101): the caller-supplied-plan entries replay their source and
+    // output transforms through the same per-stage workspaces as the routed
+    // eager path. Isolated for the same process-global cache reason.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_WARM_PREPARED_PACKS_ISOLATED",
+        "contract::storage_contract_tests::route_host_tests::warm_prepared_plan_contractions_convert_no_coefficient_pack",
+    ) {
+        return;
+    }
+    use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
+    let rule = SU2FusionRule;
+    let half = |count: usize| (0..count).map(|_| (1, 2)).collect::<Vec<_>>();
+    let lhs_hom = FusionTreeHomSpace::from_sector_ids(half(3), half(1));
+    let rhs_hom = FusionTreeHomSpace::from_sector_ids(half(1), half(3));
+    let shapes = [vec![2, 2, 2, 2], vec![2, 2, 2, 2]];
+    let space31 = |hom| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+            hom,
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap()
+    };
+    let space13 = |hom| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+            hom,
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap()
+    };
+    let lhs_core_space = space13(lhs_hom.permute(&rule, &[3], &[0, 1, 2]).unwrap());
+    let rhs_core_space = space31(rhs_hom.permute(&rule, &[1, 2, 3], &[0]).unwrap());
+    let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        (0..32).map(|index| 1.0 + 0.125 * index as f64).collect(),
+        space31(lhs_hom.clone()),
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        (0..32).map(|index| -3.0 + 0.25 * index as f64).collect(),
+        space13(rhs_hom.clone()),
+    )
+    .unwrap();
+    let dst_space = |axes: &TensorContractSpec<'_>, order: &[usize]| {
+        let hom = FusionTreeHomSpace::tensorcontract_homspace(
+            &rule,
+            &lhs_hom,
+            &rhs_hom,
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            order,
+            1,
+        )
+        .unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            hom,
+            &rule,
+            [vec![2, 2]],
+        )
+        .unwrap()
+    };
+    let zeros = |space: &FusionTensorMapSpace<1, 3>| vec![0.0; space.required_len().unwrap()];
+    let mut lhs_core =
+        TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(zeros(&lhs_core_space), lhs_core_space)
+            .unwrap();
+    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
+    )
+    .unwrap();
+    let identity_axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
+    let swapped_axes =
+        TensorContractSpec::new(&[0, 1, 2], &[1, 2, 3], OutputAxisOrder::from_axes(&[1, 0]));
+    let identity_space = dst_space(&identity_axes, &[0, 1]);
+    let swapped_space = dst_space(&swapped_axes, &[1, 0]);
+    let plan = |dst: &FusionTensorMapSpace<1, 1>, axes| {
+        crate::prepare_tensorcontract_fusion_plan(
+            &rule,
+            dst,
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap()
+    };
+    let identity_plan = plan(&identity_space, identity_axes);
+    let swapped_plan = plan(&swapped_space, swapped_axes);
+    let fresh = |space: &FusionTensorMapSpace<1, 1>| {
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![0.0; 4], space.clone()).unwrap()
+    };
+    let mut context = Context::<f64>::default();
+    let mut run = |context: &mut Context<f64>| {
+        let mut out = fresh(&identity_space);
+        context
+            .tensorcontract_fusion_prepared_into(
+                &rule,
+                &identity_plan,
+                &mut out,
+                &mut lhs_core,
+                &mut rhs_core,
+                &lhs,
+                &rhs,
+                -1.5,
+                0.0,
+            )
+            .unwrap();
+        let mut swapped = fresh(&swapped_space);
+        let mut core_dst = fresh(&identity_space);
+        context
+            .tensorcontract_fusion_prepared_into_core_dst(
+                &rule,
+                &swapped_plan,
+                &mut swapped,
+                &mut core_dst,
+                &mut lhs_core,
+                &mut rhs_core,
+                &lhs,
+                &rhs,
+                -1.5,
+                0.0,
+            )
+            .unwrap();
+        (
+            bits(out.data()),
+            bits(swapped.data()),
+            context.eager_coefficient_pack_builds(),
+        )
+    };
+    let (out, swapped, cold) = run(&mut context);
+    assert!(cold[0] > 0 && cold[1] > 0, "{cold:?}");
+    assert!(cold.iter().all(|&builds| builds <= 1), "{cold:?}");
+    for _ in 0..3 {
+        assert_eq!(run(&mut context), (out.clone(), swapped.clone(), cold));
+    }
+    // A fresh context (no installed pack) computes the same values.
+    let (fresh_out, fresh_swapped, _) = run(&mut Context::<f64>::default());
+    assert_eq!((fresh_out, fresh_swapped), (out, swapped));
 }
 
 #[test]

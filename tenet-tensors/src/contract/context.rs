@@ -625,6 +625,17 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn stage_workspace_retained_bytes(&self) -> usize
+    where
+        BT: TreeTransformBackend<D, C, Workspace = TreeTransformWorkspace<D>>,
+    {
+        self.stage_workspaces
+            .iter()
+            .map(TreeTransformWorkspace::retained_bytes)
+            .sum()
+    }
+
+    #[cfg(test)]
     pub(crate) fn last_resolution_is_core(&self) -> bool {
         self.last_top_level_resolution_was_core
     }

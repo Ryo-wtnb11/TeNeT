@@ -45,11 +45,13 @@ impl TensorExecutionContext {
 impl Runtime {
     /// Allocated Host capacity retained by idle standalone contraction contexts.
     ///
-    /// The snapshot sums fusion lhs/rhs/destination and `copyC` buffers across
-    /// every instantiated payload/coefficient lane in the idle pool. Active
-    /// leases and the lock-held expert contexts are excluded; this method does
-    /// not wait for operations. Fusion-block, dense-provider, and tree-backend
-    /// workspaces are also outside this counter.
+    /// The snapshot sums fusion lhs/rhs/destination and `copyC` buffers and
+    /// the tree-transform workspaces (one per contraction stage plus the
+    /// context's own, coefficient packs included) across every instantiated
+    /// payload/coefficient lane in the idle pool. Active leases and the
+    /// lock-held expert contexts are excluded; this method does not wait for
+    /// operations. Fusion-block and dense-provider workspaces are outside this
+    /// counter.
     pub fn host_contract_scratch_bytes(&self) -> usize {
         self.inner
             .context_pool

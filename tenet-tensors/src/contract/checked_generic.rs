@@ -1251,12 +1251,12 @@ mod tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
-    fn a_checked_generic_contraction_converts_one_coefficient_pack_per_stage() {
+    fn a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage() {
         // Why (#2101): each stage replays into its own context workspace, so
-        // no stage evicts another's Multi pack. Until #2063 reuses checked
-        // Generic transformers across calls, every call compiles transformers
-        // with a fresh identity, so each stage converts exactly one pack per
-        // call; with #2063 a warm call converts none.
+        // no stage evicts another's Multi pack: a warm call converts at most
+        // one pack per stage (a shared workspace would convert three into one
+        // slot). #2063 tightens this to none: until it reuses checked Generic
+        // transformers across calls, each call compiles them afresh.
         let (_left, lhs, _right, rhs) = bound_pair(2, 2);
         let lhs_data = (0..lhs.space().required_len().unwrap())
             .map(|index| index as f64 - 1.5)
@@ -1285,10 +1285,14 @@ mod tests {
         };
         let (cold_data, cold) = run();
         assert_eq!(cold, [1, 1, 1], "all three stages recouple");
-        for calls in 2..5 {
+        let mut previous = cold;
+        for _ in 0..3 {
             let (data, builds) = run();
             assert_eq!(data, cold_data);
-            assert_eq!(builds, [calls; 3]);
+            for (now, before) in builds.iter().zip(previous) {
+                assert!(*now - before <= 1, "{builds:?} after {previous:?}");
+            }
+            previous = builds;
         }
     }
 
