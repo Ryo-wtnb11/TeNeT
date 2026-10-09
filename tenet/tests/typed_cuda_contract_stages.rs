@@ -14,7 +14,12 @@
 //! `(h2d_calls, h2d_bytes, d2h_calls, device_allocs, gemm_calls, copy_calls,
 //! retained_bytes)` were recorded on the base revisions of #1859 C1 and C2 and
 //! are pinned in [`PINS`]: the stage sequence may regroup the kernels, never add
-//! or remove one. The counters are process-wide, hence `--test-threads=1`:
+//! or remove one, with two #1859 C2 exceptions that [`Recorder::check`]
+//! states exactly: member CopyC no longer refills its temporary
+//! ([`MEMBER_COPY_C`]), and member Core/CopyC retained bytes now use the one
+//! member workspace's Host region accounting, so they may differ from the
+//! base by a per-case constant while every device byte, which grows with
+//! `B`, is equal. The counters are process-wide, hence `--test-threads=1`:
 //!
 //! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
 //! --test typed_cuda_contract_stages -- --ignored --test-threads=1`.
@@ -110,12 +115,65 @@ impl Recorder {
             pinned.len(),
             "{prefix}: observed and pinned counter sets differ in size"
         );
+        let mut metadata: Vec<(&str, i64)> = Vec::new();
         for ((key, observed), (pinned_key, pinned)) in self.0.iter().zip(&pinned) {
             assert_eq!(key, pinned_key, "{prefix}: pin order");
-            assert_eq!(observed, pinned, "{key}: counters differ from the base pin");
+            let mut expected = *pinned;
+            // One case's rows across both B sequences and both workspaces.
+            let group = key.split(" seq=").next().unwrap();
+            let copy_c = MEMBER_COPY_C
+                .iter()
+                .find(|(name, _)| group.contains(&format!(" {name} ")))
+                .filter(|_| !key.starts_with("eager "));
+            if let Some(&(_, inactive)) = copy_c {
+                let base: Vec<u64> = PINS
+                    .iter()
+                    .filter(|(row, _)| row.starts_with(&format!("{group} seq=")))
+                    .map(|(_, counters)| counters[4])
+                    .collect();
+                let fewest = *base.iter().min().unwrap();
+                assert_eq!(
+                    base.iter().max().unwrap() - fewest,
+                    inactive,
+                    "{group}: a base refill zeroes each inactive region once"
+                );
+                expected[4] = fewest;
+            }
+            if (copy_c.is_some() || key.starts_with("direct member ")) && pinned[6] != 0 {
+                let delta = observed[6] as i64 - pinned[6] as i64;
+                match metadata.iter().find(|(seen, _)| *seen == group) {
+                    Some(&(_, first)) => assert_eq!(
+                        delta, first,
+                        "{key}: retained bytes moved by more than a B-independent metadata delta"
+                    ),
+                    None => {
+                        eprintln!("retained Host metadata delta vs base: {group}: {delta}");
+                        metadata.push((group, delta));
+                    }
+                }
+                expected[6] = observed[6];
+            }
+            assert_eq!(
+                observed, &expected,
+                "{key}: counters differ from the base pin"
+            );
         }
     }
 }
+
+/// Member CopyC cases and the inactive destination regions of their core
+/// plan. The base (`run_cuda`) zeroed those regions of the CopyC temporary
+/// on every call that reused it; the head never does, because the temporary
+/// is the member workspace's core-destination stack, born zero and written
+/// only by the core GEMMs (#1746). Every head call therefore submits the
+/// base's no-refill count: exactly `R` fewer on each base refill call.
+const MEMBER_COPY_C: &[(&str, u64)] = &[
+    ("U(1) output transform over an inactive core block", 1),
+    ("C1p", 0),
+    ("C2p", 0),
+    ("signed copyC", 1),
+    ("signed swapped copyC", 1),
+];
 
 /// A destination of `case`'s result space with every block, including the
 /// blocks no GEMM writes, holding a nonzero dyadic value.

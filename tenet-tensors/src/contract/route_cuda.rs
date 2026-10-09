@@ -1,7 +1,7 @@
 //! The one CUDA executor of a Host-compiled contraction route (#1859).
 //!
-//! Eager calls (Core, CopyC, DynamicTree) and member-batched DynamicTree
-//! replays run one stage sequence over the Host's [`RouteView`]: admit,
+//! Eager calls and member-batched replays of every route (Core, CopyC,
+//! DynamicTree) run one stage sequence over the Host's [`RouteView`]: admit,
 //! source transforms, core GEMMs, output transform. An eager call is one
 //! member. What differs between the two is a provider ([`CudaRouteStage`])
 //! and only at the seams that are genuinely different:
@@ -10,7 +10,8 @@
 //!   transform executor and contraction scratch; a member replay through the
 //!   caller-owned [`CudaContractMembersWorkspace`], prepared once per route
 //!   and member count, so a warm member call never depends on the runtime's
-//!   bounded structure cache;
+//!   bounded structure cache, and admitted once per plan
+//!   ([`StorageContractResolution::admit_cuda_members`]);
 //! - kernels: eager transforms admit Single/Multi, conjugation, alpha and
 //!   beta, and its GEMMs Adjoint operands and axpby; member transforms are
 //!   prepared nonzero Single overwrite moves and its GEMMs batch a trailing
@@ -39,8 +40,7 @@ use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
 use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
 
 use super::dynamic::cuda::{grow, scratch_entry, CudaContractScratch, ScratchBuffers};
-use super::dynamic::DynamicTreeExecutionArtifact;
-use super::resolution::{ContractRoute, StorageContractResolution};
+use super::resolution::StorageContractResolution;
 use super::route_host::{RouteView, SourceStage, Stage};
 use crate::{
     ContractDestinationInit, DenseBlockScalar, OperationError, RecouplingCoefficientAction,
@@ -554,15 +554,19 @@ pub struct CudaContractMembersWorkspace<S> {
     stages: [Option<CudaSingleMemberRegions>; 3],
     /// Scaled-move coefficients per stage; structure-only, kept across `B`.
     coefficients: [Option<CudaDenseStorage>; 3],
-    /// Transformed lhs, transformed rhs and core destination stacks. A
-    /// member's offset is `B`-independent, so the first `B` members are the
-    /// active stack and the rest is idle capacity.
+    /// Transformed lhs, transformed rhs and core destination stacks; the core
+    /// destination is a DynamicTree's or the CopyC temporary, born zero and
+    /// written only by the core GEMMs (#1746). A member's offset is
+    /// `B`-independent, so the first `B` members are the active stack and the
+    /// rest is idle capacity.
     buffers: [Option<S>; 3],
     /// Core inactive blocks of a directly written destination, per member.
     core_zeros: Vec<CudaRegion>,
     /// Member lengths of the core destination, the core's left operand and
     /// its right operand.
     lens: [usize; 3],
+    /// Test seam: the next output transform fails before it submits.
+    fail_before_output: bool,
 }
 
 impl<S> Default for CudaContractMembersWorkspace<S> {
@@ -575,7 +579,18 @@ impl<S> Default for CudaContractMembersWorkspace<S> {
             buffers: [None, None, None],
             core_zeros: Vec::new(),
             lens: [0; 3],
+            fail_before_output: false,
         }
+    }
+}
+
+impl<S> CudaContractMembersWorkspace<S> {
+    /// Test seam: makes the next replay of the prepared route fail after its
+    /// core GEMMs and before its output transform, as a backend error there
+    /// would, so failure recovery is testable after device work.
+    #[doc(hidden)]
+    pub fn fail_next_before_output(&mut self) {
+        self.fail_before_output = true;
     }
 }
 
@@ -605,45 +620,6 @@ impl<D: CudaScalar> CudaContractMembersWorkspace<CudaStorage<D>> {
         elements
             .saturating_mul(std::mem::size_of::<D>())
             .saturating_add(regions)
-    }
-}
-
-fn dynamic_tree(
-    resolution: &StorageContractResolution<f64>,
-) -> Result<&Arc<DynamicTreeExecutionArtifact<f64>>, OperationError> {
-    match &resolution.route {
-        ContractRoute::DynamicTree(artifact) => Ok(artifact),
-        _ => Err(OperationError::UnsupportedTensorContractScope {
-            message: "CUDA member contraction requires a transformed-tree route",
-        }),
-    }
-}
-
-impl StorageContractResolution<f64> {
-    /// Checks, without a device, that this route has a CUDA member replay,
-    /// and returns the device plan entries one workspace holds: distinct core
-    /// GEMM shapes, core zero fills, and each stage's zero fills and scaled
-    /// moves.
-    #[doc(hidden)]
-    pub fn admit_cuda_dynamic_tree_members(&self) -> Result<usize, OperationError> {
-        let artifact = dynamic_tree(self)?;
-        self.admit_cuda_inactive_regions()?;
-        artifact.block_plan.require_identity_direct_replay()?;
-        let mut entries = artifact.block_plan.cuda_direct_plan_entries();
-        let [lhs_scales, rhs_scales] = artifact.stage_scales();
-        for (borrowed, transform, scales) in [
-            (artifact.lhs_borrowed, &artifact.lhs_transform, lhs_scales),
-            (artifact.rhs_borrowed, &artifact.rhs_transform, rhs_scales),
-        ] {
-            if !borrowed {
-                entries +=
-                    CudaSingleMemberRegions::admit_scaled(&transform.transform_structure, scales)?;
-            }
-        }
-        if let Some(output) = &artifact.core_dst {
-            entries += CudaSingleMemberRegions::admit(&output.output_transform_structure)?;
-        }
-        Ok(entries)
     }
 }
 
@@ -967,7 +943,12 @@ where
         _: D,
         _: ContractDestinationInit<D>,
     ) -> Result<(), OperationError> {
-        let workspace = &*self.workspace;
+        let workspace = &mut *self.workspace;
+        if std::mem::take(&mut workspace.fail_before_output) {
+            return Err(OperationError::InvalidArgument {
+                message: "injected CUDA member failure before the output transform",
+            });
+        }
         let output = Stage::Output as usize;
         let (Some(stage), Some(core)) = (&workspace.stages[output], &workspace.buffers[output])
         else {
@@ -981,7 +962,8 @@ where
 /// contraction, through the stage sequence of every eager call. `init` is
 /// [`ContractDestinationInit::Zeroed`] for a fresh zero stack (its core
 /// inactive blocks need no fill) or `Axpby(0)`; anything else, and `alpha`
-/// other than one, is not a member contract.
+/// other than one, is not a member contract. The caller admits the route
+/// once, for every `B`, with [`StorageContractResolution::admit_cuda_members`].
 ///
 /// Every structural and region check finishes before the first device
 /// submission; a warm call at an unchanged `B` transfers nothing, and a
@@ -1002,8 +984,6 @@ pub fn execute_storage_contract_members_cuda<D>(
 where
     D: CudaScalar + RecouplingCoefficientAction<f64> + num_traits::Zero,
 {
-    // Core and CopyC members still run `ContractPlan::run_cuda` (#1859 C2).
-    dynamic_tree(resolution)?;
     execute_route_cuda(
         &mut MemberCudaStage {
             workspace,
