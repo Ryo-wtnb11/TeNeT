@@ -106,16 +106,44 @@ where
             eager_d.materialize().unwrap().dense_data().unwrap(),
             terms,
         );
+        // The plan's spectra come from the factorization with vectors, eager
+        // `eigh_vals` from the values-only driver call; a LAPACK provider may
+        // round those two routines differently, so the sectors match exactly
+        // and the values to the numerics rule.
+        let eager_spectra = input
+            .eigh_vals(
+                &codomain_axes(input),
+                &domain_axes(input),
+                HermitianTol::DEFAULT,
+            )
+            .unwrap();
+        assert_eq!(
+            output.spectra[member].len(),
+            eager_spectra.len(),
+            "{what}: spectra sectors"
+        );
+        for (got, want) in output.spectra[member].iter().zip(&eager_spectra) {
+            assert!(got.sector == want.sector, "{what}: spectra sector order");
+            numerics::assert_slices_close(
+                &format!("{what}: spectra"),
+                &got.values,
+                &want.values,
+                terms,
+            );
+        }
+        // On faer the values-only and full drivers agree bitwise.
+        #[cfg(all(
+            feature = "cpu-faer",
+            not(any(
+                feature = "cpu-blas",
+                feature = "blas-accelerate",
+                feature = "blas-openblas",
+                feature = "blas-mkl"
+            ))
+        ))]
         assert!(
-            output.spectra[member]
-                == input
-                    .eigh_vals(
-                        &codomain_axes(input),
-                        &domain_axes(input),
-                        HermitianTol::DEFAULT
-                    )
-                    .unwrap(),
-            "{what}: spectra"
+            output.spectra[member] == eager_spectra,
+            "{what}: spectra bitwise"
         );
         check_member(&what, input, &d, &v, (&eager_d, &eager_v), f64::EPSILON);
     }

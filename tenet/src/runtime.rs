@@ -2039,6 +2039,7 @@ mod tests {
     // The default-feature graph includes faer. This control verifies that its
     // explicit provider path constructs; the adapter's private route test pins
     // the unset compiled-default selection separately.
+    #[cfg(feature = "cpu-faer")]
     #[test]
     fn transform_ops_builds_for_every_faer_config() {
         let faer = tenet_dense::CpuBackendKind::Faer;

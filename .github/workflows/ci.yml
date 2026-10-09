@@ -129,13 +129,16 @@ jobs:
       # provider takes (#1163). `accelerate` carries the runtime gate because
       # its vendor is the system framework, so linking a test binary needs no
       # setup its runner lacks; `cpu-blas` selects no vendor at all. Scoped to
-      # the two crates that own the path: the workspace suite is red here for
-      # an unrelated 1-ULP equality in tenet-rs's truncated-SVD adjoint gate.
+      # the two crates that own the path; tenet-rs runs in its own step below.
       - name: Run the BLAS full-SVD suites
         working-directory: tenet
         run: |
           cargo test --locked -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --tests
           cargo test --locked -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --doc
+      # The facade integration tests under the system BLAS/LAPACK (#2107).
+      - name: Run the tenet-rs tests under Accelerate
+        working-directory: tenet
+        run: cargo test --locked -p tenet-rs --tests --no-default-features --features blas-accelerate
 
   # opt-path (wraps opt-einsum-path) and cotengra-python (shells out to an
   # installed Python `cotengra`) have real code but, unlike the backend rows

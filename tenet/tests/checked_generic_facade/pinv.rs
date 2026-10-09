@@ -365,42 +365,47 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
 }
 
 #[test]
-fn checked_generic_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
+fn checked_generic_pinv_of_a_nan_tensor_is_invalid_argument() {
     // What: the staged checked-Generic pinv never publishes a finite answer
-    // for a NaN payload. Today's CPU backend refuses the NaN SVD before the
-    // cutoff, so that typed error is pinned; a backend returning NaN singular
-    // values would reach `pinv_cutoff` and answer `Error::InvalidArgument`.
+    // for a NaN payload; the finite-input stage answers `InvalidArgument`
+    // before any provider SVD, so the kind does not depend on the provider.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let bond =
         GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)]).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, _| {
-            if trees.coupled() == &Label::Vacuum {
-                4.0
-            } else {
-                f64::NAN
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &Label::Vacuum {
+                    4.0
+                } else {
+                    bad
+                }
+            })
+            .unwrap();
+        for (case, result) in [
+            ("f64", source.pinv(&[0], &[1], 0.5).map(|_| ())),
+            (
+                "c64",
+                source
+                    .convert::<Complex64>()
+                    .pinv(&[0], &[1], 0.5)
+                    .map(|_| ()),
+            ),
+        ] {
+            match result {
+                Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                    assert!(message.contains("must be finite"), "{case}: {message}")
+                }
+                other => panic!("{case}: expected InvalidArgument, got {other:?}"),
             }
-        })
-        .unwrap();
-    for (case, result) in [
-        ("f64", source.pinv(&[0], &[1], 0.5).map(|_| ())),
-        (
-            "c64",
-            source
-                .convert::<Complex64>()
-                .pinv(&[0], &[1], 0.5)
-                .map(|_| ()),
-        ),
-    ] {
-        match result {
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error))) => {
-                assert!(
-                    matches!(*error, tenet::typed::OperationError::Dense(_)),
-                    "{case}: {error:?}"
-                )
+        }
+        // rcond validation precedes the finite scan.
+        match source.pinv(&[0], &[1], -1.0) {
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                assert!(message.contains("rcond"), "{message}")
             }
-            other => panic!("{case}: expected the backend SVD rejection, got {other:?}"),
+            other => panic!("expected the rcond error, got {:?}", other.map(|_| ())),
         }
     }
 }

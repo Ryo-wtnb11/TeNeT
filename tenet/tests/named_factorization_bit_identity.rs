@@ -204,7 +204,17 @@ fn check(label: &str, actual: &[(u64, u64)], structure: &[u64; 20], exact: &[u64
     for ((name, actual), expected) in NAMES.iter().zip(actual).zip(structure) {
         assert_eq!(actual.0, *expected, "{label} {name} structure");
     }
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    if cfg!(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "cpu-faer",
+        not(any(
+            feature = "cpu-blas",
+            feature = "blas-accelerate",
+            feature = "blas-openblas",
+            feature = "blas-mkl"
+        ))
+    )) {
         for ((name, actual), expected) in NAMES.iter().zip(actual).zip(exact) {
             assert_eq!(actual.1, *expected, "{label} {name} exact");
         }
