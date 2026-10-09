@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use num_traits::ToPrimitive;
 
@@ -18,9 +19,80 @@ const IDENTITY_SCHEMA: u64 = 0x5355_4e5f_434f_4445;
 pub struct SUNFusionRule {
     n: usize,
     identity: RuleIdentity,
+    irreps: Arc<IrrepTable>,
 }
 
-// The identity is a pure function of `n`, so equality and hashing ignore it.
+/// Most sectors one rule interns. A full table still answers every query:
+/// misses are converted per call exactly as before (#2120).
+const IRREP_TABLE_CAPACITY: usize = 1 << 16;
+
+/// Interned `SectorId <-> racah Irrep` pairs and duals of one SU(N) rule (#2120).
+///
+/// The codec is a bijection between ids and SU(`n`) irreps fixed by `n`, so
+/// either side is a complete key for the other, and the dual is a function of
+/// the id. Entries are immutable once inserted and only successful
+/// conversions are stored, so errors are recomputed per call. At most
+/// [`IRREP_TABLE_CAPACITY`] pairs, each one `Arc<Irrep>` (`n` `i64`s) shared
+/// by both maps, and as many dual entries. Clones of a rule share the table;
+/// readers take a shared lock.
+#[derive(Default)]
+struct IrrepTable(RwLock<IrrepMaps>);
+
+#[derive(Default)]
+struct IrrepMaps {
+    by_id: HashMap<SectorId, Arc<racah::sun::Irrep>>,
+    by_irrep: HashMap<Arc<racah::sun::Irrep>, SectorId>,
+    duals: HashMap<SectorId, SectorId>,
+}
+
+impl fmt::Debug for IrrepTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IrrepTable").finish_non_exhaustive()
+    }
+}
+
+impl IrrepTable {
+    fn by_id(&self, sector: SectorId) -> Option<Arc<racah::sun::Irrep>> {
+        let maps = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        maps.by_id.get(&sector).cloned()
+    }
+
+    fn by_irrep(&self, irrep: &racah::sun::Irrep) -> Option<SectorId> {
+        let maps = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        maps.by_irrep.get(irrep).copied()
+    }
+
+    fn dual(&self, sector: SectorId) -> Option<SectorId> {
+        let maps = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        maps.duals.get(&sector).copied()
+    }
+
+    /// Records `sector <-> dual`; duality is an involution.
+    fn insert_dual(&self, sector: SectorId, dual: SectorId) {
+        let mut maps = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        if maps.duals.len() < IRREP_TABLE_CAPACITY {
+            maps.duals.insert(sector, dual);
+            maps.duals.insert(dual, sector);
+        }
+    }
+
+    /// Records a pair and returns the interned irrep (the first one inserted
+    /// when threads race on the same sector).
+    fn insert(&self, sector: SectorId, irrep: Arc<racah::sun::Irrep>) -> Arc<racah::sun::Irrep> {
+        let mut maps = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = maps.by_id.get(&sector) {
+            return existing.clone();
+        }
+        if maps.by_id.len() < IRREP_TABLE_CAPACITY {
+            maps.by_id.insert(sector, irrep.clone());
+            maps.by_irrep.insert(irrep.clone(), sector);
+        }
+        irrep
+    }
+}
+
+// The identity and the irrep table are pure functions of `n`, so equality and
+// hashing ignore them.
 impl PartialEq for SUNFusionRule {
     fn eq(&self, other: &Self) -> bool {
         self.n == other.n
@@ -155,7 +227,11 @@ impl SUNFusionRule {
             std::hash::Hasher::finish(&hasher),
             Self::identity_bytes(n),
         );
-        Ok(Self { n, identity })
+        Ok(Self {
+            n,
+            identity,
+            irreps: Arc::default(),
+        })
     }
 
     pub const fn rank(&self) -> usize {
@@ -281,9 +357,22 @@ impl SUNFusionRule {
         Arc::from(bytes)
     }
 
-    fn irrep(&self, sector: SectorId) -> Result<racah::sun::Irrep, SUNFusionRuleError> {
+    fn irrep(&self, sector: SectorId) -> Result<Arc<racah::sun::Irrep>, SUNFusionRuleError> {
+        if let Some(irrep) = self.irreps.by_id(sector) {
+            return Ok(irrep);
+        }
         let labels = self.decode_dynkin(sector)?;
-        racah::sun::Irrep::from_dynkin(&labels).map_err(racah_error)
+        let irrep = racah::sun::Irrep::from_dynkin(&labels).map_err(racah_error)?;
+        Ok(self.irreps.insert(sector, Arc::new(irrep)))
+    }
+
+    fn sector(&self, irrep: &racah::sun::Irrep) -> Result<SectorId, SUNFusionRuleError> {
+        if let Some(sector) = self.irreps.by_irrep(irrep) {
+            return Ok(sector);
+        }
+        let sector = self.encode_dynkin(&irrep.dynkin())?;
+        self.irreps.insert(sector, Arc::new(irrep.clone()));
+        Ok(sector)
     }
 
     fn dim_scalar(&self, sector: SectorId) -> Result<f64, SUNFusionRuleError> {
@@ -313,7 +402,12 @@ impl CheckedGenericFusion for SUNFusionRule {
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        self.encode_dynkin(&self.irrep(sector)?.dual().dynkin())
+        if let Some(dual) = self.irreps.dual(sector) {
+            return Ok(dual);
+        }
+        let dual = self.sector(&self.irrep(sector)?.dual())?;
+        self.irreps.insert_dual(sector, dual);
+        Ok(dual)
     }
 
     fn try_fusion_channels(
@@ -321,12 +415,11 @@ impl CheckedGenericFusion for SUNFusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
+        let product = racah::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
             .map_err(racah_error)?;
         let mut channels: SectorVec = product
             .iter()
-            .map(|(irrep, _)| irrep)
-            .map(|irrep| self.encode_dynkin(&irrep.dynkin()))
+            .map(|(irrep, _)| self.sector(irrep))
             .collect::<Result<_, _>>()?;
         channels.sort_unstable();
         Ok(channels)
@@ -346,9 +439,9 @@ impl CheckedGenericFusion for SUNFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
-        let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
+        let product = racah::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
             .map_err(racah_error)?;
-        Ok(product.multiplicity(&self.irrep(coupled)?) as usize)
+        Ok(product.multiplicity(&*self.irrep(coupled)?) as usize)
     }
 }
 
@@ -412,12 +505,12 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         f: SectorId,
     ) -> Result<GenericFArray<f64>, Self::Error> {
         let block = racah::sun::f_symbol(
-            &self.irrep(a)?,
-            &self.irrep(b)?,
-            &self.irrep(c)?,
-            &self.irrep(d)?,
-            &self.irrep(e)?,
-            &self.irrep(f)?,
+            &*self.irrep(a)?,
+            &*self.irrep(b)?,
+            &*self.irrep(c)?,
+            &*self.irrep(d)?,
+            &*self.irrep(e)?,
+            &*self.irrep(f)?,
         )
         .map_err(racah_error)?;
         let [mu, nu, kappa, lambda] = block.dims();
@@ -431,7 +524,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<f64>, Self::Error> {
-        let block = racah::sun::r_symbol(&self.irrep(a)?, &self.irrep(b)?, &self.irrep(c)?)
+        let block = racah::sun::r_symbol(&*self.irrep(a)?, &*self.irrep(b)?, &*self.irrep(c)?)
             .map_err(racah_error)?;
         GenericRMatrix::try_new(block.data().to_vec(), block.dim(), block.dim())
             .map_err(SUNFusionRuleError::MalformedSymbolData)
@@ -728,6 +821,31 @@ mod tests {
             hasher.finish()
         };
         assert_ne!(hash(&su3), hash(&su4));
+    }
+
+    #[test]
+    fn irreps_and_duals_are_interned_once_per_sector() {
+        let rule = SUNFusionRule::new(3).unwrap();
+        let three = rule.encode_dynkin(&[1, 0]).unwrap();
+        let eight = rule.encode_dynkin(&[1, 1]).unwrap();
+        let first = rule.irrep(three).unwrap();
+        assert!(Arc::ptr_eq(&first, &rule.irrep(three).unwrap()));
+        assert!(Arc::ptr_eq(&first, &rule.clone().irrep(three).unwrap()));
+        assert_eq!(*first, racah::sun::Irrep::from_dynkin(&[1, 0]).unwrap());
+        assert_ne!(*rule.irrep(eight).unwrap(), *first);
+        assert_eq!(rule.sector(&first).unwrap(), three);
+
+        let anti_three = rule.encode_dynkin(&[0, 1]).unwrap();
+        assert_eq!(rule.irreps.dual(three), None);
+        assert_eq!(rule.try_dual(three).unwrap(), anti_three);
+        assert_eq!(rule.irreps.dual(three), Some(anti_three));
+        assert_eq!(rule.irreps.dual(anti_three), Some(three));
+
+        // Failed conversions are not interned.
+        let su2 = SUNFusionRule::new(2).unwrap();
+        let wide = SUNFusionRule::new(4).unwrap().irrep(three).unwrap();
+        assert!(su2.sector(&wide).is_err());
+        assert!(su2.sector(&wide).is_err());
     }
 
     #[test]
