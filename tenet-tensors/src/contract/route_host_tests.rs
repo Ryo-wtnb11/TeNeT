@@ -1,13 +1,18 @@
 //! #1859 Host H1: the DynamicTree route has one Host executor for eager and
 //! member (any B) replays.
 //!
-//! The characterization tables pin the exact output bits of the eager and
-//! member DynamicTree replays (alpha/beta placement, `Zeroed`, signed zeros,
-//! non-finite operands) on exactly representable data, so every sum is exact
-//! and only the executor's operation placement decides the bits. They were
-//! recorded on `d416b1a2` (before the executor merge) and must not change.
+//! The characterization compares, bit for bit, the executor against `d416b1a2`'s
+//! eager step sequence spelled with the replay primitives
+//! ([`base_sequence`]), for every alpha/beta placement, `Zeroed`, signed-zero
+//! and non-finite case. Both run the same dense kernels on the same machine,
+//! so the comparison is exact on every platform. The pinned digests then tie
+//! the values to `d416b1a2` across platforms: they fold signed zeros and NaNs
+//! to one pattern each, because the sign of an exactly-zero GEMM sum and of a
+//! default NaN are decided by the dense backend's architecture-specific
+//! kernels (macOS AArch64 and Linux x86-64 differ), not by the executor.
 
 use super::*;
+use crate::contract::fusion_block::{BackendRank2Gemm, FusionBlockContractWorkspace};
 use tenet_operations::ContractDestinationInit;
 
 /// Exactly representable payload in `{-2, -1, ±0, 1, 2}`.
@@ -24,9 +29,21 @@ fn exact_data(len: usize, salt: usize) -> Vec<f64> {
         .collect()
 }
 
+/// The platform-independent part of a value's bits: one pattern for every
+/// NaN and for both zeros.
+fn portable_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
 fn fnv(digest: &mut u64, values: &[f64]) {
-    for value in values {
-        for byte in value.to_bits().to_le_bytes() {
+    for &value in values {
+        for byte in portable_bits(value).to_le_bytes() {
             *digest ^= u64::from(byte);
             *digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -34,6 +51,10 @@ fn fnv(digest: &mut u64, values: &[f64]) {
 }
 
 const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
 
 /// The DynamicTree fixtures: U(1) identity output with and without an
 /// inactive core block, U(1) source and output transforms, and a twisted
@@ -91,8 +112,112 @@ fn inits() -> [(ContractDestinationInit<f64>, Option<f64>); 5] {
     ]
 }
 
-/// One eager replay per `(alpha, init)` plus a non-finite operand replay,
-/// folded into one digest.
+/// `d416b1a2`'s eager DynamicTree step sequence, spelled with the replay
+/// primitives and fresh resources: overwrite each owned source into zeroed
+/// scratch (with its twist scales), `execute_raw(alpha, beta)` into the
+/// destination for an identity output, else `execute_raw(alpha, 0)` into a
+/// zeroed core destination and `into(1, beta)`; `beta = init.active_beta()`.
+#[allow(clippy::too_many_arguments)]
+fn base_sequence(
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    dst_structure: &Arc<tenet_core::BlockStructure>,
+    dst: &mut [f64],
+    lhs: &[f64],
+    rhs: &[f64],
+    alpha: f64,
+    init: ContractDestinationInit<f64>,
+) {
+    let beta = init.active_beta();
+    let mut tree = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
+        DenseTreeTransformOperations::default(),
+    );
+    let [lhs_scales, rhs_scales] = artifact.stage_scales();
+    let mut source = |space: &crate::DynamicFusionMapSpace,
+                      structure: &crate::TreeTransformStructure<f64>,
+                      replay: &Arc<tenet_core::BlockStructure>,
+                      borrowed: bool,
+                      data: &[f64],
+                      scales: &[(usize, f64)]| {
+        if borrowed {
+            return data.to_vec();
+        }
+        let mut scratch = vec![0.0; space.required_len().unwrap()];
+        tree.tree_transform_structure_overwrite_into_raw(
+            structure,
+            space.structure(),
+            replay,
+            &mut scratch,
+            data,
+            1.0,
+            scales,
+        )
+        .unwrap();
+        scratch
+    };
+    let (l, r) = (&artifact.lhs_transform, &artifact.rhs_transform);
+    let lhs_core = source(
+        &l.space,
+        &l.transform_structure,
+        &l.replay_structure,
+        artifact.lhs_borrowed,
+        lhs,
+        lhs_scales,
+    );
+    let rhs_core = source(
+        &r.space,
+        &r.transform_structure,
+        &r.replay_structure,
+        artifact.rhs_borrowed,
+        rhs,
+        rhs_scales,
+    );
+    let (left, right) = artifact.core_order(&lhs_core[..], &rhs_core[..]);
+    let (left_structure, right_structure) = artifact.core_order(
+        artifact.lhs_transform.space.structure(),
+        artifact.rhs_transform.space.structure(),
+    );
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+    let mut gemm = BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut backend_workspace);
+    let mut core = |out_structure: &Arc<tenet_core::BlockStructure>, out: &mut [f64], beta| {
+        artifact
+            .block_plan
+            .execute_raw(
+                &mut crate::StridedHostKernelAdapter::default(),
+                &mut gemm,
+                &mut FusionBlockContractWorkspace::default(),
+                out_structure,
+                out,
+                left_structure,
+                left,
+                right_structure,
+                right,
+                alpha,
+                beta,
+            )
+            .unwrap()
+    };
+    match &artifact.core_dst {
+        None => core(dst_structure, dst, beta),
+        Some(output) => {
+            let mut core_dst = vec![0.0; output.space.required_len().unwrap()];
+            core(output.space.structure(), &mut core_dst, 0.0);
+            tree.tree_transform_structure_into_raw(
+                &output.output_transform_structure,
+                dst_structure,
+                output.space.structure(),
+                dst,
+                &core_dst,
+                1.0,
+                beta,
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// Every eager `(alpha, init)` replay plus non-finite operand replays: each
+/// bit-identical to [`base_sequence`]; the portable digest of all outputs.
 fn eager_digest<R>(case: &Case<R>) -> u64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -102,13 +227,38 @@ where
     let len = dst.space().required_len().unwrap();
     let lhs = exact_data(case.lhs.space().required_len().unwrap(), 1);
     let rhs = exact_data(case.rhs.space().required_len().unwrap(), 3);
+    let resolution = Context::<f64>::default()
+        .plan_contract::<crate::contract::HostEagerExecutor, _>(
+            &dst,
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+        )
+        .unwrap();
+    let crate::contract::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+    else {
+        panic!("eager must plan DynamicTree");
+    };
     let mut digest = FNV_START;
     let mut context = Context::<f64>::default();
-    let mut run = |lhs: &[f64], alpha: f64, init: ContractDestinationInit<f64>, out: &mut [f64]| {
+    let mut run = |lhs: &[f64], alpha: f64, init: ContractDestinationInit<f64>, out: Vec<f64>| {
+        let mut expected = out.clone();
+        base_sequence(
+            artifact,
+            dst.space().structure(),
+            &mut expected,
+            lhs,
+            &rhs,
+            alpha,
+            init,
+        );
+        let mut actual = out;
         context
             .tensorcontract_fusion_dyn_prelowered_into_with_init(
                 &dst,
-                out,
+                &mut actual,
                 FusionOperand::direct(case.lhs.space()),
                 lhs,
                 FusionOperand::direct(case.rhs.space()),
@@ -120,16 +270,17 @@ where
             .unwrap();
         assert!(!context.last_resolution_is_core());
         assert!(context.last_resolution_orientation().is_some());
+        assert_eq!(bits(&actual), bits(&expected), "alpha {alpha}, {init:?}");
+        fnv(&mut digest, &actual);
     };
     for alpha in [0.0, 1.0, -1.0, 2.5] {
         for (init, read) in inits() {
-            let mut out = match (init, read) {
+            let out = match (init, read) {
                 (ContractDestinationInit::Zeroed, _) => vec![0.0; len],
                 (_, None) => vec![f64::NAN; len],
                 (_, Some(_)) => exact_data(len, 11),
             };
-            run(&lhs, alpha, init, &mut out);
-            fnv(&mut digest, &out);
+            run(&lhs, alpha, init, out);
         }
     }
     let mut poisoned = lhs.clone();
@@ -138,20 +289,21 @@ where
         poisoned[1] = f64::INFINITY;
     }
     for alpha in [0.0, 1.0] {
-        let mut out = exact_data(len, 11);
         run(
             &poisoned,
             alpha,
             ContractDestinationInit::Axpby(1.0),
-            &mut out,
+            exact_data(len, 11),
         );
-        fnv(&mut digest, &out);
     }
     digest
 }
 
-/// Member replays of the planner's artifact at B = 1, 2 into NaN-poisoned
-/// destinations, folded into one digest.
+/// Member replays of the planner's artifact at B = 1, 2, 1 into NaN-poisoned
+/// destinations: B = 1 bit-identical to [`base_sequence`] with unit alpha
+/// and strong-zero beta, every member at B = 2 equal to it up to the
+/// backend's zero and NaN signs (a batched GEMM may sign an exact zero
+/// differently); the portable digest of all outputs.
 fn member_digest<R>(case: &Case<R>) -> u64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -182,6 +334,30 @@ where
             members,
         )
         .unwrap();
+        for member in 0..members {
+            let mut expected = vec![f64::NAN; len];
+            base_sequence(
+                artifact,
+                dst.space().structure(),
+                &mut expected,
+                &lhs[member * lhs_len..(member + 1) * lhs_len],
+                &rhs[member * rhs_len..(member + 1) * rhs_len],
+                1.0,
+                ContractDestinationInit::Axpby(0.0),
+            );
+            let actual = &out[member * len..(member + 1) * len];
+            if members == 1 {
+                assert_eq!(bits(actual), bits(&expected), "B = 1");
+            } else {
+                let portable =
+                    |values: &[f64]| values.iter().map(|&v| portable_bits(v)).collect::<Vec<_>>();
+                assert_eq!(
+                    portable(actual),
+                    portable(&expected),
+                    "B = {members}, member {member}"
+                );
+            }
+        }
         fnv(&mut digest, &out);
     }
     digest
@@ -212,12 +388,14 @@ pub(super) fn run_members(
     )
 }
 
-/// Recorded on `d416b1a2`: `(fixture, eager digest, member digest)`.
+/// Portable digests (see [`portable_bits`]), identical for `d416b1a2` and this
+/// executor, on macOS AArch64 and on Linux x86-64:
+/// `(fixture, eager digest, member digest)`.
 const PINNED: [(&str, u64, u64); 4] = [
     (
         "transformed lhs, identity output, inactive block",
-        0x8f9e_882e_4f9e_d814,
-        0xa52a_4ee5_0ad3_cdcd,
+        0x42d6_b575_aa34_ae94,
+        0x04b5_09ec_131c_53cd,
     ),
     (
         "transformed rhs, identity output, fully covered",
@@ -231,8 +409,8 @@ const PINNED: [(&str, u64, u64); 4] = [
     ),
     (
         "fermionic twisted",
-        0x057a_e7e0_ebf2_98e6,
-        0x77ce_6c67_abe8_f0d5,
+        0xe236_3de9_d940_c5e6,
+        0xfe76_0e2e_41d4_0855,
     ),
 ];
 
