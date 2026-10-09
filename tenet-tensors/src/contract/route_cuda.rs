@@ -562,6 +562,8 @@ pub struct CudaContractMembersWorkspace<S> {
     buffers: [Option<S>; 3],
     /// Core inactive blocks of a directly written destination, per member.
     core_zeros: Vec<CudaRegion>,
+    /// Elements of the largest `core_zeros` block, before the member axis.
+    core_zero_len: usize,
     /// Member lengths of the core destination, the core's left operand and
     /// its right operand.
     lens: [usize; 3],
@@ -579,6 +581,7 @@ impl<S> Default for CudaContractMembersWorkspace<S> {
             coefficients: [None, None, None],
             buffers: [None, None, None],
             core_zeros: Vec::new(),
+            core_zero_len: 0,
             lens: [0; 3],
             #[cfg(any(test, feature = "testing"))]
             fail_before_output: false,
@@ -632,7 +635,7 @@ impl<D: CudaScalar> CudaContractMembersWorkspace<CudaStorage<D>> {
 }
 
 /// The per-call member contract every route's member replay admits, checked
-/// without a device: overwrite only (`alpha = 1`, a fresh zero destination or
+/// without a device: overwrite only (`alpha = 1`, a born-zero destination or
 /// `Axpby(0)`), at least one member.
 fn admit_member_call<D: CudaScalar>(
     alpha: D,
@@ -680,7 +683,7 @@ impl<D> MemberCudaStage<'_, D>
 where
     D: CudaScalar + RecouplingCoefficientAction<f64>,
 {
-    /// Validates every structure, region and template for `members` and
+    /// Validates every structure and region for `members` and
     /// installs them; nothing is submitted. A changed resolution empties the
     /// workspace first, so a failure leaves nothing a later call trusts.
     /// Stacks are replaced only above the high-water capacity (#1746).
@@ -740,27 +743,16 @@ where
                 members,
             )?);
         }
-        let mut zero_len = 0;
         let mut core_zeros = Vec::new();
+        let mut core_zero_len = 0;
         if route.output.is_none() {
             let zeros = CudaMemberZeroRegions::prepare(
                 route.plan.inactive_destination_regions(),
                 dst_len,
                 members,
             )?;
-            zero_len = zeros.max_zero_len();
+            core_zero_len = zeros.max_zero_len();
             core_zeros = zeros.into_regions();
-        }
-        let mut any_zero = !core_zeros.is_empty();
-        for stage in stages.iter().flatten() {
-            zero_len = zero_len.max(stage.max_zero_len());
-            any_zero |= !stage.zeros().is_empty();
-        }
-        ctx.reserve_zero_template::<D>(stack_len(zero_len, members)?)
-            .map_err(OperationError::Dense)?;
-        if any_zero {
-            ctx.reserve_ones_template::<D>(1)
-                .map_err(OperationError::Dense)?;
         }
         for (slot, stage) in workspace.coefficients.iter_mut().zip(&stages) {
             if let Some(stage) = stage.as_ref().filter(|stage| stage.has_scaled_moves()) {
@@ -795,6 +787,7 @@ where
         }
         workspace.stages = stages;
         workspace.core_zeros = core_zeros;
+        workspace.core_zero_len = core_zero_len;
         workspace.lens = [core_len, left.required_len()?, right.required_len()?];
         workspace.prepared = Some((Arc::clone(self.resolution), members));
         Ok(())
@@ -822,7 +815,7 @@ where
         members: usize,
         alpha: D,
         init: ContractDestinationInit<D>,
-        _: ContractDestinationInit<D>,
+        core_init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError> {
         admit_member_call(alpha, init, members)?;
         // A copied source reads the caller's payload layout; a borrowed one is
@@ -851,11 +844,30 @@ where
             .is_some_and(|(resolution, prepared)| {
                 *prepared == members && Arc::ptr_eq(resolution, self.resolution)
             });
-        if prepared {
-            Ok(())
-        } else {
-            self.prepare(ctx, route, dst_structure, members)
+        if !prepared {
+            self.prepare(ctx, route, dst_structure, members)?;
         }
+        // The templates of the fills this call submits, so they upload
+        // nothing. The transform stages fill on every call; the core fills
+        // only for `Axpby`, so a caller that never fills it pins no template
+        // for it (#2123).
+        let workspace = &*self.workspace;
+        let core_fill = (inactive_blocks_need_beta(core_init) && !workspace.core_zeros.is_empty())
+            .then_some(workspace.core_zero_len);
+        let stages = workspace.stages.iter().flatten();
+        let zero_len = stages
+            .clone()
+            .map(CudaSingleMemberRegions::max_zero_len)
+            .chain(core_fill)
+            .max()
+            .unwrap_or(0);
+        ctx.reserve_zero_template::<D>(stack_len(zero_len, members)?)
+            .map_err(OperationError::Dense)?;
+        if core_fill.is_some() || stages.into_iter().any(|stage| !stage.zeros().is_empty()) {
+            ctx.reserve_ones_template::<D>(1)
+                .map_err(OperationError::Dense)?;
+        }
+        Ok(())
     }
 
     fn source(
@@ -969,8 +981,9 @@ where
 
 /// Overwrites each of `members` member-major destination members with its
 /// contraction, through the stage sequence of every eager call. `init` is
-/// [`ContractDestinationInit::Zeroed`] for a fresh zero stack (its core
-/// inactive blocks need no fill) or `Axpby(0)`; anything else, and `alpha`
+/// [`ContractDestinationInit::Zeroed`] for a stack whose core inactive
+/// blocks are already zero (they get no fill, and the call reserves no
+/// template for one) or `Axpby(0)`; anything else, and `alpha`
 /// other than one, is not a member contract. The caller admits the route
 /// once, for every `B`, with [`StorageContractResolution::admit_cuda_members`].
 ///

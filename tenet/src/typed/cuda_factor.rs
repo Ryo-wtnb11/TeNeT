@@ -475,13 +475,14 @@ pub(crate) fn fill_diagonal_values<D: CudaPayload>(
     data: &mut [D],
     spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
 ) -> Result<(), Error> {
+    let mut cursor = super::fusion_tree::SpectrumCursor::default();
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
         let BlockKey::FusionTree(tree) = block.key() else {
             continue;
         };
         let sector = tree.codomain_tree().coupled();
-        let Some(entry) = spectra.iter().find(|entry| entry.sector == sector) else {
+        let Some(entry) = cursor.find(spectra, sector) else {
             continue;
         };
         let strides = block.strides();

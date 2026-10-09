@@ -308,6 +308,32 @@ fn run_route_members<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    run_route_members_with(
+        resolution,
+        case,
+        workspace,
+        dst,
+        lhs,
+        rhs,
+        members,
+        ContractDestinationInit::Axpby(0.0),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_route_members_with<R>(
+    resolution: &crate::contract::StorageContractResolution<f64>,
+    case: &Case<R>,
+    workspace: &mut crate::contract::HostContractMembersWorkspace<f64>,
+    dst: &mut [f64],
+    lhs: &[f64],
+    rhs: &[f64],
+    members: usize,
+    init: ContractDestinationInit<f64>,
+) -> Result<(), crate::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     crate::contract::route_host::execute_members_host(
         &mut DenseTreeTransformOperations::default(),
         &mut DenseTreeTransformOperations::default(),
@@ -324,6 +350,7 @@ where
         lhs,
         rhs,
         members,
+        init,
     )
 }
 
@@ -603,5 +630,110 @@ fn a_failed_copy_c_member_replay_refills_its_temporary_on_retry() {
         assert_eq!(fills(members, true, &mut dirty), None);
         assert_eq!(fills(members, false, &mut dirty), Some(1));
         assert_eq!(fills(members, false, &mut dirty), Some(0));
+    }
+}
+
+/// Bits with `-0` folded into `+0`: the overwrite kernel accumulates onto a
+/// zero pass, so it may turn a `-0` the `beta = 0` kernel writes into `+0`.
+fn folded_bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| (value + 0.0).to_bits()).collect()
+}
+
+#[test]
+fn zeroed_member_replays_skip_the_fills_of_a_born_zero_destination() {
+    // What (#2123): into a destination born zero and reused across
+    // B = 1, 2, 17, 1 with changed inputs on every call, `Zeroed` (the
+    // `ContractPlan::execute` init) gives the bits `Axpby(0)` gives into a
+    // NaN-poisoned destination. A directly written destination gets no
+    // inactive fill under `Zeroed` and one per call under `Axpby(0)`; a
+    // workspace core destination's fills do not depend on `init`; the
+    // `B = 1` output transform runs the overwrite kernel exactly under
+    // `Zeroed`.
+    let mut fixtures: Vec<_> = core_fixtures()
+        .into_iter()
+        .map(|(name, case, _)| (name, case))
+        .collect();
+    fixtures.push((
+        "dynamicTree identity output, inactive block",
+        overwrite_cases().remove(1).1,
+    ));
+    fixtures.push(("dynamicTree source and output transforms", u1_case()));
+    for (name, case) in fixtures {
+        let resolution = member_resolution(&case);
+        let route = crate::contract::route_host::RouteView::of(
+            &resolution.route,
+            case.lhs.space().structure(),
+            case.rhs.space().structure(),
+        );
+        let direct = route.output.is_none();
+        if name.contains("inactive") {
+            assert!(
+                !route.plan.inactive_destination_regions().is_empty(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            resolution.is_dynamic_tree(),
+            name.starts_with("dynamicTree"),
+            "{name}"
+        );
+        let len = case.dst().space().required_len().unwrap();
+        let lhs_len = case.lhs.space().required_len().unwrap();
+        let rhs_len = case.rhs.space().required_len().unwrap();
+        let mut zeroed = crate::contract::HostContractMembersWorkspace::default();
+        let mut axpby = crate::contract::HostContractMembersWorkspace::default();
+        let counters = |workspace: &crate::contract::HostContractMembersWorkspace<f64>| {
+            [
+                workspace.core_inactive_fills(),
+                workspace.output_overwrites(),
+            ]
+        };
+        let mut born = Vec::new();
+        for (call, members) in [1, 2, 17, 1].into_iter().enumerate() {
+            if born.len() != len * members {
+                born = vec![0.0; len * members];
+            }
+            for salt in [0, 1] {
+                let lhs = exact_data(lhs_len * members, 1 + 2 * call + salt);
+                let rhs = exact_data(rhs_len * members, 2 + call + 3 * salt);
+                let before = [counters(&zeroed), counters(&axpby)];
+                run_route_members_with(
+                    &resolution,
+                    &case,
+                    &mut zeroed,
+                    &mut born,
+                    &lhs,
+                    &rhs,
+                    members,
+                    ContractDestinationInit::Zeroed,
+                )
+                .unwrap();
+                let mut expected = vec![f64::NAN; len * members];
+                run_route_members_with(
+                    &resolution,
+                    &case,
+                    &mut axpby,
+                    &mut expected,
+                    &lhs,
+                    &rhs,
+                    members,
+                    ContractDestinationInit::Axpby(0.0),
+                )
+                .unwrap();
+                let what = format!("{name}, B = {members}, call {salt}");
+                assert_eq!(folded_bits(&born), folded_bits(&expected), "{what}");
+                let [z, a] = [
+                    (counters(&zeroed), before[0]),
+                    (counters(&axpby), before[1]),
+                ]
+                .map(|(after, before)| [after[0] - before[0], after[1] - before[1]]);
+                if direct {
+                    assert_eq!((z, a), ([0, 0], [1, 0]), "{what}");
+                } else {
+                    assert_eq!(z[0], a[0], "{what}");
+                    assert_eq!((z[1], a[1]), (usize::from(members == 1), 0), "{what}");
+                }
+            }
+        }
     }
 }

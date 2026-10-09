@@ -374,6 +374,9 @@ pub(super) struct CoreSlot<C> {
     builds: usize,
     #[cfg(test)]
     inactive_fills: usize,
+    /// `B = 1` output transforms that ran the overwrite kernel (`Zeroed`).
+    #[cfg(test)]
+    output_overwrites: usize,
     /// Test fault point: the next replay dirties the core destination (as a
     /// previous plan's active results would) and fails before the core.
     #[cfg(test)]
@@ -389,6 +392,8 @@ impl<C> Default for CoreSlot<C> {
             builds: 0,
             #[cfg(test)]
             inactive_fills: 0,
+            #[cfg(test)]
+            output_overwrites: 0,
             #[cfg(test)]
             poison_dst_then_fail: false,
         }
@@ -630,7 +635,7 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
 /// destination.
 ///
 /// `B > 1` admits only the member overwrite contract (`alpha = 1`,
-/// `Axpby(0)`) with a caller-owned core slot, and checks every structure,
+/// `Axpby(0)` or `Zeroed`) with a caller-owned core slot, and checks every structure,
 /// length and transform before the first write. At `B = 1` each stage
 /// validates its inputs before its first write and only the last stage writes
 /// `dst`, so a validation error leaves `dst` unchanged at every `B`.
@@ -682,9 +687,11 @@ where
 
     let mut stacked = None;
     if members != 1 {
-        if alpha != D::one()
-            || !matches!(init, ContractDestinationInit::Axpby(beta) if beta.is_zero())
-        {
+        let overwrite = match init {
+            ContractDestinationInit::Zeroed => true,
+            ContractDestinationInit::Axpby(beta) => beta.is_zero(),
+        };
+        if alpha != D::one() || !overwrite {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "member contraction overwrites its destination with unit alpha",
             });
@@ -954,6 +961,11 @@ where
     };
     if let Some(slot) = core {
         slot.inactive_zero = true;
+        #[cfg(test)]
+        {
+            slot.output_overwrites +=
+                usize::from(members == 1 && matches!(init, ContractDestinationInit::Zeroed));
+        }
     }
     let result = timed(
         &mut profile,
@@ -1145,6 +1157,11 @@ impl<D, C: Copy + PartialEq + One> HostContractMembersWorkspace<D, C> {
     }
 
     #[cfg(test)]
+    pub(crate) fn output_overwrites(&self) -> usize {
+        self.core.output_overwrites
+    }
+
+    #[cfg(test)]
     pub(crate) fn poison_dst_then_fail(&mut self) {
         self.core.poison_dst_then_fail = true;
     }
@@ -1168,7 +1185,9 @@ pub(super) enum MemberRoute<'r, C> {
 
 /// Replays one route over uniform member-major Host stacks through the
 /// route executor, with this workspace's slot and per-stage transform
-/// workspaces: `dst = contract(lhs, rhs)` per member.
+/// workspaces: `dst = contract(lhs, rhs)` per member. `init` is `Zeroed`
+/// only for a destination whose inactive blocks are already zero, else
+/// `Axpby(0)`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute_members_host<E, EC, D, C>(
     tree_backend: &mut DenseTreeTransformOperations<E>,
@@ -1182,6 +1201,7 @@ pub(super) fn execute_members_host<E, EC, D, C>(
     lhs: &[D],
     rhs: &[D],
     members: usize,
+    init: ContractDestinationInit<D>,
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
@@ -1227,7 +1247,7 @@ where
         rhs,
         members,
         D::one(),
-        ContractDestinationInit::Axpby(D::zero()),
+        init,
         None,
     )
 }
@@ -1266,5 +1286,6 @@ where
         lhs,
         rhs,
         members,
+        ContractDestinationInit::Axpby(D::zero()),
     )
 }
