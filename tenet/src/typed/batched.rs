@@ -1252,12 +1252,7 @@ where
         labels: &[(SectorId, <R as SectorCodec>::Sector)],
     ) -> Result<Self, Error> {
         let plan = tenet_matrixalgebra::seam::compact_factor_routes(&source.space)?;
-        let routes: Vec<_> = plan
-            .routes()
-            .iter()
-            .filter(|route| route.left_region().is_some() && route.right_region().is_some())
-            .copied()
-            .collect();
+        let routes: Vec<_> = plan.executed_routes().map(|(route, _, _)| *route).collect();
         let left_space = plan.left_space(&source.space)?;
         let middle_space = plan.bond_space(&source.space)?;
         let label_routes = labels
@@ -1369,7 +1364,7 @@ fn route_diagonals<R>(
             match diagonals.iter().find(|entry| entry.0 == sector) {
                 Some(&(_, offset, step, count)) if count == route.rank() => Ok((offset, step)),
                 _ => Err(internal_layout_error(
-                    "CUDA EIGH route has no matching diagonal block",
+                    "an EIGH route has no matching diagonal block",
                 )),
             }
         })

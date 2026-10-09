@@ -78,6 +78,14 @@ impl CompactFactorPlan {
         &self.routes
     }
 
+    /// The nonzero-rank routes with their `(left, right)` factor regions: a
+    /// zero-rank sector has nothing to decompose or publish.
+    pub fn executed_routes(&self) -> impl Iterator<Item = (&CompactFactorRoute, usize, usize)> {
+        self.routes
+            .iter()
+            .filter_map(|route| Some((route, route.left_region?, route.right_region?)))
+    }
+
     /// The left factor space `codomain <- W`, bound to `input`'s provider.
     pub fn left_space<R>(
         &self,
