@@ -6,16 +6,16 @@ pub use cache::{
     admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeTreeTransformCacheInfo,
     TreeTransformOperationView,
 };
+#[cfg(test)]
+pub(crate) use cache::{
+    before_next_completed_publication, take_coefficient_group_activity,
+    take_completed_transformer_activity, take_oriented_tree_pair_compiles,
+    take_trace_column_activity, CoefficientGroupActivity, CompletedActivity,
+};
 pub(crate) use cache::{
     lookup_bound, publish_committed, publishable, CheckedPendingCoefficients,
     CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups,
     TraceColumnReuse, TransformerMode, TreeTransformPlanning, TreeTransformScope,
-};
-#[cfg(test)]
-pub(crate) use cache::{
-    take_coefficient_group_activity, take_completed_transformer_activity,
-    take_oriented_tree_pair_compiles, take_trace_column_activity, CoefficientGroupActivity,
-    CompletedActivity,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
