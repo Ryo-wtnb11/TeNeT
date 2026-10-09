@@ -174,7 +174,7 @@ where
             )
             .map_err(CheckedGenericPlanError::from)
     })?;
-    let destination = Arc::new(prepared.structure().clone());
+    let destination = prepared.shared_structure();
     let replay = <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
         coefficients,
         provider,
@@ -724,7 +724,7 @@ where
             )
             .map_err(CheckedGenericPlanError::from)
         })?;
-    let core_structure = Arc::new(core_destination.structure().clone());
+    let core_structure = core_destination.shared_structure();
     let core_plan = compile_checked_generic_core_plan(
         &core_structure,
         core_destination.nout(),
@@ -735,7 +735,7 @@ where
         core_axes,
     )?;
 
-    let destination_structure = Arc::new(destination.structure().clone());
+    let destination_structure = destination.shared_structure();
     let output_replay = if plan.output_transform_is_identity() {
         None
     } else {
