@@ -1124,8 +1124,8 @@ mod tests {
             let expected: Vec<Complex64> = (0..2).flat_map(oracle).collect();
             assert_eq!(bits(&stacked), bits(&expected));
         }
-        let contiguous = [1..3];
-        let single = [Some(&contiguous[..]), None, None];
+        let contiguous = 1..3;
+        let single = [Some(core::slice::from_ref(&contiguous)), None, None];
         let block = structure(&[(&[2, 3, 1], &[1, 2, 6], 0)]);
         let with_copy = overwrite_owned_blocks(&block, |_, writer: &mut Writer<'_>| {
             writer.copy(
@@ -1150,14 +1150,14 @@ mod tests {
     #[test]
     fn copy_runs_rejects_an_uncovered_block_before_any_write() {
         let source = values();
-        let short = [0..1];
+        let short = 0..1;
         let unsorted = [3..4, 0..1];
         let overlapping = [0..2, 1..2];
         let empty = [0..0, 0..2];
         let far = [0..1, 95..96];
         let invalid: [&[AxisRuns<'_>]; 5] = [
             // Covers one row of two: the extent - 1 under-coverage.
-            &[Some(&short[..]), None, None],
+            &[Some(core::slice::from_ref(&short)), None, None],
             &[Some(&unsorted[..]), None, None],
             &[Some(&overlapping[..]), None, None],
             &[Some(&empty[..]), None, None],

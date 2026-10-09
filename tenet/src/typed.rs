@@ -105,7 +105,8 @@
 //! [`TensorMap::map_diagonal`] on compact diagonals), the truncation primitives
 //! a truncated factorization is composed from ([`TensorMap::diagview`],
 //! [`GradedSpace::find_truncated`], [`GradedSpace::truncspace`],
-//! [`TensorMap::restrict_leg`]), concatenation ([`TensorMap::cat`],
+//! [`TensorMap::restrict_leg`] with a [`LegSelection`] of kept degeneracy
+//! positions per sector, contiguous or not), concatenation ([`TensorMap::cat`],
 //! [`TensorMap::absorb`]) and explicit payload conversion
 //! ([`TensorMap::convert`], [`TensorMap::zeros_like`], [`TensorMap::re`],
 //! [`TensorMap::im`]; exact widenings and the two lossy narrowings, never

@@ -841,8 +841,8 @@ mod tests {
 
     fn sliced_both_sectors() -> [(SectorId, SelectedRuns); 2] {
         [
-            (SectorId::new(0), runs(&[1..2])),
-            (SectorId::new(1), runs(&[1..2])),
+            (SectorId::new(0), SelectedRuns::from_elem(1..2, 1)),
+            (SectorId::new(1), SelectedRuns::from_elem(1..2, 1)),
         ]
     }
 
@@ -976,7 +976,10 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&source),
                 &[1.0, 2.0, 3.0, 4.0],
-                &[Some(&[(SectorId::new(0), runs(&[1..2]))][..]), None],
+                &[
+                    Some(&[(SectorId::new(0), SelectedRuns::from_elem(1..2, 1))][..]),
+                    None
+                ],
             ),
             Err(OperationError::StructureMismatch { .. })
         ));
@@ -987,7 +990,10 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&destination_operand()),
                 &[0.0; 12],
-                &[Some(&[(SectorId::new(0), runs(&[1..2]))][..]), None],
+                &[
+                    Some(&[(SectorId::new(0), SelectedRuns::from_elem(1..2, 1))][..]),
+                    None
+                ],
             ),
             Err(OperationError::StructureMismatch { .. })
         ));
