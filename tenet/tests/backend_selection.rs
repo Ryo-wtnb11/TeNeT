@@ -219,6 +219,7 @@ fn injected_executor_with_linalg_backend_is_a_typed_build_error() {
     );
     // The provider-independent GEMM selection is not a factorization provider,
     // so it stays compatible with an injected executor.
+    #[cfg(feature = "cpu-faer")]
     Runtime::builder()
         .with_dense_executor(Box::new(DefaultDenseExecutor::default()))
         .gemm_backend(LinalgBackend::Faer)

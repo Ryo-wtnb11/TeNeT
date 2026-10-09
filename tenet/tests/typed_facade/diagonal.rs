@@ -1096,7 +1096,16 @@ fn z2_spectrum_fixture(
         }
     })
     .unwrap();
-    source.svd_compact(&[0], &[1]).unwrap().s
+    let s = source.svd_compact(&[0], &[1]).unwrap().s;
+    if rank_deficient {
+        // The trailing singular values of a rank-one block are zero only up to
+        // the provider's rounding (exactly zero on faer, ~1e-17 on Accelerate).
+        // Snap them so the fixture is the exactly semidefinite spectrum the
+        // tests name.
+        s.map_diagonal(|v| if v > 1e-8 { v } else { 0.0 }).unwrap()
+    } else {
+        s
+    }
 }
 
 #[test]
