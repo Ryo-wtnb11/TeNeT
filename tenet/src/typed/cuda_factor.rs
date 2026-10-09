@@ -32,6 +32,9 @@ thread_local! {
     /// Marks every compact-SVD route non-aligned, so the selector-GEMM
     /// assembly runs on a layout whose public constructions are all aligned.
     pub(super) static CUDA_SVD_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Forces the selector-GEMM EIGH assembly even when every order is the
+    /// identity, so the column-copy path can be compared with it.
+    pub(super) static CUDA_EIGH_FORCE_SELECTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Selector uploads made by device `eigh_full` assembly.
     pub(super) static CUDA_EIGH_SELECTOR_UPLOADS: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
@@ -413,6 +416,50 @@ pub(crate) fn copy_whole_factor<D: CudaPayload>(
     .map_err(dense_err)?;
     #[cfg(test)]
     observe_cuda_factor_copy();
+    Ok(())
+}
+
+/// Copies every column of a full `source.rows() x cols` device factor into a
+/// left-factor region, one strided copy per codomain tree: the per-tree
+/// assembly of [`assemble_left_factor`] when its selector is the identity.
+#[cfg(feature = "cuda")]
+pub(crate) fn copy_left_factor_treewise<D: CudaPayload>(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage<D>,
+    target: &CoupledSectorRegion,
+    source: &CoupledSectorRegion,
+    factor: &CudaDenseStorage,
+    cols: usize,
+) -> Result<(), Error> {
+    let region = |rows: usize, leading: usize, offset: usize| {
+        tenet_dense::CudaRegion::new(vec![rows, cols], vec![1, leading], offset).map_err(dense_err)
+    };
+    for target_tree in target.row_trees() {
+        let sub_rows = target_tree.extent()?;
+        if sub_rows == 0 {
+            continue;
+        }
+        let src_row = source
+            .row_trees()
+            .iter()
+            .find(|source_tree| source_tree.tree() == target_tree.tree())
+            .map(|source_tree| source_tree.offset())
+            .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
+        tenet_dense::cuda_copy_strided_into::<D>(
+            cuda,
+            factor,
+            &region(sub_rows, source.rows(), src_row)?,
+            &mut dst.0,
+            &region(
+                sub_rows,
+                target.rows(),
+                target.range().start + target_tree.offset(),
+            )?,
+        )
+        .map_err(dense_err)?;
+        #[cfg(test)]
+        observe_cuda_factor_copy();
+    }
     Ok(())
 }
 

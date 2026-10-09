@@ -332,9 +332,10 @@ pub use block_layout::{Direction, Duality, Side};
 mod cuda_factor;
 #[cfg(feature = "cuda")]
 pub(crate) use cuda_factor::{
-    assemble_aligned_left_factor, assemble_left_factor, assemble_right_factor, copy_whole_factor,
-    cuda_download_spectra, cuda_hermitian_regions, cuda_qr_region, cuda_svd_region, dense_err,
-    fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
+    assemble_aligned_left_factor, assemble_left_factor, assemble_right_factor,
+    copy_left_factor_treewise, copy_whole_factor, cuda_download_spectra, cuda_hermitian_regions,
+    cuda_qr_region, cuda_svd_region, dense_err, fill_diagonal_values, typed_cuda_eigh_region,
+    upload_selector,
 };
 #[cfg(feature = "cuda")]
 use cuda_factor::{
@@ -345,7 +346,7 @@ use cuda_factor::{
 use cuda_factor::{
     observe_cuda_arithmetic, observe_cuda_qr_output_upload,
     observe_cuda_svd_final_storage_creation, CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE,
-    CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION,
+    CUDA_EIGH_FORCE_SELECTOR, CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION,
     CUDA_REDUCTION_BUFFER_OBSERVATION, CUDA_SVD_OBSERVATION, CUDA_SVD_TREEWISE,
 };
 #[cfg(feature = "cuda")]

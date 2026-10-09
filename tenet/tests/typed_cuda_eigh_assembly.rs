@@ -1,5 +1,6 @@
-//! Device `eigh_full` assembles each layout-aligned coupled sector with one
-//! GEMM, and its uploads do not depend on the number of fusion trees (#1485).
+//! Device `eigh_full` assembles its eigenvectors without a GEMM when
+//! cuSOLVER's order is already the published ascending one (#1985), and its
+//! uploads do not depend on the number of fusion trees (#1485).
 //!
 //! This file holds a single test because it reads the process-wide
 //! [`cuda_transfer_stats`] counters.
@@ -76,8 +77,9 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
             .unwrap();
         let after = cuda_transfer_stats();
         let gemms = after.gemm_calls - before.gemm_calls;
-        // One GEMM per coupled sector, not per tree.
-        assert_eq!(gemms, 5);
+        // cuSOLVER's ascending order is the published one (#1985): the
+        // eigenvectors are copied, with no selector GEMM.
+        assert_eq!(gemms, 0);
         counts.push((
             after.h2d_calls - before.h2d_calls,
             after.h2d_bytes - before.h2d_bytes,
@@ -97,8 +99,8 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
         close(&d, &host_d);
         close(&source.compose(&v).unwrap(), &v.compose(&d).unwrap());
     }
-    // The same sectors and sizes, so every upload, selectors included, is
-    // independent of the tree count. The one-selector-per-call count itself is
+    // The same sectors and sizes, so every upload is independent of the tree
+    // count. The selector-free copy counts and the forced selector path are
     // asserted in-crate (`typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise`).
     assert_eq!(counts[0], counts[1], "uploads do not depend on the trees");
 }

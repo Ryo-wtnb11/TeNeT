@@ -210,7 +210,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eig_vals_dyn eig_vals_from_source \
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \
-             left_null_from_source lexicographic_eig_order \
+             left_null_from_source \
              left_polar_adjoint_from_parent left_polar_from_source left_polar_of_diagonal \
              lq_compact_from_source lq_full_from_source pinv_diagonal_spectrum \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \

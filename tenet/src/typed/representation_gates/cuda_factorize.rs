@@ -489,10 +489,13 @@ fn typed_cuda_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
-    // What: an aligned route permutes its eigenvectors with one GEMM, the
-    // general path with one per codomain tree; both read one selector
-    // uploaded per call and, being exact data movement, publish the same
-    // bytes.
+    // What: cuSOLVER's ascending order is the published one (#1985), so an
+    // aligned route copies its eigenvectors once and the general path once
+    // per codomain tree, with no selector. The selector-GEMM assembly (one
+    // GEMM per route or per tree, one selector upload per call), still the
+    // path for a non-identity order, is forced for comparison. All four are
+    // exact data movement and publish the same values; the GEMM's `x * 1 + 0`
+    // may turn a `-0.0` into `+0.0`, so zeros are compared by value.
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -520,8 +523,14 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
     );
 
     let mut outputs = Vec::new();
-    for (treewise, gemms) in [(false, sectors.len()), (true, trees)] {
+    for (treewise, forced, uploads, copies, gemms) in [
+        (false, false, 0, sectors.len(), 0),
+        (true, false, 0, trees, 0),
+        (false, true, 1, 0, sectors.len()),
+        (true, true, 1, 0, trees),
+    ] {
         CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
+        CUDA_EIGH_FORCE_SELECTOR.with(|flag| flag.set(forced));
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
         let Eigh { d, v } = device
@@ -532,13 +541,14 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
             )
             .unwrap();
         CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
+        CUDA_EIGH_FORCE_SELECTOR.with(|flag| flag.set(false));
         assert_eq!(
             CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
-            Some(1)
+            Some(uploads)
         );
         CUDA_QR_OBSERVATION.with(|observation| {
-            let (_, _, _, _, assembly_gemms, _, _) = observation.get().unwrap();
-            assert_eq!(assembly_gemms, gemms);
+            let (_, factor_copies, _, _, assembly_gemms, _, _) = observation.get().unwrap();
+            assert_eq!((factor_copies, assembly_gemms), (copies, gemms));
             observation.set(None);
         });
         outputs.push((d.to_host().unwrap(), v.to_host().unwrap()));
@@ -547,11 +557,13 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
         map.dense_data()
             .unwrap()
             .iter()
-            .map(|value| value.to_bits())
+            .map(|value| (value + 0.0).to_bits())
             .collect::<Vec<_>>()
     };
-    assert_eq!(bits(&outputs[0].0), bits(&outputs[1].0));
-    assert_eq!(bits(&outputs[0].1), bits(&outputs[1].1));
+    for (d, v) in &outputs[1..] {
+        assert_eq!(bits(&outputs[0].0), bits(d));
+        assert_eq!(bits(&outputs[0].1), bits(v));
+    }
     let (d, v) = &outputs[0];
     assert_typed_map_close(&source.compose(v).unwrap(), &v.compose(d).unwrap(), 1.0e-10);
 }

@@ -388,8 +388,9 @@ where
     /// the only numerical payload that crosses to the host, where they are
     /// put in the Host order (ascending per sector; cuSOLVER `syevd` already
     /// returns it, so only an O(n) check runs); the eigenvectors stay on the
-    /// device and their columns are gathered into that order by the assembly
-    /// selector.
+    /// device and are copied into `v` (one copy per route, or per codomain
+    /// tree on a non-aligned route). Only if some sector's order is not the
+    /// identity are the columns gathered by a selector GEMM instead.
     ///
     /// Transfers, exactly:
     ///
@@ -406,7 +407,8 @@ where
     ///   the factor-space plan consume.
     /// - Host to device: `d` as one dense upload of `Σ_c n_c²` elements with
     ///   the sorted eigenvalues already on its diagonal, one zero upload for
-    ///   `v`, and at most one packed selector upload.
+    ///   `v`, and a packed selector upload only when some sector's solver
+    ///   order is not ascending (none for cuSOLVER `syevd`).
     ///
     /// Why `d` is filled on the host rather than scattered on the
     /// device: the only device allocation path is a zero upload of the same
@@ -484,7 +486,7 @@ where
             }
         }
 
-        let (spectra, mut raw_vectors, orders) = {
+        let (spectra, mut raw_vectors, orders, permuted) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
             let mut device_spectra = Vec::with_capacity(plan.source_regions().len());
@@ -510,6 +512,7 @@ where
             let mut downloaded = cuda_download_spectra::<D>(cuda, &device_spectra)?.into_iter();
             let mut spectra = Vec::with_capacity(plan.source_regions().len());
             let mut orders = Vec::with_capacity(plan.source_regions().len());
+            let mut permuted = false;
             for region in plan.source_regions().iter() {
                 let n = region.rows();
                 let values = if n == 0 {
@@ -527,6 +530,7 @@ where
                 let mut order = vec![0; n];
                 let sorted = if tenet_matrixalgebra::seam::ascending_eigh_order(&values, &mut order)
                 {
+                    permuted = true;
                     order.iter().map(|&index| values[index]).collect()
                 } else {
                     values
@@ -537,7 +541,9 @@ where
                 });
                 orders.push(order);
             }
-            (spectra, vectors, orders)
+            #[cfg(test)]
+            let permuted = permuted || CUDA_EIGH_FORCE_SELECTOR.with(std::cell::Cell::get);
+            (spectra, vectors, orders, permuted)
         };
 
         // Every factor-space admission is provider work on the host: no CUDA
@@ -571,7 +577,10 @@ where
                 selector_offsets.push(selector_len);
                 selector_len += route.rank() * route.rank();
             }
-            let selector = if selector_len == 0 {
+            // cuSOLVER `syevd` is ascending, so every order is normally the
+            // identity: then each route is a plain column copy and no
+            // selector is uploaded or multiplied.
+            let selector = if selector_len == 0 || !permuted {
                 None
             } else {
                 Some(upload_selector(
@@ -607,9 +616,6 @@ where
                     assembly_ordinal += 1;
                     Self::inject_cuda_eigh_failure("assembly", assembly_ordinal)?;
                 }
-                let selector = selector
-                    .as_ref()
-                    .ok_or_else(|| internal_layout_error("CUDA EIGH route has no selector"))?;
                 let raw = raw_vectors[route.source_region()]
                     .take()
                     .ok_or_else(|| internal_layout_error("CUDA EIGH route has no eigenvectors"))?;
@@ -620,6 +626,21 @@ where
                     && !CUDA_EIGH_TREEWISE.with(std::cell::Cell::get);
                 #[cfg(not(test))]
                 let aligned = plan.left_preserves_trees(route);
+                let Some(selector) = selector.as_ref() else {
+                    if aligned {
+                        copy_whole_factor(cuda, &mut vector_data, left_region, &raw)?;
+                    } else {
+                        copy_left_factor_treewise(
+                            cuda,
+                            &mut vector_data,
+                            left_region,
+                            &plan.source_regions()[route.source_region()],
+                            &raw,
+                            n,
+                        )?;
+                    }
+                    continue;
+                };
                 if aligned {
                     assemble_aligned_left_factor(
                         cuda,
