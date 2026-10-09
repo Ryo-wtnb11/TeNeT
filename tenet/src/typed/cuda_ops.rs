@@ -164,11 +164,8 @@ where
 
     /// The Host compact factor plan of this tensor's matrix view: the one
     /// authority for the bond, the factor spaces and the sector routes.
-    pub(super) fn compact_factor_plan(
-        &self,
-        source_regions: Arc<[CoupledSectorRegion]>,
-    ) -> Result<CompactFactorPlan, Error> {
-        Ok(compact_factor_routes(self.logical_space(), source_regions)?)
+    pub(super) fn compact_factor_plan(&self) -> Result<CompactFactorPlan, Error> {
+        Ok(compact_factor_routes(self.logical_space())?)
     }
 
     /// Streamed compact SVD of owned dense CUDA storage.
@@ -209,7 +206,9 @@ where
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+        // Region admission precedes the placement preflight; the plan reads
+        // the same cached regions.
+        sector_regions(source_space.structure(), source_space.nout())?;
 
         {
             // Preflight only: the ordinal is immutable, so this placement
@@ -224,7 +223,7 @@ where
         }
         // As for typed CUDA QR, all provider work and final-space admission
         // complete before the execution lock and before any output exists.
-        let plan = self.compact_factor_plan(source_regions)?;
+        let plan = self.compact_factor_plan()?;
         #[cfg(test)]
         let treewise = CUDA_SVD_TREEWISE.with(std::cell::Cell::get);
         #[cfg(not(test))]
@@ -462,7 +461,7 @@ where
 
         // The Host compact factor plan: an endomorphism's compact bond keeps
         // every eigenpair (`min(n, n) = n`), so its left route is EIGH's.
-        let plan = self.compact_factor_plan(source_regions)?;
+        let plan = self.compact_factor_plan()?;
 
         // Admission is complete. Validate every block before the first EIGH so
         // a late non-Hermitian sector cannot trigger partial numerical work.
@@ -735,7 +734,9 @@ where
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+        // Region admission precedes the placement preflight; the plan reads
+        // the same cached regions.
+        sector_regions(source_space.structure(), source_space.nout())?;
 
         {
             // Preflight only: the ordinal is immutable, so this placement
@@ -751,7 +752,7 @@ where
 
         // Provider queries and final HomSpace admission belong outside the
         // execution lock; the plan owns every source-to-factor route.
-        let plan = self.compact_factor_plan(source_regions)?;
+        let plan = self.compact_factor_plan()?;
         let left_space = plan.left_space(self.logical_space())?;
         let right_space = plan.right_space(self.logical_space())?;
         let left_len = left_space.space().required_len()?;

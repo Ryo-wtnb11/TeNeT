@@ -42,6 +42,10 @@ impl CompactFactorRoute {
 /// factor spaces, the sector routes and their tree layouts, shared by Host
 /// and CUDA. Owned by the calling factorization and dropped with it.
 ///
+/// Reference map (TensorKit `initialize_output` + `foreachblock`, QSpace
+/// `EigenSymmetric` / `blockSVD`), what was ported and the Rust differences:
+/// `docs/audit/issue-1774-shared-compact-factor-plan.md`.
+///
 /// Why not `Arc` the plan or its source half: nothing shares it beyond the
 /// one call that builds it, so the wrappers were two heap allocations per
 /// call with no owner to serve.
@@ -61,7 +65,7 @@ impl CompactFactorPlan {
         &self.source_regions
     }
 
-    pub fn left_regions(&self) -> &[CoupledSectorRegion] {
+    pub fn left_regions(&self) -> &Arc<[CoupledSectorRegion]> {
         &self.left_regions
     }
 
@@ -214,23 +218,27 @@ where
     Ok(Some(plan))
 }
 
-/// The compact factor plan of `input` over its own coupled-sector regions
-/// `source_regions` (`input.space().structure().coupled_sector_regions(nout)`),
+/// The compact factor plan of `input` over its coupled-sector regions,
 /// whatever the factors' tree order; each route then reports whether its
 /// factor regions keep the source's trees
 /// ([`CompactFactorPlan::left_preserves_trees`]).
 ///
-/// Why the caller passes the regions: a device caller admits them before its
-/// placement checks, and this keeps that error order without a second
-/// region query.
+/// The regions are cached per structure, so a caller that admitted them
+/// first (a device op does, before its placement checks) pays no second
+/// compilation here.
 pub fn compact_factor_routes<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-    source_regions: Arc<[CoupledSectorRegion]>,
 ) -> Result<CompactFactorPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    route_compact_factors(input, input.validated_layout(), source_regions)
+    let space = input.space();
+    let regions = checked_sector_regions(space.structure(), space.nout())?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact factor source is not a coupled-sector matrix layout",
+        },
+    )?;
+    route_compact_factors(input, input.validated_layout(), regions)
 }
 
 fn route_compact_factors<R>(

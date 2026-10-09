@@ -1297,7 +1297,10 @@ type StackPair<R, D, S> = (StackedTensorMap<R, D, S>, StackedTensorMap<R, D, S>)
 /// The data-independent part of the device eigendecomposition.
 #[cfg(feature = "cuda")]
 struct DeviceEighPlan<R> {
-    plan: super::CompactFactorPlan,
+    /// The source and eigenvector regions of the compact factor plan, all
+    /// EIGH reads of it besides the routes.
+    source_regions: Arc<[CoupledSectorRegion]>,
+    left_regions: Arc<[CoupledSectorRegion]>,
     /// The plan's executed (nonzero-rank) routes; every other per-route
     /// table below follows their order.
     routes: Vec<super::CompactFactorRoute>,
@@ -1400,7 +1403,7 @@ where
         labels.sort_by(|left, right| left.1.cmp(&right.1));
         #[cfg(feature = "cuda")]
         let device = match source.signature.placement {
-            Placement::Cuda(_) => Some(DeviceEighPlan::new(source, &regions)?),
+            Placement::Cuda(_) => Some(DeviceEighPlan::new(source)?),
             Placement::Host => None,
         };
         Ok(Self {
@@ -1811,11 +1814,8 @@ where
 {
     /// Compiles the eager device plan from the structure: `eigh_full` keeps
     /// every eigenpair, so each coupled sector's rank is its full `n`.
-    fn new<D, S>(
-        source: &StackedTensorMap<R, D, S>,
-        regions: &Arc<[CoupledSectorRegion]>,
-    ) -> Result<Self, Error> {
-        let plan = super::compact_factor_routes(&source.space, Arc::clone(regions))?;
+    fn new<D, S>(source: &StackedTensorMap<R, D, S>) -> Result<Self, Error> {
+        let plan = super::compact_factor_routes(&source.space)?;
         let routes: Vec<_> = super::executed_routes(&plan)
             .map(|(route, _, _)| *route)
             .collect();
@@ -1841,7 +1841,8 @@ where
         let d_len = middle_space.space().required_len()?;
         let v_len = left_space.space().required_len()?;
         Ok(Self {
-            plan,
+            source_regions: Arc::clone(plan.source_regions()),
+            left_regions: Arc::clone(plan.left_regions()),
             routes,
             left_space,
             middle_space,
@@ -2036,7 +2037,7 @@ where
         let mut device_spectra = Vec::with_capacity(routes.len());
         let mut vectors = Vec::with_capacity(routes.len());
         for route in routes {
-            let region = &device.plan.source_regions()[route.source_region()];
+            let region = &device.source_regions[route.source_region()];
             let (values, vector) = tenet_dense::cuda_eigh_region_batched::<D>(
                 cuda,
                 &source.storage.0,
@@ -2166,7 +2167,7 @@ where
             .zip(&device.spectrum_offsets)
             .zip(&device.copies)
         {
-            let target = &device.plan.left_regions()[left_region(route)?];
+            let target = &device.left_regions[left_region(route)?];
             let columns: Vec<usize> = (0..members)
                 .flat_map(|member| {
                     workspace.orders[member * total + offset..][..route.rank()]

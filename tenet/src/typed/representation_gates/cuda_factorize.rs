@@ -474,9 +474,7 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
         .count();
     let source_device = source.to_cuda().unwrap();
     // Per-route transfer and kernel counts follow the proved layout flag.
-    let plan = source_device
-        .compact_factor_plan(Arc::clone(&regions))
-        .unwrap();
+    let plan = source_device.compact_factor_plan().unwrap();
     let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
     let routes = executed_routes(&plan).count();
     assert_eq!(routes, nonempty);
@@ -618,9 +616,7 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     let source_device = source.to_cuda().unwrap();
     // Compact SVD assembles through the same aligned-copy dispatch as QR
     // and shares its copy/selector/GEMM observation.
-    let plan = source_device
-        .compact_factor_plan(Arc::clone(&regions))
-        .unwrap();
+    let plan = source_device.compact_factor_plan().unwrap();
     let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
     CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -1103,7 +1099,7 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
             host.logical_space().space().nout(),
         )
         .unwrap();
-        let plan = device.compact_factor_plan(Arc::clone(&regions)).unwrap();
+        let plan = device.compact_factor_plan().unwrap();
         let max_rows = executed_routes(&plan)
             .map(|(route, _, _)| regions[route.source_region()].rows())
             .max()
