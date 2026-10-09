@@ -369,7 +369,7 @@ use checked_generic_contract::{trace_source, write_identity_blocks_generic};
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;
 use space::{
-    require_restriction_set, require_selected_leg_of, restricted_space, restriction_starts,
+    require_restriction_set, require_selected_leg_of, restricted_space, restriction_runs,
     space_with_replaced_legs,
 };
 pub use space::{GradedSpace, LegSelection, TruncatedSelection};

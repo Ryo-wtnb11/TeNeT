@@ -29,14 +29,14 @@ type AxisLayout = Vec<(usize, usize)>;
 
 /// Destination dense index -> source dense index for one axis.
 ///
-/// `selection[i]` is the kept degeneracy range of the `i`-th sector,
-/// `None` when that sector is dropped entirely.
-fn axis_gather(layout: &AxisLayout, selection: &[Option<Range<usize>>]) -> Vec<usize> {
+/// `selection[i]` is the kept degeneracy positions of the `i`-th sector, in
+/// order, `None` when that sector is dropped entirely.
+fn axis_gather(layout: &AxisLayout, selection: &[Option<Vec<usize>>]) -> Vec<usize> {
     let mut map = Vec::new();
     let mut offset = 0;
     for (position, &(degeneracy, carrier)) in layout.iter().enumerate() {
-        if let Some(range) = &selection[position] {
-            for index in range.clone() {
+        if let Some(kept) = &selection[position] {
+            for &index in kept {
                 for basis in 0..carrier {
                     map.push(offset + index * carrier + basis);
                 }
@@ -208,14 +208,14 @@ impl TensorKitPosition for SU2Irrep {
 }
 
 /// The physical-order `(degeneracy, carrier)` layout and the per-position
-/// selection ranges the dense oracle needs.
-fn dense_plan<S: PartialEq + TensorKitPosition>(
+/// selected positions the dense oracle needs.
+fn dense_plan<S: PartialEq + TensorKitPosition, P: Clone + IntoIterator<Item = usize>>(
     sectors: &[S],
     degeneracies: &[usize],
     is_dual: bool,
     carrier: impl Fn(&S) -> usize,
-    selected: &[(S, Range<usize>)],
-) -> (AxisLayout, Vec<Option<Range<usize>>>) {
+    selected: &[(S, P)],
+) -> (AxisLayout, Vec<Option<Vec<usize>>>) {
     let mut order = sectors.iter().zip(degeneracies).collect::<Vec<_>>();
     order.sort_by_key(|(sector, _)| sector.tensorkit_position(is_dual));
     let (sectors, degeneracies): (Vec<_>, Vec<_>) = order.into_iter().unzip();
@@ -230,7 +230,7 @@ fn dense_plan<S: PartialEq + TensorKitPosition>(
             selected
                 .iter()
                 .find(|(candidate, _)| candidate == *sector)
-                .map(|(_, range)| range.clone())
+                .map(|(_, positions)| positions.clone().into_iter().collect())
         })
         .collect();
     (layout, selection)
@@ -266,7 +266,7 @@ fn restrict_matches_the_dense_gather_on_a_dual_u1_codomain_leg() {
         |_| 1,
         &selected,
     );
-    let (other_layout, _) = dense_plan::<U1Irrep>(
+    let (other_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &other.sectors().unwrap(),
         other.degeneracies(),
         other.is_dual(),
@@ -311,7 +311,7 @@ fn restrict_keeps_su2_multiplets_intact_for_a_middle_sector_with_offset() {
         |sector: &SU2Irrep| sector.twice_spin() + 1,
         &selected,
     );
-    let (other_layout, _) = dense_plan::<SU2Irrep>(
+    let (other_layout, _) = dense_plan::<SU2Irrep, Range<usize>>(
         &other.sectors().unwrap(),
         other.degeneracies(),
         other.is_dual(),
@@ -473,7 +473,7 @@ fn restrict_reads_a_complex_lazy_adjoint_domain_leg_with_a_multi_sector_selectio
         |_| 1,
         &selected,
     );
-    let (row_layout, _) = dense_plan::<U1Irrep>(
+    let (row_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &columns.sectors().unwrap(),
         columns.degeneracies(),
         columns.is_dual(),
@@ -585,7 +585,7 @@ fn embed_after_restrict_is_the_orthogonal_projector() {
         |_| 1,
         &selected,
     );
-    let (other_layout, _) = dense_plan::<U1Irrep>(
+    let (other_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &other.sectors().unwrap(),
         other.degeneracies(),
         other.is_dual(),
@@ -643,7 +643,7 @@ fn selections_are_validated_against_their_parent_leg_before_anything_is_built() 
     let leg = u1(&provider, &[(0, 2), (1, 3)]);
     let other = u1(&provider, &[(0, 2)]);
 
-    assert!(LegSelection::try_new(&leg, std::iter::empty()).is_err());
+    assert!(LegSelection::try_new(&leg, std::iter::empty::<(U1Irrep, Range<usize>)>()).is_err());
     assert!(LegSelection::try_new(&leg, [(U1Irrep::new(0), 1..1)]).is_err());
     assert!(LegSelection::try_new(&leg, [(U1Irrep::new(0), Range { start: 2, end: 1 })]).is_err());
     assert!(LegSelection::try_new(&leg, [(U1Irrep::new(0), 0..3)]).is_err());
@@ -749,14 +749,14 @@ fn embed_scatters_a_complex_lazy_adjoint_dual_domain_leg_per_sector() {
         |_| 1,
         &selected,
     );
-    let (column_layout, _) = dense_plan::<U1Irrep>(
+    let (column_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &columns.sectors().unwrap(),
         columns.degeneracies(),
         columns.is_dual(),
         |_| 1,
         &[],
     );
-    let (spectator_layout, _) = dense_plan::<U1Irrep>(
+    let (spectator_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &spectator.sectors().unwrap(),
         spectator.degeneracies(),
         spectator.is_dual(),
@@ -901,7 +901,7 @@ fn a_rank_five_restriction_still_gathers_one_axis_only() {
         |_| 1,
         &selected,
     );
-    let (small_layout, _) = dense_plan::<U1Irrep>(
+    let (small_layout, _) = dense_plan::<U1Irrep, Range<usize>>(
         &small.sectors().unwrap(),
         small.degeneracies(),
         small.is_dual(),
@@ -1052,6 +1052,16 @@ impl ExactEntry for f64 {
     }
 }
 
+impl ExactEntry for f32 {
+    const ZERO: Self = 0.0;
+    fn entry<S: std::hash::Hash>(trees: &BlockFusionTrees<S>, indices: &[usize]) -> Self {
+        hashed_nonzero(trees, indices, 0) as f32
+    }
+    fn bits(self) -> (u64, u64) {
+        (u64::from(self.to_bits()), 0)
+    }
+}
+
 impl ExactEntry for Complex64 {
     const ZERO: Self = Complex64::new(0.0, 0.0);
     fn entry<S: std::hash::Hash>(trees: &BlockFusionTrees<S>, indices: &[usize]) -> Self {
@@ -1069,13 +1079,13 @@ fn exact_bits<D: ExactEntry>(data: &[D]) -> Vec<(u64, u64)> {
     data.iter().map(|value| value.bits()).collect()
 }
 
-/// The selected range of the sector the block carries on `axis`.
-fn selected_range<S: PartialEq>(
+/// The selected positions of the sector the block carries on `axis`.
+fn selected_positions<S: PartialEq>(
     trees: &BlockFusionTrees<S>,
     axis: usize,
     codomain_rank: usize,
-    selected: &[(S, Range<usize>)],
-) -> Option<Range<usize>> {
+    selected: &[(S, Vec<usize>)],
+) -> Option<Vec<usize>> {
     let sector = if axis < codomain_rank {
         &trees.codomain_uncoupled()[axis]
     } else {
@@ -1094,16 +1104,24 @@ enum Place {
     Middle,
     End,
     Single,
+    /// The first and the last position: the largest `|λ|` of an ascending
+    /// signed `eigh` spectrum, two runs (#2095).
+    Ends,
+    /// Every other position from the first: an arbitrary `eig` set, one run
+    /// per kept position (#2095).
+    Alternate,
 }
 
 impl Place {
-    fn range(self, degeneracy: usize) -> Range<usize> {
+    fn positions(self, degeneracy: usize) -> Vec<usize> {
         assert!(degeneracy >= 3);
         match self {
-            Place::Start => 0..2,
-            Place::Middle => 1..degeneracy - 1,
-            Place::End => degeneracy - 1..degeneracy,
-            Place::Single => 1..2,
+            Place::Start => (0..2).collect(),
+            Place::Middle => (1..degeneracy - 1).collect(),
+            Place::End => vec![degeneracy - 1],
+            Place::Single => vec![1],
+            Place::Ends => vec![0, degeneracy - 1],
+            Place::Alternate => (0..degeneracy).step_by(2).collect(),
         }
     }
 }
@@ -1128,7 +1146,7 @@ macro_rules! assert_exact_restrict_embed {
             .zip(parent.degeneracies())
             .zip($selected)
             .filter_map(|((sector, &degeneracy), place)| {
-                place.map(|place: Place| (sector, place.range(degeneracy)))
+                place.map(|place: Place| (sector, place.positions(degeneracy)))
             })
             .collect();
         let selection = LegSelection::try_new(parent, selected.iter().cloned()).unwrap();
@@ -1159,9 +1177,9 @@ macro_rules! assert_exact_restrict_embed {
             &sub_codomain,
             &sub_domain,
             |trees, indices| {
-                let start = selected_range(trees, axis, rank, &selected).unwrap().start;
+                let positions = selected_positions(trees, axis, rank, &selected).unwrap();
                 let mut shifted = indices.to_vec();
-                shifted[axis] += start;
+                shifted[axis] = positions[indices[axis]];
                 <$dtype as ExactEntry>::entry(trees, &shifted)
             },
         )
@@ -1176,8 +1194,8 @@ macro_rules! assert_exact_restrict_embed {
             &runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
-            |trees, indices| match selected_range(trees, axis, rank, &selected) {
-                Some(range) if range.contains(&indices[axis]) => {
+            |trees, indices| match selected_positions(trees, axis, rank, &selected) {
+                Some(positions) if positions.contains(&indices[axis]) => {
                     <$dtype as ExactEntry>::entry(trees, indices)
                 }
                 _ => <$dtype as ExactEntry>::ZERO,
@@ -1203,11 +1221,19 @@ fn restrict_and_embed_are_exact_block_copies_on_u1_legs() {
     // single-state selection.
     let ranges = [Some(Place::Start), Some(Place::Middle), Some(Place::End)];
     let single = [None, Some(Place::Single), None];
-    for selected in [ranges, single] {
+    // Non-contiguous positions: two runs and one run per kept position.
+    let gaps = [
+        Some(Place::Alternate),
+        Some(Place::Ends),
+        Some(Place::Alternate),
+    ];
+    for selected in [ranges, single, gaps] {
         assert_exact_restrict_embed!(f64, [&leg, &other], [&other], 0, selected);
         assert_exact_restrict_embed!(Complex64, [&other, &dual], [&other], 1, selected);
         assert_exact_restrict_embed!(f64, [&other], [&other, &dual], 2, selected);
         assert_exact_restrict_embed!(Complex64, [&other], [&leg, &other], 1, selected);
+        // Single precision, on the middle leg of a rank-four map.
+        assert_exact_restrict_embed!(f32, [&other, &leg, &other], [&other], 1, selected);
     }
 }
 
@@ -1218,7 +1244,13 @@ fn restrict_and_embed_are_exact_block_copies_on_su2_legs() {
     let other = su2(&provider, &[(0, 1), (1, 2), (2, 1)]);
     let ranges = [Some(Place::End), Some(Place::Middle), Some(Place::Start)];
     let single = [None, Some(Place::Single), None];
-    for selected in [ranges, single] {
+    // Non-contiguous positions: two runs and one run per kept position.
+    let gaps = [
+        Some(Place::Alternate),
+        Some(Place::Ends),
+        Some(Place::Alternate),
+    ];
+    for selected in [ranges, single, gaps] {
         assert_exact_restrict_embed!(f64, [&leg, &other], [&other], 0, selected);
         assert_exact_restrict_embed!(Complex64, [&other, &other], [&leg], 2, selected);
         assert_exact_restrict_embed!(Complex64, [&other, &leg], [&other], 1, selected);
@@ -1256,7 +1288,13 @@ fn restrict_and_embed_are_exact_block_copies_on_fz2_u1_legs() {
     .unwrap();
     let ranges = [Some(Place::Start), Some(Place::Middle), Some(Place::End)];
     let single = [None, Some(Place::Single), None];
-    for selected in [ranges, single] {
+    // Non-contiguous positions: two runs and one run per kept position.
+    let gaps = [
+        Some(Place::Alternate),
+        Some(Place::Ends),
+        Some(Place::Alternate),
+    ];
+    for selected in [ranges, single, gaps] {
         assert_exact_restrict_embed!(Complex64, [&dual, &other], [&other], 0, selected);
         assert_exact_restrict_embed!(f64, [&other, &leg], [&other], 1, selected);
         assert_exact_restrict_embed!(f64, [&other], [&other, &dual], 2, selected);
@@ -1286,7 +1324,7 @@ macro_rules! assert_exact_multi_restrict {
                 .zip(parent.degeneracies())
                 .zip($places)
                 .filter_map(|((sector, &degeneracy), place)| {
-                    place.map(|place: Place| (sector, place.range(degeneracy)))
+                    place.map(|place: Place| (sector, place.positions(degeneracy)))
                 })
                 .collect();
             selections.push(($axis, LegSelection::try_new(parent, kept.iter().cloned()).unwrap()));
@@ -1321,7 +1359,8 @@ macro_rules! assert_exact_multi_restrict {
             |trees, indices| {
                 let mut shifted = indices.to_vec();
                 for (axis, kept) in &selected {
-                    shifted[*axis] += selected_range(trees, *axis, rank, kept).unwrap().start;
+                    shifted[*axis] =
+                        selected_positions(trees, *axis, rank, kept).unwrap()[indices[*axis]];
                 }
                 <$dtype as ExactEntry>::entry(trees, &shifted)
             },
@@ -1345,12 +1384,24 @@ fn multi_axis_restrict_is_one_exact_block_copy_on_u1_su2_and_fz2_u1_legs() {
     let ranges = [Some(Place::Start), Some(Place::Middle), Some(Place::End)];
     let other_ranges = [Some(Place::End), None, Some(Place::Middle)];
     let single = [None, Some(Place::Single), None];
+    let gaps = [
+        Some(Place::Alternate),
+        Some(Place::Ends),
+        Some(Place::Alternate),
+    ];
+    let other_gaps = [Some(Place::Ends), None, Some(Place::Alternate)];
 
     let provider = Arc::new(U1FusionRule);
     let leg = u1(&provider, &[(-1, 3), (0, 4), (1, 5)]);
     let dual = leg.try_dual().unwrap();
     let other = u1(&provider, &[(-1, 1), (0, 2), (1, 3)]);
     assert_exact_multi_restrict!(f64, [&leg, &dual], [&leg], [(0, ranges), (2, other_ranges)]);
+    assert_exact_multi_restrict!(
+        Complex64,
+        [&leg, &dual],
+        [&leg, &dual],
+        [(1, gaps), (3, other_gaps), (0, ranges)]
+    );
     assert_exact_multi_restrict!(
         Complex64,
         [&dual, &other],
@@ -1373,6 +1424,12 @@ fn multi_axis_restrict_is_one_exact_block_copy_on_u1_su2_and_fz2_u1_legs() {
         [&leg, &leg],
         [&leg, &other],
         [(0, ranges), (1, other_ranges), (2, single)]
+    );
+    assert_exact_multi_restrict!(
+        Complex64,
+        [&other, &leg],
+        [&leg],
+        [(1, gaps), (2, other_gaps)]
     );
 
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
@@ -1404,6 +1461,7 @@ fn multi_axis_restrict_is_one_exact_block_copy_on_u1_su2_and_fz2_u1_legs() {
         [(2, other_ranges), (0, ranges)]
     );
     assert_exact_multi_restrict!(f64, [&leg], [&other, &dual], [(0, single), (2, ranges)]);
+    assert_exact_multi_restrict!(f64, [&other, &leg], [&dual], [(1, gaps), (2, other_gaps)]);
 }
 
 /// A compact diagonal restricted on both legs with one selection stays
@@ -1428,7 +1486,7 @@ macro_rules! assert_compact_stays_compact {
             .zip(bond.degeneracies())
             .zip($places)
             .filter_map(|((sector, &degeneracy), place)| {
-                place.map(|place: Place| (sector, place.range(degeneracy)))
+                place.map(|place: Place| (sector, place.positions(degeneracy)))
             })
             .collect();
         let selection = LegSelection::try_new(&bond, kept.iter().cloned()).unwrap();
@@ -1439,7 +1497,10 @@ macro_rules! assert_compact_stays_compact {
             .filter_map(|entry| {
                 kept.iter()
                     .find(|(sector, _)| *sector == entry.sector)
-                    .map(|(_, range)| (entry.sector.clone(), entry.values[range.clone()].to_vec()))
+                    .map(|(_, positions)| {
+                        let values = positions.iter().map(|&position| entry.values[position]);
+                        (entry.sector.clone(), values.collect::<Vec<_>>())
+                    })
             })
             .collect();
         for set in [
@@ -1474,14 +1535,17 @@ macro_rules! assert_compact_stays_compact {
 #[test]
 fn a_compact_diagonal_restricted_on_both_legs_with_one_selection_stays_compact() {
     let places = [Some(Place::Start), Some(Place::Middle), None];
+    let gaps = [Some(Place::Ends), Some(Place::Alternate), None];
     let provider = Arc::new(U1FusionRule);
     let leg = u1(&provider, &[(-1, 3), (0, 4), (1, 5)]);
     assert_compact_stays_compact!(f64, leg.clone(), places);
+    assert_compact_stays_compact!(f64, leg.clone(), gaps);
     assert_compact_stays_compact!(Complex64, leg.try_dual().unwrap(), places);
 
     let provider = Arc::new(SU2FusionRule);
     let leg = su2(&provider, &[(0, 3), (1, 4), (2, 3)]);
     assert_compact_stays_compact!(Complex64, leg.clone(), places);
+    assert_compact_stays_compact!(Complex64, leg.clone(), gaps);
     assert_compact_stays_compact!(f64, leg, [None, Some(Place::Single), Some(Place::End)]);
 
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
@@ -1501,5 +1565,127 @@ fn a_compact_diagonal_restricted_on_both_legs_with_one_selection_stays_compact()
     )
     .unwrap();
     assert_compact_stays_compact!(f64, leg.try_dual().unwrap(), places);
-    assert_compact_stays_compact!(Complex64, leg, places);
+    assert_compact_stays_compact!(Complex64, leg.clone(), places);
+    assert_compact_stays_compact!(f64, leg, gaps);
+}
+
+/// #2095: non-contiguous kept positions on a middle SU(2) leg of a rank-four
+/// map and on the same leg of its lazy adjoint, against the dense gather of
+/// the physical expansion (multiplets kept whole, physical offsets
+/// recomputed), and `embed_leg` against the dense scatter into zeros.
+#[test]
+fn noncontiguous_positions_match_the_dense_gather_and_scatter_on_su2_and_a_lazy_adjoint() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SU2FusionRule);
+    let leg = su2(&provider, &[(0, 4), (1, 5), (2, 3)]);
+    let other = su2(&provider, &[(0, 1), (1, 2)]);
+    let source: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&other, &leg, &other], [&other], 23).unwrap();
+    let selected = [
+        (SU2Irrep::from_twice_spin(0), vec![0, 3]),
+        (SU2Irrep::from_twice_spin(1), vec![1, 2, 4]),
+        (SU2Irrep::from_twice_spin(2), vec![0, 2]),
+    ];
+    let selection = LegSelection::try_new(&leg, selected.iter().cloned()).unwrap();
+    assert_eq!(selection.subspace().degeneracies(), &[2, 3, 2]);
+    let carrier = |sector: &SU2Irrep| sector.twice_spin() + 1;
+    let (layout, kept) = dense_plan(
+        &leg.sectors().unwrap(),
+        leg.degeneracies(),
+        leg.is_dual(),
+        carrier,
+        &selected,
+    );
+    let (other_layout, _) = dense_plan::<SU2Irrep, Vec<usize>>(
+        &other.sectors().unwrap(),
+        other.degeneracies(),
+        other.is_dual(),
+        carrier,
+        &[],
+    );
+    let zero = Complex64::new(0.0, 0.0);
+    let check = |tensor: &TensorMap<_, Complex64>, axis: usize| {
+        let restricted = tensor.restrict_leg(&[(axis, &selection)]).unwrap();
+        let dense = tensor.to_physical_dense().unwrap();
+        let maps: Vec<Vec<usize>> = (0..dense.shape.len())
+            .map(|candidate| {
+                if candidate == axis {
+                    axis_gather(&layout, &kept)
+                } else {
+                    identity_gather(&other_layout)
+                }
+            })
+            .collect();
+        let (shape, expected) = gather(&dense.shape, &dense.data, &maps);
+        let actual = restricted.to_physical_dense().unwrap();
+        assert_eq!(actual.shape, shape);
+        numerics::assert_slices_close("restricted entries", &actual.data, &expected, TERMS);
+
+        let embedded = restricted.embed_leg(axis, &selection).unwrap();
+        let expected = scattered(&dense.shape, &actual.data, &maps, zero);
+        let actual = embedded.to_physical_dense().unwrap();
+        assert_eq!(actual.shape, dense.shape);
+        numerics::assert_slices_close("embedded entries", &actual.data, &expected, TERMS);
+    };
+    check(&source, 1);
+    let lazy = source.adjoint().unwrap();
+    check(&lazy, lazy.codomain().len() + 1);
+}
+
+/// #2095: kept positions are a set. Any spelling of one set is the same
+/// selection (canonical runs), `positions` reports it ascending, and
+/// unsorted, repeated or out-of-range positions are rejected (stricter than
+/// TensorKit's `view(b, :, I)`, which would permute or duplicate columns).
+#[test]
+fn kept_positions_are_a_canonical_strictly_increasing_set() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(0, 5), (1, 3), (2, 2)]);
+    let zero = U1Irrep::new(0);
+    let one = U1Irrep::new(1);
+
+    let by_range = LegSelection::try_new(&leg, [(zero, 0..2), (one, 1..3)]).unwrap();
+    let by_list = LegSelection::try_new(&leg, [(one, vec![1, 2]), (zero, vec![0, 1])]).unwrap();
+    assert_eq!(by_range.subspace(), by_list.subspace());
+    assert_eq!(by_list.positions(&zero).unwrap(), vec![0, 1]);
+    assert_eq!(by_list.positions(&one).unwrap(), vec![1, 2]);
+    // A parent sector that is not selected keeps nothing; a sector absent
+    // from the parent is an error, not an empty set.
+    assert!(by_list.positions(&U1Irrep::new(2)).unwrap().is_empty());
+    assert!(by_list.positions(&U1Irrep::new(7)).is_err());
+
+    let gaps = LegSelection::try_new(&leg, [(zero, vec![0, 2, 3]), (one, vec![0, 2])]).unwrap();
+    assert_eq!(gaps.positions(&zero).unwrap(), vec![0, 2, 3]);
+    assert_eq!(gaps.subspace().degeneracies(), &[3, 2]);
+    assert!(!gaps.is_full());
+    let full = LegSelection::try_new(
+        &leg,
+        [
+            (zero, vec![0, 1, 2, 3, 4]),
+            (one, vec![0, 1, 2]),
+            (U1Irrep::new(2), vec![0, 1]),
+        ],
+    )
+    .unwrap();
+    assert!(full.is_full());
+
+    // Equal sets spelled differently are one selection: a compact diagonal
+    // restricted with both stays compact, which needs equal tables.
+    let source: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 5).unwrap();
+    let s = source.svd_compact(&[0], &[1]).unwrap().s;
+    let bond = s.domain()[0].clone();
+    let split = LegSelection::try_new(&bond, [(zero, vec![1, 2, 3])]).unwrap();
+    let joined = LegSelection::try_new(&bond, [(zero, 1..4)]).unwrap();
+    let restricted = s.restrict_leg(&[(0, &split), (1, &joined)]).unwrap();
+    assert!(tenet::expert::diagonal_spectrum(&restricted)
+        .unwrap()
+        .is_some());
+
+    for invalid in [vec![2, 1], vec![1, 1], vec![0, 5], vec![]] {
+        let error = LegSelection::try_new(&leg, [(zero, invalid.clone())]).unwrap_err();
+        assert!(
+            matches!(error, tenet::typed::Error::InvalidArgument(_)),
+            "{invalid:?}: {error:?}"
+        );
+    }
 }

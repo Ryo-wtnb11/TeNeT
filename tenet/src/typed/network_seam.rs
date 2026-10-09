@@ -143,20 +143,25 @@ where
         // One single-entry table per restricted axis: this path always names
         // exactly one sector per axis, and the kernel reads the sector back
         // from each destination block's own key.
-        let tables: Vec<[(SectorId, usize); 1]> = staged
+        let tables: Vec<[(SectorId, tenet_tensors::SelectedRuns); 1]> = staged
             .iter()
-            .map(|&(_, sector, start, _)| [(sector, start)])
+            .map(|&(_, sector, start, extent)| {
+                [(
+                    sector,
+                    tenet_tensors::SelectedRuns::from_elem(start..start + extent, 1),
+                )]
+            })
             .collect();
-        let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; rank];
+        let mut runs: Vec<tenet_tensors::SectorRunTable<'_>> = vec![None; rank];
         for (table, &(axis, ..)) in tables.iter().zip(&staged) {
-            starts[axis] = Some(table.as_slice());
+            runs[axis] = Some(table.as_slice());
         }
         let (source, source_data) = self.fusion_operand_and_data();
         let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
             source,
             &source_data,
-            &starts,
+            &runs,
         )
         .map_err(Error::from)?;
         Ok(Self {
@@ -296,14 +301,20 @@ where
                                 .to_string(),
                         ));
                     }
-                    sliced.push((axis, [(sector, range.clone())]));
+                    sliced.push((
+                        axis,
+                        [(
+                            sector,
+                            tenet_tensors::SelectedRuns::from_elem(range.clone(), 1),
+                        )],
+                    ));
                 }
             }
         }
         // The sliced source leg carries exactly one sector (checked above), so
         // each restricted axis needs a single-entry table; the kernel reads the
         // sector back from each source block's own key.
-        let mut scatter_ranges: Vec<tenet_tensors::SectorRangeTable<'_>> = vec![None; ranges.len()];
+        let mut scatter_ranges: Vec<tenet_tensors::SectorRunTable<'_>> = vec![None; ranges.len()];
         for (axis, table) in &sliced {
             scatter_ranges[*axis] = Some(table.as_slice());
         }

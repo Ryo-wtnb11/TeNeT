@@ -12,9 +12,10 @@
 //! fill-then-overwrite sequence these outputs used before.
 
 use core::mem::MaybeUninit;
-use core::ops::{Add, Mul};
+use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 
 use tenet_core::{BlockRef, BlockStructure};
@@ -85,27 +86,156 @@ where
     /// `conjugate` is set. `alpha = 1` is a bit-exact copy.
     pub fn copy(
         &mut self,
-        mut source_stride: impl FnMut(usize) -> Result<usize, OperationError>,
+        source_stride: impl FnMut(usize) -> Result<usize, OperationError>,
         source: &[D],
         source_offset: usize,
         conjugate: bool,
         alpha: D,
     ) -> Result<(), OperationError> {
         self.claim()?;
+        let block = self.block;
+        self.write_piece(
+            &block_shape(block.shape(), self.member_axis),
+            block.offset(),
+            source_stride,
+            source,
+            source_offset,
+            conjugate,
+            alpha,
+        )?;
+        self.written = true;
+        Ok(())
+    }
+
+    /// [`Self::copy`] of an order-preserving gather: on every logical axis
+    /// the block's `extent` destination positions read the source positions
+    /// `runs[axis]` (all of `0..extent` for `None`), in order. `source_offset`
+    /// is the source block's origin; the run starts are added to it here.
+    ///
+    /// One strided copy per piece of the cartesian product of the per-axis
+    /// runs, so a single run per axis is exactly one [`Self::copy`].
+    ///
+    /// # Errors
+    ///
+    /// Before any element is written: [`OperationError::InvalidArgument`]
+    /// unless `runs` has one entry per axis and every `Some` entry is
+    /// nonempty, sorted, disjoint runs whose lengths sum to the block's
+    /// extent on that axis ([`check_axis_runs`]), and an offset error when
+    /// the reachable source envelope leaves `source`.
+    pub fn copy_runs(
+        &mut self,
+        mut source_stride: impl FnMut(usize) -> Result<usize, OperationError>,
+        source: &[D],
+        source_offset: usize,
+        conjugate: bool,
+        alpha: D,
+        runs: &[AxisRuns<'_>],
+    ) -> Result<(), OperationError> {
+        self.claim()?;
+        let block = self.block;
+        let shape = block.shape();
+        // SAFETY (of the uninitialized publish this write contributes to):
+        // `initialize_owned` publishes the buffer once every block reported
+        // `written`, relying on each block's write to reach every element of
+        // its own destination layout. A gather reaches the destination only
+        // through the pieces of `for_each_run_piece`; their packed
+        // rectangles partition the block exactly when, per axis, the run
+        // lengths sum to the block extent. This check is that invariant. It
+        // is owned here, not by the caller, because `BlockOverwrite` is the
+        // owner of the `MaybeUninit` contract: no runs a safe caller passes
+        // can mark the block written with an element left unreached, since
+        // any violation returns before the first write and `written` stays
+        // false (an unwritten block aborts the output).
+        check_axis_runs(shape, runs)?;
+        let mut source_strides: SmallVec<[usize; 8]> = SmallVec::with_capacity(shape.len());
+        for axis in 0..shape.len() {
+            source_strides.push(source_stride(axis)?);
+        }
+        self.check_source_envelope(shape, runs, &source_strides, source.len(), source_offset)?;
+        let member_axis = self.member_axis;
+        let strides = block.strides();
+        let source_strides = &source_strides;
+        for_each_run_piece(shape, runs, |piece, packed, sparse| {
+            let destination_offset = linear_offset(block.offset(), packed, strides)?;
+            let piece_source_offset = linear_offset(source_offset, sparse, source_strides)?;
+            let mut piece_shape: SmallVec<[usize; 9]> = SmallVec::from_slice(piece);
+            if let Some(member) = member_axis {
+                piece_shape.push(member.members);
+            }
+            self.write_piece(
+                &piece_shape,
+                destination_offset,
+                |axis| Ok(source_strides[axis]),
+                source,
+                piece_source_offset,
+                conjugate,
+                alpha,
+            )
+        })?;
+        self.written = true;
+        Ok(())
+    }
+
+    /// Rejects, before the first piece is written, a gather whose farthest
+    /// source element lies outside `source`, so a failing gather writes
+    /// nothing. Strides are non-negative, so the farthest element is the
+    /// last position of every axis' last run (and the last member).
+    fn check_source_envelope(
+        &self,
+        shape: &[usize],
+        runs: &[AxisRuns<'_>],
+        source_strides: &[usize],
+        source_len: usize,
+        source_offset: usize,
+    ) -> Result<(), OperationError> {
+        if shape.contains(&0) || self.member_axis.is_some_and(|member| member.members == 0) {
+            return Ok(());
+        }
+        let mut last = source_offset;
+        for (axis, (&extent, &stride)) in shape.iter().zip(source_strides).enumerate() {
+            let position = match runs[axis] {
+                None => extent - 1,
+                Some(runs) => runs.last().map_or(0, |run| run.end - 1),
+            };
+            last = position
+                .checked_mul(stride)
+                .and_then(|step| last.checked_add(step))
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        if let Some(member) = self.member_axis {
+            last = (member.members - 1)
+                .checked_mul(member.source_stride)
+                .and_then(|step| last.checked_add(step))
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        if last >= source_len {
+            return Err(OperationError::OffsetOverflow { value: last });
+        }
+        Ok(())
+    }
+
+    /// One strided copy of `shape` (the member count trailing for a stacked
+    /// output) from `source_offset` to `destination_offset` along the block's
+    /// own destination strides.
+    #[allow(clippy::too_many_arguments)]
+    fn write_piece(
+        &mut self,
+        shape: &[usize],
+        destination_offset: usize,
+        mut source_stride: impl FnMut(usize) -> Result<usize, OperationError>,
+        source: &[D],
+        source_offset: usize,
+        conjugate: bool,
+        alpha: D,
+    ) -> Result<(), OperationError> {
         let strides = self.block.strides();
         let rank = strides.len();
         let member_axis = self.member_axis;
-        self.layout
-            .fill_one(
-                &block_shape(self.block.shape(), member_axis),
-                |axis| match member_axis {
-                    Some(member) if axis == rank => {
-                        Ok((member.destination_stride, member.source_stride))
-                    }
-                    _ => Ok((strides[axis], source_stride(axis)?)),
-                },
-            )?;
-        let dst_offset = checked_offset(self.block.offset())?;
+        self.layout.fill_one(shape, |axis| match member_axis {
+            Some(member) if axis == rank => Ok((member.destination_stride, member.source_stride)),
+            _ => Ok((strides[axis], source_stride(axis)?)),
+        })?;
+        let dst_offset = checked_offset(destination_offset)?;
         let src_offset = checked_offset(source_offset)?;
         match &mut self.storage {
             Storage::Uninit(dst) => self
@@ -121,7 +251,6 @@ where
                 D::zero(),
             )?,
         }
-        self.written = true;
         Ok(())
     }
 
@@ -262,6 +391,116 @@ fn block_shape(shape: &[usize], member_axis: Option<MemberAxis>) -> Cow<'_, [usi
 
 fn checked_offset(offset: usize) -> Result<isize, OperationError> {
     isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
+}
+
+/// One axis of an order-preserving gather or scatter: `None` is the whole
+/// axis, `Some(runs)` the positions on the sparse side, as sorted, disjoint,
+/// nonempty half-open runs. The packed side holds the same positions
+/// consecutively, in order.
+#[doc(hidden)]
+pub type AxisRuns<'a> = Option<&'a [Range<usize>]>;
+
+/// Checks that `runs` packs exactly `packed[axis]` positions on every axis:
+/// one entry per axis, and each `Some` entry nonempty, sorted, disjoint runs
+/// whose lengths sum to that extent. The pieces of [`for_each_run_piece`]
+/// then partition the packed block.
+///
+/// Bounds on the sparse side (`last run end <= sparse extent`) are the
+/// caller's, which knows that extent.
+#[doc(hidden)]
+pub fn check_axis_runs(packed: &[usize], runs: &[AxisRuns<'_>]) -> Result<(), OperationError> {
+    if runs.len() != packed.len() {
+        return Err(OperationError::InvalidArgument {
+            message: "axis runs must name every block axis once",
+        });
+    }
+    for (&extent, runs) in packed.iter().zip(runs) {
+        let Some(runs) = runs else { continue };
+        let mut covered = 0usize;
+        let mut floor = 0usize;
+        for run in *runs {
+            if run.start < floor || run.start >= run.end {
+                return Err(OperationError::InvalidArgument {
+                    message: "axis runs must be nonempty, sorted and disjoint",
+                });
+            }
+            floor = run.end;
+            covered += run.end - run.start;
+        }
+        if covered != extent {
+            return Err(OperationError::InvalidArgument {
+                message: "axis runs must cover the packed block extent exactly",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Calls `piece(shape, packed_start, sparse_start)` once per piece of the
+/// cartesian product of the per-axis runs, in column-major piece order.
+/// `packed` gives each axis' packed extent (the run of a `None` axis).
+/// Inline up to rank 8: no heap allocation per call or piece.
+///
+/// `runs` must have passed [`check_axis_runs`] against `packed`.
+#[doc(hidden)]
+pub fn for_each_run_piece<E>(
+    packed: &[usize],
+    runs: &[AxisRuns<'_>],
+    mut piece: impl FnMut(&[usize], &[usize], &[usize]) -> Result<(), E>,
+) -> Result<(), E> {
+    let run = |axis: usize, index: usize| match runs[axis] {
+        None => 0..packed[axis],
+        Some(runs) => runs[index].clone(),
+    };
+    let count = |axis: usize| runs[axis].map_or(1, <[Range<usize>]>::len);
+    let rank = packed.len();
+    if (0..rank).any(|axis| count(axis) == 0) {
+        return Ok(());
+    }
+    let mut index: SmallVec<[usize; 8]> = SmallVec::from_elem(0, rank);
+    let mut shape: SmallVec<[usize; 8]> = (0..rank).map(|axis| run(axis, 0).len()).collect();
+    let mut packed_start: SmallVec<[usize; 8]> = SmallVec::from_elem(0, rank);
+    let mut sparse_start: SmallVec<[usize; 8]> = (0..rank).map(|axis| run(axis, 0).start).collect();
+    loop {
+        piece(&shape, &packed_start, &sparse_start)?;
+        let mut axis = 0;
+        loop {
+            if axis == rank {
+                return Ok(());
+            }
+            index[axis] += 1;
+            if index[axis] < count(axis) {
+                packed_start[axis] += shape[axis];
+                let next = run(axis, index[axis]);
+                shape[axis] = next.len();
+                sparse_start[axis] = next.start;
+                break;
+            }
+            let first = run(axis, 0);
+            index[axis] = 0;
+            packed_start[axis] = 0;
+            shape[axis] = first.len();
+            sparse_start[axis] = first.start;
+            axis += 1;
+        }
+    }
+}
+
+/// `origin + sum_a position[a] * stride[a]`, checked.
+fn linear_offset(
+    origin: usize,
+    position: &[usize],
+    strides: &[usize],
+) -> Result<usize, OperationError> {
+    position
+        .iter()
+        .zip(strides)
+        .try_fold(origin, |offset, (&position, &stride)| {
+            position
+                .checked_mul(stride)
+                .and_then(|step| offset.checked_add(step))
+        })
+        .ok_or(OperationError::ElementCountOverflow)
 }
 
 /// Whether the blocks' reachable offsets partition `0..len`, so writing every
@@ -817,6 +1056,169 @@ mod tests {
         let zeros =
             overwrite_owned_blocks(&tiled(), |_, writer: &mut Writer<'_>| writer.zero()).unwrap();
         assert_eq!(bits(&zeros), bits(&[Complex64::new(0.0, 0.0); 23]));
+    }
+
+    /// One column-major `2 x 3 x 1` block, tiled `0..6`, gathered from a
+    /// column-major `4 x 5 x 1` source (strides `1, 4, 20`) at rows `{0, 3}`
+    /// and columns `{0, 2, 3}`: two runs on each of the first two axes.
+    fn gather_block() -> BlockStructure {
+        structure(&[(&[2, 3, 1], &[1, 2, 6], 0)])
+    }
+
+    fn gather_runs() -> [Range<usize>; 4] {
+        [0..1, 3..4, 0..1, 2..4]
+    }
+
+    fn write_gather(
+        allow_uninit: bool,
+        member_axis: Option<MemberAxis>,
+        source: &[Complex64],
+        runs: &[AxisRuns<'_>],
+    ) -> Result<Vec<Complex64>, OperationError> {
+        overwrite_owned_blocks_in(
+            &gather_block(),
+            allow_uninit,
+            member_axis,
+            |_, writer: &mut Writer<'_>| {
+                writer.copy_runs(
+                    |axis| Ok([1, 4, 20][axis]),
+                    source,
+                    1,
+                    true,
+                    Complex64::new(1.0, 0.0),
+                    runs,
+                )
+            },
+        )
+    }
+
+    /// What: a multi-run gather stores, bit for bit, the conjugated source
+    /// elements at the selected positions in order (an index-by-index
+    /// oracle), into uninitialized and zeroed storage and for every member of
+    /// a stacked output; one run per axis is exactly `copy`.
+    #[test]
+    fn copy_runs_gathers_the_selected_positions_in_order_bitwise() {
+        let source = values();
+        let all = gather_runs();
+        let runs = [Some(&all[..2]), Some(&all[2..]), None];
+        let rows = [0, 3];
+        let columns = [0, 2, 3];
+        let oracle = |member: usize| -> Vec<Complex64> {
+            let mut expected = Vec::new();
+            for &column in &columns {
+                for &row in &rows {
+                    expected.push(source[member * 40 + 1 + row + 4 * column].conj());
+                }
+            }
+            expected
+        };
+        for allow_uninit in [true, false] {
+            let gathered = write_gather(allow_uninit, None, &source, &runs).unwrap();
+            assert_eq!(bits(&gathered), bits(&oracle(0)));
+            let member_axis = MemberAxis {
+                members: 2,
+                destination_stride: 6,
+                source_stride: 40,
+            };
+            let stacked = write_gather(allow_uninit, Some(member_axis), &source, &runs).unwrap();
+            let expected: Vec<Complex64> = (0..2).flat_map(oracle).collect();
+            assert_eq!(bits(&stacked), bits(&expected));
+        }
+        let contiguous = [1..3];
+        let single = [Some(&contiguous[..]), None, None];
+        let block = structure(&[(&[2, 3, 1], &[1, 2, 6], 0)]);
+        let with_copy = overwrite_owned_blocks(&block, |_, writer: &mut Writer<'_>| {
+            writer.copy(
+                |axis| Ok([1, 4, 20][axis]),
+                &source,
+                2,
+                true,
+                Complex64::new(1.0, 0.0),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            bits(&write_gather(true, None, &source, &single).unwrap()),
+            bits(&with_copy)
+        );
+    }
+
+    /// What (#2095 F1): runs that do not cover the block exactly, or are
+    /// empty, unsorted, overlapping or one short of the rank, and a source
+    /// envelope past the end, are typed errors raised before the first
+    /// write: nothing is published and no span walk ran.
+    #[test]
+    fn copy_runs_rejects_an_uncovered_block_before_any_write() {
+        let source = values();
+        let short = [0..1];
+        let unsorted = [3..4, 0..1];
+        let overlapping = [0..2, 1..2];
+        let empty = [0..0, 0..2];
+        let far = [0..1, 95..96];
+        let invalid: [&[AxisRuns<'_>]; 5] = [
+            // Covers one row of two: the extent - 1 under-coverage.
+            &[Some(&short[..]), None, None],
+            &[Some(&unsorted[..]), None, None],
+            &[Some(&overlapping[..]), None, None],
+            &[Some(&empty[..]), None, None],
+            &[None, None],
+        ];
+        for runs in invalid {
+            #[cfg(debug_assertions)]
+            crate::take_checked_block_passes();
+            for allow_uninit in [true, false] {
+                assert!(matches!(
+                    write_gather(allow_uninit, None, &source, runs),
+                    Err(OperationError::InvalidArgument { .. })
+                ));
+            }
+            #[cfg(debug_assertions)]
+            assert_eq!(crate::take_checked_block_passes(), Default::default());
+        }
+        #[cfg(debug_assertions)]
+        crate::take_checked_block_passes();
+        assert!(matches!(
+            write_gather(true, None, &source, &[Some(&far[..]), None, None]),
+            Err(OperationError::OffsetOverflow { .. })
+        ));
+        #[cfg(debug_assertions)]
+        assert_eq!(crate::take_checked_block_passes(), Default::default());
+    }
+
+    /// What: the piece walk visits the cartesian product of the runs in
+    /// column-major order with packed and sparse starts, and nothing for an
+    /// axis with no runs.
+    #[test]
+    fn run_pieces_walk_the_product_of_the_runs() {
+        let axis0 = [0..1, 3..5];
+        let axis2 = [1..2, 4..6];
+        let mut pieces = Vec::new();
+        for_each_run_piece::<()>(
+            &[3, 2, 3],
+            &[Some(&axis0), None, Some(&axis2)],
+            |s, p, q| {
+                pieces.push((s.to_vec(), p.to_vec(), q.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pieces,
+            vec![
+                (vec![1, 2, 1], vec![0, 0, 0], vec![0, 0, 1]),
+                (vec![2, 2, 1], vec![1, 0, 0], vec![3, 0, 1]),
+                (vec![1, 2, 2], vec![0, 0, 1], vec![0, 0, 4]),
+                (vec![2, 2, 2], vec![1, 0, 1], vec![3, 0, 4]),
+            ]
+        );
+        let none: [Range<usize>; 0] = [];
+        let mut count = 0;
+        for_each_run_piece::<()>(&[0, 2], &[Some(&none), None], |_, _, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
     }
 
     /// What: unwinding from a block writer after earlier blocks were

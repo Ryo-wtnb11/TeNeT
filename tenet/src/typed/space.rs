@@ -493,12 +493,21 @@ where
             &encoded,
             truncation,
         )?;
-        let selection = LegSelection::from_prefix_counts(
+        // An all-discarded sector is omitted; a decision that discards
+        // everything is the ordinary bond leg with no sectors.
+        let selection = LegSelection::from_runs(
             self,
             encoded
                 .iter()
-                .map(|entry| entry.sector)
-                .zip(decision.kept.iter().copied()),
+                .zip(&decision.kept)
+                .filter(|&(_, &count)| count > 0)
+                .map(|(entry, &count)| {
+                    (
+                        entry.sector,
+                        tenet_tensors::SelectedRuns::from_elem(0..count, 1),
+                    )
+                })
+                .collect(),
         )?;
         Ok(TruncatedSelection {
             selection,
@@ -542,16 +551,18 @@ impl<R> GradedSpace<R> {
     }
 }
 
-/// A subspace of one graded leg, given as a half-open degeneracy range per
-/// sector.
+/// A subspace of one graded leg, given as a set of kept degeneracy positions
+/// per sector.
 ///
-/// For a leg `V = ⊕_c ℂ^{n_c} ⊗ R_c`, a selection `σ = { c ↦ [a_c, b_c) }`
-/// names the subspace `W = ⊕_{c ∈ σ} ℂ^{b_c − a_c} ⊗ R_c` and the inclusion
-/// isometry `ι_σ : W → V`, which is the identity on every irrep and a
-/// coordinate inclusion on the degeneracy spaces. Ranges therefore never cut
-/// into a multiplet: for a non-Abelian sector they select whole copies of
-/// `R_c`, exactly as TensorKit's `dim(V, c)` counts degeneracy and its
-/// truncation keeps or drops whole multiplets.
+/// For a leg `V = ⊕_c ℂ^{n_c} ⊗ R_c`, a selection
+/// `σ = { c ↦ P_c }` with `P_c = {p_0 < … < p_{k_c − 1}} ⊆ [0, n_c)` nonempty
+/// names the subspace `W = ⊕_{c ∈ σ} ℂ^{k_c} ⊗ R_c` and the inclusion
+/// isometry `ι_σ : W → V`, which is the identity on every irrep and the
+/// order-preserving coordinate inclusion `e_j ↦ e_{p_j}` on the degeneracy
+/// spaces. Positions therefore never cut into a multiplet: for a
+/// non-Abelian sector they select whole copies of `R_c`, exactly as
+/// TensorKit's `dim(V, c)` counts degeneracy and its truncation keeps or
+/// drops whole multiplets.
 ///
 /// Sectors are named in the leg's **own** labels, as [`GradedSpace::sectors`]
 /// reports them. For a dual leg those are already the dualised labels; a
@@ -565,20 +576,24 @@ impl<R> GradedSpace<R> {
 /// # TensorKit correspondence
 ///
 /// TensorKit has no per-leg selection primitive. Its production route for a
-/// bond is `truncate_domain!`/`truncate_codomain!` with per-sector index
-/// selectors (`src/factorizations/truncation.jl`); for an arbitrary leg it is
-/// a contraction with `isometry(W ← V)`, which realises only leading-index
-/// selections. General offsets and dual legs have no direct counterpart there.
+/// bond is `truncate_domain!`/`truncate_codomain!`/`truncate_diagonal!`
+/// (`src/factorizations/truncation.jl`), a per-sector `view(b, :, I)` with
+/// `I` a Bool mask, an ascending index vector or a range; for an arbitrary
+/// leg it is a contraction with `isometry(W ← V)`, which realises only
+/// leading-index selections. A `LegSelection` is the set such an `I` names,
+/// stored as sorted maximal runs of positions per sector rather than as a
+/// mask or index list: the same set, and the kernels copy each run as one
+/// strided piece. A selection carries no order of its own, so an `I` that
+/// would permute columns has no counterpart (see [`Self::try_new`]).
 pub struct LegSelection<R> {
     parent: GradedSpace<R>,
     subspace: GradedSpace<R>,
     // Sorted by `SectorId`, parallel to `subspace`'s stored sectors: the
-    // kernels look the start up by the id they read from a block's own key.
-    pub(super) entries: Vec<(SectorId, std::ops::Range<usize>)>,
-    // `entries`' starts, the table the restriction kernel reads per axis.
-    // Why stored: one selection is applied to several factors, and a
-    // restriction then borrows it instead of allocating it per call and axis.
-    starts: Vec<(SectorId, usize)>,
+    // kernels look the runs up by the id they read from a block's own key,
+    // and borrow this table instead of building one per call and axis.
+    // Runs are canonical (maximal, sorted, nonempty), so equal tables are
+    // equal sets.
+    pub(super) entries: Vec<(SectorId, tenet_tensors::SelectedRuns)>,
 }
 
 // Why hand-written: both fields clone through an `Arc`, exactly as
@@ -590,7 +605,6 @@ impl<R> Clone for LegSelection<R> {
             parent: self.parent.clone(),
             subspace: self.subspace.clone(),
             entries: self.entries.clone(),
-            starts: self.starts.clone(),
         }
     }
 }
@@ -612,27 +626,37 @@ where
 {
     /// Validates `pairs` against `parent` and records the resulting subspace.
     ///
-    /// Input order does not matter; entries are stored in the provider's
+    /// Each pair names a sector and its kept degeneracy positions, strictly
+    /// increasing: a range `a..b` (a contiguous selection) or any list such
+    /// as `[0, 3]` or a `Vec<usize>`. Input order of the pairs does not
+    /// matter; entries are stored in the provider's
     /// [`crate::sector::SectorId`] order, as the leg itself stores them.
+    ///
+    /// Stricter than TensorKit: `view(b, :, I)` accepts an unsorted or
+    /// repeated `I` and then permutes or duplicates columns, which is not a
+    /// subspace; such positions are an error here.
     ///
     /// # Complexity
     ///
-    /// `O(k log k)` for `k` pairs; no payload is touched.
+    /// `O(s log s + K)` for `s` pairs naming `K` positions in total; no
+    /// payload is touched.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidArgument`] when `pairs` is empty, a label is
-    /// repeated, two labels encode to the same id, a range is empty or
-    /// reversed, a sector is absent from `parent`, or a range exceeds that
-    /// sector's degeneracy.
-    pub fn try_new<Pairs>(
+    /// repeated, two labels encode to the same id, a sector names no
+    /// position, its positions are not strictly increasing, a sector is
+    /// absent from `parent`, or a position is not below that sector's
+    /// degeneracy.
+    pub fn try_new<Pairs, P>(
         parent: &GradedSpace<R>,
         pairs: Pairs,
     ) -> Result<Self, TypedFacadeError<R>>
     where
-        Pairs: IntoIterator<Item = (R::Sector, std::ops::Range<usize>)>,
+        Pairs: IntoIterator<Item = (R::Sector, P)>,
+        P: IntoIterator<Item = usize>,
     {
-        let pairs: Vec<(R::Sector, std::ops::Range<usize>)> = pairs.into_iter().collect();
+        let pairs: Vec<(R::Sector, P)> = pairs.into_iter().collect();
         if pairs.is_empty() {
             return Err(Error::InvalidArgument(
                 "leg selection must name at least one sector".to_string(),
@@ -653,29 +677,43 @@ where
         }
 
         let mut entries = Vec::with_capacity(pairs.len());
-        for (label, range) in &pairs {
-            if range.start >= range.end {
-                return Err(Error::InvalidArgument(format!(
-                    "leg selection for sector {label:?} must be nonempty, got [{}, {})",
-                    range.start, range.end
-                ))
-                .into());
-            }
-            let id = TypedSectorAdmission::try_encode_label(parent.provider(), label)
+        for (label, positions) in pairs {
+            let id = TypedSectorAdmission::try_encode_label(parent.provider(), &label)
                 .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
             let degeneracy = parent.leg().degeneracy(id).ok_or_else(|| {
                 TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
                     "sector {label:?} is absent from the selected leg"
                 )))
             })?;
-            if range.end > degeneracy {
+            let mut runs = tenet_tensors::SelectedRuns::new();
+            for position in positions {
+                if position >= degeneracy {
+                    return Err(Error::InvalidArgument(format!(
+                        "leg selection position {position} for sector {label:?} exceeds its \
+                         degeneracy {degeneracy}"
+                    ))
+                    .into());
+                }
+                match runs.last_mut() {
+                    Some(run) if position == run.end => run.end += 1,
+                    Some(run) if position < run.end => {
+                        return Err(Error::InvalidArgument(format!(
+                            "leg selection positions for sector {label:?} must be strictly \
+                             increasing, got {position} after {}",
+                            run.end - 1
+                        ))
+                        .into());
+                    }
+                    _ => runs.push(position..position + 1),
+                }
+            }
+            if runs.is_empty() {
                 return Err(Error::InvalidArgument(format!(
-                    "leg selection [{}, {}) for sector {label:?} exceeds its degeneracy {degeneracy}",
-                    range.start, range.end
+                    "leg selection for sector {label:?} must name at least one position"
                 ))
                 .into());
             }
-            entries.push((id, range.clone()));
+            entries.push((id, runs));
         }
         entries.sort_unstable_by_key(|(id, _)| *id);
         if let Some(window) = entries.windows(2).find(|window| window[0].0 == window[1].0) {
@@ -685,14 +723,29 @@ where
             ))
             .into());
         }
+        Self::from_runs(parent, entries)
+    }
 
+    /// Records a selection whose `entries` are already valid for `parent`:
+    /// ascending by [`SectorId`], each sector of `parent`, each with
+    /// canonical runs inside its degeneracy, which [`Self::try_new`] and
+    /// [`GradedSpace::find_truncated`] have established.
+    ///
+    /// Why `entries` may be empty here but not in `try_new`: a decision that
+    /// discards everything leaves no sector to name, and that outcome is an
+    /// ordinary bond leg with no sectors. An empty list from a *caller* is
+    /// almost always a bug, so `try_new` keeps rejecting it.
+    fn from_runs(
+        parent: &GradedSpace<R>,
+        entries: Vec<(SectorId, tenet_tensors::SelectedRuns)>,
+    ) -> Result<Self, TypedFacadeError<R>> {
         // The subspace is built on the parent's own dual flag and stored ids:
         // going through `GradedSpace::try_new` + `try_dual` would dualise the
         // labels and name a different leg.
         let leg = SectorLeg::try_new(
             entries
                 .iter()
-                .map(|(id, range)| (*id, range.end - range.start)),
+                .map(|(id, runs)| (*id, runs.iter().map(ExactSizeIterator::len).sum())),
             parent.is_dual(),
         )
         .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
@@ -702,65 +755,40 @@ where
                 provider: Arc::clone(parent.provider_arc()),
                 leg,
             },
-            starts: entries
-                .iter()
-                .map(|(sector, range)| (*sector, range.start))
-                .collect(),
             entries,
         })
     }
-}
 
-impl<R> LegSelection<R>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorModeDispatch<R>,
-{
-    /// Builds the selection of leading prefixes `0..count` that a truncation
-    /// decision produced. `kept` must be ascending by [`SectorId`] and name
-    /// only sectors of `parent`, which [`GradedSpace::find_truncated`] has
-    /// already established.
+    /// The kept degeneracy positions of `sector`, ascending: empty for a
+    /// sector of the parent leg that is not selected.
     ///
-    /// Why not [`Self::try_new`]: a decision that discards everything leaves no
-    /// sector to name, and that outcome is an ordinary bond leg with no
-    /// sectors. An empty list from a *caller* is
-    /// almost always a bug, so `try_new` keeps rejecting it.
-    fn from_prefix_counts(
-        parent: &GradedSpace<R>,
-        kept: impl IntoIterator<Item = (SectorId, usize)>,
-    ) -> Result<Self, TypedFacadeError<R>> {
-        let entries: Vec<(SectorId, std::ops::Range<usize>)> = kept
-            .into_iter()
-            .filter(|&(_, count)| count > 0)
-            .map(|(sector, count)| (sector, 0..count))
-            .collect();
-        let leg = SectorLeg::try_new(
-            entries
-                .iter()
-                .map(|(sector, range)| (*sector, range.end - range.start)),
-            parent.is_dual(),
-        )
-        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
-        Ok(Self {
-            parent: parent.clone(),
-            subspace: GradedSpace {
-                provider: Arc::clone(parent.provider_arc()),
-                leg,
-            },
-            starts: entries
-                .iter()
-                .map(|(sector, range)| (*sector, range.start))
-                .collect(),
-            entries,
-        })
-    }
-}
-
-impl<R> LegSelection<R> {
-    /// The source start of every selected sector, sorted by [`SectorId`]: the
-    /// per-axis table the restriction kernels read.
-    fn start_table(&self) -> &[(SectorId, usize)] {
-        &self.starts
+    /// This is the index set TensorKit's `findtruncated` returns as `ind`,
+    /// in stored order, for mapping the kept states back to the parent leg
+    /// (for example, which eigenvalues survived a truncation).
+    ///
+    /// # Complexity
+    ///
+    /// `O(k + log s)` for `k` kept positions of `sector` and `s` selected
+    /// sectors.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `sector` is absent from the parent
+    /// leg; provider label-encoding failures are returned unchanged.
+    pub fn positions(&self, sector: &R::Sector) -> Result<Vec<usize>, TypedFacadeError<R>> {
+        let id = TypedSectorAdmission::try_encode_label(self.parent.provider(), sector)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        if self.parent.leg().degeneracy(id).is_none() {
+            return Err(Error::InvalidArgument(format!(
+                "sector {sector:?} is absent from the selection's parent leg"
+            ))
+            .into());
+        }
+        Ok(self
+            .entries
+            .binary_search_by_key(&id, |(candidate, _)| *candidate)
+            .map(|index| self.entries[index].1.iter().cloned().flatten().collect())
+            .unwrap_or_default())
     }
 }
 
@@ -834,17 +862,17 @@ where
     <R::Mode as TypedTensorRootDispatch<R>>::build_root(Arc::clone(space.provider_arc()), homspace)
 }
 
-/// The kernel's per-axis start tables for a restriction set on a tensor of
+/// The kernel's per-axis run tables for a restriction set on a tensor of
 /// rank `rank`, borrowed from the selections.
-pub(super) fn restriction_starts<'a, R>(
+pub(super) fn restriction_runs<'a, R>(
     rank: usize,
     legs: &[(usize, &'a LegSelection<R>)],
-) -> Vec<tenet_tensors::SectorStartTable<'a>> {
-    let mut starts = vec![None; rank];
+) -> Vec<tenet_tensors::SectorRunTable<'a>> {
+    let mut runs = vec![None; rank];
     for &(axis, selection) in legs {
-        starts[axis] = Some(selection.start_table());
+        runs[axis] = Some(selection.entries.as_slice());
     }
-    starts
+    runs
 }
 
 /// Checks a `restrict_leg` set against `space`. Shared by the eager and the
@@ -937,8 +965,9 @@ impl<R> LegSelection<R> {
         &self.parent
     }
 
-    /// The selected subspace: the selected sectors with degeneracy
-    /// `end − start`, the parent's dual flag, and the parent's provider.
+    /// The selected subspace: the selected sectors with degeneracy equal to
+    /// their number of kept positions, the parent's dual flag, and the
+    /// parent's provider.
     #[inline]
     pub fn subspace(&self) -> &GradedSpace<R> {
         &self.subspace
@@ -947,8 +976,8 @@ impl<R> LegSelection<R> {
     /// Whether this selection is the whole parent leg, so that restricting
     /// with it would only copy.
     ///
-    /// True exactly when every parent sector is selected over its full
-    /// degeneracy — including the degenerate case of a parent with no sectors,
+    /// True exactly when every parent sector keeps all of its degeneracy
+    /// positions — including the degenerate case of a parent with no sectors,
     /// where the only selection is also the whole leg.
     #[inline]
     pub fn is_full(&self) -> bool {
