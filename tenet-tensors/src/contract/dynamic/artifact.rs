@@ -23,6 +23,11 @@ pub(crate) struct DynamicTreeExecutionArtifact<C = f64> {
 
 impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
     #[cfg(test)]
+    pub(crate) fn test_has_core_dst(&self) -> bool {
+        self.core_dst.is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_lhs_transform(
         &self,
     ) -> (
