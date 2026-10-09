@@ -232,6 +232,56 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     }
 }
 
+#[cfg(feature = "cuda")]
+impl StorageContractResolution<f64> {
+    /// Checks, without a device, that this route has a CUDA member replay,
+    /// and returns the device plan entries one member workspace holds:
+    /// distinct core GEMM shapes, core zero fills, and each transform stage's
+    /// zero fills and scaled moves.
+    ///
+    /// Core and CopyC admit exact +1/-1 job coefficients; a DynamicTree core
+    /// must be unit, its fermionic twist riding the source moves. Every
+    /// transform stage must be unconjugated nonzero Single moves.
+    #[doc(hidden)]
+    pub fn admit_cuda_members(&self) -> Result<usize, OperationError> {
+        use tenet_operations::cuda_transform::CudaSingleMemberRegions;
+        match &self.route {
+            ContractRoute::Core { plan, .. } => {
+                plan.require_identity_signed_direct_replay()?;
+                self.admit_cuda_inactive_regions()?;
+                Ok(plan.cuda_direct_plan_entries())
+            }
+            ContractRoute::CopyC(copy) => {
+                copy.core.require_identity_signed_direct_replay()?;
+                let output = CudaSingleMemberRegions::admit(&copy.transform)?;
+                self.admit_cuda_inactive_regions()?;
+                Ok(copy.core.cuda_direct_plan_entries() + output)
+            }
+            ContractRoute::DynamicTree(artifact) => {
+                self.admit_cuda_inactive_regions()?;
+                artifact.block_plan.require_identity_direct_replay()?;
+                let mut entries = artifact.block_plan.cuda_direct_plan_entries();
+                let [lhs_scales, rhs_scales] = artifact.stage_scales();
+                for (borrowed, transform, scales) in [
+                    (artifact.lhs_borrowed, &artifact.lhs_transform, lhs_scales),
+                    (artifact.rhs_borrowed, &artifact.rhs_transform, rhs_scales),
+                ] {
+                    if !borrowed {
+                        entries += CudaSingleMemberRegions::admit_scaled(
+                            &transform.transform_structure,
+                            scales,
+                        )?;
+                    }
+                }
+                if let Some(output) = &artifact.core_dst {
+                    entries += CudaSingleMemberRegions::admit(&output.output_transform_structure)?;
+                }
+                Ok(entries)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     /// This thread's zero-copy candidate walks: the preflight-count probe.
