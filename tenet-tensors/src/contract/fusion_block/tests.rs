@@ -1042,3 +1042,289 @@ fn core_fusion_block_workspace_is_explicit_host_workspace() {
     assert!(workspace.is_host_placement());
     assert_eq!(alias.placement(), Placement::Host);
 }
+
+/// Entries of one block in column-major order over its axes, which is the
+/// column-major matrix whose rows fuse any leading split of the axes.
+fn block_matrix(structure: &BlockStructure, index: usize, data: &[f64]) -> Vec<f64> {
+    let block = structure.block(index).unwrap();
+    let shape = block.shape();
+    let len = shape.iter().product::<usize>();
+    (0..len)
+        .map(|mut linear| {
+            let mut at = block.offset();
+            for (&extent, &stride) in shape.iter().zip(block.strides()) {
+                at += (linear % extent) * stride;
+                linear /= extent;
+            }
+            data[at]
+        })
+        .collect()
+}
+
+/// Hand oracle of the core GEMM: `C[X, Z] = Σ_Y A[X, Y] B[Y, Z]` over tree
+/// identity, read from block keys and degeneracy layouts only.
+fn core_oracle(
+    dst: &DynamicFusionMapSpace,
+    lhs: (&Arc<BlockStructure>, &[f64]),
+    rhs: (&Arc<BlockStructure>, &[f64]),
+    nout: usize,
+) -> Vec<f64> {
+    let dims = |structure: &BlockStructure, index: usize, split: usize| {
+        let shape = structure.block(index).unwrap().shape().to_vec();
+        (
+            shape[..split].iter().product::<usize>(),
+            shape[split..].iter().product::<usize>(),
+        )
+    };
+    let pair = |structure: &BlockStructure, index: usize| match structure
+        .block(index)
+        .unwrap()
+        .key()
+        .clone()
+    {
+        BlockKey::FusionTree(pair) => pair,
+        other => panic!("{other:?}"),
+    };
+    let dst_structure = dst.structure();
+    let mut out = vec![0.0; dst.required_len().unwrap()];
+    for d in 0..dst_structure.block_count() {
+        let key = pair(dst_structure, d);
+        let (rows, cols) = dims(dst_structure, d, nout);
+        let mut value = vec![0.0; rows * cols];
+        for l in 0..lhs.0.block_count() {
+            let lkey = pair(lhs.0, l);
+            if lkey.codomain_tree() != key.codomain_tree() {
+                continue;
+            }
+            for r in 0..rhs.0.block_count() {
+                let rkey = pair(rhs.0, r);
+                if rkey.domain_tree() != key.domain_tree()
+                    || rkey.codomain_tree() != lkey.domain_tree()
+                {
+                    continue;
+                }
+                let (_, inner) = dims(lhs.0, l, nout);
+                let a = block_matrix(lhs.0, l, lhs.1);
+                let b = block_matrix(rhs.0, r, rhs.1);
+                for col in 0..cols {
+                    for row in 0..rows {
+                        for k in 0..inner {
+                            value[row + rows * col] += a[row + rows * k] * b[k + inner * col];
+                        }
+                    }
+                }
+            }
+        }
+        let block = dst_structure.block(d).unwrap();
+        let shape = block.shape();
+        for (mut linear, entry) in value.into_iter().enumerate() {
+            let mut at = block.offset();
+            for (&extent, &stride) in shape.iter().zip(block.strides()) {
+                at += (linear % extent) * stride;
+                linear /= extent;
+            }
+            out[at] = entry;
+        }
+    }
+    out
+}
+
+fn run_core_plan(
+    plan: &FusionBlockContractPlan,
+    dst: &Arc<BlockStructure>,
+    init: &[f64],
+    lhs: (&Arc<BlockStructure>, &[f64]),
+    rhs: (&Arc<BlockStructure>, &[f64]),
+    alpha: f64,
+    beta: f64,
+) -> Vec<f64> {
+    let mut output = init.to_vec();
+    let mut dense = DenseTreeTransformOperations::default();
+    let mut dense_workspace = TensorContractWorkspace::default();
+    let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
+    plan.execute_raw(
+        &mut crate::StridedHostKernelAdapter::default(),
+        &mut BackendRank2Gemm::<_, _, f64>::new(&mut dense, &mut dense_workspace),
+        &mut fusion_workspace,
+        dst,
+        &mut output,
+        lhs.0,
+        lhs.1,
+        rhs.0,
+        rhs.1,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    output
+}
+
+/// What (#2129 leaf A): the checked Generic core plan of canonical staged
+/// structures compiles from coupled regions (no per-subblock layout) and is
+/// bitwise identical to the per-subblock builder; a non-canonical operand
+/// tiling falls back to that builder. Outer multiplicity (`1 ⊗ 1 → 1` twice),
+/// dual and non-dual legs, degeneracies 2 and 3, two active coupled sectors,
+/// and an inactive destination sector are covered. A zero-extent tree cannot
+/// be built: `SectorLeg` drops zero-degeneracy sectors.
+#[test]
+fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
+    use crate::tests::GenericMultiplicityRule;
+    let rule = GenericMultiplicityRule;
+    let full = |dual| SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], dual);
+    let vacuum = |dual| SectorLeg::new([(SectorId::new(0), 2)], dual);
+    let space = |codomain: [SectorLeg; 2], domain: [SectorLeg; 2]| {
+        DynamicFusionMapSpace::from_final_homspace_generic(
+            &rule,
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new(codomain),
+                FusionProductSpace::new(domain),
+            ),
+        )
+        .unwrap()
+    };
+    let values = |space: &DynamicFusionMapSpace, seed: f64| {
+        (0..space.required_len().unwrap())
+            .map(|index| ((index * 7 + 3) % 13) as f64 * 0.25 - 1.5 + seed)
+            .collect::<Vec<_>>()
+    };
+    let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]);
+
+    let dst = space([full(false), full(true)], [full(false), full(false)]);
+    let cases = [
+        (
+            "multiplicity",
+            space([full(false), full(true)], [full(true), full(false)]),
+            space([full(true), full(false)], [full(false), full(false)]),
+        ),
+        (
+            "inactive coupled 1",
+            space([full(false), full(true)], [vacuum(true), vacuum(false)]),
+            space([vacuum(true), vacuum(false)], [full(false), full(false)]),
+        ),
+    ];
+    for (name, lhs, rhs) in &cases {
+        let (lhs_data, rhs_data) = (values(lhs, 0.0), values(rhs, 0.5));
+        let init = values(&dst, 2.0);
+        reset_layout_lookups();
+        let region = compile_checked_generic_core_plan(
+            dst.structure(),
+            2,
+            lhs.structure(),
+            2,
+            rhs.structure(),
+            2,
+            axes,
+        )
+        .unwrap();
+        // What: canonical staged structures never build per-subblock layouts.
+        assert_eq!(layout_compiles(), 0, "{name}");
+        let general = compile_checked_generic_core_plan_general(
+            dst.structure(),
+            2,
+            lhs.structure(),
+            2,
+            rhs.structure(),
+            2,
+        )
+        .unwrap();
+        let operands = (
+            (lhs.structure(), lhs_data.as_slice()),
+            (rhs.structure(), rhs_data.as_slice()),
+        );
+        for (alpha, beta) in [(1.0, 0.0), (0.75, -1.25)] {
+            let got = run_core_plan(
+                &region,
+                dst.structure(),
+                &init,
+                operands.0,
+                operands.1,
+                alpha,
+                beta,
+            );
+            let want = run_core_plan(
+                &general,
+                dst.structure(),
+                &init,
+                operands.0,
+                operands.1,
+                alpha,
+                beta,
+            );
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{name} alpha={alpha} beta={beta}"
+            );
+        }
+        let oracle = core_oracle(&dst, operands.0, operands.1, 2);
+        let got = run_core_plan(
+            &region,
+            dst.structure(),
+            &init,
+            operands.0,
+            operands.1,
+            1.0,
+            0.0,
+        );
+        for (got, want) in got.iter().zip(&oracle) {
+            assert!((got - want).abs() <= 1e-12 * (1.0 + want.abs()), "{name}");
+        }
+        assert!(
+            oracle.iter().any(|v| v.abs() > 0.5),
+            "{name}: nonzero oracle"
+        );
+    }
+
+    // Negative: an operand packed block by block is not a coupled-sector
+    // tiling, so the region route declines and the general builder re-bases.
+    let (lhs, rhs) = (&cases[0].1, &cases[0].2);
+    let packed = Arc::new(
+        crate::tests::packed_fixture_structure(
+            4,
+            (0..lhs.structure().block_count()).map(|index| {
+                let block = lhs.structure().block(index).unwrap();
+                (block.key().clone(), block.shape().to_vec())
+            }),
+        )
+        .unwrap(),
+    );
+    let mut packed_data = vec![0.0; lhs.required_len().unwrap()];
+    let canonical_data = values(lhs, 0.0);
+    for index in 0..packed.block_count() {
+        let source = block_matrix(lhs.structure(), index, &canonical_data);
+        let block = packed.block(index).unwrap();
+        for (mut linear, value) in source.into_iter().enumerate() {
+            let mut at = block.offset();
+            for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+                at += (linear % extent) * stride;
+                linear /= extent;
+            }
+            packed_data[at] = value;
+        }
+    }
+    let rhs_data = values(rhs, 0.5);
+    let init = values(&dst, 2.0);
+    reset_layout_lookups();
+    let fallback =
+        compile_checked_generic_core_plan(dst.structure(), 2, &packed, 2, rhs.structure(), 2, axes)
+            .unwrap();
+    assert!(layout_compiles() > 0);
+    let got = run_core_plan(
+        &fallback,
+        dst.structure(),
+        &init,
+        (&packed, packed_data.as_slice()),
+        (rhs.structure(), rhs_data.as_slice()),
+        1.0,
+        0.0,
+    );
+    let oracle = core_oracle(
+        &dst,
+        (&packed, packed_data.as_slice()),
+        (rhs.structure(), rhs_data.as_slice()),
+        2,
+    );
+    for (got, want) in got.iter().zip(&oracle) {
+        assert!((got - want).abs() <= 1e-12 * (1.0 + want.abs()));
+    }
+}
