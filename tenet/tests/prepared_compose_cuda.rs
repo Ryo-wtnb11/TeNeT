@@ -471,12 +471,36 @@ fn device_counters_are_pinned_against_the_base() {
     }
     let pinned: Vec<_> = PINS
         .iter()
-        .map(|&(key, counters)| (key.to_string(), counters))
+        .map(|&(key, mut counters)| {
+            if key.ends_with(" execute warm") {
+                counters[6] += EXECUTE_REGION_METADATA;
+            } else if key.ends_with(" execute_into") {
+                counters[6] += INTO_REGION_METADATA_DELTA;
+            }
+            (key.to_string(), counters)
+        })
         .collect();
     assert_eq!(rows, pinned, "observed rows are printed above");
 }
 
+/// #1775: the head runs the shared member stage, which builds the core's
+/// zero-region list (one region per fixture: 56 inline bytes plus the
+/// heap capacity of its dims and strides) when it prepares a member count,
+/// whether or not the call fills. An `execute`-only workspace therefore
+/// retains these Host bytes, where the base built regions only for
+/// `execute_into`. They do not depend on `B`; no device byte, upload or
+/// kernel changes, since the zero template is still reserved only by a
+/// call that fills (#2123).
+const EXECUTE_REGION_METADATA: u64 = 120;
+
+/// #1775: the same region list on an `execute_into` workspace, which the
+/// base counted as `2 * dims.len()` words of heap instead of the vectors'
+/// capacity (the #1859 C2 accounting of `ContractPlan`). B-independent.
+const INTO_REGION_METADATA_DELTA: u64 = 32;
+
 /// Recorded on qg1 (A100) at the base `ec3dea5d` with these tests (`096ef9be`).
+/// The head differs only in retained bytes, as [`EXECUTE_REGION_METADATA`]
+/// and [`INTO_REGION_METADATA_DELTA`] state.
 #[rustfmt::skip]
 const PINS: &[(&str, Counters)] = &[
     ("U1 f64 workspaces", [0, 0, 0, 0, 0, 0, 0, 0, 6]),
