@@ -43,7 +43,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
             },
             SectorSpectrum {
                 sector: vec![1, 0],
-                values: vec![-2.0, 2.0, 1.0],
+                values: vec![-2.0, 1.0, 2.0],
             },
         ]
     );
@@ -257,10 +257,11 @@ fn assert_same_complex_multisets<S: PartialEq + std::fmt::Debug>(
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {
         assert_eq!(actual.sector, expected.sector);
-        assert!(actual
-            .values
-            .windows(2)
-            .all(|pair| pair[0].norm() >= pair[1].norm()));
+        assert!(actual.values.windows(2).all(|pair| pair[0]
+            .re
+            .total_cmp(&pair[1].re)
+            .then(pair[0].im.total_cmp(&pair[1].im))
+            .is_le()));
         let sorted = |values: &[Complex64]| {
             let mut values = values.to_vec();
             values.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
@@ -314,14 +315,14 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
         vec![
             SectorSpectrum {
                 sector: vec![0, 0],
-                values: vec![Complex64::new(2.0, -2.0), Complex64::new(-0.25, 0.0)],
+                values: vec![Complex64::new(-0.25, 0.0), Complex64::new(2.0, -2.0)],
             },
             SectorSpectrum {
                 sector: vec![1, 0],
                 values: vec![
                     Complex64::new(-3.0, 4.0),
-                    Complex64::new(1.0, 1.0),
                     Complex64::new(0.0, 0.5),
+                    Complex64::new(1.0, 1.0),
                 ],
             },
         ]
@@ -397,7 +398,7 @@ fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
             },
             SectorSpectrum {
                 sector: vec![1, 0],
-                values: vec![c(r32(1.3), 0.0), c(r32(0.2), 0.0)],
+                values: vec![c(r32(0.2), 0.0), c(r32(1.3), 0.0)],
             },
         ]
     );
@@ -424,7 +425,7 @@ fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let got = real64.eig_vals(&[0], &[1]).unwrap();
     assert_eq!(got[0].values, vec![c(-0.7, 0.0), c(0.1, 0.0)]);
-    assert_eq!(got[1].values, vec![c(1.3, 0.0), c(0.2, 0.0)]);
+    assert_eq!(got[1].values, vec![c(0.2, 0.0), c(1.3, 0.0)]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let dense = real64.materialize().unwrap().eig_vals(&[0], &[1]).unwrap();
     assert_same_complex_multisets(&got, &dense, 1e-12);
@@ -532,7 +533,7 @@ fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
         got,
         vec![SectorSpectrum {
             sector: dual_sector,
-            values: vec![c(5.0, 0.0), c(-2.0, 0.0)],
+            values: vec![c(-2.0, 0.0), c(5.0, 0.0)],
         }]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
@@ -698,7 +699,7 @@ fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() 
                     },
                     SectorSpectrum {
                         sector: vec![1, 0],
-                        values: vec![from(-2.0), from(2.0), from(1.0)],
+                        values: vec![from(-2.0), from(1.0), from(2.0)],
                     },
                 ]
             );
@@ -714,7 +715,7 @@ fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() 
                     let order: &[usize] = if trees.coupled() == &vec![0, 0] {
                         &[1, 0]
                     } else {
-                        &[1, 0, 2]
+                        &[1, 2, 0]
                     };
                     from(f64::from(ij[0] == order[ij[1]]))
                 },
@@ -926,7 +927,7 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
         GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
     let c = |re: f64, im: f64| Complex64::new(re, im);
     macro_rules! check {
-        ($dtype:ty, $from:expr, [$($a:expr),*], [$($b:expr),*], [$($da:expr),*], [$($db:expr),*]) => {{
+        ($dtype:ty, $from:expr, [$($a:expr),*], [$($b:expr),*], [$($da:expr),*], [$($db:expr),*], $order:expr) => {{
             let from: fn(Complex64) -> $dtype = $from;
             let input: TensorMap<_, $dtype> = TensorMap::diagonal(
                 &runtime,
@@ -978,7 +979,7 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
                     let order: &[usize] = if trees.coupled() == &vec![0, 0] {
                         &[0, 1]
                     } else {
-                        &[1, 2, 0]
+                        &$order
                     };
                     c(f64::from(ij[0] == order[ij[1]]), 0.0)
                 },
@@ -994,14 +995,16 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
             assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 0);
         }};
     }
-    // Magnitudes: sector (0,0) 4 > 0.25; sector (1,0) 5 > |-2+0.5i| > |1+i|.
+    // Lexicographic (re, im): sector (1,0) -2+0.5i < -5i < 1+i, whose
+    // magnitude order (5 > |-2+0.5i| > |1+i|) differs.
     check!(
         Complex64,
         |z| z,
         [c(-4.0, 0.0), c(0.0, 0.25)],
         [c(1.0, 1.0), c(0.0, -5.0), c(-2.0, 0.5)],
         [c(-4.0, 0.0), c(0.0, 0.25)],
-        [c(0.0, -5.0), c(-2.0, 0.5), c(1.0, 1.0)]
+        [c(-2.0, 0.5), c(0.0, -5.0), c(1.0, 1.0)],
+        [2, 1, 0]
     );
     check!(
         f64,
@@ -1009,7 +1012,8 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
         [c(-4.0, 0.0), c(0.25, 0.0)],
         [c(1.0, 0.0), c(-5.0, 0.0), c(-2.0, 0.0)],
         [c(-4.0, 0.0), c(0.25, 0.0)],
-        [c(-5.0, 0.0), c(-2.0, 0.0), c(1.0, 0.0)]
+        [c(-5.0, 0.0), c(-2.0, 0.0), c(1.0, 0.0)],
+        [1, 2, 0]
     );
 }
 
@@ -1072,6 +1076,16 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
                     }
                 }
             };
+            // The published order, sorted here independently: lexicographic
+            // (re, im) of the widened stored values, stable on ties.
+            let lexicographic = |stored: &[_]| {
+                let mut values: Vec<$eig> = stored.iter().map(|&value| eig(value)).collect();
+                values.sort_by(|x, y| {
+                    let (x, y) = (x.widen_complex(), y.widen_complex());
+                    (x.re, x.im).partial_cmp(&(y.re, y.im)).unwrap()
+                });
+                values
+            };
             // Distinct magnitudes: |0.1-0.3i|<0.7 and 0.2(+0.2i)<1.3(i)<2.9.
             let distinct = [
                 vec![(0.1, -0.3), (-0.7, 0.0)],
@@ -1123,11 +1137,11 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
                         vec![
                             SectorSpectrum {
                                 sector: vec![0, 0],
-                                values: vec![eig(a[1]), eig(a[0])],
+                                values: lexicographic(&a),
                             },
                             SectorSpectrum {
                                 sector: vec![1, 0],
-                                values: vec![eig(b[2]), eig(b[0]), eig(b[1])],
+                                values: lexicographic(&b),
                             },
                         ]
                     );
@@ -1146,8 +1160,9 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
                 assert!(distance(&swapped.v, &swapped_oracle.v) <= tol);
             }
 
-            // Equal-magnitude ties keep stored order. Degenerate bases are not
-            // a public guarantee, so check the factorization itself.
+            // Equal-magnitude ties (±2, conjugate-free imaginary ties) follow
+            // the published order. Degenerate bases are not a public
+            // guarantee, so check the factorization itself.
             let ties = if $complex {
                 [
                     vec![(2.0, 0.0), (0.0, -2.0)],
@@ -1180,11 +1195,11 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
                 vec![
                     SectorSpectrum {
                         sector: vec![0, 0],
-                        values: vec![eig(a[0]), eig(a[1])],
+                        values: lexicographic(&a),
                     },
                     SectorSpectrum {
                         sector: vec![1, 0],
-                        values: vec![eig(b[0]), eig(b[2]), eig(b[1])],
+                        values: lexicographic(&b),
                     },
                 ]
             );
