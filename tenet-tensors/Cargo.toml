@@ -21,8 +21,10 @@ blas-mkl = ["tenet-operations/blas-mkl"]
 provider-inject = ["tenet-operations/provider-inject"]
 cuda = ["tenet-dense/cuda", "tenet-operations/cuda"]
 racah-generated = ["tenet-core/racah-generated"]
-# The infallible Generic entries (`*_generic` facade, context and plan
-# builders): test oracles only; production Generic is checked only (#1854).
+# Unstable, internal: the infallible Generic entries (`*_generic` facade,
+# context and plan builders), test oracles only, since production Generic is
+# checked only (#1854); and the CUDA member workspace's failure seam
+# (`fail_next_before_output`). Only in-workspace tests may enable it.
 testing = ["tenet-core/testing"]
 
 [dependencies]

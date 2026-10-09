@@ -57,10 +57,15 @@ mod tests {
 
     include!("../../tests/common/spy_executor.rs");
 
+    /// The CopyC temporary is born zero and only the core GEMMs write it,
+    /// at member offsets that do not depend on `B` (#1746, #1859 C2): its
+    /// inactive block stays zero across `B` changes and warm
+    /// replays without a refill, so a warm call submits exactly what the
+    /// first call on a fresh temporary did.
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn cuda_copy_c_zeros_poisoned_inactive_temporary_on_warm_replay() {
+    fn cuda_copy_c_inactive_temporary_stays_zero_without_refill() {
         let runtime = Runtime::builder().cuda(0).build().unwrap();
         let v = GradedSpace::try_new(
             Arc::new(U1FusionRule),
@@ -84,58 +89,73 @@ mod tests {
             codomain: &[1, 0],
             domain: &[2],
         };
-        let expected = a.contract(&b, &spec).unwrap();
-        let lhs = StackedTensorMap::pack(&[&a, &a])
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        let rhs = StackedTensorMap::pack(&[&b, &b])
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
-        assert!(plan.copy_c().is_some());
-        assert_eq!(plan.core().0.inactive_destination_regions().len(), 1);
-        assert_eq!(
-            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(
-                plan.copy_c().unwrap().transform(),
-            )
-            .unwrap(),
-            0
-        );
-        let mut workspace = plan.workspace().unwrap();
-        plan.execute(&lhs, &rhs, &mut workspace).unwrap();
-        let (temporary, members) = workspace.copy_c_temporary.as_mut().unwrap();
-        let member_len = plan.copy_c().unwrap().temporary_len();
-        let lease = runtime.lease_cuda().unwrap();
-        *temporary = CudaStorage::upload_members(
-            &lease,
-            vec![f64::NAN; *members * member_len],
-            member_len,
-            *members,
+        let pack = |tensors: &[TensorMap<_, f64>]| {
+            StackedTensorMap::pack(&tensors.iter().collect::<Vec<_>>())
+                .unwrap()
+                .to_cuda()
+                .unwrap()
+        };
+        let plan = ContractPlan::new(
+            &pack(std::slice::from_ref(&a)),
+            &pack(std::slice::from_ref(&b)),
+            &spec,
         )
         .unwrap();
-        drop(lease);
-        let poisoned = expected.scale(f64::NAN);
-        let mut dst = StackedTensorMap::pack(&[&poisoned, &poisoned])
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
-            .unwrap();
-        let actual = dst.to_host().unwrap();
-        for i in 0..2 {
-            for (&value, &reference) in actual
-                .member(i)
-                .unwrap()
-                .dense_data()
-                .unwrap()
+        assert!(plan.copy_c().is_some());
+        assert_eq!(
+            plan.resolution
+                .core_plan()
+                .inactive_destination_regions()
+                .len(),
+            1
+        );
+        let mut workspace = plan.workspace().unwrap();
+        let mut first_submissions = None;
+        for (call, count) in [2, 1, 2].into_iter().enumerate() {
+            let lhs: Vec<_> = (0..count)
+                .map(|i| a.scale(1.0 + (call * 2 + i) as f64 / 8.0))
+                .collect();
+            let rhs: Vec<_> = (0..count)
+                .map(|i| b.scale(1.0 - (call + i) as f64 / 16.0))
+                .collect();
+            let expected: Vec<_> = lhs
                 .iter()
-                .zip(expected.dense_data().unwrap())
-            {
-                assert!(value.is_finite());
-                let tolerance = 128.0 * 64.0_f64.sqrt() * f64::EPSILON * reference.abs().max(1.0);
-                assert!((value - reference).abs() <= tolerance);
+                .zip(&rhs)
+                .map(|(l, r)| l.contract(r, &spec).unwrap())
+                .collect();
+            let (lhs, rhs) = (pack(&lhs), pack(&rhs));
+            let before = tenet_dense::cuda_transfer_stats();
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+            let after = tenet_dense::cuda_transfer_stats();
+            let submitted = after.gemm_calls - before.gemm_calls;
+            let first = *first_submissions.get_or_insert(submitted);
+            assert_eq!(submitted, first, "call {call}: no temporary refill");
+            let poisoned: Vec<_> = expected.iter().map(|e| e.scale(f64::NAN)).collect();
+            let mut dst = pack(&poisoned);
+            let before = tenet_dense::cuda_transfer_stats();
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                .unwrap();
+            let after = tenet_dense::cuda_transfer_stats();
+            assert_eq!(
+                after.gemm_calls - before.gemm_calls,
+                first,
+                "call {call}: no temporary refill"
+            );
+            let actual = dst.to_host().unwrap();
+            for (i, expected) in expected.iter().enumerate() {
+                for (&value, &reference) in actual
+                    .member(i)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(expected.dense_data().unwrap())
+                {
+                    assert!(value.is_finite(), "call {call} member {i}");
+                    let tolerance =
+                        128.0 * 64.0_f64.sqrt() * f64::EPSILON * reference.abs().max(1.0);
+                    assert!((value - reference).abs() <= tolerance);
+                }
             }
         }
     }

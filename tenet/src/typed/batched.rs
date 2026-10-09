@@ -625,10 +625,6 @@ struct DeviceComposeState {
     members: usize,
     /// Each inactive destination layout with a trailing member axis.
     zero_regions: Vec<tenet_dense::CudaRegion>,
-    /// Validated output CopyC views for this member count.
-    copy_regions: Option<tenet_operations::cuda_transform::CudaSingleMemberRegions>,
-    /// Payload-typed nonunit CopyC coefficients uploaded before the core runs.
-    copy_coefficients: Option<tenet_dense::CudaDenseStorage>,
     /// Plan entries this workspace holds in the device context's ledger.
     reserved_plan_entries: usize,
 }
