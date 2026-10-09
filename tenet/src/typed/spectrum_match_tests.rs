@@ -46,6 +46,11 @@ fn spectrum_walk_scans_nothing_and_scatters_every_sector() {
     for groups in [1000, 2000] {
         let (misses, data) = misses_and_data(groups);
         assert_eq!(misses, 0, "G = {groups}");
+        // Block offsets follow the structure's own layout, not sector order,
+        // so compare as a multiset; which entry each block gets is pinned by
+        // the cursor test below.
+        let mut data = data;
+        data.sort_by(f64::total_cmp);
         let expected: Vec<f64> = (0..groups).map(|i| 2.0 * (1.0 + i as f64)).collect();
         assert_eq!(data, expected, "G = {groups}");
     }
