@@ -75,18 +75,6 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         }
     }
 
-    /// The structure the core GEMMs write: the output transform's source, or
-    /// the caller's destination when the output transform is the identity.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn core_dst_structure<'a>(
-        &'a self,
-        dst: &'a Arc<BlockStructure>,
-    ) -> &'a Arc<BlockStructure> {
-        self.core_dst
-            .as_ref()
-            .map_or(dst, |entry| entry.space.structure())
-    }
-
     /// The twist folds of the lhs and rhs source stages: the twisted stage
     /// carries [`Self::source_twist_destination_scales`], the other none. A
     /// twisted source is never borrowed (checked at construction).

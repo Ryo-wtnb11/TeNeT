@@ -181,6 +181,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         // contract
         "tensorcontract_structure",
         "compile_direct_composition_plan",
+        "execute_storage_contract_members_cuda",
         "execute_storage_contract_resolution_on_cuda",
         "prepare_tensorcontract_fusion_plan",
         "prepare_tensorcontract_fusion_plan_dyn",
@@ -205,7 +206,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "HostEagerExecutor",
         "BoundDynamicFusionMapSpace",
         "CudaContractScratch",
-        "CudaDynamicTreeMembersWorkspace",
+        "CudaContractMembersWorkspace",
         "DynamicFusionMapSpace",
         "HostContractMembersWorkspace",
         "FusionContractOrientation",

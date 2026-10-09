@@ -1,31 +1,14 @@
-//! Device executor of the Host-compiled storage contraction route.
-//!
-//! Nothing categorical happens here: the route, the orientation, every
-//! transform structure, the borrow decisions and the core plan were compiled
-//! on the host by
-//! [`plan_contract`](crate::TensorContractFusionExecutionContext::plan_contract).
-//! This module replays that value with the device executors — the tree
-//! transform executor for the source and output transforms, the storage GEMM
-//! seam for the core — which is TensorKit's `blas_contract!` dataflow
-//! (tensoroperations.jl:383-455 @cfaa073: `tensoradd!` A and B into temporaries,
-//! `mul!`, `tensoradd!` into C) and QSpace's `QSpace::contract`
-//! (QSpace.cc:4141-4260 @dd2cc7e: `permute_to` both operands, grouped GEMMs,
-//! `Permute` of the result), each permute skipped when it is the identity.
+//! The eager device contraction scratch: the buffers
+//! [`execute_storage_contract_resolution_on_cuda`](crate::execute_storage_contract_resolution_on_cuda)
+//! materializes transformed operands and a core destination into. The stage
+//! sequence that uses them is `contract/route_cuda.rs`.
 
 use std::any::{Any, TypeId};
-use std::sync::Arc;
 
-use tenet_core::BlockStructure;
-use tenet_dense::{cuda_region_scale, CudaDenseContext, CudaRegion, CudaScalar};
-use tenet_operations::cuda::{CudaStorage, CudaStorageGemm};
-use tenet_operations::cuda_transform::CudaMemberZeroRegions;
-use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
+use tenet_dense::{CudaDenseContext, CudaRegion, CudaScalar};
+use tenet_operations::cuda::CudaStorage;
 
-use super::DynamicTreeExecutionArtifact;
-use crate::contract::resolution::{ContractRoute, CopyCRoute, StorageContractResolution};
-use crate::{
-    ContractDestinationInit, DenseBlockScalar, OperationError, RecouplingCoefficientAction,
-};
+use crate::OperationError;
 
 /// Device scratch a general contraction materializes its transformed operands
 /// and its core result into: two source buffers and one core-destination
@@ -34,8 +17,9 @@ use crate::{
 /// It is execution scratch, not a semantic cache. A source buffer is written
 /// in overwrite mode before it is read (every active block assigned, every
 /// inactive layout zeroed), so it never needs a reset; the core-destination
-/// buffer has exactly the plan's inactive destination blocks zeroed before
-/// the core GEMMs write the rest. Dropping it changes nothing but the cost of
+/// buffer has its active blocks written by the core GEMMs and exactly the
+/// plan's inactive destination blocks zeroed after them, on every call.
+/// Dropping it changes nothing but the cost of
 /// the next contraction.
 ///
 /// Each buffer is narrowed to exactly the length the replay admits
@@ -47,11 +31,11 @@ use crate::{
 /// each call that zeroes.
 #[derive(Default)]
 pub struct CudaContractScratch {
-    entries: Vec<ScratchEntry>,
-    zero_regions: Vec<CudaRegion>,
+    pub(in crate::contract) entries: Vec<ScratchEntry>,
+    pub(in crate::contract) zero_regions: Vec<CudaRegion>,
 }
 
-struct ScratchEntry {
+pub(in crate::contract) struct ScratchEntry {
     scalar: TypeId,
     context: u64,
     bytes: usize,
@@ -60,10 +44,10 @@ struct ScratchEntry {
     buffers: Box<dyn Any + Send>,
 }
 
-struct ScratchBuffers<D: CudaScalar> {
-    lhs: Option<CudaStorage<D>>,
-    rhs: Option<CudaStorage<D>>,
-    dst: Option<CudaStorage<D>>,
+pub(in crate::contract) struct ScratchBuffers<D: CudaScalar> {
+    pub(in crate::contract) lhs: Option<CudaStorage<D>>,
+    pub(in crate::contract) rhs: Option<CudaStorage<D>>,
+    pub(in crate::contract) dst: Option<CudaStorage<D>>,
 }
 
 impl CudaContractScratch {
@@ -83,7 +67,7 @@ impl CudaContractScratch {
     }
 }
 
-fn scratch_entry<D: CudaScalar + 'static>(
+pub(in crate::contract) fn scratch_entry<D: CudaScalar + 'static>(
     entries: &mut Vec<ScratchEntry>,
     context: u64,
 ) -> Result<(&mut usize, &mut ScratchBuffers<D>), OperationError> {
@@ -146,7 +130,7 @@ impl CudaContractScratch {
 }
 
 /// Makes `slot` hold at least `len` elements and narrows it to exactly `len`.
-fn grow<'a, D: CudaScalar>(
+pub(in crate::contract) fn grow<'a, D: CudaScalar>(
     ctx: &CudaDenseContext,
     slot: &'a mut Option<CudaStorage<D>>,
     bytes: &mut usize,
@@ -172,339 +156,4 @@ fn grow<'a, D: CudaScalar>(
         .set_active_len(len)
         .map_err(OperationError::Dense)?;
     Ok(buffer)
-}
-
-/// Replays a Host-compiled storage contraction route on `ctx`'s device into
-/// `dst`: `dst = alpha * contract(lhs, rhs) + beta * dst`.
-///
-/// `init` is [`ContractDestinationInit::Zeroed`] when the caller provides
-/// `dst` zero-filled (the returning path's fresh #740 output), and otherwise
-/// `Axpby(beta)` for a retained destination (`contract_into`). `beta` rides
-/// the epilogue of whatever writes each element: the core GEMMs when they
-/// write `dst` directly (their jobs carry `alpha` and `beta`), or the output
-/// transform in `Axpby(beta)` mode. Only the core plan's inactive blocks of a
-/// directly written `dst` have no writer; they become `beta * dst` through a
-/// zero-source region move (a zero fill for `beta = 0`, nothing for `beta = 1`).
-/// No pass reads or clears the whole destination.
-///
-/// `Core`: one storage GEMM per coupled-sector job over the parent buffers.
-/// `DynamicTree`: each non-borrowed source is replayed into its scratch
-/// buffer in overwrite mode (a borrowed source — an identity transform of an
-/// unconjugated operand already in core layout — is read in place, as on the
-/// host); the core GEMMs write straight into `dst` when the output transform
-/// is the identity, and otherwise into the core-destination scratch, whose
-/// inactive blocks — and only those — are zeroed first, followed by the
-/// output transform into `dst` in overwrite mode.
-///
-/// The fermionic contraction twist is folded into the source transform of
-/// the operand the artifact twists (the one already materialized, as in
-/// TensorKit's `blas_contract!`): the move writing its block `b` runs with
-/// descriptor alpha `θ_b` (`replay_with_destination_scales`), as the Host
-/// folds it into the same move. A twisted operand is never borrowed, so the transform
-/// always runs.
-///
-/// Every check that can reject the route runs before the first device
-/// submission.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn execute_storage_contract_resolution_on_cuda<D, C>(
-    ctx: &mut CudaDenseContext,
-    transforms: &mut CudaTreeTransformExecutor,
-    scratch: &mut CudaContractScratch,
-    resolution: &StorageContractResolution<C>,
-    dst_structure: &Arc<BlockStructure>,
-    dst: &mut CudaStorage<D>,
-    lhs: &CudaStorage<D>,
-    rhs: &CudaStorage<D>,
-    alpha: D,
-    init: ContractDestinationInit<D>,
-) -> Result<(), OperationError>
-where
-    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
-    C: DenseBlockScalar,
-{
-    resolution.admit_cuda_inactive_regions()?;
-    match &resolution.route {
-        ContractRoute::Core { plan, swapped } => {
-            let (lhs, rhs) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
-            // Converted before the first submission, like every other check.
-            let regions = if direct_regions_need_beta(init) {
-                CudaMemberZeroRegions::fill_single(
-                    &mut scratch.zero_regions,
-                    plan.inactive_destination_regions(),
-                )?
-            } else {
-                &[][..]
-            };
-            let beta = active_beta(init);
-            execute_core_direct(ctx, plan, dst, lhs, rhs, alpha, beta)?;
-            scale_regions(ctx, dst, regions, beta)
-        }
-        ContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
-            ctx,
-            transforms,
-            scratch,
-            artifact,
-            dst_structure,
-            dst,
-            lhs,
-            rhs,
-            alpha,
-            init,
-        ),
-        ContractRoute::CopyC(copy) => execute_copy_c_on_cuda(
-            ctx,
-            transforms,
-            scratch,
-            copy,
-            dst_structure,
-            dst,
-            lhs,
-            rhs,
-            alpha,
-            init,
-        ),
-    }
-}
-
-/// TensorKit `blas_contract!`'s `copyC` (`tensoroperations.jl:436-446` @cfaa073): the
-/// unscaled core into the retained core-destination scratch (inactive blocks
-/// zeroed), then one output transform into `dst` carrying `alpha` and `beta`
-/// — TensorKit's `tensoradd!(C, C′, pAB, false, α, β)`.
-#[allow(clippy::too_many_arguments)]
-fn execute_copy_c_on_cuda<D, C>(
-    ctx: &mut CudaDenseContext,
-    transforms: &mut CudaTreeTransformExecutor,
-    scratch: &mut CudaContractScratch,
-    copy: &CopyCRoute<C>,
-    dst_structure: &Arc<BlockStructure>,
-    dst: &mut CudaStorage<D>,
-    lhs: &CudaStorage<D>,
-    rhs: &CudaStorage<D>,
-    alpha: D,
-    init: ContractDestinationInit<D>,
-) -> Result<(), OperationError>
-where
-    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
-    C: DenseBlockScalar,
-{
-    let (lhs, rhs) = if copy.swapped { (rhs, lhs) } else { (lhs, rhs) };
-    let CudaContractScratch {
-        entries,
-        zero_regions,
-    } = scratch;
-    let regions =
-        CudaMemberZeroRegions::fill_single(zero_regions, copy.core.inactive_destination_regions())?;
-    let (bytes, buffers) = scratch_entry::<D>(entries, ctx.identity())?;
-    let temporary = grow(ctx, &mut buffers.dst, bytes, copy.temporary_len)?;
-    scale_regions(ctx, temporary, regions, D::ZERO)?;
-    copy.core.execute_direct_on_storage_prezeroed(
-        &mut CudaStorageGemm::new(ctx),
-        temporary,
-        lhs,
-        rhs,
-    )?;
-    transforms.replay(
-        ctx,
-        &copy.transform,
-        dst_structure,
-        &copy.temporary,
-        dst,
-        temporary,
-        alpha,
-        match init {
-            ContractDestinationInit::Zeroed => CudaTreeTransformDestination::Overwrite,
-            ContractDestinationInit::Axpby(beta) => CudaTreeTransformDestination::Axpby(beta),
-        },
-    )
-}
-
-fn active_beta<D: CudaScalar>(init: ContractDestinationInit<D>) -> D {
-    match init {
-        ContractDestinationInit::Zeroed => D::ZERO,
-        ContractDestinationInit::Axpby(beta) => beta,
-    }
-}
-
-/// The core GEMMs straight into `dst`; `alpha = 1, beta = 0` keeps the
-/// unscaled overwrite GEMMs bit for bit.
-fn execute_core_direct<D, C>(
-    ctx: &mut CudaDenseContext,
-    plan: &tenet_operations::FusionBlockContractPlan<C>,
-    dst: &mut CudaStorage<D>,
-    lhs: &CudaStorage<D>,
-    rhs: &CudaStorage<D>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
-    C: DenseBlockScalar,
-{
-    let mut gemm = CudaStorageGemm::new(ctx);
-    if alpha == D::ONE && beta == D::ZERO {
-        plan.execute_direct_on_storage_prezeroed(&mut gemm, dst, lhs, rhs)
-    } else {
-        plan.execute_direct_on_storage_axpby(&mut gemm, dst, lhs, rhs, alpha, beta)
-    }
-}
-
-/// Whether a `dst` the core GEMMs write directly has inactive blocks to
-/// finish: not when it is born zero, and not for `beta = 1`.
-fn direct_regions_need_beta<D: CudaScalar>(init: ContractDestinationInit<D>) -> bool {
-    matches!(init, ContractDestinationInit::Axpby(beta) if beta != D::ONE)
-}
-
-/// Scales `regions` of `dst` by `beta` (zeroes them for `beta = 0`). A plan's
-/// inactive blocks are disjoint from every block its GEMMs write, so the pass
-/// may follow them; it runs after, so the plan's own range validation still
-/// precedes every write to `dst`.
-fn scale_regions<D: CudaScalar>(
-    ctx: &mut CudaDenseContext,
-    dst: &mut CudaStorage<D>,
-    regions: &[CudaRegion],
-    beta: D,
-) -> Result<(), OperationError> {
-    for region in regions {
-        cuda_region_scale::<D>(ctx, &mut dst.0, region, beta).map_err(OperationError::Dense)?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_dynamic_tree_on_cuda<D, C>(
-    ctx: &mut CudaDenseContext,
-    transforms: &mut CudaTreeTransformExecutor,
-    scratch: &mut CudaContractScratch,
-    artifact: &DynamicTreeExecutionArtifact<C>,
-    dst_structure: &Arc<BlockStructure>,
-    dst: &mut CudaStorage<D>,
-    lhs: &CudaStorage<D>,
-    rhs: &CudaStorage<D>,
-    alpha: D,
-    init: ContractDestinationInit<D>,
-) -> Result<(), OperationError>
-where
-    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
-    C: DenseBlockScalar,
-{
-    let lhs_len = artifact.lhs_transform.space.required_len()?;
-    let rhs_len = artifact.rhs_transform.space.required_len()?;
-    let core_dst_len = artifact
-        .core_dst
-        .as_ref()
-        .map(|core_dst| core_dst.space.required_len())
-        .transpose()?;
-    // The core destination is the retained scratch with an output transform,
-    // whose inactive blocks are zeroed; otherwise `dst` itself, whose inactive
-    // blocks become `beta * dst`.
-    let CudaContractScratch {
-        entries,
-        zero_regions: region_scratch,
-    } = scratch;
-    let core_zero_regions = if artifact.core_dst.is_some() || direct_regions_need_beta(init) {
-        CudaMemberZeroRegions::fill_single(
-            region_scratch,
-            artifact.block_plan().inactive_destination_regions(),
-        )?
-    } else {
-        &[]
-    };
-
-    let (bytes, buffers) = scratch_entry::<D>(entries, ctx.identity())?;
-    let ScratchBuffers {
-        lhs: lhs_slot,
-        rhs: rhs_slot,
-        dst: dst_slot,
-    } = buffers;
-    let [lhs_scales, rhs_scales] = artifact.stage_scales();
-    for (borrowed, transform, slot, source, len, destination_scales) in [
-        (
-            artifact.lhs_borrowed,
-            &artifact.lhs_transform,
-            &mut *lhs_slot,
-            lhs,
-            lhs_len,
-            lhs_scales,
-        ),
-        (
-            artifact.rhs_borrowed,
-            &artifact.rhs_transform,
-            &mut *rhs_slot,
-            rhs,
-            rhs_len,
-            rhs_scales,
-        ),
-    ] {
-        if borrowed {
-            continue;
-        }
-        let buffer = grow(ctx, slot, bytes, len)?;
-        transforms.replay_with_destination_scales(
-            ctx,
-            &transform.transform_structure,
-            transform.space.structure(),
-            &transform.replay_structure,
-            buffer,
-            source,
-            D::ONE,
-            CudaTreeTransformDestination::Overwrite,
-            destination_scales,
-        )?;
-    }
-
-    let physical_lhs = if artifact.lhs_borrowed {
-        lhs
-    } else {
-        materialized(lhs_slot)?
-    };
-    let physical_rhs = if artifact.rhs_borrowed {
-        rhs
-    } else {
-        materialized(rhs_slot)?
-    };
-    let (core_left, core_right) = artifact.core_order(physical_lhs, physical_rhs);
-
-    let (Some(core_dst), Some(core_dst_len)) = (artifact.core_dst.as_ref(), core_dst_len) else {
-        let beta = active_beta(init);
-        execute_core_direct(
-            ctx,
-            &artifact.block_plan,
-            dst,
-            core_left,
-            core_right,
-            alpha,
-            beta,
-        )?;
-        return scale_regions(ctx, dst, core_zero_regions, beta);
-    };
-    let core_buffer = grow(ctx, dst_slot, bytes, core_dst_len)?;
-    scale_regions(ctx, core_buffer, core_zero_regions, D::ZERO)?;
-    artifact.block_plan.execute_direct_on_storage_prezeroed(
-        &mut CudaStorageGemm::new(ctx),
-        core_buffer,
-        core_left,
-        core_right,
-    )?;
-    transforms.replay(
-        ctx,
-        &core_dst.output_transform_structure,
-        dst_structure,
-        core_dst.space.structure(),
-        dst,
-        core_buffer,
-        alpha,
-        match init {
-            ContractDestinationInit::Zeroed => CudaTreeTransformDestination::Overwrite,
-            ContractDestinationInit::Axpby(beta) => CudaTreeTransformDestination::Axpby(beta),
-        },
-    )
-}
-
-fn materialized<D: CudaScalar>(
-    slot: &Option<CudaStorage<D>>,
-) -> Result<&CudaStorage<D>, OperationError> {
-    slot.as_ref().ok_or(OperationError::InvalidArgument {
-        message: "device contraction source was not materialized",
-    })
 }

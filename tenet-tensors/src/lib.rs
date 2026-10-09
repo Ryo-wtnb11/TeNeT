@@ -100,8 +100,8 @@ pub use admission::{
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use contract::{
-    execute_storage_contract_resolution_on_cuda, CudaContractScratch,
-    CudaDynamicTreeMembersWorkspace,
+    execute_storage_contract_members_cuda, execute_storage_contract_resolution_on_cuda,
+    CudaContractMembersWorkspace, CudaContractScratch,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use facade::{

@@ -53,7 +53,7 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     #[cfg(feature = "cuda")]
     copy_c_temporary: Option<(S, usize)>,
     #[cfg(feature = "cuda")]
-    dynamic: tenet_tensors::CudaDynamicTreeMembersWorkspace<S>,
+    members_cuda: tenet_tensors::CudaContractMembersWorkspace<S>,
     #[cfg(feature = "cuda")]
     device: DeviceComposeState,
 }
@@ -250,7 +250,7 @@ where
             #[cfg(feature = "cuda")]
             copy_c_temporary: None,
             #[cfg(feature = "cuda")]
-            dynamic: Default::default(),
+            members_cuda: Default::default(),
             #[cfg(feature = "cuda")]
             device: DeviceComposeState::default(),
         })
@@ -365,7 +365,7 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
     /// Retained device payload and Host layout scratch, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
-            + self.dynamic.retained_bytes()
+            + self.members_cuda.retained_bytes()
             + self.copy_c_temporary.as_ref().map_or(0, |(temporary, _)| {
                 TensorStorage::len(temporary).saturating_mul(std::mem::size_of::<D>())
             })
@@ -421,7 +421,7 @@ where
             output: OutputSlot::default(),
             members: HostContractMembersWorkspace::default(),
             copy_c_temporary: None,
-            dynamic: Default::default(),
+            members_cuda: Default::default(),
             device: DeviceComposeState::default(),
         };
         let entries = if self.resolution.is_dynamic_tree() {
@@ -687,15 +687,19 @@ where
         dst: &mut CudaStorage<D>,
         dst_zeroed: bool,
     ) -> Result<(), Error> {
-        workspace.dynamic.execute(
+        tenet_tensors::execute_storage_contract_members_cuda(
             ctx,
             &self.resolution,
-            self.space.space().structure(),
-            dst,
-            &lhs.storage,
-            &rhs.storage,
+            (self.space.space().structure(), dst),
+            (lhs.space.space().structure(), &lhs.storage),
+            (rhs.space.space().structure(), &rhs.storage),
+            &mut workspace.members_cuda,
             lhs.members,
-            dst_zeroed,
+            if dst_zeroed {
+                tenet_tensors::ContractDestinationInit::Zeroed
+            } else {
+                tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0))
+            },
         )?;
         Ok(())
     }
