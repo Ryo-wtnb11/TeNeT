@@ -254,8 +254,8 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
                 .permute_into(&[2, 0], &[1, 3], &mut wrong_space, 1.0, 0.0)
                 .unwrap_err()
         ),
-        "invalid argument: destination fusion space or block layout does not match \
-         the operation result"
+        "operation error: space mismatch: destination fusion space or block layout \
+         does not match the operation result"
     );
     drop(wrong_space_handle);
 

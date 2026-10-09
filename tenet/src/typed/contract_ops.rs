@@ -237,10 +237,10 @@ where
             spec.codomain.len(),
         )?;
         if destination_body.space.space() != expected.space() {
-            return Err(Error::InvalidArgument(
-                "destination fusion space or block layout does not match the contraction result"
-                    .to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message:
+                    "destination fusion space or block layout does not match the contraction result",
+            }));
         }
         let execution_destination = self
             .logical_space()

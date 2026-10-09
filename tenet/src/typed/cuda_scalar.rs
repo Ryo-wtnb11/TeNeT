@@ -180,9 +180,9 @@ where
             return Err(Error::RuntimeMismatch);
         }
         if self.logical_space().space() != y.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            }));
         }
         match (&self.repr, &y.repr) {
             (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
@@ -249,9 +249,9 @@ where
             return Err(Error::RuntimeMismatch);
         }
         if self.logical_space().space() != destination.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            }));
         }
         let source = self.direct_cuda_storage("axpby_into")?;
         let destination_storage = unique_dense_destination(
@@ -564,9 +564,9 @@ where
             return Err(Error::RuntimeMismatch);
         }
         if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            }));
         }
         let lhs = self.direct_cuda_storage("inner")?;
         let rhs = other.direct_cuda_storage("inner")?;

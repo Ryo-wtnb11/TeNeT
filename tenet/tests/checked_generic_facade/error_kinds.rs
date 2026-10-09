@@ -141,6 +141,34 @@ fn multiplicity_free_misuse_has_one_variant_per_kind() {
         singular.inv(&[0], &[1]),
         is_numerical_failure
     ));
+    // #2097: the remaining hom-space relations, each TensorKit `SpaceMismatch`.
+    let mut other = skew.clone();
+    let mut wrong_destination = rectangular.clone();
+    assert!(multiplicity_free(rectangular.tr(), is_space_mismatch));
+    assert!(multiplicity_free(
+        skew.axpby(1.0, &rectangular, 1.0),
+        is_space_mismatch
+    ));
+    assert!(multiplicity_free(
+        skew.inner(&rectangular),
+        is_space_mismatch
+    ));
+    assert!(multiplicity_free(
+        rectangular.axpby_into(&mut other, 1.0, 1.0),
+        is_space_mismatch
+    ));
+    assert!(multiplicity_free(
+        skew.permute_into(&[1], &[0], &mut wrong_destination, 1.0, 0.0),
+        is_space_mismatch
+    ));
+    assert!(multiplicity_free(
+        TensorMap::<_, f64>::isomorphism(&runtime, [&wide], [&narrow]),
+        is_space_mismatch
+    ));
+    assert!(multiplicity_free(
+        TensorMap::<_, f64>::isometry(&runtime, [&narrow], [&wide]),
+        is_space_mismatch
+    ));
     for (f32_factors, kind) in [
         (false, is_shape_mismatch as fn(&OperationError) -> bool),
         (true, is_dtype_mismatch),
@@ -181,6 +209,26 @@ fn checked_misuse_has_one_variant_per_kind() {
     assert!(checked(rectangular.exp(&[0], &[1]), is_space_mismatch));
     assert!(checked(eigh(&skew), is_invalid_argument));
     assert!(checked(singular.inv(&[0], &[1]), is_numerical_failure));
+    // #2097: the remaining hom-space relations, each TensorKit `SpaceMismatch`.
+    let mut other = skew.clone();
+    assert!(checked(rectangular.tr(), is_space_mismatch));
+    assert!(checked(
+        skew.axpby(1.0, &rectangular, 1.0),
+        is_space_mismatch
+    ));
+    assert!(checked(skew.inner(&rectangular), is_space_mismatch));
+    assert!(checked(
+        rectangular.axpby_into(&mut other, 1.0, 1.0),
+        is_space_mismatch
+    ));
+    assert!(checked(
+        TensorMap::<_, f64>::isomorphism(&runtime, [&wide], [&narrow]),
+        is_space_mismatch
+    ));
+    assert!(checked(
+        TensorMap::<_, f64>::isometry(&runtime, [&narrow], [&wide]),
+        is_space_mismatch
+    ));
     for (f32_factors, kind) in [
         (false, is_shape_mismatch as fn(&OperationError) -> bool),
         (true, is_dtype_mismatch),

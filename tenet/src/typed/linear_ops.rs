@@ -70,9 +70,9 @@ where
         // codomain/domain split and the block structure, which is exactly what
         // makes the zipped element-wise combination below meaningful.
         if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            }));
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
             || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
@@ -341,8 +341,8 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::RuntimeMismatch`]; [`Error::InvalidArgument`] when the two
-    /// tensors live on different spaces or block layouts, when `destination`
+    /// [`Error::RuntimeMismatch`]; `SpaceMismatch` when the two tensors live
+    /// on different spaces or block layouts; [`Error::InvalidArgument`] when `destination`
     /// is not owned dense host storage, or when it aliases `self`;
     /// [`Error::DestinationShared`] when `destination` shares its storage with
     /// a clone.
@@ -392,10 +392,9 @@ pub(super) fn require_destination_space(
     expected: &DynamicFusionMapSpace,
 ) -> Result<(), Error> {
     if destination != expected {
-        return Err(Error::InvalidArgument(
-            "destination fusion space or block layout does not match the operation result"
-                .to_string(),
-        ));
+        return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+            message: "destination fusion space or block layout does not match the operation result",
+        }));
     }
     Ok(())
 }
@@ -462,9 +461,9 @@ where
         return Err(Error::RuntimeMismatch);
     }
     if x.logical_space().space() != destination.logical_space().space() {
-        return Err(Error::InvalidArgument(
-            "tensors live on different spaces or block layouts".to_string(),
-        ));
+        return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+            message: "tensors live on different spaces or block layouts",
+        }));
     }
     unique_dense_destination(
         destination,

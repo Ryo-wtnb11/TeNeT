@@ -309,12 +309,13 @@ fn su2_tr_matches_the_literal_weighted_diagonal_sum_and_conjugates_lazily() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
     assert!(matches!(
         non_endomorphism.tr().unwrap_err(),
-        tenet::typed::Error::InvalidArgument(message)
-            if message == "tr() requires an endomorphism (domain == codomain)"
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert!(matches!(
         non_endomorphism.adjoint().unwrap().tr().unwrap_err(),
-        tenet::typed::Error::InvalidArgument(_)
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 

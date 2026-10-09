@@ -371,7 +371,8 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .unwrap();
     assert!(matches!(
         lhs_device.axpby(alpha, &mismatched, beta),
-        Err(tenet::typed::Error::InvalidArgument(_))
+        Err(tenet::typed::Error::Operation(operation))
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert_eq!(
         lhs_device.to_host().unwrap().dense_data().unwrap(),
