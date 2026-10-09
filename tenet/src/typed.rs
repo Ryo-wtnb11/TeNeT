@@ -338,18 +338,18 @@ pub(crate) use cuda_factor::{
 };
 #[cfg(feature = "cuda")]
 use cuda_factor::{
-    compile_cuda_eigh_plan, compile_cuda_qr_plan, download_cuda_reduction_partials,
-    validate_cuda_reduction_placement, validate_cuda_svd_middle_regions, TypedCudaEighPlan,
-    TypedCudaEighRoute, TypedCudaQrPlan, TypedCudaQrRoute, TypedCudaQrScratch, TypedCudaSvdScratch,
+    download_cuda_reduction_partials, executed_routes, validate_cuda_reduction_placement,
+    validate_cuda_svd_middle_regions, TypedCudaQrScratch, TypedCudaSvdScratch,
 };
 #[cfg(all(test, feature = "cuda"))]
 use cuda_factor::{
-    cuda_factor_layout_is_aligned, cuda_qr_tree_extents_match, observe_cuda_arithmetic,
-    observe_cuda_qr_output_upload, observe_cuda_svd_final_storage_creation,
-    CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE, CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE,
-    CUDA_QR_OBSERVATION, CUDA_REDUCTION_BUFFER_OBSERVATION, CUDA_SVD_OBSERVATION,
-    CUDA_SVD_TREEWISE,
+    observe_cuda_arithmetic, observe_cuda_qr_output_upload,
+    observe_cuda_svd_final_storage_creation, CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE,
+    CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION,
+    CUDA_REDUCTION_BUFFER_OBSERVATION, CUDA_SVD_OBSERVATION, CUDA_SVD_TREEWISE,
 };
+#[cfg(feature = "cuda")]
+use tenet_matrixalgebra::seam::{compact_factor_routes, CompactFactorPlan, CompactFactorRoute};
 mod generic_error;
 pub use generic_error::GenericTensorError;
 mod dispatch;

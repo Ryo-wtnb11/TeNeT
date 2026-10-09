@@ -5,7 +5,7 @@ use super::*;
 /// whole-factor copy and no selector upload, a non-aligned side is one GEMM
 /// per nonempty target tree.
 #[cfg(feature = "cuda")]
-fn cuda_route_assembly_counts<R>(plan: &TypedCudaQrPlan<R>) -> (usize, usize, usize) {
+fn cuda_route_assembly_counts(plan: &CompactFactorPlan) -> (usize, usize, usize) {
     let nonempty_trees = |trees: &[CoupledTreeExtent]| {
         trees
             .iter()
@@ -13,56 +13,24 @@ fn cuda_route_assembly_counts<R>(plan: &TypedCudaQrPlan<R>) -> (usize, usize, us
             .count()
     };
     let mut counts = (0, 0, 0);
-    for route in &plan.routes {
-        if route.aligned_left {
+    for (route, left, right) in executed_routes(plan) {
+        let aligned_left = plan.left_preserves_trees(route);
+        let aligned_right = plan.right_preserves_trees(route);
+        if aligned_left {
             counts.0 += 1;
         } else {
-            counts.2 += nonempty_trees(plan.left_regions[route.left].row_trees());
+            counts.2 += nonempty_trees(plan.left_regions()[left].row_trees());
         }
-        if route.aligned_right {
+        if aligned_right {
             counts.0 += 1;
         } else {
-            counts.2 += nonempty_trees(plan.right_regions[route.right].col_trees());
+            counts.2 += nonempty_trees(plan.right_regions()[right].col_trees());
         }
-        if !(route.aligned_left && route.aligned_right) {
+        if !(aligned_left && aligned_right) {
             counts.1 += 1;
         }
     }
     counts
-}
-
-#[cfg(feature = "cuda")]
-#[test]
-fn typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective() {
-    let source = u1_lazy_fixture();
-    let regions = sector_regions(
-        source.logical_space().space().structure(),
-        source.logical_space().space().nout(),
-    )
-    .unwrap();
-    let trees = regions
-        .iter()
-        .flat_map(|region| [region.row_trees(), region.col_trees()])
-        .find(|trees| trees.len() > 1)
-        .expect("fixture must contain a multi-tree coupled sector");
-    let mut reordered = trees.to_vec();
-    reordered.reverse();
-    assert!(cuda_qr_tree_extents_match(trees, &reordered).unwrap());
-    reordered.pop();
-    assert!(!cuda_qr_tree_extents_match(trees, &reordered).unwrap());
-
-    // The aligned-copy dispatch is the stricter, order-sensitive predicate:
-    // a permuted tree sequence carries the same blocks but a different
-    // layout, so it must fall back to the per-tree GEMM.
-    let extent: usize = trees.iter().map(|tree| tree.extent().unwrap()).sum();
-    assert!(cuda_factor_layout_is_aligned(trees, trees, extent).unwrap());
-    let mut permuted = trees.to_vec();
-    permuted.reverse();
-    assert!(!cuda_factor_layout_is_aligned(trees, &permuted, extent).unwrap());
-    assert!(
-        !cuda_factor_layout_is_aligned(trees, trees, extent + 1).unwrap(),
-        "trees that do not tile the region are never aligned"
-    );
 }
 
 #[cfg(feature = "cuda")]
@@ -507,28 +475,31 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     let source_device = source.to_cuda().unwrap();
     // Per-route transfer and kernel counts follow the proved layout flag.
     let plan = source_device
-        .compile_cuda_qr_plan(Arc::clone(&regions))
+        .compact_factor_plan(Arc::clone(&regions))
         .unwrap();
     let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
-    assert_eq!(plan.routes.len(), nonempty);
+    let routes = executed_routes(&plan).count();
+    assert_eq!(routes, nonempty);
     // Both factor spaces of this fixture reproduce the source tree layout,
     // so every route takes the whole-factor copy and the assembly uploads
     // and downloads nothing. The non-aligned fallback is a layout
-    // property, not a workload one, and is covered by
-    // `typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective`.
+    // property, not a workload one: the Host plan's tree-order predicate
+    // decides it, and the `CUDA_*_TREEWISE` gates force it on the device.
     assert!(
-        plan.routes
-            .iter()
-            .all(|route| route.aligned_left && route.aligned_right),
+        executed_routes(&plan)
+            .all(|(route, _, _)| plan.left_preserves_trees(route)
+                && plan.right_preserves_trees(route)),
         "expected an all-aligned route mix, got {:?}",
-        plan.routes
-            .iter()
-            .map(|route| (route.aligned_left, route.aligned_right))
+        executed_routes(&plan)
+            .map(|(route, _, _)| (
+                plan.left_preserves_trees(route),
+                plan.right_preserves_trees(route)
+            ))
             .collect::<Vec<_>>()
     );
     assert_eq!(
         (factor_copies, selector_uploads, assembly_gemms),
-        (2 * plan.routes.len(), 0, 0)
+        (2 * routes, 0, 0)
     );
 
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -648,7 +619,7 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     // Compact SVD assembles through the same aligned-copy dispatch as QR
     // and shares its copy/selector/GEMM observation.
     let plan = source_device
-        .compile_cuda_qr_plan(Arc::clone(&regions))
+        .compact_factor_plan(Arc::clone(&regions))
         .unwrap();
     let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
     CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
@@ -1132,21 +1103,17 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
             host.logical_space().space().nout(),
         )
         .unwrap();
-        let plan = device.compile_cuda_qr_plan(Arc::clone(&regions)).unwrap();
-        let max_rows = plan
-            .routes
-            .iter()
-            .map(|route| regions[route.source].rows())
+        let plan = device.compact_factor_plan(Arc::clone(&regions)).unwrap();
+        let max_rows = executed_routes(&plan)
+            .map(|(route, _, _)| regions[route.source_region()].rows())
             .max()
             .unwrap();
         for treewise in [false, true] {
-            let expected_ops: u64 = plan
-                .routes
-                .iter()
-                .map(|route| {
+            let expected_ops: u64 = executed_routes(&plan)
+                .map(|(route, _, _)| {
                     let side = |aligned: bool| if aligned && !treewise { 2 } else { 1 };
-                    13 + side(route.aligned_left)
-                        + side(route.aligned_right)
+                    13 + side(plan.left_preserves_trees(route))
+                        + side(plan.right_preserves_trees(route))
                         + u64::from(<D as tenet_dense::CudaScalar>::IS_COMPLEX)
                 })
                 .sum();

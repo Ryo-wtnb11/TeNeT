@@ -102,6 +102,7 @@ use authority::*;
 pub use authority::{spectrum_bond, FactorMode, FactorSpaceAuthority};
 pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
+pub use compact_plan::{compact_factor_routes, CompactFactorPlan, CompactFactorRoute};
 // `dense_stage` items are consumed only by sibling factorization modules.
 use dense_stage::*;
 pub use diagonal::admit_compact_diagonal;

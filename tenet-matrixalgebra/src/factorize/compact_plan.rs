@@ -1,7 +1,9 @@
 use super::*;
 
+/// One source coupled-sector region's route to its two compact factor
+/// regions. A zero-rank region has neither factor region.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CompactFactorRoute {
+pub struct CompactFactorRoute {
     pub(super) source_region: usize,
     pub(super) left_region: Option<usize>,
     pub(super) right_region: Option<usize>,
@@ -9,14 +11,42 @@ pub(crate) struct CompactFactorRoute {
     pub(super) rank: usize,
 }
 
+impl CompactFactorRoute {
+    /// Index of the source region in [`CompactFactorPlan::source_regions`].
+    pub fn source_region(&self) -> usize {
+        self.source_region
+    }
+
+    /// Index in [`CompactFactorPlan::left_regions`]; `None` at rank zero.
+    pub fn left_region(&self) -> Option<usize> {
+        self.left_region
+    }
+
+    /// Index in [`CompactFactorPlan::right_regions`]; `None` at rank zero.
+    pub fn right_region(&self) -> Option<usize> {
+        self.right_region
+    }
+
+    pub fn sector(&self) -> SectorId {
+        self.sector
+    }
+
+    /// The compact bond dimension `min(rows, cols)` of this sector.
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+}
+
 /// Per-call routing from the source coupled-sector regions to the two factor
-/// regions. Owned by the calling factorization and dropped with it.
+/// regions: the one placement-neutral authority for the compact bond, the
+/// factor spaces, the sector routes and their tree layouts, shared by Host
+/// and CUDA. Owned by the calling factorization and dropped with it.
 ///
 /// Why not `Arc` the plan or its source half: nothing shares it beyond the
 /// one call that builds it, so the wrappers were two heap allocations per
 /// call with no owner to serve.
 #[derive(Debug)]
-pub(crate) struct CompactFactorPlan {
+pub struct CompactFactorPlan {
     pub(super) source_layout: ValidatedDynamicFusionLayout,
     pub(super) source_regions: Arc<[CoupledSectorRegion]>,
     pub(super) left_layout: ValidatedDynamicFusionLayout,
@@ -24,6 +54,80 @@ pub(crate) struct CompactFactorPlan {
     pub(super) left_regions: Arc<[CoupledSectorRegion]>,
     pub(super) right_regions: Arc<[CoupledSectorRegion]>,
     pub(super) routes: Vec<CompactFactorRoute>,
+}
+
+impl CompactFactorPlan {
+    pub fn source_regions(&self) -> &Arc<[CoupledSectorRegion]> {
+        &self.source_regions
+    }
+
+    pub fn left_regions(&self) -> &[CoupledSectorRegion] {
+        &self.left_regions
+    }
+
+    pub fn right_regions(&self) -> &[CoupledSectorRegion] {
+        &self.right_regions
+    }
+
+    /// One route per source region, in source order.
+    pub fn routes(&self) -> &[CompactFactorRoute] {
+        &self.routes
+    }
+
+    /// The left factor space `codomain <- W`, bound to `input`'s provider.
+    pub fn left_space<R>(
+        &self,
+        input: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        input.rebind_validated(&self.left_layout)
+    }
+
+    /// The right factor space `W <- domain`, bound to `input`'s provider.
+    pub fn right_space<R>(
+        &self,
+        input: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        input.rebind_validated(&self.right_layout)
+    }
+
+    /// The spectrum factor space `W <- W` of the compact bond, by the one
+    /// spectrum-bond rule of [`spectrum_bond`].
+    pub fn bond_space<R>(
+        &self,
+        input: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        leg_bond_space::<MultiplicityFreeAdmissionMode, R>(
+            input,
+            compact_bond_leg(&self.source_regions),
+        )
+    }
+
+    /// Whether `route`'s left factor region lists the source's codomain
+    /// trees with the source's extents and offsets, so the source rows map
+    /// to the factor rows positionally. `false` at rank zero.
+    pub fn left_preserves_trees(&self, route: &CompactFactorRoute) -> bool {
+        route.left_region.is_some_and(|index| {
+            self.left_regions[index].row_trees()
+                == self.source_regions[route.source_region].row_trees()
+        })
+    }
+
+    /// The domain-tree counterpart of [`Self::left_preserves_trees`].
+    pub fn right_preserves_trees(&self, route: &CompactFactorRoute) -> bool {
+        route.right_region.is_some_and(|index| {
+            self.right_regions[index].col_trees()
+                == self.source_regions[route.source_region].col_trees()
+        })
+    }
 }
 
 #[doc(hidden)]
@@ -74,6 +178,8 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericFactorP
     }
 }
 
+/// The Host direct-region plan: `None` unless `input` is a coupled-sector
+/// matrix layout whose factors keep the source's tree order.
 pub(super) fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<CompactFactorPlan>, OperationError>
@@ -94,6 +200,48 @@ where
     let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
+    let plan = route_compact_factors(input, source_layout, regions)?;
+    // The direct path publishes each dense factor region positionally, so it
+    // is sound only when the fresh factor lists the source's trees in the
+    // source's order. Why not scatter here: a reordered tiling takes the
+    // packed path, whose `PlacementIndex` scatter already maps by tree
+    // identity, so one authority owns non-canonical publication.
+    if !plan.routes.iter().all(|route| {
+        route.rank == 0 || (plan.left_preserves_trees(route) && plan.right_preserves_trees(route))
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(plan))
+}
+
+/// The compact factor plan of `input` over its own coupled-sector regions
+/// `source_regions` (`input.space().structure().coupled_sector_regions(nout)`),
+/// whatever the factors' tree order; each route then reports whether its
+/// factor regions keep the source's trees
+/// ([`CompactFactorPlan::left_preserves_trees`]).
+///
+/// Why the caller passes the regions: a device caller admits them before its
+/// placement checks, and this keeps that error order without a second
+/// region query.
+pub fn compact_factor_routes<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    source_regions: Arc<[CoupledSectorRegion]>,
+) -> Result<CompactFactorPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    route_compact_factors(input, input.validated_layout(), source_regions)
+}
+
+fn route_compact_factors<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    source_layout: ValidatedDynamicFusionLayout,
+    regions: Arc<[CoupledSectorRegion]>,
+) -> Result<CompactFactorPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let space = input.space();
     let bond = compact_bond_leg(&regions);
     let u_space =
         build_bound_factor_space(input, space.homspace(), bond.clone(), FactorSide::Left)?;
@@ -109,16 +257,7 @@ where
             },
         )?;
     let routes = compile_compact_factor_routes(&regions, &left_regions, &right_regions)?;
-    // The direct path publishes each dense factor region positionally, so it
-    // is sound only when the fresh factor lists the source's trees in the
-    // source's order. Why not scatter here: a reordered tiling takes the
-    // packed path, whose `PlacementIndex` scatter already maps by tree
-    // identity, so one authority owns non-canonical publication.
-    if !compact_factor_routes_preserve_tree_order(&routes, &regions, &left_regions, &right_regions)
-    {
-        return Ok(None);
-    }
-    Ok(Some(CompactFactorPlan {
+    Ok(CompactFactorPlan {
         source_layout,
         source_regions: regions,
         left_layout: u_space.validated_layout(),
@@ -126,23 +265,6 @@ where
         left_regions,
         right_regions,
         routes,
-    }))
-}
-
-pub(super) fn compact_factor_routes_preserve_tree_order(
-    routes: &[CompactFactorRoute],
-    source: &[CoupledSectorRegion],
-    left: &[CoupledSectorRegion],
-    right: &[CoupledSectorRegion],
-) -> bool {
-    routes.iter().all(|route| {
-        let region = &source[route.source_region];
-        route
-            .left_region
-            .is_none_or(|index| left[index].row_trees() == region.row_trees())
-            && route
-                .right_region
-                .is_none_or(|index| right[index].col_trees() == region.col_trees())
     })
 }
 

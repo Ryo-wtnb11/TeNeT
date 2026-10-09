@@ -1297,7 +1297,12 @@ type StackPair<R, D, S> = (StackedTensorMap<R, D, S>, StackedTensorMap<R, D, S>)
 /// The data-independent part of the device eigendecomposition.
 #[cfg(feature = "cuda")]
 struct DeviceEighPlan<R> {
-    plan: super::TypedCudaEighPlan<R>,
+    plan: super::CompactFactorPlan,
+    /// The plan's executed (nonzero-rank) routes; every other per-route
+    /// table below follows their order.
+    routes: Vec<super::CompactFactorRoute>,
+    left_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
+    middle_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
     /// `(offset, n)` of every source coupled sector, for admission.
     admission: Vec<(usize, usize)>,
     /// First eigenvalue of each route in a member's concatenated spectra.
@@ -1810,41 +1815,36 @@ where
         source: &StackedTensorMap<R, D, S>,
         regions: &Arc<[CoupledSectorRegion]>,
     ) -> Result<Self, Error> {
-        let source_plan = super::compile_cuda_qr_plan(&source.space, Arc::clone(regions))?;
-        let ranks: Vec<(SectorId, usize)> = source_plan
-            .source_regions
-            .iter()
-            .filter(|region| region.rows() != 0)
-            .map(|region| (region.coupled(), region.rows()))
+        let plan = super::compact_factor_routes(&source.space, Arc::clone(regions))?;
+        let routes: Vec<_> = super::executed_routes(&plan)
+            .map(|(route, _, _)| *route)
             .collect();
-        let plan = super::compile_cuda_eigh_plan(
-            &source.space,
-            source_plan.source_regions,
-            ranks.iter().copied(),
-        )?;
+        let left_space = plan.left_space(&source.space)?;
+        let middle_space = plan.bond_space(&source.space)?;
         let admission = plan
-            .source_regions
+            .source_regions()
             .iter()
             .map(|region| (region.range().start, region.rows()))
             .collect();
-        let mut spectrum_offsets = Vec::with_capacity(plan.routes.len());
-        let mut copies = Vec::with_capacity(plan.routes.len());
+        let mut spectrum_offsets = Vec::with_capacity(routes.len());
+        let mut copies = Vec::with_capacity(routes.len());
         let mut spectrum_len = 0usize;
-        for route in &plan.routes {
+        for route in &routes {
             spectrum_offsets.push(spectrum_len);
-            spectrum_len += route.full_rank;
+            spectrum_len += route.rank();
             copies.push(route_copies(&plan, route)?);
         }
-        let diagonals = route_diagonals(&plan)?;
+        let diagonals = route_diagonals(&routes, &middle_space)?;
         let placement = source.signature.placement;
-        let d_signature =
-            StructureSignature::of_space(&plan.middle_space, placement, &source.runtime);
-        let v_signature =
-            StructureSignature::of_space(&plan.left_space, placement, &source.runtime);
-        let d_len = plan.middle_space.space().required_len()?;
-        let v_len = plan.left_space.space().required_len()?;
+        let d_signature = StructureSignature::of_space(&middle_space, placement, &source.runtime);
+        let v_signature = StructureSignature::of_space(&left_space, placement, &source.runtime);
+        let d_len = middle_space.space().required_len()?;
+        let v_len = left_space.space().required_len()?;
         Ok(Self {
             plan,
+            routes,
+            left_space,
+            middle_space,
             admission,
             spectrum_offsets,
             spectrum_len,
@@ -1863,19 +1863,20 @@ where
 /// plan proved it layout-aligned, else one row slice per codomain tree,
 /// matched by tree identity.
 #[cfg(feature = "cuda")]
-fn route_copies<R>(
-    plan: &super::TypedCudaEighPlan<R>,
-    route: &super::TypedCudaEighRoute,
+fn route_copies(
+    plan: &super::CompactFactorPlan,
+    route: &super::CompactFactorRoute,
 ) -> Result<Vec<(usize, usize, usize)>, Error> {
-    let target = &plan.left_regions[route.left];
+    let target = &plan.left_regions()[left_region(route)?];
     #[cfg(test)]
-    let aligned = route.aligned && !tests::FORCE_TREEWISE.with(std::cell::Cell::get);
+    let aligned =
+        plan.left_preserves_trees(route) && !tests::FORCE_TREEWISE.with(std::cell::Cell::get);
     #[cfg(not(test))]
-    let aligned = route.aligned;
+    let aligned = plan.left_preserves_trees(route);
     if aligned {
         return Ok(vec![(0, 0, target.rows())]);
     }
-    let source = &plan.source_regions[route.source];
+    let source = &plan.source_regions()[route.source_region()];
     let mut copies = Vec::with_capacity(target.row_trees().len());
     for target_tree in target.row_trees() {
         let rows = target_tree.extent()?;
@@ -1893,16 +1894,27 @@ fn route_copies<R>(
     Ok(copies)
 }
 
+/// An executed route's eigenvector region.
+#[cfg(feature = "cuda")]
+fn left_region(route: &super::CompactFactorRoute) -> Result<usize, Error> {
+    route
+        .left_region()
+        .ok_or_else(|| internal_layout_error("an executed EIGH route has no eigenvector region"))
+}
+
 /// Each route's diagonal in the dense `d` of one member, `(offset, step)`.
 #[cfg(feature = "cuda")]
-fn route_diagonals<R>(plan: &super::TypedCudaEighPlan<R>) -> Result<Vec<(usize, usize)>, Error> {
-    let diagonals = sector_diagonals(plan.middle_space.space().structure())?;
-    plan.routes
+fn route_diagonals<R>(
+    routes: &[super::CompactFactorRoute],
+    middle_space: &tenet_tensors::BoundDynamicFusionMapSpace<R>,
+) -> Result<Vec<(usize, usize)>, Error> {
+    let diagonals = sector_diagonals(middle_space.space().structure())?;
+    routes
         .iter()
         .map(|route| {
-            let sector = plan.source_regions[route.source].coupled();
+            let sector = route.sector();
             match diagonals.iter().find(|entry| entry.0 == sector) {
-                Some(&(_, offset, step, count)) if count == route.kept => Ok((offset, step)),
+                Some(&(_, offset, step, count)) if count == route.rank() => Ok((offset, step)),
                 _ => Err(internal_layout_error(
                     "CUDA EIGH route has no matching diagonal block",
                 )),
@@ -1965,13 +1977,12 @@ where
             source.members,
             |member, sector| {
                 device
-                    .plan
                     .routes
                     .iter()
                     .zip(&device.spectrum_offsets)
-                    .find(|(route, _)| device.plan.source_regions[route.source].coupled() == sector)
+                    .find(|(route, _)| route.sector() == sector)
                     .map(|(route, &offset)| {
-                        &workspace.device.sorted[member * total + offset..][..route.kept]
+                        &workspace.device.sorted[member * total + offset..][..route.rank()]
                     })
                     .ok_or_else(|| internal_layout_error("a coupled sector has no route"))
             },
@@ -2000,7 +2011,7 @@ where
             .ok_or_else(|| internal_layout_error("a device eigh plan has no device route plan"))?;
         let mut lease = runtime.lease_cuda()?;
         let cuda = &mut *lease;
-        let routes = &device.plan.routes;
+        let routes = &device.routes;
 
         let accepted = tenet_dense::cuda_hermitian_regions_batched::<D>(
             cuda,
@@ -2025,12 +2036,12 @@ where
         let mut device_spectra = Vec::with_capacity(routes.len());
         let mut vectors = Vec::with_capacity(routes.len());
         for route in routes {
-            let region = &device.plan.source_regions[route.source];
+            let region = &device.plan.source_regions()[route.source_region()];
             let (values, vector) = tenet_dense::cuda_eigh_region_batched::<D>(
                 cuda,
                 &source.storage.0,
                 region.range().start,
-                route.full_rank,
+                route.rank(),
                 members,
                 self.member_len,
             )
@@ -2038,7 +2049,7 @@ where
                 // Only the solver's own status names a block; argument,
                 // bounds and backend failures are the operation's.
                 error @ tenet_dense::DenseError::NumericalFailure { .. } => BatchError::Solver {
-                    block: route.source,
+                    block: route.source_region(),
                     source: dense_err(error),
                 },
                 other => BatchError::Operation(dense_err(other)),
@@ -2061,7 +2072,7 @@ where
         for member in 0..members {
             let mut finite = true;
             for (route, &offset) in routes.iter().zip(&device.spectrum_offsets) {
-                let n = route.full_rank;
+                let n = route.rank();
                 let base = member * total + offset;
                 let values = &raw[base..base + n];
                 finite &= values.iter().all(|value| value.is_finite());
@@ -2100,14 +2111,14 @@ where
             };
             *buffers = Some((
                 self.stack(
-                    device.plan.middle_space.clone(),
+                    device.middle_space.clone(),
                     device.d_signature.clone(),
                     zeros(device.d_len)?,
                     members,
                     device.d_len,
                 ),
                 self.stack(
-                    device.plan.left_space.clone(),
+                    device.left_space.clone(),
                     device.v_signature.clone(),
                     zeros(device.v_len)?,
                     members,
@@ -2139,9 +2150,13 @@ where
             tenet_dense::cuda_copy_strided_into::<D>(
                 cuda,
                 &values.0,
-                &region(vec![route.kept, members], vec![1, total], spectrum)?,
+                &region(vec![route.rank(), members], vec![1, total], spectrum)?,
                 &mut d.storage.0,
-                &region(vec![route.kept, members], vec![step, device.d_len], offset)?,
+                &region(
+                    vec![route.rank(), members],
+                    vec![step, device.d_len],
+                    offset,
+                )?,
             )
             .map_err(dense_err)?;
         }
@@ -2151,10 +2166,10 @@ where
             .zip(&device.spectrum_offsets)
             .zip(&device.copies)
         {
-            let target = &device.plan.left_regions[route.left];
+            let target = &device.plan.left_regions()[left_region(route)?];
             let columns: Vec<usize> = (0..members)
                 .flat_map(|member| {
-                    workspace.orders[member * total + offset..][..route.kept]
+                    workspace.orders[member * total + offset..][..route.rank()]
                         .iter()
                         .copied()
                 })
@@ -2166,7 +2181,7 @@ where
                 target.rows(),
                 device.v_len,
                 raw_vectors,
-                route.full_rank,
+                route.rank(),
                 members,
                 &columns,
                 copies,

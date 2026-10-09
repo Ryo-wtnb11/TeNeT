@@ -204,7 +204,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
     assert_eq!(
         seam,
         names(
-            "admit_compact_diagonal coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
+            "admit_compact_diagonal compact_factor_routes coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
              decide_bond_truncation_generic_checked \
              diagonal_bond_data eig_full_dyn eig_full_from_source \
              eig_vals_dyn eig_vals_from_source \
@@ -220,7 +220,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
-             BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
+             BoundDynamicTensorRef CheckedGenericFactorPlanError CompactFactorPlan CompactFactorRoute EigFullDyn EighFullDyn \
              EIGH_EIGENVALUE_CHECK EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
