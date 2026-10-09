@@ -105,7 +105,10 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
             .to_host()
             .unwrap();
         let gemms = warm.cuda.gemm_calls;
-        assert!(gemms >= 3, "warm replay also zeroes inactive blocks");
+        assert_eq!(
+            gemms, cold.cuda.gemm_calls,
+            "a reused output is born zero and not refilled (#2123)"
+        );
         if let Some(expected) = expected_gemms {
             assert_eq!(gemms, expected);
         }
@@ -188,10 +191,21 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
             .unwrap()
             .to_cuda()
             .unwrap();
+        // The first `execute_into` at a new high-water B reserves the zero
+        // template of its inactive-block fills, which `execute` never reads.
+        let mut reserve = StackedTensorMap::pack(&poisoned.iter().collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let (_, first_into) = observe(|| {
+            plan.execute_into(&lhs, &rhs, &mut reserve, &mut other)
+                .unwrap()
+        });
         let (_, into) = observe(|| plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap());
         assert_eq!(into.cuda.h2d_calls, 0);
         assert_eq!(into.cuda.d2h_calls, 0);
-        assert_eq!(into.cuda.gemm_calls, gemms);
+        assert_eq!(into.cuda.gemm_calls, first_into.cuda.gemm_calls);
+        assert!(into.cuda.gemm_calls >= gemms);
         let written = dst.to_host().unwrap();
         for (i, member) in members.iter().enumerate() {
             numerics::assert_nonzero_slices_close(
@@ -795,7 +809,10 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
     let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec()).unwrap();
     let mut workspace = plan.workspace().unwrap();
     let oracle = blas_contract_oracle(&case);
-    for count in [1, 2, 17, 1] {
+    // Template uploads of the first `execute_into` per B on this fresh
+    // Runtime: zero and ones templates at B = 1, then the zero template's
+    // growth to each new high-water B. `execute` reserves none (#2123).
+    for (count, template_uploads) in [(1, 2), (2, 1), (17, 1), (1, 0)] {
         let left = StackedTensorMap::pack(&vec![&case.lhs; count])
             .unwrap()
             .to_cuda()
@@ -817,7 +834,11 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
         let before = cuda_transfer_stats();
         plan.execute(&left, &right, &mut workspace).unwrap();
         let after = cuda_transfer_stats();
-        assert_eq!(after.gemm_calls - before.gemm_calls, core_calls + 1);
+        assert_eq!(
+            after.gemm_calls - before.gemm_calls,
+            core_calls,
+            "the reused output's inactive region stays zero (#2123)"
+        );
         assert_eq!(after.h2d_calls - before.h2d_calls, 0);
         assert_eq!(after.d2h_calls - before.d2h_calls, 0);
         let before = cuda_transfer_stats();
@@ -829,7 +850,7 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
             core_calls + 1,
             "one inactive region is zeroed once over all B members"
         );
-        assert_eq!(after.h2d_calls - before.h2d_calls, 0);
+        assert_eq!(after.h2d_calls - before.h2d_calls, template_uploads);
         assert_eq!(after.d2h_calls - before.d2h_calls, 0);
         let actual = dst.to_host().unwrap();
         for i in 0..count {
@@ -852,6 +873,55 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
             })
             .collect();
         check_changed_input_reuse(&plan, &members, &mut [&mut workspace], blas_contract_oracle);
+    }
+}
+
+/// Device bytes (#2123): a caller that only calls `execute` never fills the
+/// inactive core region of its born-zero output, so it pins no context zero
+/// or ones template for it; the first `execute_into`, which fills it, does.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn execute_only_caller_pins_no_core_zero_template() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let case = u1_inactive_cases::<f64>(&runtime)
+        .into_iter()
+        .next()
+        .unwrap();
+    let stack = |tensor: &TensorMap<U1FusionRule, f64>, count| {
+        StackedTensorMap::pack(&vec![tensor; count])
+            .unwrap()
+            .to_cuda()
+            .unwrap()
+    };
+    let plan = ContractPlan::new(&stack(&case.lhs, 1), &stack(&case.rhs, 1), &case.spec()).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let template_bytes = || {
+        runtime
+            .cuda_tree_transform_stats()
+            .unwrap()
+            .context_scalar_operand_bytes
+    };
+    for count in [1, 2, 17, 1] {
+        let (lhs, rhs) = (stack(&case.lhs, count), stack(&case.rhs, count));
+        for _ in 0..2 {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+            assert_eq!(template_bytes(), 0, "B = {count}");
+        }
+    }
+    let (lhs, rhs) = (stack(&case.lhs, 17), stack(&case.rhs, 17));
+    let mut dst = stack(&poisoned_destination(&case), 17);
+    plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+        .unwrap();
+    assert!(template_bytes() > 0);
+    let oracle = blas_contract_oracle(&case);
+    let written = dst.to_host().unwrap();
+    for i in 0..17 {
+        numerics::assert_nonzero_slices_close(
+            case.name,
+            written.member(i).unwrap().dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
+            case.terms(),
+        );
     }
 }
 

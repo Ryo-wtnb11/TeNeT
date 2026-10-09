@@ -19,7 +19,12 @@
 //! ([`MEMBER_COPY_C`]), and member retained bytes now use the one member
 //! workspace's Host region accounting, so they differ from the base by a
 //! pinned per-case constant ([`RETAINED_METADATA_DELTA`]) while every device
-//! byte, which grows with `B`, is equal. The counters are process-wide, hence `--test-threads=1`:
+//! byte, which grows with `B`, is equal. #2123 adds two more: a warm member
+//! `execute` whose core writes its born-zero output directly no longer
+//! refills its inactive regions ([`BORN_ZERO_OUTPUT`]), and the core fill's
+//! context templates are reserved by the first call that fills, an
+//! `execute_into` ([`LAZY_CORE_TEMPLATE`]). The counters are process-wide,
+//! hence `--test-threads=1`:
 //!
 //! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
 //! --test typed_cuda_contract_stages -- --ignored --test-threads=1`.
@@ -145,6 +150,23 @@ impl Recorder {
                     .map_or(0, |&(_, delta)| delta);
                 expected[6] = expected[6].checked_add_signed(delta).unwrap();
             }
+            if key.ends_with(" execute warm") {
+                if let Some(&(_, inactive)) =
+                    BORN_ZERO_OUTPUT.iter().find(|(name, _)| group == *name)
+                {
+                    expected[4] -= inactive;
+                }
+            }
+            for (call, [calls, bytes]) in LAZY_CORE_TEMPLATE {
+                let sign = match key.strip_prefix(call) {
+                    Some(" execute first") => -1,
+                    Some(" execute_into") => 1,
+                    _ => continue,
+                };
+                for (index, change) in [(0, calls), (1, bytes), (3, calls)] {
+                    expected[index] = expected[index].checked_add_signed(sign * change).unwrap();
+                }
+            }
             if let Some((_, [calls, bytes])) =
                 ZERO_TEMPLATE_GROWTH.iter().find(|(row, _)| row == key)
             {
@@ -209,6 +231,59 @@ const RETAINED_METADATA_DELTA: &[(&str, i64)] = &[
     ),
     ("member fA f64", 168),
     ("member fB f64", 168),
+];
+
+/// Member cases whose core writes the output directly, and the inactive
+/// destination regions of their core plan (#2123). The base zeroed those
+/// regions of a reused `execute` output on every warm call; the head never
+/// does, because that output is born zero and only the core GEMMs write it.
+/// Every warm `execute` row therefore submits exactly `R` fewer; CopyC and
+/// output-transform rows keep their (#1859 C2) counts.
+const BORN_ZERO_OUTPUT: &[(&str, u64)] = &[
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64",
+        1,
+    ),
+    ("member fA f64", 3),
+    ("member fB f64", 3),
+    ("direct member U(1) core route, inactive block f64", 1),
+    ("direct member signed core f64", 1),
+    ("direct member signed swapped core f64", 1),
+];
+
+/// Calls whose context template growth moved (#2123) from the cold
+/// `execute` to the `execute_into` of the same call: the base reserved the
+/// core fill's zero template (and, first, the ones template) when `execute`
+/// prepared a new B; the head reserves them only for a call that fills, the
+/// `execute_into`. The uploads are the same; only the row that pays them
+/// changes. Later calls find the template at its high-water size.
+const LAZY_CORE_TEMPLATE: &[(&str, [i64; 2])] = &[
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1",
+        [2, 56],
+    ),
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2",
+        [1, 96],
+    ),
+    (
+        "direct member U(1) core route, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17",
+        [1, 816],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=0 B=1",
+        [2, 16],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=1 B=2",
+        [1, 16],
+    ),
+    (
+        "member U(1) transformed lhs, identity output, inactive block f64 seq=[1, 2, 17, 1] call=2 B=17",
+        [1, 136],
+    ),
+    ("member fA f64 seq=[1, 2, 17, 1] call=1 B=2", [1, 256]),
+    ("member fA f64 seq=[1, 2, 17, 1] call=2 B=17", [1, 2176]),
 ];
 
 const MEMBER_COPY_C: &[(&str, u64)] = &[
@@ -355,8 +430,9 @@ fn rescaled<R: DeviceRule, D: DevicePayload>(
 }
 
 /// One member plan over the B sequences 1, 2, 17, 1 and 4, 2, 4
-/// with fresh values on every call: `execute` (twice, the second warm) and
-/// `execute_into` a NaN-poisoned destination through a second workspace.
+/// with fresh values on every call: `execute` (twice, the second warm, on
+/// changed inputs after a rejected call) and `execute_into` a NaN-poisoned
+/// destination through a second workspace.
 /// Every member is bit-equal to the Host member replay of the same plan and
 /// to eager device `contract`.
 fn members<R: DeviceRule, D: DevicePayload>(
@@ -393,9 +469,27 @@ fn members<R: DeviceRule, D: DevicePayload>(
             };
             let (host_lhs, host_rhs) = (stack(|m| &m.lhs), stack(|m| &m.rhs));
             let (lhs, rhs) = (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap());
+            // The first call writes stale values (a later call's scaling) into
+            // the output the warm call reuses; a rejected call in between keeps
+            // that buffer as the spare (#2123).
+            let stale: Vec<_> = (0..count).map(|i| rescaled(case, call + 8, i)).collect();
+            let stale_stack = |pick: fn(&Case<R, D>) -> &TensorMap<R, D>| {
+                StackedTensorMap::pack(&stale.iter().map(pick).collect::<Vec<_>>())
+                    .unwrap()
+                    .to_cuda()
+                    .unwrap()
+            };
+            let (stale_lhs, stale_rhs) = (stale_stack(|m| &m.lhs), stale_stack(|m| &m.rhs));
+            let longer = StackedTensorMap::pack(&vec![&case.rhs; count + 1])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
             let (_, first) = delta(|| {
-                plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+                plan.execute(&stale_lhs, &stale_rhs, &mut workspace)
+                    .unwrap();
             });
+            assert!(plan.execute(&lhs, &longer, &mut workspace).is_err());
+            assert!(workspace.take_output().is_none());
             let (_, mut warm) = delta(|| {
                 plan.execute(&lhs, &rhs, &mut workspace).unwrap();
             });
