@@ -981,6 +981,52 @@ where
     }
 }
 
+/// Whole-block checked Generic permutation of one fusion-tree group of
+/// `structure`, read in `orientation`: the checked twin of
+/// [`multiplicity_free_permute_tree_pair_block_indexed`] for trace lowering.
+///
+/// Each oriented source key of `src_indices` is validated once, in order,
+/// then the group is recoupled step-major as [`generic_permute_block_result`]
+/// (TensorKit `cfaa073e` `tensoroperations.jl:_trace_permute!`: one
+/// permutation matrix per fusion block). Why not
+/// [`CheckedGenericAdmittedFusionTreeBlockStructure`]: it admits the whole
+/// stored structure up front, while trace admits one group at a time (so a
+/// later group's error cannot overtake an earlier source's lowering error)
+/// and permutes the adjoint-oriented keys of a lazy adjoint source.
+#[doc(hidden)]
+pub fn generic_permute_tree_pair_block_indexed_checked<C>(
+    provider: &C,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let mut src_keys = Vec::with_capacity(src_indices.len());
+    for &index in src_indices {
+        let block = structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(CoreError::ExpectedFusionTreePairKey {
+                actual: block.key().kind(),
+            }
+            .into());
+        };
+        let key = match orientation {
+            FusionTreePairOrientation::Direct => key.clone(),
+            FusionTreePairOrientation::Adjoint => {
+                FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone())
+            }
+        };
+        validate_generic_fusion_tree_pair_checked(provider, &key)
+            .map_err(map_checked_generic_structure_error)?;
+        src_keys.push(key);
+    }
+    generic_permute_block_result(provider, src_keys, codomain_permutation, domain_permutation)
+}
+
 /// Validate infallible-rule keys as the test-only block entries' seed did.
 #[cfg(any(test, feature = "testing"))]
 fn admit_generic_tree_pair_block<R>(
