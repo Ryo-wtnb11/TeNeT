@@ -1,13 +1,14 @@
 //! Spectrum truncation policies for the fusion-tensor factorizations.
 //!
 //! Design (informed by MatrixAlgebraKit / the legacy `TruncationStrategy`, but
-//! intentionally narrower): every policy here is a magnitude-monotone rule
-//! over per-sector spectra that are non-negative and descending, so a
-//! selection is always a per-sector *prefix count*. That keeps the host-side
-//! decision a pure scalar computation and keeps the device-side application a
-//! leading-columns/rows gather. Rules that can keep non-prefix index sets
-//! (arbitrary filters, signed eigenvalue windows) get their own layer when a
-//! decomposition needs them.
+//! intentionally narrower): every policy here is a magnitude rule over
+//! per-sector spectra of non-negative magnitudes in the factorization's
+//! stored order, which need not be descending (`eigh` publishes ascending
+//! signed eigenvalues, `eig` an arbitrary order). A decision is TensorKit's
+//! `findtruncated` kept set: a per-sector mask over the stored positions,
+//! computed host-side as a pure scalar computation. Arbitrary filters and
+//! signed eigenvalue windows are not policies here; `by = abs, rev = true` is
+//! fixed.
 //!
 //! All budgets are weighted by the coupled sector's quantum dimension: one
 //! kept value of an SU(2) spin-j sector consumes `2j + 1` of a rank budget
@@ -26,15 +27,13 @@ use std::fmt;
 
 use tenet_core::{RuleIdentity, SectorId, SectorOrderKey};
 
-/// A fixed per-sector prefix count, TensorKit's `TruncationSpace`
+/// A fixed per-sector rank, TensorKit's `TruncationSpace`
 /// (`src/factorizations/truncation.jl:261-269`).
 ///
 /// TensorKit reads the target rank of coupled sector `c` as
 /// `dim(strategy.space, c)` — the *reduced* (per-sector degeneracy) dimension
-/// of a target space — and then applies a plain `truncrank` inside that block.
-/// That is exactly a per-sector prefix count, which is why this fits the
-/// prefix-only decision layer instead of needing the non-prefix filter layer
-/// `truncfilter` would.
+/// of a target space — and then applies a plain `truncrank` inside that block:
+/// the `dim(strategy.space, c)` largest magnitudes of the sector.
 ///
 /// Build one from a space via `GradedSpace::truncspace` rather than by hand:
 /// the sector keys are the engine's opaque
@@ -71,7 +70,15 @@ impl TruncationSpace {
     }
 }
 
-/// Truncation policy over per-sector descending spectra.
+/// Truncation policy over per-sector spectra of magnitudes in stored order.
+///
+/// Ordering policies ([`Truncation::Rank`], [`Truncation::DiscardWeight`],
+/// [`Truncation::Space`]) follow TensorKit's flat stable `sortperm` over its
+/// `SectorVector`: the keep order is `|v|` descending, then sector order, then
+/// position ascending; the discard order is `|v|` ascending, then sector
+/// order, then position ascending. So at an exact tie within a sector,
+/// `Rank` keeps the earlier position and `DiscardWeight` discards the earlier
+/// position.
 ///
 /// # Tolerances and the payload's precision
 ///
@@ -116,11 +123,19 @@ pub enum Truncation {
     /// discarded stays at or below `rtol * norm`.
     #[non_exhaustive]
     DiscardWeight { rtol: f64 },
-    /// Keep exactly the requested prefix of every coupled sector, clamped to
-    /// what the spectrum offers. TensorKit `TruncationSpace`.
+    /// Keep the requested number of largest magnitudes in every coupled
+    /// sector, clamped to what the spectrum offers. TensorKit
+    /// `TruncationSpace`.
+    ///
+    /// Deviation: the kept states stay in stored order. TensorKit returns
+    /// `sortperm(d; by=abs, rev=true)[1:k]` here and so also permutes the kept
+    /// columns into magnitude order; a mask names the same set without an
+    /// order. TensorKit is itself not uniform here: its `truncrank`, and
+    /// `truncspace & truncrank`, return a mask in stored order. For a
+    /// descending (SVD) spectrum both are the leading `k` states.
     Space(TruncationSpace),
-    /// Keep a value only if every component keeps it. Prefix rules compose to
-    /// a prefix rule, so this is the per-sector minimum of the kept counts.
+    /// Keep a value only if every component keeps it: the per-sector
+    /// intersection of the kept sets.
     All(Vec<Truncation>),
 }
 
@@ -223,8 +238,7 @@ impl Truncation {
         Ok(Self::DiscardWeight { rtol })
     }
 
-    /// Keep the fixed per-sector prefix `profile` names (TensorKit
-    /// `truncspace`).
+    /// Keep the per-sector ranks `profile` names (TensorKit `truncspace`).
     pub fn space(profile: TruncationSpace) -> Self {
         Self::Space(profile)
     }
@@ -252,7 +266,8 @@ impl Truncation {
 }
 
 /// One coupled sector's spectrum offered to the selection: its identity, its
-/// quantum dimension and its values, non-negative and descending.
+/// quantum dimension and its non-negative magnitudes, in the order the
+/// factorization stored them.
 ///
 /// `sector` is only read by [`Truncation::Space`], the one policy whose
 /// decision is per-sector rather than magnitude-driven; every other policy
@@ -264,15 +279,20 @@ pub struct WeightedSpectrum<'a> {
     pub values: &'a [f64],
 }
 
-/// The outcome of a truncation decision: per-sector kept prefix lengths and
-/// the weighted 2-norm of everything discarded.
+/// The outcome of a truncation decision: per sector, a mask over its stored
+/// values (`kept[i][j]`: whether `spectra[i].values[j]` is kept, TensorKit's
+/// `SectorVector{Bool}`), and the weighted 2-norm of everything discarded.
+///
+/// One `Vec<bool>` per sector rather than a flat mask plus offsets: the
+/// caller turns each sector's mask into that sector's kept positions, and
+/// the per-sector shape makes the pairing with `spectra` the indexing itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncationDecision {
-    pub kept: Vec<usize>,
+    pub kept: Vec<Vec<bool>>,
     pub error: f64,
 }
 
-/// Selects the kept prefix per sector for `truncation` over `spectra`.
+/// Selects the kept positions per sector for `truncation` over `spectra`.
 ///
 /// Host-side scalar computation by design: spectra are small compared to the
 /// tensors, so the decision never needs to touch device data.
@@ -293,7 +313,16 @@ pub struct TruncationDecision {
 /// [`TruncationError::RuleMismatch`] for a foreign profile,
 /// [`TruncationError::InvalidPolicy`] for a policy with a non-finite or
 /// negative tolerance, [`TruncationError::InvalidSpectrum`] for spectra that
-/// are not finite, non-negative and descending, or that repeat a sector.
+/// are not finite and non-negative, or that repeat a sector.
+///
+/// # Complexity
+///
+/// For `K` values in `G` sectors: `O(K)` to validate and for the error, plus
+/// per sector its positions in keep or discard order for the ordering
+/// policies — `O(n_c)` when the sector is monotone in magnitude in either
+/// direction, ties included (any SVD spectrum), `O(n_c log n_c)` otherwise
+/// — then `O(G + k log G)` to merge
+/// `k` kept (`Rank`) or discarded (`DiscardWeight`) candidates.
 ///
 /// The decision does not depend on the order of `spectra`: it is taken in
 /// ascending `order_key(sector)` order and `kept` is reported in the
@@ -335,9 +364,9 @@ pub fn select_truncation(
     }
     let sorted: Vec<WeightedSpectrum<'_>> = order.iter().map(|&index| spectra[index]).collect();
     let ascending = decide(&sorted, truncation);
-    let mut kept = vec![0; spectra.len()];
-    for (&index, count) in order.iter().zip(ascending.kept) {
-        kept[index] = count;
+    let mut kept = vec![Vec::new(); spectra.len()];
+    for (&index, mask) in order.iter().zip(ascending.kept) {
+        kept[index] = mask;
     }
     Ok(TruncationDecision {
         kept,
@@ -346,7 +375,7 @@ pub fn select_truncation(
 }
 
 fn decide(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> TruncationDecision {
-    let kept = kept_counts(spectra, truncation);
+    let kept = kept_masks(spectra, truncation);
     let error = discarded_norm(spectra, &kept);
     TruncationDecision { kept, error }
 }
@@ -431,80 +460,76 @@ fn validate_spectra(spectra: &[WeightedSpectrum<'_>]) -> Result<(), TruncationEr
                 });
             }
         }
-        for pair in spectrum.values.windows(2) {
-            if pair[0] < pair[1] {
-                return Err(TruncationError::InvalidSpectrum {
-                    message: "spectrum values must be descending",
-                });
-            }
-        }
     }
     Ok(())
 }
 
-fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<usize> {
+fn kept_masks(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<Vec<bool>> {
     match truncation {
-        Truncation::Full => spectra
-            .iter()
-            .map(|spectrum| spectrum.values.len())
-            .collect(),
+        Truncation::Full => uniform_masks(spectra, true),
+        // TensorKit `findtruncated(::SectorVector, ::TruncationByOrder)`
+        // (truncation.jl:171-203): walk the flat keep order and mark until the
+        // running `dim(c)` sum overflows. Here each sector's keep order is
+        // merged by a heap whose head ties go to the lower sector, which is
+        // the same flat order.
         Truncation::Rank(rank) => {
-            let mut order = descending_candidates(spectra);
-            let mut kept = vec![0usize; spectra.len()];
+            let orders = ordered_positions(spectra, KEEP);
+            let mut kept = uniform_masks(spectra, false);
+            let mut heap: BinaryHeap<DescendingCandidate> = orders
+                .iter()
+                .enumerate()
+                .filter_map(|(sector, order)| {
+                    order.first().map(|&position| DescendingCandidate {
+                        value: spectra[sector].values[position],
+                        sector,
+                        cursor: 0,
+                    })
+                })
+                .collect();
             let mut used = 0.0;
             let budget = *rank as f64;
-            for (sector, index) in order.drain(..) {
+            while let Some(DescendingCandidate { sector, cursor, .. }) = heap.pop() {
                 let weight = spectra[sector].weight;
-                // TensorKit `findtruncated(::SectorVector, ::TruncationByOrder)`
-                // (truncation.jl:171-205) compares the running `dim(c)` sum
-                // with no slack. The weights are exact `dim(c)` (#1871), so a
-                // tolerance here would only admit a state TensorKit rejects.
+                // TensorKit `totaldim > howmany && break` compares the
+                // running `dim(c)` sum with no slack. The weights are exact
+                // `dim(c)` (#1871), so a tolerance here would only admit a
+                // state TensorKit rejects.
                 if used + weight > budget {
                     break;
                 }
-                debug_assert_eq!(index, kept[sector]);
                 used += weight;
-                kept[sector] += 1;
+                kept[sector][orders[sector][cursor]] = true;
+                if let Some(&position) = orders[sector].get(cursor + 1) {
+                    heap.push(DescendingCandidate {
+                        value: spectra[sector].values[position],
+                        sector,
+                        cursor: cursor + 1,
+                    });
+                }
             }
             kept
         }
+        // MatrixAlgebraKit `findtruncated(::AbstractVector, ::TruncationByValue)`
+        // is `findall(>=(atol) ∘ abs, d)`: a filter, whatever the order.
         Truncation::Tolerance { atol, rtol } => {
-            let threshold = atol.max(rtol * full_norm(spectra));
-            spectra
-                .iter()
-                .map(|spectrum| {
-                    spectrum
-                        .values
-                        .iter()
-                        .take_while(|&&value| value >= threshold)
-                        .count()
-                })
-                .collect()
+            threshold_masks(spectra, atol.max(rtol * full_norm(spectra)))
         }
         Truncation::ToleranceInf { atol, rtol } => {
-            let threshold = atol.max(rtol * full_norm_inf(spectra));
-            spectra
-                .iter()
-                .map(|spectrum| {
-                    spectrum
-                        .values
-                        .iter()
-                        .take_while(|&&value| value >= threshold)
-                        .count()
-                })
-                .collect()
+            threshold_masks(spectra, atol.max(rtol * full_norm_inf(spectra)))
         }
         // TensorKit `findtruncated(::SectorVector, ::TruncationByError)`
-        // (truncation.jl:227-256): ascending raw magnitude, weight only in the
-        // squared error, stop at the first candidate that overflows. The
-        // budget is `(rtol * norm)^2` as in MatrixAlgebraKit `_truncerr_impl`,
-        // not TensorKit's `rtol^p * norm(values, p)` (truncation.jl:230), so
-        // that `relative_error(rtol)` means `error <= rtol * norm` literally.
+        // (truncation.jl:227-256): ascending raw magnitude in the flat stable
+        // `sortperm` (equal values: lower sector, then lower position, go
+        // first), weight only in the squared error, stop at the first
+        // candidate that overflows. The budget is `(rtol * norm)^2` as in
+        // MatrixAlgebraKit `_truncerr_impl`, not TensorKit's
+        // `rtol^p * norm(values, p)` (truncation.jl:230), so that
+        // `relative_error(rtol)` means `error <= rtol * norm` literally.
         //
-        // One tail per non-empty sector lives in a call-local min-heap on
-        // (value asc, sector asc): O(G + D log G) selection with O(G)
-        // workspace instead of rescanning G sectors per discard (O(D * G)).
-        // The heap build is paid even for D = 0; no cutoff to the scan.
+        // Each sector's discard order is merged by a call-local min-heap on
+        // (value asc, sector asc): O(G + D log G) selection after the
+        // per-sector sorts, with O(G) heap workspace instead of rescanning G
+        // sectors per discard (O(D * G)).
         Truncation::DiscardWeight { rtol } => {
             let norm = full_norm(spectra);
             let bound = rtol * norm;
@@ -551,20 +576,26 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             // keeps, so a budget met exactly up to rounding discards that
             // state.
             let limit = budget * slack;
-            let mut kept: Vec<usize> = spectra
+            let orders = ordered_positions(spectra, DISCARD);
+            let mut kept = uniform_masks(spectra, true);
+            let mut tails: BinaryHeap<TailCandidate> = orders
                 .iter()
-                .map(|spectrum| spectrum.values.len())
+                .enumerate()
+                .filter_map(|(sector, order)| {
+                    order.first().map(|&position| TailCandidate {
+                        value: spectra[sector].values[position],
+                        sector,
+                        cursor: 0,
+                    })
+                })
                 .collect();
-            let mut tails = Vec::with_capacity(spectra.len());
-            tails.extend(spectra.iter().enumerate().filter_map(|(sector, spectrum)| {
-                spectrum
-                    .values
-                    .last()
-                    .map(|&value| TailCandidate { value, sector })
-            }));
-            let mut tails = BinaryHeap::from(tails);
             let mut discarded = 0.0;
-            while let Some(TailCandidate { value, sector }) = tails.pop() {
+            while let Some(TailCandidate {
+                value,
+                sector,
+                cursor,
+            }) = tails.pop()
+            {
                 let weight = spectra[sector].weight;
                 let next = discarded
                     + match units {
@@ -578,40 +609,135 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
                     break;
                 }
                 discarded = next;
-                kept[sector] -= 1;
-                if kept[sector] > 0 {
+                kept[sector][orders[sector][cursor]] = false;
+                if let Some(&position) = orders[sector].get(cursor + 1) {
                     tails.push(TailCandidate {
-                        value: spectra[sector].values[kept[sector] - 1],
+                        value: spectra[sector].values[position],
                         sector,
+                        cursor: cursor + 1,
                     });
                 }
             }
             kept
         }
         // TensorKit `findtruncated(values, ::TruncationSpace)`
-        // (truncation.jl:261-269): a plain `truncrank(dim(space, c))` inside
-        // each block. Absent sector -> rank zero (TK's `dim(V, c)` is zero
+        // (truncation.jl:261-265): a plain `truncrank(dim(space, c))` inside
+        // each block, i.e. the first `dim(space, c)` entries of the block's
+        // keep order. Absent sector -> rank zero (TK's `dim(V, c)` is zero
         // there); clamped to what the spectrum actually offers, since asking
-        // for more than exists is a request the prefix cannot honour rather
-        // than an error. No magnitude enters, so the descending-prefix
-        // invariant is preserved by construction.
+        // for more than exists is not an error there either. TensorKit returns
+        // those positions in magnitude order and so also permutes the kept
+        // columns; a mask cannot, and keeps them in stored order (see
+        // `Truncation::Space`).
         Truncation::Space(profile) => spectra
             .iter()
-            .map(|spectrum| profile.rank(spectrum.sector).min(spectrum.values.len()))
+            .map(|spectrum| {
+                let mut mask = vec![false; spectrum.values.len()];
+                let rank = profile.rank(spectrum.sector);
+                for &position in sector_order(spectrum.values, KEEP).iter().take(rank) {
+                    mask[position] = true;
+                }
+                mask
+            })
             .collect(),
+        // MatrixAlgebraKit `_ind_intersect`: per-sector set intersection.
         Truncation::All(components) => {
-            let mut kept: Vec<usize> = spectra
-                .iter()
-                .map(|spectrum| spectrum.values.len())
-                .collect();
+            let mut kept = uniform_masks(spectra, true);
             for component in components {
-                for (slot, count) in kept.iter_mut().zip(kept_counts(spectra, component)) {
-                    *slot = (*slot).min(count);
+                for (mask, other) in kept.iter_mut().zip(kept_masks(spectra, component)) {
+                    for (slot, keep) in mask.iter_mut().zip(other) {
+                        *slot &= keep;
+                    }
                 }
             }
             kept
         }
     }
+}
+
+fn uniform_masks(spectra: &[WeightedSpectrum<'_>], keep: bool) -> Vec<Vec<bool>> {
+    spectra
+        .iter()
+        .map(|spectrum| vec![keep; spectrum.values.len()])
+        .collect()
+}
+
+fn threshold_masks(spectra: &[WeightedSpectrum<'_>], threshold: f64) -> Vec<Vec<bool>> {
+    spectra
+        .iter()
+        .map(|spectrum| {
+            spectrum
+                .values
+                .iter()
+                .map(|&value| value >= threshold)
+                .collect()
+        })
+        .collect()
+}
+
+/// TensorKit's keep order (`by = abs, rev = true`).
+const KEEP: bool = true;
+/// TensorKit's discard order (`by = abs, rev = false`).
+const DISCARD: bool = false;
+
+/// The positions of one sector's `values` in TensorKit's flat stable
+/// `sortperm` order restricted to that sector: by magnitude (descending for
+/// [`KEEP`], ascending for [`DISCARD`]), equal magnitudes by ascending
+/// position.
+///
+/// `O(n)` for every monotone sector, ties included, in either direction, and
+/// `O(n log n)` otherwise:
+/// - monotone in the requested direction (a descending SVD spectrum under
+///   `KEEP`): the stable sort sees one run, `n - 1` comparisons;
+/// - monotone the other way (ascending magnitudes under `KEEP`, a
+///   descending spectrum under `DISCARD`): the positions reversed, with each group
+///   of equal values reversed back so ties stay position-ascending. Why not
+///   leave this to the sort: it reverses only *strictly* descending runs, so
+///   a run with exact ties (degenerate eigenvalues, `[5, 5, 4, 4]`) would
+///   cost `O(n log n)`.
+///
+/// `partial_cmp` / `==` rather than `total_cmp`, so `-0.0` ties `0.0` as
+/// under `by = abs`; NaN never reaches here (`validate_spectra`).
+fn sector_order(values: &[f64], keep: bool) -> Vec<usize> {
+    let reversed = values.windows(2).all(|pair| {
+        if keep {
+            pair[0] <= pair[1]
+        } else {
+            pair[0] >= pair[1]
+        }
+    });
+    if reversed {
+        let mut order: Vec<usize> = (0..values.len()).rev().collect();
+        let mut start = 0;
+        while start < order.len() {
+            let value = values[order[start]];
+            let end = start
+                + order[start..]
+                    .iter()
+                    .take_while(|&&position| values[position] == value)
+                    .count();
+            order[start..end].reverse();
+            start = end;
+        }
+        return order;
+    }
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ascending = values[a].partial_cmp(&values[b]).unwrap_or(Ordering::Equal);
+        if keep {
+            ascending.reverse()
+        } else {
+            ascending
+        }
+    });
+    order
+}
+
+fn ordered_positions(spectra: &[WeightedSpectrum<'_>], keep: bool) -> Vec<Vec<usize>> {
+    spectra
+        .iter()
+        .map(|spectrum| sector_order(spectrum.values, keep))
+        .collect()
 }
 
 /// The out-of-range `DiscardWeight` comparison in units of
@@ -697,8 +823,10 @@ fn scale_by_power_of_two(mut value: f64, mut exponent: i32) -> f64 {
     value * power(exponent)
 }
 
-/// A sector's current tail for `DiscardWeight`. `Ord` is inverted so the
-/// max-heap pops the smallest value, lowest sector first. Not
+/// A sector's next discard candidate for `DiscardWeight`: `cursor` indexes
+/// that sector's discard order. `Ord` is inverted so the max-heap pops the
+/// smallest value, lowest sector first; the heap holds one candidate per
+/// sector, so `cursor` never needs to break a tie. Not
 /// `Reverse<DescendingCandidate>`: that would break cross-sector ties toward
 /// the highest sector. `partial_cmp` rather than `total_cmp` keeps
 /// `-0.0 == 0.0`; NaN never reaches here (`validate_spectra`).
@@ -706,6 +834,7 @@ fn scale_by_power_of_two(mut value: f64, mut exponent: i32) -> f64 {
 struct TailCandidate {
     value: f64,
     sector: usize,
+    cursor: usize,
 }
 
 impl PartialEq for TailCandidate {
@@ -732,48 +861,20 @@ impl Ord for TailCandidate {
     }
 }
 
-/// Candidates as `(sector, index)` sorted by descending value; ties keep the
-/// slice order (TensorKit sector order after `select_truncation`), the same
-/// stable rule as TensorKit `sortperm(parent(values); rev=true)` over its own
-/// sector order.
-fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
-    let total = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-    let mut heap = BinaryHeap::with_capacity(spectra.len());
-    for (sector, spectrum) in spectra.iter().enumerate() {
-        if let Some(&value) = spectrum.values.first() {
-            heap.push(DescendingCandidate {
-                value,
-                sector,
-                index: 0,
-            });
-        }
-    }
-
-    let mut candidates = Vec::with_capacity(total);
-    while let Some(candidate) = heap.pop() {
-        candidates.push((candidate.sector, candidate.index));
-        let next_index = candidate.index + 1;
-        if let Some(&value) = spectra[candidate.sector].values.get(next_index) {
-            heap.push(DescendingCandidate {
-                value,
-                sector: candidate.sector,
-                index: next_index,
-            });
-        }
-    }
-    candidates
-}
-
+/// A sector's next keep candidate for `Rank`: `cursor` indexes that sector's
+/// keep order. The max-heap pops the largest value, lowest sector first —
+/// TensorKit's `sortperm(parent(values); rev=true)` over its own sector
+/// order once `select_truncation` has put the slice in that order.
 #[derive(Clone, Copy, Debug)]
 struct DescendingCandidate {
     value: f64,
     sector: usize,
-    index: usize,
+    cursor: usize,
 }
 
 impl PartialEq for DescendingCandidate {
     fn eq(&self, other: &Self) -> bool {
-        self.value == other.value && self.sector == other.sector && self.index == other.index
+        self.value == other.value && self.sector == other.sector && self.cursor == other.cursor
     }
 }
 
@@ -791,7 +892,7 @@ impl Ord for DescendingCandidate {
             .partial_cmp(&other.value)
             .unwrap_or(Ordering::Equal)
             .then_with(|| other.sector.cmp(&self.sector))
-            .then_with(|| other.index.cmp(&self.index))
+            .then_with(|| other.cursor.cmp(&self.cursor))
     }
 }
 
@@ -865,23 +966,28 @@ fn power_of_two_floor(value: f64) -> f64 {
     }
 }
 
-/// `sqrt(Σ weight · Σ value²)` over the suffix `values[from(sector)..]` of
-/// every sector, finite whenever the result is representable (#1440).
+/// `sqrt(Σ weight · Σ value²)` over the values `(sector, position)` for
+/// which `summed` holds, finite whenever the result is representable (#1440).
 ///
-/// The in-range pass is the historical unscaled sum. Out of range, the scale
-/// is the power-of-two floor of the largest value summed, which is the first
-/// value of a descending suffix, so the result is exactly
+/// The in-range pass is the historical unscaled sum, in stored order within a
+/// sector. Out of range, the scale is the power-of-two floor of the largest
+/// value summed — a maximum over every summed value, since a sector's values
+/// may come in any order — so the result is exactly
 /// `scale * (in-range norm of spectrum / scale)`.
-fn weighted_norm(spectra: &[WeightedSpectrum<'_>], from: impl Fn(usize) -> usize) -> f64 {
+fn weighted_norm(spectra: &[WeightedSpectrum<'_>], summed: impl Fn(usize, usize) -> bool) -> f64 {
     let max = || {
-        spectra
-            .iter()
-            .enumerate()
-            .filter_map(|(sector, spectrum)| spectrum.values.get(from(sector)).copied())
-            .fold(0.0, f64::max)
+        let mut max = 0.0_f64;
+        for (sector, spectrum) in spectra.iter().enumerate() {
+            for (position, &value) in spectrum.values.iter().enumerate() {
+                if summed(sector, position) {
+                    max = max.max(value);
+                }
+            }
+        }
+        max
     };
     rescaled_power_norm::<std::convert::Infallible>(
-        weighted_square_sum(spectra, &from, |value| value * value),
+        weighted_square_sum(spectra, &summed, |value| value * value),
         2.0,
         || {
             let max = max();
@@ -892,7 +998,7 @@ fn weighted_norm(spectra: &[WeightedSpectrum<'_>], from: impl Fn(usize) -> usize
             }
         },
         |scale| {
-            Ok(weighted_square_sum(spectra, &from, |value| {
+            Ok(weighted_square_sum(spectra, &summed, |value| {
                 (value / scale) * (value / scale)
             }))
         },
@@ -902,7 +1008,7 @@ fn weighted_norm(spectra: &[WeightedSpectrum<'_>], from: impl Fn(usize) -> usize
 
 fn weighted_square_sum(
     spectra: &[WeightedSpectrum<'_>],
-    from: &impl Fn(usize) -> usize,
+    summed: &impl Fn(usize, usize) -> bool,
     square: impl Fn(f64) -> f64,
 ) -> f64 {
     spectra
@@ -910,9 +1016,12 @@ fn weighted_square_sum(
         .enumerate()
         .map(|(sector, spectrum)| {
             spectrum.weight
-                * spectrum.values[from(sector)..]
+                * spectrum
+                    .values
                     .iter()
-                    .map(|&value| square(value))
+                    .enumerate()
+                    .filter(|&(position, _)| summed(sector, position))
+                    .map(|(_, &value)| square(value))
                     .sum::<f64>()
         })
         // Not `sum()`: its f64 identity is `-0.0`, so a decision that
@@ -924,7 +1033,7 @@ fn weighted_square_sum(
 }
 
 fn full_norm(spectra: &[WeightedSpectrum<'_>]) -> f64 {
-    weighted_norm(spectra, |_| 0)
+    weighted_norm(spectra, |_, _| true)
 }
 
 fn full_norm_inf(spectra: &[WeightedSpectrum<'_>]) -> f64 {
@@ -934,8 +1043,8 @@ fn full_norm_inf(spectra: &[WeightedSpectrum<'_>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> f64 {
-    weighted_norm(spectra, |sector| kept[sector])
+fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[Vec<bool>]) -> f64 {
+    weighted_norm(spectra, |sector, position| !kept[sector][position])
 }
 
 #[cfg(test)]
@@ -979,6 +1088,30 @@ mod tests {
         })
     }
 
+    /// The kept count per sector, asserting that every mask is a prefix:
+    /// what TensorKit keeps on a descending spectrum without within-sector
+    /// ties.
+    #[track_caller]
+    fn counts(kept: &[Vec<bool>]) -> Vec<usize> {
+        kept.iter()
+            .map(|mask| {
+                let count = mask.iter().take_while(|&&keep| keep).count();
+                assert!(
+                    mask[count..].iter().all(|&keep| !keep),
+                    "{mask:?} is not a prefix"
+                );
+                count
+            })
+            .collect()
+    }
+
+    /// A per-sector mask keeping exactly `positions`.
+    fn mask(len: usize, positions: &[usize]) -> Vec<bool> {
+        (0..len)
+            .map(|position| positions.contains(&position))
+            .collect()
+    }
+
     fn profile(pairs: [(usize, usize); 2]) -> TruncationSpace {
         TruncationSpace::new(
             rule(),
@@ -995,7 +1128,7 @@ mod tests {
         let spectra = spectra(&entries);
         for truncation in [Truncation::Full, Truncation::rank(usize::MAX)] {
             let decision = select(&spectra, &truncation).unwrap();
-            assert_eq!(decision.kept, vec![2, 2]);
+            assert_eq!(counts(&decision.kept), vec![2, 2]);
             assert_eq!(
                 decision.error.to_bits(),
                 0.0_f64.to_bits(),
@@ -1013,10 +1146,10 @@ mod tests {
         let over = 1.0 + 1e-13;
         let entries = [(over, vec![2.0]), (1.0, vec![1.0])];
         let decision = select(&spectra(&entries), &Truncation::rank(1)).unwrap();
-        assert_eq!(decision.kept, vec![0, 0]);
+        assert_eq!(counts(&decision.kept), vec![0, 0]);
         let entries = [(1.0, vec![2.0]), (1.0, vec![1.0])];
         let decision = select(&spectra(&entries), &Truncation::rank(1)).unwrap();
-        assert_eq!(decision.kept, vec![1, 0]);
+        assert_eq!(counts(&decision.kept), vec![1, 0]);
     }
 
     #[test]
@@ -1025,13 +1158,13 @@ mod tests {
         let spectra = spectra(&entries);
         // Budget 4: keep 5.0 (weight 1) and 4.0 (weight 3) exactly.
         let decision = select(&spectra, &Truncation::rank(4)).unwrap();
-        assert_eq!(decision.kept, vec![1, 1]);
+        assert_eq!(counts(&decision.kept), vec![1, 1]);
         // Budget 5: the next candidate (1.0, weight 1) fits.
         let decision = select(&spectra, &Truncation::rank(5)).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
         // Budget 6: 0.5 has weight 3 and does not fit.
         let decision = select(&spectra, &Truncation::rank(6)).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
     }
 
     #[test]
@@ -1039,10 +1172,10 @@ mod tests {
         let entries = [(1.0, vec![2.0, 1.0]), (1.0, vec![2.0, 1.0])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::rank(1)).unwrap();
-        assert_eq!(decision.kept, vec![1, 0]);
+        assert_eq!(counts(&decision.kept), vec![1, 0]);
 
         let decision = select(&spectra, &Truncation::rank(3)).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
     }
 
     #[test]
@@ -1051,13 +1184,13 @@ mod tests {
         let spectra = spectra(&entries);
         let truncation = Truncation::absolute_cutoff(1.0).unwrap();
         let decision = select(&spectra, &truncation).unwrap();
-        assert_eq!(decision.kept, vec![2]);
+        assert_eq!(counts(&decision.kept), vec![2]);
         assert!((decision.error - 0.1).abs() < 1e-12);
 
         // norm = 5.001..., rtol 0.5 => threshold ~2.5: keeps 4 and 3.
         let truncation = Truncation::relative_cutoff(0.5).unwrap();
         let decision = select(&spectra, &truncation).unwrap();
-        assert_eq!(decision.kept, vec![2]);
+        assert_eq!(counts(&decision.kept), vec![2]);
     }
 
     #[test]
@@ -1066,7 +1199,7 @@ mod tests {
         let spectra = spectra(&entries);
         let truncation = Truncation::relative_inf_cutoff(0.7).unwrap();
         let decision = select(&spectra, &truncation).unwrap();
-        assert_eq!(decision.kept, vec![2, 0]);
+        assert_eq!(counts(&decision.kept), vec![2, 0]);
     }
 
     #[test]
@@ -1077,11 +1210,11 @@ mod tests {
         let truncation = Truncation::relative_error(0.3).unwrap();
         let decision = select(&spectra, &truncation).unwrap();
         assert!(decision.error <= 0.3 * norm + 1e-12);
-        assert!(decision.kept[0] < 4, "a 30% budget must discard something");
+        let kept = counts(&decision.kept)[0];
+        assert!(kept < 4, "a 30% budget must discard something");
         // Discarding one more value would exceed the budget.
-        let mut tighter = decision.kept.clone();
-        tighter[0] -= 1;
-        assert!(discarded_norm(&spectra, &tighter) > 0.3 * norm);
+        let tighter = mask(4, &(0..kept - 1).collect::<Vec<_>>());
+        assert!(discarded_norm(&spectra, &[tighter]) > 0.3 * norm);
     }
 
     #[test]
@@ -1090,11 +1223,11 @@ mod tests {
         let spectra = spectra(&entries);
         let combined = Truncation::rank(3).and(Truncation::absolute_cutoff(2.5).unwrap());
         let decision = select(&spectra, &combined).unwrap();
-        assert_eq!(decision.kept, vec![2]);
+        assert_eq!(counts(&decision.kept), vec![2]);
 
         let combined = Truncation::rank(1).and(Truncation::absolute_cutoff(0.5).unwrap());
         let decision = select(&spectra, &combined).unwrap();
-        assert_eq!(decision.kept, vec![1]);
+        assert_eq!(counts(&decision.kept), vec![1]);
     }
 
     #[test]
@@ -1102,7 +1235,7 @@ mod tests {
         let entries = [(1.0, vec![2.0, 1.0]), (2.0, vec![1.5])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::Full).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
         assert_eq!(decision.error, 0.0);
     }
 
@@ -1160,7 +1293,7 @@ mod tests {
         let entries = [(1.0, vec![9.0, 8.0, 7.0]), (3.0, vec![2.0, 1.0, 0.5])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::space(profile([(0, 1), (1, 3)]))).unwrap();
-        assert_eq!(decision.kept, vec![1, 3]);
+        assert_eq!(counts(&decision.kept), vec![1, 3]);
         // The reported error is still the weighted 2-norm of the discarded tail.
         let expected = (8.0f64 * 8.0 + 7.0 * 7.0).sqrt();
         assert!((decision.error - expected).abs() < 1e-12);
@@ -1176,7 +1309,7 @@ mod tests {
         let spectra = spectra(&entries);
         let sparse = TruncationSpace::new(rule(), [(SectorId::new(0), 9)]);
         let decision = select(&spectra, &Truncation::space(sparse)).unwrap();
-        assert_eq!(decision.kept, vec![2, 0]);
+        assert_eq!(counts(&decision.kept), vec![2, 0]);
     }
 
     #[test]
@@ -1188,7 +1321,7 @@ mod tests {
         let combined = Truncation::space(profile([(0, 3), (1, 1)]))
             .and(Truncation::absolute_cutoff(1.0).unwrap());
         let decision = select(&spectra, &combined).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
     }
 
     #[test]
@@ -1249,11 +1382,14 @@ mod tests {
         ];
         for (policy, expected) in policies {
             let reference = select(&ascending, &policy).unwrap();
-            assert_eq!(reference.kept, expected, "{policy:?}");
+            assert_eq!(counts(&reference.kept), expected, "{policy:?}");
             for permutation in permutations {
                 let feed: Vec<_> = permutation.iter().map(|&i| ascending[i]).collect();
                 let decision = select(&feed, &policy).unwrap();
-                let back: Vec<usize> = permutation.iter().map(|&i| reference.kept[i]).collect();
+                let back: Vec<Vec<bool>> = permutation
+                    .iter()
+                    .map(|&i| reference.kept[i].clone())
+                    .collect();
                 assert_eq!(decision.kept, back, "{policy:?} {permutation:?}");
                 assert_eq!(decision.error.to_bits(), reference.error.to_bits());
             }
@@ -1268,68 +1404,254 @@ mod tests {
     }
 
     #[test]
-    fn non_descending_spectrum_returns_typed_error() {
-        let entries = [(1.0, vec![3.0, 1.0, 2.0])];
-        let spectra = spectra(&entries);
-        assert!(matches!(
-            select(&spectra, &Truncation::rank(2)),
-            Err(TruncationError::InvalidSpectrum { .. })
-        ));
+    fn stored_order_spectra_select_the_tensorkit_kept_set() {
+        // What: values arrive in the factorization's stored order and the
+        // kept set is TensorKit's mask over those positions. Expected masks
+        // from TensorKit `findtruncated(::SectorVector, ...)` at cfaa073e
+        // (one Trivial-like block), by hand:
+        // - eigh ascending `[-3, -1, 0.5, 2]` (magnitudes `[3, 1, 0.5, 2]`):
+        //   `sortperm(rev)` = `[1, 4, 2, 3]`; `truncrank(2)` keeps {0, 3};
+        //   `truncerror`: norm^2 = 14.25, rtol 0.3 -> budget 1.2825 discards
+        //   0.5 (0.25) and 1 (1.25 total), then 2 overflows -> {0, 3};
+        //   `trunctol(atol = 1.5)` is `findall` -> {0, 3}; `truncspace(1)`
+        //   -> {0}.
+        // - eig arbitrary `[1, 3, 0.5, 2, 2.5]`: `truncrank(3)` keeps
+        //   3, 2.5, 2 -> {1, 3, 4} (two runs).
+        let entries = [(1.0, vec![3.0, 1.0, 0.5, 2.0])];
+        let eigh = spectra(&entries);
+        let both = mask(4, &[0, 3]);
+        for policy in [
+            Truncation::rank(2),
+            Truncation::relative_error(0.3).unwrap(),
+            Truncation::absolute_cutoff(1.5).unwrap(),
+            Truncation::rank(3).and(Truncation::absolute_cutoff(1.5).unwrap()),
+        ] {
+            let decision = select(&eigh, &policy).unwrap();
+            assert_eq!(decision.kept, std::slice::from_ref(&both), "{policy:?}");
+            assert!(
+                (decision.error - 1.25f64.sqrt()).abs() < 1e-15,
+                "{policy:?}"
+            );
+        }
+        let one = TruncationSpace::new(rule(), [(SectorId::new(0), 1)]);
+        let decision = select(&eigh, &Truncation::space(one)).unwrap();
+        assert_eq!(decision.kept, [mask(4, &[0])]);
+
+        let entries = [(1.0, vec![1.0, 3.0, 0.5, 2.0, 2.5])];
+        let decision = select(&spectra(&entries), &Truncation::rank(3)).unwrap();
+        assert_eq!(decision.kept, [mask(5, &[1, 3, 4])]);
+        assert!((decision.error - 1.25f64.sqrt()).abs() < 1e-15);
     }
 
-    /// Independent `DiscardWeight` oracle: flatten every value, stable-sort by
-    /// (value asc, sector asc, index desc) and accumulate the weighted squared
-    /// error with the same first-failure stop. Shares no code with the heap
-    /// selector and never touches `kept` while selecting. Within-sector ties
-    /// are ordered tail-first: that is TeNeT's prefix convention, which differs
-    /// from TensorKit's boolean mask order only by a permutation among equal
-    /// values, so kept counts and error agree.
-    fn discard_weight_oracle(spectra: &[WeightedSpectrum<'_>], rtol: f64) -> (Vec<usize>, f64) {
-        let norm = full_norm(spectra);
-        let budget = (rtol * norm) * (rtol * norm);
-        let count: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-        let limit = budget * (1.0 + (count + 5) as f64 * f64::EPSILON);
-        let mut flat: Vec<(f64, usize, usize)> = spectra
-            .iter()
-            .enumerate()
-            .flat_map(|(sector, spectrum)| {
-                spectrum
-                    .values
-                    .iter()
-                    .enumerate()
-                    .map(move |(index, &value)| (value, sector, index))
-            })
-            .collect();
-        flat.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap()
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| b.2.cmp(&a.2))
-        });
-        let mut discards: Vec<Vec<usize>> = vec![Vec::new(); spectra.len()];
-        let mut total = 0.0;
-        for (value, sector, index) in flat {
-            total += spectra[sector].weight * value * value;
-            if total > limit {
-                break;
+    #[test]
+    fn rank_ties_within_a_sector_keep_the_earlier_position() {
+        // TensorKit `sortperm(rev = true)` is stable: of `[1, 2, 1, 2]` the
+        // order is `[2, 4, 1, 3]`, so `truncrank(3)` keeps {0, 1, 3}.
+        let entries = [(1.0, vec![1.0, 2.0, 1.0, 2.0])];
+        let decision = select(&spectra(&entries), &Truncation::rank(3)).unwrap();
+        assert_eq!(decision.kept, [mask(4, &[0, 1, 3])]);
+    }
+
+    #[test]
+    fn signed_zeros_tie_in_both_orders() {
+        // `by = abs` makes -0.0 and 0.0 equal, so position decides; NaN is
+        // rejected before any order is built (`validate_spectra`).
+        let values = [0.0, -0.0, 0.0, 1.0];
+        assert_eq!(sector_order(&values, KEEP), [3, 0, 1, 2]);
+        assert_eq!(sector_order(&values, DISCARD), [0, 1, 2, 3]);
+        let values = [-0.0, 0.0];
+        assert_eq!(sector_order(&values, KEEP), [0, 1]);
+        assert_eq!(sector_order(&values, DISCARD), [0, 1]);
+    }
+
+    #[test]
+    fn monotone_orders_equal_the_full_key_sort_with_ties() {
+        // What: the `O(n)` reversal for a sector monotone the other way gives
+        // exactly the full-key order `(value, position asc)`, on tie-heavy
+        // spectra in both directions, plus unordered ones (the sort path).
+        let full_key = |values: &[f64], keep: bool| {
+            let mut order: Vec<usize> = (0..values.len()).collect();
+            order.sort_by(|&a, &b| {
+                let by_value = if keep {
+                    values[b].partial_cmp(&values[a])
+                } else {
+                    values[a].partial_cmp(&values[b])
+                };
+                by_value.unwrap().then(a.cmp(&b))
+            });
+            order
+        };
+        let descending = [
+            vec![],
+            vec![1.0],
+            vec![5.0, 5.0, 4.0, 4.0, 4.0, 1.0, 0.0, -0.0, 0.0],
+            vec![2.0, 2.0, 2.0],
+            vec![3.0, 2.0, 2.0, 1.0, 1.0],
+        ];
+        let mut cases = 0;
+        for values in descending {
+            let mut ascending = values.clone();
+            ascending.reverse();
+            let mut shuffled = values.clone();
+            shuffled.rotate_left(values.len() / 2);
+            for values in [&values, &ascending, &shuffled] {
+                for keep in [KEEP, DISCARD] {
+                    assert_eq!(
+                        sector_order(values, keep),
+                        full_key(values, keep),
+                        "{values:?} keep {keep}"
+                    );
+                    cases += 1;
+                }
             }
-            discards[sector].push(index);
         }
-        let kept: Vec<usize> = spectra
-            .iter()
-            .zip(&discards)
-            .map(|(spectrum, discarded)| {
-                let len = spectrum.values.len();
-                let mut expected: Vec<usize> = (len - discarded.len()..len).rev().collect();
-                expected.sort_unstable();
-                let mut got = discarded.clone();
-                got.sort_unstable();
-                assert_eq!(got, expected, "discards must form a suffix");
-                len - discarded.len()
-            })
-            .collect();
-        let error = discarded_norm(spectra, &kept);
-        (kept, error)
+        assert_eq!(cases, 5 * 3 * 2);
+    }
+
+    #[test]
+    fn an_ascending_out_of_range_spectrum_scales_by_its_maximum() {
+        // What (#1440 with stored order): `1e200^2` overflows, so the norm is
+        // rescaled. Scaled by the first value (`1.0`) the sum stays `Inf`, the
+        // threshold is `Inf` and everything was discarded; scaled by the
+        // maximum the norm is `1e200` and only the `1.0` goes.
+        let entries = [(1.0, vec![1.0, 1e200])];
+        let ascending = spectra(&entries);
+        let norm = full_norm(&ascending);
+        assert!((norm - 1e200).abs() <= 1e200 * f64::EPSILON, "{norm:e}");
+        for policy in [
+            Truncation::relative_cutoff(0.5).unwrap(),
+            Truncation::relative_error(0.5).unwrap(),
+        ] {
+            let decision = select(&ascending, &policy).unwrap();
+            assert_eq!(decision.kept, [mask(2, &[1])], "{policy:?}");
+            assert_eq!(decision.error, 1.0, "{policy:?}");
+        }
+        // The discarded norm takes its scale from what it sums too: here the
+        // `1e200` is discarded and the `1.0` kept.
+        let error = discarded_norm(&ascending, &[mask(2, &[0])]);
+        assert!((error - 1e200).abs() <= 1e200 * f64::EPSILON, "{error:e}");
+    }
+
+    /// `sqrt(Σ weight · Σ value²)` over the selected values, summed in units
+    /// of their maximum: the oracle's own norm, not `weighted_norm`.
+    fn oracle_norm(
+        spectra: &[WeightedSpectrum<'_>],
+        selected: impl Fn(usize, usize) -> bool,
+    ) -> f64 {
+        let picked = || {
+            spectra
+                .iter()
+                .enumerate()
+                .flat_map(move |(sector, spectrum)| {
+                    spectrum
+                        .values
+                        .iter()
+                        .enumerate()
+                        .map(move |(position, &value)| (sector, position, value))
+                })
+        };
+        let max = picked()
+            .filter(|&(s, p, _)| selected(s, p))
+            .map(|(_, _, value)| value)
+            .fold(0.0, f64::max);
+        if max == 0.0 {
+            return 0.0;
+        }
+        let sum: f64 = picked()
+            .filter(|&(s, p, _)| selected(s, p))
+            .map(|(s, _, value)| spectra[s].weight * (value / max) * (value / max))
+            .sum();
+        max * sum.sqrt()
+    }
+
+    /// Independent oracle for the ordering policies, TensorKit's
+    /// `findtruncated(::SectorVector, ...)` restated: flatten every value as
+    /// `(value, sector, position)`, sort with the flat order spelled out as a
+    /// full key (so it does not lean on sort stability), and walk it with
+    /// the documented stop rule; `Space` sorts each sector the same way and
+    /// takes its rank. Shares no code with the per-sector sorts or the heap
+    /// merge. Sector ids are entry positions, and so is the sector order.
+    fn flat_oracle(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec<Vec<bool>> {
+        let flat = |sector_filter: Option<usize>| -> Vec<(f64, usize, usize)> {
+            spectra
+                .iter()
+                .enumerate()
+                .filter(|&(sector, _)| sector_filter.is_none_or(|only| only == sector))
+                .flat_map(|(sector, spectrum)| {
+                    spectrum
+                        .values
+                        .iter()
+                        .enumerate()
+                        .map(move |(position, &value)| (value, sector, position))
+                })
+                .collect()
+        };
+        let keep_key = |a: &(f64, usize, usize), b: &(f64, usize, usize)| {
+            b.0.partial_cmp(&a.0)
+                .unwrap()
+                .then(a.1.cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+        };
+        match truncation {
+            Truncation::Rank(rank) => {
+                let mut kept: Vec<Vec<bool>> = spectra
+                    .iter()
+                    .map(|spectrum| vec![false; spectrum.values.len()])
+                    .collect();
+                let mut order = flat(None);
+                order.sort_by(keep_key);
+                let mut total = 0.0;
+                for (_, sector, position) in order {
+                    total += spectra[sector].weight;
+                    if total > *rank as f64 {
+                        break;
+                    }
+                    kept[sector][position] = true;
+                }
+                kept
+            }
+            Truncation::DiscardWeight { rtol } => {
+                let norm = oracle_norm(spectra, |_, _| true);
+                let budget = (rtol * norm) * (rtol * norm);
+                let count: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+                let limit = budget * (1.0 + (count + 5) as f64 * f64::EPSILON);
+                let mut kept: Vec<Vec<bool>> = spectra
+                    .iter()
+                    .map(|spectrum| vec![true; spectrum.values.len()])
+                    .collect();
+                let mut order = flat(None);
+                order.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap()
+                        .then(a.1.cmp(&b.1))
+                        .then(a.2.cmp(&b.2))
+                });
+                let mut total = 0.0;
+                for (value, sector, position) in order {
+                    total += spectra[sector].weight * value * value;
+                    if total > limit {
+                        break;
+                    }
+                    kept[sector][position] = false;
+                }
+                kept
+            }
+            Truncation::Space(profile) => spectra
+                .iter()
+                .enumerate()
+                .map(|(sector, spectrum)| {
+                    let mut order = flat(Some(sector));
+                    order.sort_by(keep_key);
+                    let rank = profile.rank(spectrum.sector);
+                    let mut mask = vec![false; spectrum.values.len()];
+                    for &(_, _, position) in order.iter().take(rank) {
+                        mask[position] = true;
+                    }
+                    mask
+                })
+                .collect(),
+            other => unreachable!("no flat oracle for {other:?}"),
+        }
     }
 
     /// The #1324 pin fixture (non-dyadic tenths, so partial sums round) plus an
@@ -1403,21 +1725,27 @@ mod tests {
     fn discard_weight_discards_a_state_that_meets_the_budget_exactly() {
         // What: TensorKit `SectorVector` `TruncationByError` semantics — the
         // running error may equal the budget. norm = 2, rtol 0.5 -> budget
-        // exactly 1: one 1.0 goes, the second would make 2 > 1.
+        // exactly 1: one 1.0 goes, the second would make 2 > 1. Of the four
+        // equal values the earliest goes (stable ascending `sortperm`).
         // (MatrixAlgebraKit `_truncerr_impl` breaks at `>= budget` and would
         // keep all four.)
         let entries = [(1.0, vec![1.0, 1.0, 1.0, 1.0])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::relative_error(0.5).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![3]);
+        assert_eq!(decision.kept, [mask(4, &[1, 2, 3])]);
         assert_eq!(decision.error, 1.0);
     }
 
     #[test]
-    fn discard_weight_matches_flatten_and_sort_oracle() {
+    fn ordering_policies_match_the_flatten_and_sort_oracle() {
+        // What: on a fixed grid of spectra fed both in generation order
+        // (arbitrary, as `eig` stores them) and sorted descending (as SVD
+        // does), with repeated values inside and across sectors, every
+        // ordering policy keeps exactly the oracle's mask.
         const WEIGHTS: [f64; 6] = [1.0, 2.0, 3.0, 0.5, 2.5, 4.0];
         const VALUES: [f64; 7] = [3.0, 2.0, 1.0, 1.0, 0.5, 0.25, 0.0];
         const RTOLS: [f64; 6] = [0.0, 0.05, 0.3, 0.7, 1.0, 1.5];
+        const RANKS: [usize; 5] = [0, 1, 3, 6, 40];
         // Tiny deterministic LCG; the grid is fixed, not random.
         let mut state: u64 = 0x2545_F491_4F6C_DD1D;
         let mut next = |bound: usize| -> usize {
@@ -1429,26 +1757,40 @@ mod tests {
         let mut cases = 0;
         for sectors in [1usize, 2, 3, 5, 8] {
             for _ in 0..40 {
-                let entries: Vec<(f64, Vec<f64>)> = (0..sectors)
+                let stored: Vec<(f64, Vec<f64>)> = (0..sectors)
                     .map(|_| {
                         let len = next(7);
-                        let mut values: Vec<f64> = (0..len).map(|_| VALUES[next(7)]).collect();
-                        values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                        let values: Vec<f64> = (0..len).map(|_| VALUES[next(7)]).collect();
                         (WEIGHTS[next(6)], values)
                     })
                     .collect();
-                let weighted = spectra(&entries);
-                for rtol in RTOLS {
-                    let (kept, error) = discard_weight_oracle(&weighted, rtol);
-                    let decision =
-                        select(&weighted, &Truncation::relative_error(rtol).unwrap()).unwrap();
-                    assert_eq!(decision.kept, kept, "entries {entries:?} rtol {rtol}");
-                    assert!((decision.error - error).abs() <= 1e-12);
-                    cases += 1;
+                let profile = TruncationSpace::new(
+                    rule(),
+                    (0..sectors).map(|sector| (SectorId::new(sector), next(5))),
+                );
+                let mut descending = stored.clone();
+                for (_, values) in &mut descending {
+                    values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                }
+                for entries in [&stored, &descending] {
+                    let weighted = spectra(entries);
+                    let policies = RTOLS
+                        .iter()
+                        .map(|&rtol| Truncation::relative_error(rtol).unwrap())
+                        .chain(RANKS.iter().map(|&rank| Truncation::rank(rank)))
+                        .chain([Truncation::space(profile.clone())]);
+                    for policy in policies {
+                        let kept = flat_oracle(&weighted, &policy);
+                        let decision = select(&weighted, &policy).unwrap();
+                        assert_eq!(decision.kept, kept, "entries {entries:?} {policy:?}");
+                        let error = oracle_norm(&weighted, |s, p| !kept[s][p]);
+                        assert!((decision.error - error).abs() <= 1e-12);
+                        cases += 1;
+                    }
                 }
             }
         }
-        assert_eq!(cases, 5 * 40 * RTOLS.len());
+        assert_eq!(cases, 5 * 40 * 2 * (RTOLS.len() + RANKS.len() + 1));
     }
 
     #[test]
@@ -1458,19 +1800,23 @@ mod tests {
         let lower = TailCandidate {
             value: -0.0,
             sector: 0,
+            cursor: 0,
         };
         let higher = TailCandidate {
             value: 0.0,
             sector: 1,
+            cursor: 0,
         };
         assert_eq!(lower.cmp(&higher), Ordering::Greater);
         let lower = TailCandidate {
             value: -0.0,
             sector: 1,
+            cursor: 0,
         };
         let higher = TailCandidate {
             value: 0.0,
             sector: 0,
+            cursor: 0,
         };
         assert_eq!(lower.cmp(&higher), Ordering::Less);
     }
@@ -1487,18 +1833,34 @@ mod tests {
         ];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::relative_error(0.31).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![1, 1, 1]);
+        assert_eq!(counts(&decision.kept), vec![1, 1, 1]);
         assert!((decision.error - 2f64.sqrt()).abs() < 1e-12);
     }
 
     #[test]
-    fn discard_weight_repeated_values_stay_a_prefix() {
+    fn discard_weight_within_sector_ties_discard_the_earlier_position() {
+        // Behaviour change (#2095): TensorKit's `TruncationByError` walks the
+        // ascending stable `sortperm`, so of equal values the earlier
+        // position goes first, even on a descending SVD spectrum. TensorKit
+        // `findtruncated` at cfaa073e gives these masks.
         // norm^2 = 14; rtol 0.6 -> budget 5.04 admits two of the three 2*1^2.
         let entries = [(2.0, vec![2.0, 1.0, 1.0, 1.0])];
-        let spectra = spectra(&entries);
-        let decision = select(&spectra, &Truncation::relative_error(0.6).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![2]);
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(0.6).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [mask(4, &[0, 3])]);
         assert!((decision.error - 2.0).abs() < 1e-12);
+        // `[3, 1, 1]`, norm^2 = 11; rtol 0.35 -> budget 1.3475 admits one 1.
+        let entries = [(1.0, vec![3.0, 1.0, 1.0])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(0.35).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [mask(3, &[0, 2])]);
+        assert_eq!(decision.error, 1.0);
     }
 
     #[test]
@@ -1509,7 +1871,7 @@ mod tests {
         let entries = [(4.0, vec![5.0, 1.0]), (1.0, vec![5.0, 1.5])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::relative_error(0.16).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![2, 2]);
+        assert_eq!(counts(&decision.kept), vec![2, 2]);
         assert_eq!(decision.error, 0.0);
     }
 
@@ -1518,13 +1880,13 @@ mod tests {
         let entries = [(1.0, vec![1.0, 0.0, -0.0]), (3.0, vec![0.0])];
         let mixed = spectra(&entries);
         let decision = select(&mixed, &Truncation::relative_error(0.0).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![1, 0]);
+        assert_eq!(counts(&decision.kept), vec![1, 0]);
         assert_eq!(decision.error, 0.0);
 
         let entries = [(1.0, vec![0.0, 0.0]), (2.0, vec![-0.0])];
         let all_zero = spectra(&entries);
         let decision = select(&all_zero, &Truncation::relative_error(0.0).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![0, 0]);
+        assert_eq!(counts(&decision.kept), vec![0, 0]);
         assert_eq!(decision.error, 0.0);
     }
 
@@ -1540,7 +1902,7 @@ mod tests {
         ];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::relative_error(0.4).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![0, 1, 0, 0]);
+        assert_eq!(counts(&decision.kept), vec![0, 1, 0, 0]);
         assert!((decision.error - 0.75f64.sqrt()).abs() < 1e-12);
 
         let decision = select(&[], &Truncation::relative_error(0.5).unwrap()).unwrap();
@@ -1554,12 +1916,12 @@ mod tests {
         let entries = [(1.0, vec![3.0, 2.0, 1.0]), (2.0, vec![2.5])];
         let spectra = spectra(&entries);
         let decision = select(&spectra, &Truncation::relative_error(0.0).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![3, 1]);
+        assert_eq!(counts(&decision.kept), vec![3, 1]);
         let decision = select(&spectra, &Truncation::relative_error(1.0).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![0, 0]);
+        assert_eq!(counts(&decision.kept), vec![0, 0]);
         // budget 2.385: 1.0 fits, then 2.0 (cost 4) fails.
         let decision = select(&spectra, &Truncation::relative_error(0.3).unwrap()).unwrap();
-        assert_eq!(decision.kept, vec![2, 1]);
+        assert_eq!(counts(&decision.kept), vec![2, 1]);
         assert!((decision.error - 1.0).abs() < 1e-12);
     }
 
@@ -1572,10 +1934,10 @@ mod tests {
         let by_rank = select(&spectra, &rank).unwrap().kept;
         let by_error = select(&spectra, &error).unwrap().kept;
         assert_ne!(by_rank, by_error, "fixture must make both components bind");
-        let expected: Vec<usize> = by_rank
+        let expected: Vec<Vec<bool>> = by_rank
             .iter()
             .zip(&by_error)
-            .map(|(a, b)| *a.min(b))
+            .map(|(a, b)| a.iter().zip(b).map(|(a, b)| a & b).collect())
             .collect();
 
         for combined in [
@@ -1637,7 +1999,7 @@ mod tests {
             &Truncation::relative_error(0.0).unwrap(),
         )
         .unwrap();
-        assert_eq!(decision.kept, [1, 1]);
+        assert_eq!(counts(&decision.kept), [1, 1]);
         assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
     }
 
@@ -1654,7 +2016,7 @@ mod tests {
             &Truncation::relative_error(1e-170).unwrap(),
         )
         .unwrap();
-        assert_eq!(decision.kept, [2]);
+        assert_eq!(counts(&decision.kept), [2]);
         // Relative, as `error / 1e-171`: the absolute tolerance would accept
         // zero here. One value reaches the error.
         crate::test_numerics::numerics::assert_close("error", decision.error / 1e-171, 8.0, 1);
@@ -1679,7 +2041,7 @@ mod tests {
             assert!(bound * bound <= f64::MAX);
             assert!((bound * bound * (1.0 + (n + 5.0) * f64::EPSILON)).is_infinite());
             let decision = select(&unit, &Truncation::relative_error(rtol).unwrap()).unwrap();
-            assert_eq!(decision.kept, [1, 0], "weight {weight}");
+            assert_eq!(counts(&decision.kept), [1, 0], "weight {weight}");
             // Exact: one dyadic term, `sqrt(w)` rounded once.
             assert_eq!(decision.error, weight.sqrt() * 2f64.powi(500));
         }
@@ -1690,7 +2052,7 @@ mod tests {
             &Truncation::relative_error(rtol).unwrap(),
         )
         .unwrap();
-        assert_eq!(decision.kept, [1]);
+        assert_eq!(counts(&decision.kept), [1]);
         assert_eq!(decision.error, 2f64.powi(500));
     }
 
@@ -1708,7 +2070,7 @@ mod tests {
             &Truncation::relative_error(3.0 * tiny).unwrap(),
         )
         .unwrap();
-        assert_eq!(decision.kept, [2]);
+        assert_eq!(counts(&decision.kept), [2]);
         assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
     }
 
@@ -1731,7 +2093,7 @@ mod tests {
                 &Truncation::relative_error(rtol).unwrap(),
             )
             .unwrap();
-            assert_eq!(decision.kept, [2], "tail {tail:e} rtol {rtol:e}");
+            assert_eq!(counts(&decision.kept), [2], "tail {tail:e} rtol {rtol:e}");
             assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
         }
     }

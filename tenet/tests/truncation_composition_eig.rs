@@ -22,7 +22,7 @@ use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::TensorMap;
-use tenet::typed::{Eig, GradedSpace};
+use tenet::typed::{Eig, GradedSpace, SectorSpectrum};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -395,5 +395,158 @@ fn multi_tree_eig_composition_matches_the_hand_selection_for_every_policy() {
         source.clone(),
         fz2_leg(&[(false, 2), (true, 1)]),
         "fz2 x fz2' eig c64"
+    );
+}
+
+/// Odd positions, then even: a fixed shuffle of `0..n` that turns a
+/// descending spectrum into one that is neither ascending nor descending.
+fn shuffle(n: usize) -> Vec<usize> {
+    (1..n).step_by(2).chain((0..n).step_by(2)).collect()
+}
+
+/// The decision follows stored order, not a published sort (#2095): the bond
+/// of `eig_full` is re-stored in the [`shuffle`]d order — `d' = diag(d[π])`
+/// and `v' = v P` with `P[π(j), j] = 1`, so `t v' = v' d'` still holds — and
+/// the composition must keep exactly the hand selection's positions over the
+/// same shuffled order, gather `v'`'s columns at those positions, and keep
+/// the factorization relation.
+macro_rules! assert_shuffled_eig_composition {
+    ($source:expr, $target:expr, $tag:expr) => {{
+        let source = &$source;
+        let runtime = source.runtime().clone();
+        let Eig { d, v } = source
+            .eig_full(&codomain_axes(source), &domain_axes(source))
+            .unwrap();
+        let bond = d.domain()[0].clone();
+        let stored: Vec<SectorSpectrum<_, Complex64>> = d
+            .diagview()
+            .unwrap()
+            .into_iter()
+            .map(|entry| SectorSpectrum {
+                values: shuffle(entry.values.len())
+                    .into_iter()
+                    .map(|p| entry.values[p])
+                    .collect(),
+                sector: entry.sector,
+            })
+            .collect();
+        let d = TensorMap::diagonal(&runtime, &bond, stored).unwrap();
+        let permutation: TensorMap<_, Complex64> =
+            TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
+                let n = bond.degeneracy(trees.coupled()).unwrap();
+                if indices[0] == shuffle(n)[indices[1]] {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::new(0.0, 0.0)
+                }
+            })
+            .unwrap();
+        let v = v.compose(&permutation).unwrap();
+        let spectra = d.diagview().unwrap();
+
+        let references: Vec<(_, Vec<Complex64>)> = sector_matrices!(source)
+            .iter()
+            .map(|(sector, matrix)| {
+                let descending = triangular_eigenvalues(matrix);
+                let stored = shuffle(descending.len())
+                    .into_iter()
+                    .map(|p| descending[p])
+                    .collect();
+                (sector.clone(), stored)
+            })
+            .collect();
+        let offers: Vec<Offer<_>> = references
+            .iter()
+            .map(|(sector, values)| Offer {
+                sector: sector.clone(),
+                dim: ClosedFormDim::closed_form_dim(sector),
+                magnitudes: values.iter().map(|value| value.norm()).collect(),
+            })
+            .collect();
+        let full_v = sector_matrices!(v);
+        let terms = source.materialize().unwrap().dense_data().unwrap().len();
+        let mut gapped = false;
+        for (name, truncation, policy) in policies!($target) {
+            let case = format!("{} {name}", $tag);
+            let found = bond.find_truncated(&spectra, &truncation).unwrap();
+            let kept = select(&offers, &policy);
+            for (offer, positions) in offers.iter().zip(&kept) {
+                assert_eq!(
+                    found.selection.positions(&offer.sector).unwrap(),
+                    *positions,
+                    "{case}: kept positions of {:?}",
+                    offer.sector
+                );
+                gapped |= positions.windows(2).any(|pair| pair[1] != pair[0] + 1);
+            }
+            let selection = &found.selection;
+            let got_d = d.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+            let got_v = v.restrict_leg(&[(v.codomain_rank(), selection)]).unwrap();
+
+            // Restriction is a gather at the kept positions, exactly.
+            for (sector, matrix) in sector_matrices!(got_v) {
+                let (_, parent) = full_v.iter().find(|(s, _)| *s == sector).unwrap();
+                let positions = selection.positions(&sector).unwrap();
+                assert_eq!(matrix.cols, positions.len(), "{case}: v columns");
+                for (col, &position) in positions.iter().enumerate() {
+                    for row in 0..matrix.rows {
+                        assert_eq!(matrix.at(row, col), parent.at(row, position), "{case}");
+                    }
+                }
+            }
+            for entry in got_d.diagview().unwrap() {
+                let (_, reference) = references
+                    .iter()
+                    .find(|(sector, _)| *sector == entry.sector)
+                    .unwrap();
+                let want: Vec<Complex64> = selection
+                    .positions(&entry.sector)
+                    .unwrap()
+                    .into_iter()
+                    .map(|p| reference[p])
+                    .collect();
+                numerics::assert_slices_close(
+                    &format!("{case}: kept eigenvalues of {:?}", entry.sector),
+                    &entry.values,
+                    &want,
+                    terms,
+                );
+            }
+            let left = source.compose(&got_v).unwrap();
+            let right = got_v.compose(&got_d).unwrap();
+            numerics::assert_slices_close(
+                &format!("{case}: t * v = v * d"),
+                left.dense_data().unwrap(),
+                right.dense_data().unwrap(),
+                terms,
+            );
+            numerics::assert_close(
+                &format!("{case}: truncation error"),
+                found.error,
+                discarded_norm(&offers, &kept),
+                terms,
+            );
+        }
+        assert!(
+            gapped,
+            "{}: some policy must keep a non-contiguous set",
+            $tag
+        );
+    }};
+}
+
+#[test]
+fn shuffled_eig_bond_is_truncated_at_tensorkits_stored_positions() {
+    let leg = u1_leg(&[(-1, 2), (0, 4), (1, 3)]);
+    assert_shuffled_eig_composition!(
+        complex_triangular(&leg, 0x0e19_2095),
+        u1_leg(&[(-1, 1), (0, 2), (1, 2)]),
+        "u1 shuffled eig c64"
+    );
+    let leg = su2_leg(&[(0, 4), (1, 3), (2, 2)]);
+    assert_shuffled_eig_composition!(
+        complex_triangular(&leg, 0x0e19_2096),
+        su2_leg(&[(0, 2), (1, 2)]),
+        "su2 shuffled eig c64"
     );
 }
