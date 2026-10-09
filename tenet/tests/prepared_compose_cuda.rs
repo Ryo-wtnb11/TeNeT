@@ -335,3 +335,146 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
     drop(ws2);
     assert_eq!(reserved(&runtime), r0 + executor);
 }
+
+/// `(h2d_calls, h2d_bytes, d2h_calls, device_allocs, gemm_calls, copy_calls,
+/// retained_bytes, plan-cache misses, plan-cache evictions)` of one call.
+type Counters = [u64; 9];
+
+fn counted<T>(runtime: &Runtime, body: impl FnOnce() -> T) -> (T, Counters) {
+    let (before, plans_before) = (cuda_transfer_stats(), plans(runtime));
+    let value = body();
+    let (after, plans_after) = (delta(cuda_transfer_stats(), before), plans(runtime));
+    (
+        value,
+        [
+            after.h2d_calls,
+            after.h2d_bytes,
+            after.d2h_calls,
+            after.device_allocs,
+            after.gemm_calls,
+            after.copy_calls,
+            0,
+            plans_after.misses - plans_before.misses,
+            plans_after.evictions - plans_before.evictions,
+        ],
+    )
+}
+
+fn bits<D: DevicePayload>(values: &[D]) -> Vec<[u64; 2]> {
+    let fold = |x: f64| {
+        if x.is_nan() {
+            f64::NAN.to_bits()
+        } else if x == 0.0 {
+            0
+        } else {
+            x.to_bits()
+        }
+    };
+    values
+        .iter()
+        .map(|value| {
+            let (re, im) = value.parts();
+            [fold(re), fold(im)]
+        })
+        .collect()
+}
+
+/// One plan and two workspaces (one per call form) over B = 1, 2, 17, 1 with
+/// new dyadic values per call: device members bit-equal to Host eager
+/// `compose` (every product and sum is exact), and every call's counters.
+fn record_counters<R, D>(
+    label: &str,
+    (v, w): (GradedSpace<R>, GradedSpace<R>),
+    rows: &mut Vec<(String, Counters)>,
+) where
+    R: DeviceRule,
+    R::Sector: Debug,
+    D: DevicePayload,
+{
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let stacks = |count, salt| {
+        let a = members::<R, D>(&runtime, &[&v, &v], &[&w], count, salt);
+        let b = members::<R, D>(&runtime, &[&w], &[&v], count, salt + 1);
+        let lhs = StackedTensorMap::pack(&a).unwrap().to_cuda().unwrap();
+        let rhs = StackedTensorMap::pack(&b).unwrap().to_cuda().unwrap();
+        (a, b, lhs, rhs)
+    };
+    let (_, _, lhs, rhs) = stacks(1, 1);
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let reserved = plans(&runtime).reserved_entries;
+    let mut workspace = plan.workspace().unwrap();
+    let mut into = plan.workspace().unwrap();
+    let claim = plans(&runtime).reserved_entries - reserved;
+    rows.push((
+        format!("{label} {} workspaces", D::NAME),
+        [0, 0, 0, 0, 0, 0, 0, 0, claim as u64],
+    ));
+    for (call, count) in [1usize, 2, 17, 1].into_iter().enumerate() {
+        let key = format!("{label} {} call={call} B={count}", D::NAME);
+        let (a, b, lhs, rhs) = stacks(count, 10 * call + 3);
+        let (_, first) = counted(&runtime, || {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        });
+        let (_, mut warm) = counted(&runtime, || {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        });
+        warm[6] = workspace.retained_bytes() as u64;
+        let returned = workspace.take_output().unwrap().to_host().unwrap();
+        let mut dst = StackedTensorMap::pack(&filled::<R, D>(
+            &runtime,
+            &[&v, &v],
+            &[&v],
+            count,
+            D::entry(f64::NAN, f64::NAN),
+        ))
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+        let (_, mut written) = counted(&runtime, || {
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut into).unwrap();
+        });
+        written[6] = into.retained_bytes() as u64;
+        let written_host = dst.to_host().unwrap();
+        for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+            let eager = x.compose(y).unwrap();
+            for (form, stack) in [("execute", &returned), ("execute_into", &written_host)] {
+                assert_eq!(
+                    bits(stack.member(index).unwrap().dense_data().unwrap()),
+                    bits(eager.dense_data().unwrap()),
+                    "{key} {form} member {index}"
+                );
+            }
+        }
+        for (form, counters) in [
+            ("execute first", first),
+            ("execute warm", warm),
+            ("execute_into", written),
+        ] {
+            rows.push((format!("{key} {form}"), counters));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_counters_are_pinned_against_the_base() {
+    let _guard = serial();
+    let mut rows = Vec::new();
+    record_counters::<_, f64>("U1", u1_legs(), &mut rows);
+    record_counters::<_, Complex64>("U1", u1_legs(), &mut rows);
+    record_counters::<_, f64>("SU2", su2_legs(), &mut rows);
+    record_counters::<_, Complex64>("SU2", su2_legs(), &mut rows);
+    record_counters::<_, f64>("fZ2xU1", fz2u1_legs(), &mut rows);
+    record_counters::<_, Complex64>("fZ2xU1", fz2u1_legs(), &mut rows);
+    for (key, counters) in &rows {
+        eprintln!("    (\"{key}\", {counters:?}),");
+    }
+    let pinned: Vec<_> = PINS
+        .iter()
+        .map(|&(key, counters)| (key.to_string(), counters))
+        .collect();
+    assert_eq!(rows, pinned, "observed rows are printed above");
+}
+
+#[rustfmt::skip]
+const PINS: &[(&str, Counters)] = &[];

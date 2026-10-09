@@ -44,6 +44,9 @@ use crate::error::Error;
 use crate::runtime::RuntimeIdentity;
 use crate::tensor_core::internal_layout_error;
 
+#[cfg(test)]
+#[path = "compose_plan_tests.rs"]
+mod compose_plan_tests;
 #[path = "contract_batch.rs"]
 mod contract_batch;
 pub use contract_batch::{ContractPlan, ContractWorkspace};
