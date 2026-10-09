@@ -60,8 +60,6 @@ pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
-#[cfg(feature = "cuda")]
-pub(crate) mod cuda_member;
 
 #[cfg(test)]
 use super::fusion_block;

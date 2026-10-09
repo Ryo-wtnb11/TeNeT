@@ -515,28 +515,28 @@ where
 
 /// An owned source copy: the transform writing a core operand from the
 /// caller's payload (TensorKit `blas_contract!`'s `copyA`/`copyB`).
-struct SourceStage<'r, C> {
-    transform: &'r TreeTransformStructure<C>,
-    payload_structure: &'r Arc<BlockStructure>,
-    scales: &'r [(usize, C)],
+pub(super) struct SourceStage<'r, C> {
+    pub(super) transform: &'r TreeTransformStructure<C>,
+    pub(super) payload_structure: &'r Arc<BlockStructure>,
+    pub(super) scales: &'r [(usize, C)],
 }
 
 /// The stage sequence of one route, read from its resolution: which
 /// operands are copied, the core plan and operand order, and the output
 /// transform out of a workspace core destination, if any.
-struct RouteView<'r, C> {
+pub(super) struct RouteView<'r, C> {
     /// The structures the core GEMMs read for the physical lhs and rhs.
-    lhs_core: &'r Arc<BlockStructure>,
-    rhs_core: &'r Arc<BlockStructure>,
+    pub(super) lhs_core: &'r Arc<BlockStructure>,
+    pub(super) rhs_core: &'r Arc<BlockStructure>,
     /// `None`: the core reads the caller's payload in place.
-    lhs_source: Option<SourceStage<'r, C>>,
-    rhs_source: Option<SourceStage<'r, C>>,
+    pub(super) lhs_source: Option<SourceStage<'r, C>>,
+    pub(super) rhs_source: Option<SourceStage<'r, C>>,
     /// The core's left operand is the physical rhs.
     swapped: bool,
-    plan: &'r Arc<FusionBlockContractPlan<C>>,
+    pub(super) plan: &'r Arc<FusionBlockContractPlan<C>>,
     /// `(output transform, core-destination structure)`; `None` when the
     /// core writes the caller's destination.
-    output: Option<(&'r TreeTransformStructure<C>, &'r Arc<BlockStructure>)>,
+    pub(super) output: Option<(&'r TreeTransformStructure<C>, &'r Arc<BlockStructure>)>,
     /// Alpha rides the output transform (CopyC: `mul!` into the temporary,
     /// then `tensoradd!(C, Cnew, α, β)`), else the core GEMMs.
     output_alpha: bool,
@@ -573,7 +573,7 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
         }
     }
 
-    fn of(
+    pub(super) fn of(
         route: &'r ContractRoute<C>,
         lhs: &'r Arc<BlockStructure>,
         rhs: &'r Arc<BlockStructure>,
@@ -602,7 +602,7 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
     }
 
     #[inline]
-    fn core_order<T>(&self, lhs: T, rhs: T) -> (T, T) {
+    pub(super) fn core_order<T>(&self, lhs: T, rhs: T) -> (T, T) {
         if self.swapped {
             (rhs, lhs)
         } else {

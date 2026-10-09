@@ -2221,7 +2221,12 @@ mod device {
             let twisted = artifact.requires_source_twist();
             let resolution =
                 StorageContractResolution::new(ContractRoute::DynamicTree(Arc::new(artifact)));
-            let device = self.execute(&resolution, &dst, &lhs, &rhs);
+            let device = self.execute(
+                &resolution,
+                &dst,
+                (case.lhs.space().structure(), &lhs),
+                (case.rhs.space().structure(), &rhs),
+            );
             (device, host, borrowed, twisted)
         }
 
@@ -2233,8 +2238,8 @@ mod device {
             &mut self,
             resolution: &StorageContractResolution<f64>,
             dst: &BoundDynamicFusionMapSpace<R>,
-            lhs: &[D],
-            rhs: &[D],
+            (lhs_structure, lhs): (&Arc<tenet_core::BlockStructure>, &[D]),
+            (rhs_structure, rhs): (&Arc<tenet_core::BlockStructure>, &[D]),
         ) -> Vec<D> {
             let ctx = &mut self.ctx;
             let lhs = CudaStorage::<D>::upload(ctx, lhs).unwrap();
@@ -2251,10 +2256,9 @@ mod device {
                     &mut self.transforms,
                     &mut self.scratch,
                     resolution,
-                    dst.space().structure(),
-                    &mut out,
-                    &lhs,
-                    &rhs,
+                    (dst.space().structure(), &mut out),
+                    (lhs_structure, &lhs),
+                    (rhs_structure, &rhs),
                     D::ONE,
                     init,
                 )
@@ -2443,7 +2447,12 @@ mod device {
                         case.axes(),
                     )
                     .unwrap();
-                let device = replay.execute(&resolution, &dst, &lhs, &rhs);
+                let device = replay.execute(
+                    &resolution,
+                    &dst,
+                    (case.lhs.space().structure(), &lhs),
+                    (case.rhs.space().structure(), &rhs),
+                );
                 assert_close(&device, &eager_host(&case, &lhs, &rhs), what);
             }
         }

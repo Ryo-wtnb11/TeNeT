@@ -9,10 +9,7 @@ mod context;
 mod dynamic;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
-pub use dynamic::cuda::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
-#[cfg(feature = "cuda")]
-#[doc(hidden)]
-pub use dynamic::cuda_member::CudaDynamicTreeMembersWorkspace;
+pub use dynamic::cuda::CudaContractScratch;
 #[cfg(test)]
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,
@@ -20,6 +17,12 @@ pub(crate) use dynamic::{
     execute_prelowered_dynamic_tree_execution_artifact_for_test, profiled_artifact_compile_phases,
     reset_profiled_artifact_compile_phases, reset_source_layout_homspace_id_comparisons,
     source_layout_homspace_id_comparisons, tensorcontract_fusion_dynamic_plan_into_with,
+};
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use route_cuda::{
+    execute_storage_contract_members_cuda, execute_storage_contract_resolution_on_cuda,
+    CudaContractMembersWorkspace,
 };
 #[doc(hidden)]
 pub use route_host::HostContractMembersWorkspace;
@@ -37,6 +40,8 @@ pub(crate) use fusion::{
 };
 mod fusion_block;
 mod resolution;
+#[cfg(feature = "cuda")]
+mod route_cuda;
 mod route_host;
 #[doc(hidden)]
 pub use resolution::{
