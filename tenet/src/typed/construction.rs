@@ -243,7 +243,6 @@ where
         codomain: C,
         domain: M,
         embed: bool,
-        what: &str,
     ) -> Result<Self, TypedFacadeError<R>>
     where
         C: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -268,15 +267,13 @@ where
             fused_codomain == fused_domain
         };
         if !fits {
-            // Keep the stable constructor diagnostic shape.
-            return Err(Error::InvalidArgument(format!(
-                "{what}: codomain and domain are not {} (fused sector content differs)",
-                if embed {
-                    "isometrically embeddable"
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: if embed {
+                    "isometry: codomain and domain are not isometrically embeddable (fused sector content differs)"
                 } else {
-                    "isomorphic"
-                }
-            ))
+                    "isomorphism: codomain and domain are not isomorphic (fused sector content differs)"
+                },
+            })
             .into());
         }
         let mut tensor = Self::build(runtime, provider, &codomain, &domain, Fill::Zeros)?;
@@ -297,7 +294,7 @@ where
     ///
     /// # Errors
     ///
-    /// Everything [`Self::zeros`] reports, plus [`Error::InvalidArgument`]
+    /// Everything [`Self::zeros`] reports, plus `SpaceMismatch`
     /// when the fused codomain and domain differ in sector content
     /// (TensorKit's `SpaceMismatch` on `domain ≅ codomain`).
     ///
@@ -314,7 +311,7 @@ where
         M: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        Self::structural(runtime, codomain, domain, false, "isomorphism")
+        Self::structural(runtime, codomain, domain, false)
     }
 
     /// The canonical isometry `codomain <- domain` (TensorKit
@@ -327,7 +324,7 @@ where
     ///
     /// # Errors
     ///
-    /// Everything [`Self::zeros`] reports, plus [`Error::InvalidArgument`]
+    /// Everything [`Self::zeros`] reports, plus `SpaceMismatch`
     /// when the fused domain does not embed sectorwise into the fused
     /// codomain (TensorKit's `SpaceMismatch` on `domain ≾ codomain`).
     ///
@@ -344,7 +341,7 @@ where
         M: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        Self::structural(runtime, codomain, domain, true, "isometry")
+        Self::structural(runtime, codomain, domain, true)
     }
 }
 

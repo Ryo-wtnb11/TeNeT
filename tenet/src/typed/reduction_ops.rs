@@ -451,9 +451,9 @@ where
         }
         let _host_pool = self.runtime.enter_host_pool();
         if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            )
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            })
             .into());
         }
         let provider = self.logical_space().provider();
@@ -539,9 +539,9 @@ where
         // The weighted trace below indexes codomain axis `i` together with
         // domain axis `nout + i` and would be meaningless without this check.
         if hom.codomain().legs() != hom.domain().legs() {
-            return Err(Error::InvalidArgument(
-                "tr() requires an endomorphism (domain == codomain)".to_string(),
-            )
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tr() requires an endomorphism (domain == codomain)",
+            })
             .into());
         }
         let provider = self.logical_space().provider();

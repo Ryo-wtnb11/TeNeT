@@ -339,8 +339,8 @@ where
     /// retaining the same provider instance and dual flag as this space.
     ///
     /// Returns [`Error::RuleMismatch`] when the provider identities differ, or
-    /// [`Error::InvalidArgument`] when the dual flags differ or a degeneracy
-    /// overflows.
+    /// `SpaceMismatch` when the dual flags differ, or
+    /// [`Error::InvalidArgument`] when a degeneracy overflows.
     pub fn oplus(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         self.require_same_identity(other)?;
         let leg = oplus_sector_legs(&self.leg, &other.leg).map_err(TypedFacadeError::<R>::from)?;

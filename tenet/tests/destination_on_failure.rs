@@ -40,7 +40,17 @@ macro_rules! sentinel {
 /// that the destination's legs and payload bits (and, on Host, its payload
 /// pointer) are those from before the call.
 macro_rules! rejects {
-    ($snap:expr, $what:expr, $dst:expr, $err:pat, $call:expr) => {{
+    ($snap:expr, $what:expr, $dst:expr, SpaceMismatch, $call:expr) => {
+        rejects!(
+            $snap,
+            $what,
+            $dst,
+            Error::Operation(operation)
+                if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }),
+            $call
+        )
+    };
+    ($snap:expr, $what:expr, $dst:expr, $err:pat $(if $guard:expr)?, $call:expr) => {{
         let mut dst = $dst;
         let (codomain, domain) = (dst.codomain(), dst.domain());
         #[allow(clippy::redundant_closure_call)]
@@ -48,7 +58,7 @@ macro_rules! rejects {
         let result = call(&mut dst, $call);
         // `$err` is `_` where only the rejection, not its kind, is pinned.
         #[allow(clippy::redundant_pattern_matching)]
-        let rejected = matches!(result, Err($err));
+        let rejected = matches!(&result, Err($err) $(if $guard)?);
         assert!(
             rejected,
             "{}: expected {}, got {result:?}",
@@ -206,7 +216,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&permuted),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.permute_into(&[2, 0], &[1, 3], d, 1.0, 0.5)
         );
         rejects!(
@@ -262,7 +272,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&braided),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.braid_into(&[1, 0], &[3, 2], &levels, d, 1.0, 0.5)
         );
         rejects!(
@@ -307,7 +317,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&transposed),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.transpose_into(&[1, 3], &[0, 2], d, 1.0, 0.5)
         );
         rejects!(
@@ -345,7 +355,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&repartitioned),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.repartition_into(d, 1.0, 0.5)
         );
         rejects!(
@@ -383,7 +393,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&traced),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5)
         );
         rejects!(
@@ -433,17 +443,8 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} wrong space before shared"),
             wrong(&traced),
-            Error::InvalidArgument(_),
-            shared!(|d: &mut _| {
-                let result = t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5);
-                if let Err(Error::InvalidArgument(message)) = &result {
-                    assert!(
-                        message.contains("does not match the operation result"),
-                        "{message}"
-                    );
-                }
-                result
-            })
+            SpaceMismatch,
+            shared!(|d: &mut _| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5))
         );
 
         // contract_into
@@ -459,7 +460,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&contracted),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.contract_into(&rhs, &spec, d, 1.0, 0.5)
         );
         rejects!(
@@ -507,7 +508,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} space"),
             wrong(&host_t),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.axpby_into(d, 1.0, 0.5)
         );
         rejects!(
@@ -608,7 +609,7 @@ macro_rules! rule_suite {
             $snap,
             "axpby_into rule",
             rank4(&b),
-            Error::InvalidArgument(_),
+            SpaceMismatch,
             |d: &mut _| t.axpby_into(d, 1.0, 0.5)
         );
         // The fixture is otherwise valid.

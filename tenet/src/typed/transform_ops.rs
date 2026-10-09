@@ -86,8 +86,8 @@ where
     /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], then
     /// [`Error::InvalidArgument`] for a lazy-adjoint or compact source, a
     /// destination that is not owned dense host storage, one that aliases
-    /// the source, or one whose space, block layout or length does not match
-    /// the result; [`Error::DestinationShared`] when `destination` shares its
+    /// the source, or one whose length does not match the result,
+    /// `SpaceMismatch` for one whose space or block layout does not; [`Error::DestinationShared`] when `destination` shares its
     /// storage with a clone. Plan-construction failures count as validation.
     ///
     /// # Failure
@@ -341,10 +341,9 @@ where
                     .space
                     .transformed_multiplicity_free(&operation)?;
                 if destination_body.space.space() != expected.space() {
-                    return Err(Error::InvalidArgument(
-                        "destination fusion space or block layout does not match the operation result"
-                            .to_string(),
-                    ));
+                    return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                        message: "destination fusion space or block layout does not match the operation result",
+                    }));
                 }
                 Some(operation)
             }

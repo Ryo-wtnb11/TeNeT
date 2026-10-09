@@ -369,10 +369,10 @@ where
             spec.codomain.len(),
         )?;
         if destination_body.space.space() != expected.space() {
-            return Err(Error::InvalidArgument(
-                "destination fusion space or block layout does not match the contraction result"
-                    .to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message:
+                    "destination fusion space or block layout does not match the contraction result",
+            }));
         }
         let execution_destination =
             lhs_space.rebind_validated(&destination_body.space.validated_layout())?;
@@ -607,7 +607,7 @@ where
     /// The Host [`TensorMap::trace_pairs_into`]'s order:
     /// [`Error::RuntimeMismatch`] / [`Error::RuleMismatch`] against the
     /// destination; the braiding gate and pair-list errors of
-    /// [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// [`Self::trace_pairs`]; `SpaceMismatch` for a destination
     /// whose space or layout is not the result's; the duality error; then
     /// [`Self::trace_pairs`]'s device errors, [`Error::InvalidArgument`] for a
     /// destination that is not owned dense CUDA storage, aliases the source,

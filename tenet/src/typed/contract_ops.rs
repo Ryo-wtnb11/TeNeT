@@ -59,7 +59,7 @@ where
     /// checks: [`Error::RuntimeMismatch`], [`Error::RuleMismatch`];
     /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for a
     /// non-symmetric braiding, even with an empty `pairs`; the pair-list errors
-    /// of [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// of [`Self::trace_pairs`]; `SpaceMismatch` for a destination
     /// whose space or layout is not the result's; the duality error of
     /// [`Self::trace_pairs`]; [`Error::Unsupported`] for a compact (diagonal)
     /// source with a non-empty `pairs`; [`Error::InvalidArgument`] for a
@@ -171,9 +171,10 @@ where
     /// [`Error::RuntimeMismatch`]; then
     /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
     /// non-symmetric (anyonic or `NoBraiding`) providers, as for
-    /// [`Self::contract`]; [`Error::RuleMismatch`]; [`Error::InvalidArgument`]
+    /// [`Self::contract`]; [`Error::RuleMismatch`]; `SpaceMismatch` for a
+    /// destination of the wrong space or layout; [`Error::InvalidArgument`]
     /// for a destination that is not owned dense host storage, aliases an
-    /// operand, or has the wrong space, layout or length;
+    /// operand, or has the wrong length;
     /// [`Error::DestinationShared`] when `destination` shares its storage
     /// with a clone. Runtime-context leasing counts as validation.
     ///
@@ -237,10 +238,10 @@ where
             spec.codomain.len(),
         )?;
         if destination_body.space.space() != expected.space() {
-            return Err(Error::InvalidArgument(
-                "destination fusion space or block layout does not match the contraction result"
-                    .to_string(),
-            ));
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message:
+                    "destination fusion space or block layout does not match the contraction result",
+            }));
         }
         let execution_destination = self
             .logical_space()
