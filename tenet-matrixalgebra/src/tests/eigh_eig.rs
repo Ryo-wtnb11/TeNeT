@@ -1799,7 +1799,20 @@ fn ascending_provider_eigh_order_is_published_without_a_permutation() {
     let full = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     let values = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
-    assert_eq!(full.eigenvalues, values);
+    // Full and values-only EIGH may use different LAPACK drivers (Accelerate
+    // does), which agree to rounding, not bitwise.
+    assert_eq!(full.eigenvalues.len(), values.len());
+    for (full, values) in full.eigenvalues.iter().zip(&values) {
+        assert_eq!(full.sector, values.sector);
+        assert_eq!(full.values.len(), values.values.len());
+        assert!(full.values.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(values.values.windows(2).all(|pair| pair[0] <= pair[1]));
+        let norm = full.values.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let tol = 64.0 * full.values.len() as f64 * f64::EPSILON * norm.max(1.0);
+        for (a, b) in full.values.iter().zip(&values.values) {
+            assert!((a - b).abs() <= tol, "{a} vs {b}");
+        }
+    }
     assert!(full
         .eigenvalues
         .iter()

@@ -1004,7 +1004,15 @@ fn values_only_ties_follow_the_published_order_on_direct_and_padded_layouts() {
         .as_f64_slice()
         .unwrap()
         .to_vec();
-    assert_eq!(raw_eigh, vec![-2.0, 1.0, 2.0]);
+    // The provider's spectrum is ascending; the values are a diagonal's, up
+    // to the driver's rounding.
+    for (got, want) in raw_eigh.iter().zip([-2.0, 1.0, 2.0]) {
+        assert!(
+            (got - want).abs() <= 64.0 * f64::EPSILON * 2.0,
+            "{raw_eigh:?}"
+        );
+    }
+    assert_eq!(raw_eigh.len(), 3);
     let mut raw_eig = dense
         .eig_vals(DenseRead::F64(
             tenet_dense::DenseView::new(eig_input.data(), &shape, &strides, 0).unwrap(),
