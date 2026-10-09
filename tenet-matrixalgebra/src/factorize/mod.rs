@@ -20,8 +20,8 @@ use tenet_core::{
 #[cfg(test)]
 use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseFactorization, DenseOwned,
-    DenseTensor, DenseView, DenseViewMut,
+    arity_mismatch, check_contiguous_output, DenseBackend, DenseDotConfig, DenseError,
+    DenseExecutor, DenseFactorization, DenseOwned, DenseTensor, DenseView, DenseViewMut,
 };
 
 use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
@@ -142,7 +142,7 @@ pub use compact_plan::CheckedGenericFactorPlanError;
 pub use eig::{
     eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
     eigh_full_from_source, eigh_vals_dyn, eigh_vals_from_source, validate_hermitian_regions,
-    EigFullDyn, EighFullDyn, HermitianTol,
+    EigFullDyn, EighFullDyn, HermitianTol, EIGH_EIGENVALUE_CHECK,
 };
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,

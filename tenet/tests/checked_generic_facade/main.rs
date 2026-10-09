@@ -722,6 +722,7 @@ fn lazy_close_f64(a: f64, b: f64) -> bool {
 
 mod construction;
 mod eig;
+mod error_kinds;
 mod matrix_fn;
 mod nonfinite;
 mod null_polar;

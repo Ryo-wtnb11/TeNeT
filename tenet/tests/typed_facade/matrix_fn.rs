@@ -79,11 +79,10 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
 
 #[test]
 fn inv_reports_a_singular_input_as_a_typed_error() {
-    // What: singular input is a `Result`, never a panic, and the two storages
-    // report it through different variants because the two arms detect it in
-    // different places — the compact one by inspecting the stored value, the
-    // dense one inside the LAPACK solve. Both are pinned here, because both are
-    // documented.
+    // What: singular input is a `Result`, never a panic, and both storages
+    // report it as the same numerical failure although the compact arm
+    // detects it by inspecting the stored value and the dense one inside the
+    // LAPACK solve.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
@@ -92,22 +91,20 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     // rank-deficient SVD: those singular values come back tiny but nonzero, and
     // the arm under test compares against exact zero, not a tolerance.
     let spectrum = typed.svd_compact(&[0], &[1]).unwrap().s.scale(0.0);
-    match spectrum.inv(&[0], &[1]) {
-        Err(tenet::typed::Error::InvalidArgument(message)) => {
-            assert!(
-                message.contains("singular"),
-                "unexpected message: {message}"
-            );
-        }
-        other => panic!("expected an InvalidArgument for a singular spectrum, got {other:?}"),
-    }
+    let singular = |result: Result<_, tenet::typed::Error>| {
+        matches!(
+            result,
+            Err(tenet::typed::Error::Operation(error)) if matches!(
+                *error,
+                tenet::typed::OperationError::Dense(tenet_dense::DenseError::NumericalFailure { .. })
+            )
+        )
+    };
+    assert!(singular(spectrum.inv(&[0], &[1])));
 
     // Dense: an all-zero endomorphism.
     let zeros = typed.scale(0.0);
-    match zeros.inv(&[0], &[1]) {
-        Err(tenet::typed::Error::Operation(_)) => {}
-        other => panic!("expected an Operation error for a singular dense block, got {other:?}"),
-    }
+    assert!(singular(zeros.inv(&[0], &[1])));
 }
 
 #[test]

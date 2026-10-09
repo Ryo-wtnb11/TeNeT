@@ -58,7 +58,7 @@ pub(super) fn compile_sector_landings<M: SectorGeometry>(
     let mut landings = Vec::with_capacity(source.len());
     for matrix in source {
         let index = output_by_sector.get(&matrix.sector()).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "factor output is missing a source coupled sector",
             },
         )?;
@@ -66,7 +66,7 @@ pub(super) fn compile_sector_landings<M: SectorGeometry>(
         if region.rows() != side_dimension(matrix, rows)
             || region.cols() != side_dimension(matrix, cols)
         {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "factor output does not match the source coupled-sector dimensions",
             });
         }
@@ -88,7 +88,7 @@ pub(super) fn compile_sector_landings<M: SectorGeometry>(
         });
     }
     if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "factor output contains a coupled sector absent from the source",
         });
     }
@@ -132,7 +132,7 @@ pub(super) fn compile_basis_extents<M: SectorGeometry>(
         .map(|(index, extent)| (extent.tree(), index))
         .collect::<FxHashMap<_, _>>();
     if output_by_tree.len() != output.len() {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse output contains a duplicate tree basis",
         });
     }
@@ -143,14 +143,16 @@ pub(super) fn compile_basis_extents<M: SectorGeometry>(
         let Some(source) = matrix.tree(side, index) else {
             break;
         };
-        let output_index = output_by_tree.get(source.tree).copied().ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "inverse output is missing a source tree basis",
-            },
-        )?;
+        let output_index =
+            output_by_tree
+                .get(source.tree)
+                .copied()
+                .ok_or(OperationError::SpaceMismatch {
+                    message: "inverse output is missing a source tree basis",
+                })?;
         let output_extent = &output[output_index];
         if source.shape != output_extent.shape() {
-            return Err(OperationError::UnsupportedTensorContractScope {
+            return Err(OperationError::SpaceMismatch {
                 message: "inverse output tree basis has an unexpected shape",
             });
         }
@@ -165,7 +167,7 @@ pub(super) fn compile_basis_extents<M: SectorGeometry>(
         });
     }
     if used.iter().any(|used| !used) {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: "inverse output contains a tree basis absent from the source",
         });
     }

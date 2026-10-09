@@ -37,8 +37,7 @@ where
     }
     scoped.map_err(OperationError::Dense)?;
     outcome.unwrap_or_else(|| {
-        Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        Err(OperationError::Dense(DenseError::Unsupported {
             op: "with_linalg_scope",
             message: "dense executor returned without running the scope body".to_string(),
         }))
@@ -74,15 +73,11 @@ where
     // factor count is checked by `compact_{qr,svd}_outputs`, with the same
     // error the per-matrix path reports.
     if outputs.len() != blocks.len() {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "factorize_batch",
-            message: format!(
-                "dense factorize_batch returned {} entries for {} inputs",
-                outputs.len(),
-                blocks.len()
-            ),
-        }));
+        return Err(OperationError::Dense(arity_mismatch(
+            "factorize_batch",
+            blocks.len(),
+            outputs.len(),
+        )));
     }
     Ok(outputs)
 }
@@ -93,29 +88,8 @@ pub(super) fn compact_factor_output_owned<D: FactorScalar>(
     op: &'static str,
 ) -> Result<Vec<D>, OperationError> {
     let source = D::dense_slice(&tensor).map_err(OperationError::Dense)?;
-    let shape = tensor.shape();
-    if shape != expected_shape {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op,
-            message: format!(
-                "{op} output shape mismatch: source {shape:?}, destination {expected_shape:?}",
-            ),
-        }));
-    }
-    let expected_len = tenet_core::checked_product(shape)
-        .map_err(|_| OperationError::Dense(DenseError::ElementCountOverflow))?;
-    if source.len() != expected_len {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op,
-            message: format!(
-                "{op} output storage length mismatch: source {}, expected {}",
-                source.len(),
-                expected_len
-            ),
-        }));
-    }
+    check_contiguous_output(op, source.len(), tensor.shape(), expected_shape)
+        .map_err(OperationError::Dense)?;
     D::dense_into_vec(tensor).map_err(OperationError::Dense)
 }
 
@@ -125,29 +99,8 @@ pub(super) fn compact_real_spectrum_owned<D: FactorScalar>(
     op: &'static str,
 ) -> Result<Vec<f64>, OperationError> {
     let spectrum = D::real_spectrum(&tensor).map_err(OperationError::Dense)?;
-    let shape = tensor.shape();
-    if shape != expected_shape {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op,
-            message: format!(
-                "{op} output shape mismatch: source {shape:?}, destination {expected_shape:?}",
-            ),
-        }));
-    }
-    let expected_len = tenet_core::checked_product(shape)
-        .map_err(|_| OperationError::Dense(DenseError::ElementCountOverflow))?;
-    if spectrum.len() != expected_len {
-        return Err(OperationError::Dense(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op,
-            message: format!(
-                "{op} output storage length mismatch: source {}, expected {}",
-                spectrum.len(),
-                expected_len
-            ),
-        }));
-    }
+    check_contiguous_output(op, spectrum.len(), tensor.shape(), expected_shape)
+        .map_err(OperationError::Dense)?;
     Ok(spectrum)
 }
 

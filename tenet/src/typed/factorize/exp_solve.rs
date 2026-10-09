@@ -13,11 +13,9 @@ where
         // TensorKit `exp!`: `domain == codomain` before anything else.
         let homspace = self.logical_space().space().homspace();
         if homspace.codomain() != homspace.domain() {
-            return Err(Error::from(
-                tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                    message: "exp requires an endomorphism (codomain == domain)",
-                },
-            )
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "exp requires an endomorphism (codomain == domain)",
+            })
             .into());
         }
         // A lazy adjoint is never compact; `exp_dense` materializes it.
@@ -57,9 +55,9 @@ where
         if self.logical_space().space().homspace().codomain()
             != rhs.logical_space().space().homspace().codomain()
         {
-            return Err(Error::InvalidArgument(
-                "solve requires equal divisor and right-hand-side codomains".to_string(),
-            )
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "solve requires equal divisor and right-hand-side codomains",
+            })
             .into());
         }
         self.require_isomorphic("solve requires an isomorphic divisor codomain and domain")?;

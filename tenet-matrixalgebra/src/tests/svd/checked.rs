@@ -206,7 +206,7 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
             },
         ),
         Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::InvalidArgument { .. }
+            OperationError::SpaceMismatch { .. }
         ))
     ));
     assert_eq!(checked_provider.calls.get(), 0);

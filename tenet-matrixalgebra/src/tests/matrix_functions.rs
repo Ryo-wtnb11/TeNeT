@@ -307,7 +307,7 @@ fn solve_left_validates_spaces_before_backend_execution() {
     .unwrap_err();
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "solve requires equal divisor and right-hand-side codomains"
         }
     ));
@@ -508,7 +508,7 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
     assert!(
         matches!(
             error,
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "solve coupled-sector tree bases are incompatible"
             }
         ),
@@ -939,7 +939,7 @@ fn inv_route_preflight_rejects_a_missing_later_sector_before_execution() {
 
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "inverse output is missing a source coupled sector"
         }
     ));
@@ -2398,7 +2398,7 @@ fn exp_rejects_a_non_endomorphism() {
     assert!(
         matches!(
             error,
-            OperationError::UnsupportedTensorContractScope {
+            OperationError::SpaceMismatch {
                 message: "exp requires an endomorphism (codomain == domain)"
             }
         ),

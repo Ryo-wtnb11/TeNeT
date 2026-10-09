@@ -628,15 +628,25 @@ fn checked_compact_diagonal_eig_vals_refuses_nonfinite_values() {
         // no dense solver either way.
         calls.reset();
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let error = input.eig_vals(&[0], &[1]).unwrap_err().to_string();
+        let error = input.eig_vals(&[0], &[1]).unwrap_err();
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
         assert_eq!(calls.total(), 0);
-        let expected = if bad.re.is_finite() && bad.im.is_finite() {
-            "eigenvalues must be finite"
-        } else {
-            "eig input components must be finite"
+        let operation = match &error {
+            GenericTensorError::Facade(Error::Operation(error)) => Some(&**error),
+            GenericTensorError::Plan(CheckedGenericPlanError::Operation(error)) => Some(error),
+            _ => None,
         };
-        assert!(error.contains(expected), "{error}");
+        let expected_kind = if bad.re.is_finite() && bad.im.is_finite() {
+            matches!(
+                operation,
+                Some(OperationError::Dense(
+                    tenet_dense::DenseError::NumericalFailure { .. }
+                ))
+            )
+        } else {
+            matches!(operation, Some(OperationError::InvalidArgument { .. }))
+        };
+        assert!(expected_kind, "{error:?}");
     }
 }
 

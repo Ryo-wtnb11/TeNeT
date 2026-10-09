@@ -50,6 +50,30 @@ impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
     }
 }
 
+impl<E> From<DenseError> for CheckedGenericFactorPlanError<E> {
+    fn from(error: DenseError) -> Self {
+        Self::Operation(OperationError::Dense(error))
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for CheckedGenericFactorPlanError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(f),
+            Self::Operation(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericFactorPlanError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Operation(error) => Some(error),
+        }
+    }
+}
+
 pub(super) fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<CompactFactorPlan>, OperationError>
@@ -367,7 +391,7 @@ pub(super) fn sector_region_index_of(
 ) -> Result<usize, OperationError> {
     regions
         .get(sector)
-        .ok_or_else(|| OperationError::UnsupportedTensorContractScope {
+        .ok_or_else(|| OperationError::SpaceMismatch {
             message: match side {
                 "left" => "compact left factor is missing a nonzero-rank sector",
                 _ => "compact right factor is missing a nonzero-rank sector",
@@ -382,7 +406,7 @@ pub(super) fn validate_factor_region(
     side: &'static str,
 ) -> Result<(), OperationError> {
     if region.rows() != rows || region.cols() != cols {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: match side {
                 "left" => "compact left sector region has an unexpected shape",
                 _ => "compact right sector region has an unexpected shape",
@@ -402,7 +426,7 @@ pub(super) fn validate_no_unused_factor_regions(
         .filter(|region| region.rows() != 0 && region.cols() != 0)
         .count();
     if used < nonzero {
-        return Err(OperationError::UnsupportedTensorContractScope {
+        return Err(OperationError::SpaceMismatch {
             message: match side {
                 "left" => "compact left factor contains an unused nonzero sector",
                 _ => "compact right factor contains an unused nonzero sector",

@@ -22,7 +22,7 @@ fn compact_routes_reject_an_extra_positive_output_region() {
 
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
+        OperationError::SpaceMismatch {
             message: "compact left factor contains an unused nonzero sector"
         }
     ));
