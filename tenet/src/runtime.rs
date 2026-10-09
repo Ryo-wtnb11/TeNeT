@@ -815,6 +815,12 @@ fn missing_cuda_device() -> Error {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Dense leases taken on this thread: the #1996 lease-count probe.
+    pub(crate) static DENSE_LEASES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// RAII lease of a pooled execution context (#155). Returns it to the
 /// pool on drop; on panic it is dropped instead of returned (quarantine —
 /// mirrors `tenet_network`'s `WorkspaceLease`). While it lives, the runtime's
@@ -1173,6 +1179,8 @@ impl Runtime {
     /// mintable config; otherwise falls back to the `state` lock and its single
     /// injected executor (which cannot be reproduced for a pool).
     pub(crate) fn lease_dense(&self) -> DenseLease<'_> {
+        #[cfg(test)]
+        DENSE_LEASES.set(DENSE_LEASES.get() + 1);
         if !self.inner.executor_mintable {
             return DenseLease::Locked {
                 state: self.lock(),
