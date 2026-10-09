@@ -50,9 +50,9 @@ pub struct Svd<T> {
 /// # Order
 ///
 /// Order is per coupled sector; no order across sectors is implied. Within
-/// each sector the real eigenvalues on the diagonal of `d` are stable-sorted
-/// by descending `|λ|`, and the columns of `v` follow them. This is the
-/// [`crate::SectorSpectrum`] contract.
+/// each sector the real eigenvalues on the diagonal of `d` are ascending, as
+/// LAPACK and MatrixAlgebraKit return them, and the columns of `v` follow
+/// them. No basis within a degenerate eigenspace is promised.
 ///
 /// # `d` is diagonal
 ///
@@ -81,9 +81,10 @@ pub struct Eigh<T> {
 /// # Order
 ///
 /// Order is per coupled sector; no order across sectors is implied. Within
-/// each sector the eigenvalues on the diagonal of `d` are stable-sorted by
-/// descending `|λ|`, and the columns of `v` follow them. This is the
-/// [`crate::SectorSpectrum`] contract.
+/// each sector the eigenvalues on the diagonal of `d` are ascending in
+/// lexicographic `(real(λ), imag(λ))` order (MatrixAlgebraKit's diagonal
+/// `eig_sortby`, applied to dense sectors too), and the columns of `v` follow
+/// them. No basis within a degenerate eigenspace is promised.
 ///
 /// # `d` is diagonal
 ///

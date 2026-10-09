@@ -734,8 +734,8 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
         })
         .unwrap();
     let Eigh { d, .. } = tied.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-    // The order of the tied magnitudes is the contract; the values carry the
-    // eigensolver's rounding (`terms` = the block size 3).
+    // The ascending order of the ±2 pair is the contract; the values carry
+    // the eigensolver's rounding (`terms` = the block size 3).
     numerics::assert_slices_close(
         "eigh_full tied spectrum",
         &[
@@ -743,7 +743,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
             d.materialize().unwrap().dense_data().unwrap()[4],
             d.materialize().unwrap().dense_data().unwrap()[8],
         ],
-        &[-2.0, 2.0, 1.0],
+        &[-2.0, 1.0, 2.0],
         3,
     );
 
@@ -815,7 +815,7 @@ fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
     assert_eq!(spectra[0].sector, Label::X);
     assert_eq!(
         spectra[0].values,
-        vec![Complex64::new(3.0, 0.0), Complex64::new(2.0, 0.0)]
+        vec![Complex64::new(2.0, 0.0), Complex64::new(3.0, 0.0)]
     );
 
     let complex = source.convert::<Complex64>();
@@ -1017,8 +1017,8 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
         ],
         &[
             Complex64::new(-2.0, 0.0),
-            Complex64::new(2.0, 0.0),
             Complex64::new(1.0, 0.0),
+            Complex64::new(2.0, 0.0),
         ],
         3,
     );
@@ -1648,4 +1648,117 @@ fn checked_generic_eigh_admits_at_the_given_hermitian_tolerance() {
             );
         }
     }
+}
+
+#[test]
+fn checked_generic_eig_order_matches_the_lexicographic_oracle_and_the_mf_route() {
+    // What: #1985 on checked Generic. Dense and compact EIG/EIGH, full and
+    // values-only, publish the order sorted here independently (EIG
+    // lexicographic `(re, im)`, EIGH ascending), and dense EIG agrees with
+    // the multiplicity-free route on the same block.
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    use tenet::sector::{U1FusionRule, U1Irrep};
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 4)]).unwrap();
+    let c = Complex64::new;
+    // Equal real parts in a conjugate pair; |λ| order would be
+    // [1+2i, 1-2i, -1.5, 0.5i].
+    let diagonal = [c(1.0, 2.0), c(-1.5, 0.0), c(1.0, -2.0), c(0.0, 0.5)];
+    let entry = |i: usize, j: usize| match i.cmp(&j) {
+        Equal => diagonal[i],
+        Less => c(0.25 * (i + 2 * j) as f64, -0.1 * j as f64),
+        Greater => c(0.0, 0.0),
+    };
+    let mut want = diagonal.to_vec();
+    want.sort_by(|a, b| (a.re, a.im).partial_cmp(&(b.re, b.im)).unwrap());
+
+    let general: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            entry(index[0], index[1])
+        })
+        .unwrap();
+    let Eig { d, v } = general.eig_full(&[0], &[1]).unwrap();
+    let got = d.diagview().unwrap().remove(0).values;
+    numerics::assert_slices_close("checked eig_full order", &got, &want, 16);
+    numerics::assert_slices_close(
+        "checked eig_vals order",
+        &general.eig_vals(&[0], &[1]).unwrap().remove(0).values,
+        &want,
+        16,
+    );
+    numerics::assert_slices_close(
+        "checked t v = v d",
+        general.compose(&v).unwrap().dense_data().unwrap(),
+        v.compose(&d).unwrap().dense_data().unwrap(),
+        16,
+    );
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap();
+    let mf: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, index| entry(index[0], index[1]))
+            .unwrap();
+    let Eig { d: mf_d, .. } = mf.eig_full(&[0], &[1]).unwrap();
+    numerics::assert_slices_close(
+        "checked vs multiplicity-free eig",
+        &got,
+        &mf_d.diagview().unwrap().remove(0).values,
+        16,
+    );
+
+    let compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: diagonal.to_vec(),
+        }],
+    )
+    .unwrap();
+    let Eig { d, v } = compact.eig_full(&[0], &[1]).unwrap();
+    assert_eq!(d.diagview().unwrap().remove(0).values, want);
+    assert_eq!(compact.eig_vals(&[0], &[1]).unwrap().remove(0).values, want);
+    assert_eq!(
+        compact.compose(&v).unwrap().dense_data().unwrap(),
+        v.compose(&d).unwrap().dense_data().unwrap()
+    );
+
+    let real = [2.0, -3.0, 0.5, -2.0];
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: real.to_vec(),
+        }],
+    )
+    .unwrap();
+    let ascending = vec![-3.0, -2.0, 0.5, 2.0];
+    let Eigh { d, v } = compact
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
+    assert_eq!(d.diagview().unwrap().remove(0).values, ascending);
+    assert_eq!(
+        compact
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
+            .remove(0)
+            .values,
+        ascending
+    );
+    assert_eq!(
+        compact.compose(&v).unwrap().dense_data().unwrap(),
+        v.compose(&d).unwrap().dense_data().unwrap()
+    );
+    let dense = compact.materialize().unwrap();
+    numerics::assert_slices_close(
+        "checked dense eigh order",
+        &dense
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
+            .remove(0)
+            .values,
+        &ascending,
+        4,
+    );
 }

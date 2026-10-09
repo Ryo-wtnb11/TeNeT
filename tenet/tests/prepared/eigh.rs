@@ -226,12 +226,9 @@ pub fn check_member<R>(
             .fold(0.0_f64, |m, x| m.max(x.abs()))
             .max(1e-300);
         let bound = 32.0 * (n * n) as f64 * eps * scale;
-        // Descending |λ| in `d`, as eager orders it.
+        // Ascending in `d`, as eager orders it.
         for pair in values.windows(2) {
-            assert!(
-                pair[0].abs() >= pair[1].abs(),
-                "{what}: |λ| order {values:?}"
-            );
+            assert!(pair[0] <= pair[1], "{what}: order {values:?}");
         }
         // Multisets, sorted by value.
         let sorted = |mut list: Vec<f64>| {

@@ -206,7 +206,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
         names(
             "admit_compact_diagonal compact_factor_routes coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
              decide_bond_truncation_generic_checked \
-             diagonal_bond_data eig_full_dyn eig_full_from_source \
+             ascending_eigh_order diagonal_bond_data eig_full_dyn eig_full_from_source \
              eig_vals_dyn eig_vals_from_source \
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \

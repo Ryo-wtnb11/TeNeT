@@ -906,8 +906,9 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
 }
 
 #[test]
-fn eigh_fallback_stably_orders_equal_magnitudes() {
-    // What: the noncanonical fallback preserves an exact real backend tie.
+fn eigh_fallback_publishes_the_provider_ascending_order() {
+    // What: the noncanonical fallback publishes the solver's ascending order,
+    // ±x ties included, unchanged.
     let rule = Arc::new(Z2FusionRule);
     let (source, _) = unequal_fallback_eigh_fixtures();
     let source_regions = source
@@ -937,25 +938,11 @@ fn eigh_fallback_stably_orders_equal_magnitudes() {
             .collect::<Vec<_>>(),
     );
     for (spectrum, raw) in eigh.eigenvalues.iter().zip(&dense.raw_values) {
-        assert!(spectrum
-            .values
-            .windows(2)
-            .all(|pair| pair[0].abs() >= pair[1].abs()));
-        let raw_tied = raw
-            .iter()
-            .copied()
-            .filter(|value| value.abs() == 2.0)
-            .collect::<Vec<_>>();
-        let published_tied = spectrum
-            .values
-            .iter()
-            .copied()
-            .filter(|value| value.abs() == 2.0)
-            .collect::<Vec<_>>();
-        assert_eq!(raw_tied.len(), 2);
-        assert!(raw_tied.iter().any(|value| *value < 0.0));
-        assert!(raw_tied.iter().any(|value| *value > 0.0));
-        assert_eq!(published_tied, raw_tied);
+        // The provider's ascending spectrum (with its ±2 pair) is published
+        // as returned, without a permutation.
+        assert!(raw.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(raw.contains(&-2.0) && raw.contains(&2.0));
+        assert_eq!(&spectrum.values, raw);
     }
 }
 
@@ -1328,10 +1315,7 @@ fn eigh_full_satisfies_the_eigen_equation() {
 
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(
-                pair[0].abs() >= pair[1].abs() - 1e-12,
-                "eigenvalues must be stored descending by magnitude"
-            );
+            assert!(pair[0] <= pair[1], "eigenvalues must be stored ascending");
         }
     }
     assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
@@ -1352,7 +1336,7 @@ where
     assert_factor_layout_matches_legacy_shapes(eigh.d.space());
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
+            assert!(pair[0] <= pair[1]);
         }
     }
     assert_eigen_equation(rule, &tensor, &eigh.v, &eigh.d);
@@ -1592,7 +1576,7 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
 
     for entry in &eig.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+            assert!((pair[0].re, pair[0].im) <= (pair[1].re, pair[1].im));
         }
     }
 
@@ -1722,8 +1706,8 @@ fn eigh_refuses_a_block_that_stays_hermitian_after_the_column_swap() {
     assert_eq!(reference.len(), 2);
     for spectrum in &reference {
         assert_eq!(spectrum.values.len(), 2);
-        assert!((spectrum.values[0] - 3.0).abs() < 1e-12, "{reference:?}");
-        assert!((spectrum.values[1] - 1.0).abs() < 1e-12, "{reference:?}");
+        assert!((spectrum.values[0] - 1.0).abs() < 1e-12, "{reference:?}");
+        assert!((spectrum.values[1] - 3.0).abs() < 1e-12, "{reference:?}");
     }
     let swapped = bound_tensor(provider, &swapped);
     assert_stacking_refusal(eigh_vals(&mut dense, &swapped.as_ref()), "eigh_vals ");
@@ -1801,4 +1785,65 @@ fn eigh_admits_gemm_built_gram_and_congruence_matrices_at_n_1000() {
         assert!(relative < f64::EPSILON.powf(0.75), "{relative:e}");
         assert_eigh_preflight(&one_sector_rectangular_matrix(matrix, n, n), true);
     }
+}
+
+#[test]
+fn ascending_provider_eigh_order_is_published_without_a_permutation() {
+    // What: the LAPACK/faer `syev` spectrum is already ascending, so full and
+    // values-only EIGH publish it after the O(n) check alone: no sort, no
+    // value copy, no eigenvector column permutation (#1985).
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    let full = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let values = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    // Full and values-only EIGH may use different LAPACK drivers (Accelerate
+    // does), which agree to rounding, not bitwise.
+    assert_eq!(full.eigenvalues.len(), values.len());
+    for (full, values) in full.eigenvalues.iter().zip(&values) {
+        assert_eq!(full.sector, values.sector);
+        assert_eq!(full.values.len(), values.values.len());
+        assert!(full.values.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(values.values.windows(2).all(|pair| pair[0] <= pair[1]));
+        let norm = full.values.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let tol = 64.0 * full.values.len() as f64 * f64::EPSILON * norm.max(1.0);
+        for (a, b) in full.values.iter().zip(&values.values) {
+            assert!((a - b).abs() <= tol, "{a} vs {b}");
+        }
+    }
+    assert!(full
+        .eigenvalues
+        .iter()
+        .any(|spectrum| spectrum.values.iter().any(|&x| x < 0.0)
+            && spectrum.values.iter().any(|&x| x > 0.0)));
+}
+
+#[test]
+fn eigenvalue_order_authority_is_stable_and_skips_sorted_input() {
+    // What: the order authority returns the stable sorting permutation, and
+    // `false` with the identity for already-ordered input (#1985).
+    use crate::factorize::{ascending_eigh_order, lexicographic_eig_order};
+    let mut order = [9; 4];
+    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    assert!(!ascending_eigh_order(&[-3.0, -1.0, -1.0, 2.0], &mut order));
+    assert_eq!(order, [0, 1, 2, 3]);
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    // Ties keep stored order.
+    assert!(ascending_eigh_order(&[2.0, -1.0, 0.5, -1.0], &mut order));
+    assert_eq!(order, [1, 3, 2, 0]);
+    let c = Complex64::new;
+    // A conjugate pair as `geev` returns it (`+` first), equal real parts,
+    // and a value of larger magnitude that sorts first.
+    let values = [c(1.0, 2.0), c(1.0, -2.0), c(-3.0, 0.0), c(1.0, 2.0)];
+    assert!(lexicographic_eig_order(&values, &mut order));
+    assert_eq!(order, [2, 1, 0, 3]);
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 2);
+    let mut order = [9; 3];
+    assert!(!lexicographic_eig_order(
+        &[c(-1.0, 5.0), c(0.0, -1.0), c(0.0, 1.0)],
+        &mut order
+    ));
+    assert_eq!(order, [0, 1, 2]);
 }

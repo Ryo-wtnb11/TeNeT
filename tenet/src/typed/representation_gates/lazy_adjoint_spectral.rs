@@ -286,8 +286,9 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
     let expected = eager.eig_vals(&[0], &[1]).unwrap();
     let lazy = rotation.adjoint().unwrap();
     assert_eq!(lazy.eig_vals(&[0], &[1]).unwrap(), expected);
-    assert_eq!(expected[0].values[0].im, 1.0);
-    assert_eq!(expected[0].values[1].im, -1.0);
+    // Lexicographic (re, im): the conjugate pair's `-i` precedes `+i`.
+    assert_eq!(expected[0].values[0].im, -1.0);
+    assert_eq!(expected[0].values[1].im, 1.0);
 
     for epsilon in [0.0, 1.0e-12] {
         let jordan = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {

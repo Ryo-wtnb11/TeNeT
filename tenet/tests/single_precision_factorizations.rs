@@ -521,11 +521,8 @@ macro_rules! factor_checks {
         );
         for entry in &eigenvalues {
             assert!(
-                entry
-                    .values
-                    .windows(2)
-                    .all(|pair| pair[0].abs() >= pair[1].abs()),
-                "{name}: Hermitian eigenvalues must be descending in magnitude, got {:?}",
+                entry.values.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{name}: Hermitian eigenvalues must be ascending, got {:?}",
                 entry.values
             );
         }

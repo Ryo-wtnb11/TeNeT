@@ -66,7 +66,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
             .unwrap()
             .unwrap()[0]
             .values,
-        [Complex64::new(2.0, 0.0), Complex64::new(1.0, 0.0)]
+        [Complex64::new(1.0, 0.0), Complex64::new(2.0, 0.0)]
     );
 }
 

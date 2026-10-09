@@ -651,7 +651,7 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
             },
             SectorSpectrum {
                 sector: SectorId::new(1),
-                values: vec![3.0, 1.0],
+                values: vec![1.0, 3.0],
             },
         ],
     );
@@ -671,7 +671,7 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
             },
             SectorSpectrum {
                 sector: SectorId::new(1),
-                values: vec![Complex64::new(3.0, -1.0), Complex64::new(1.0, 1.0)],
+                values: vec![Complex64::new(1.0, 1.0), Complex64::new(3.0, -1.0)],
             },
         ],
     );
@@ -840,7 +840,9 @@ fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
 }
 
 #[test]
-fn spectrum_only_entry_points_return_descending_magnitudes() {
+fn spectrum_only_entry_points_return_the_published_orders() {
+    // What: svd_vals descending, eigh_vals ascending, eig_vals ascending
+    // lexicographic (re, im) within every sector (#1985).
     let rule = Z2FusionRule;
     let hermitian = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
@@ -865,7 +867,7 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
     assert!(!eigh.is_empty());
     for entry in &eigh {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
+            assert!(pair[0] <= pair[1]);
         }
     }
     let eig = eig_vals(
@@ -876,7 +878,7 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
     assert!(!eig.is_empty());
     for entry in &eig {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+            assert!((pair[0].re, pair[0].im) <= (pair[1].re, pair[1].im));
         }
     }
 }
@@ -967,9 +969,11 @@ fn values_only_second_sector_failures_publish_no_partial_spectrum() {
 }
 
 #[test]
-fn values_only_stable_ties_match_provider_order_on_direct_and_padded_layouts() {
-    // What: equal singular values and equal-magnitude eigenvalues retain the
-    // dense provider's order on both the borrowed and packed sector paths.
+fn values_only_ties_follow_the_published_order_on_direct_and_padded_layouts() {
+    // What: equal singular values keep the provider's order, the provider's
+    // ascending EIGH spectrum (with a ±2 pair) is published unchanged, and a
+    // conjugate EIG pair is published in (re, im) order, on both the borrowed
+    // and packed sector paths.
     let rule = Z2FusionRule;
     let svd_input =
         one_sector_rectangular_matrix(vec![2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0], 3, 3);
@@ -992,7 +996,7 @@ fn values_only_stable_ties_match_provider_order_on_direct_and_padded_layouts() {
         .as_f64_slice()
         .unwrap()
         .to_vec();
-    let mut raw_eigh = dense
+    let raw_eigh = dense
         .eigh_vals(DenseRead::F64(
             tenet_dense::DenseView::new(eigh_input.data(), &shape, &strides, 0).unwrap(),
         ))
@@ -1000,7 +1004,15 @@ fn values_only_stable_ties_match_provider_order_on_direct_and_padded_layouts() {
         .as_f64_slice()
         .unwrap()
         .to_vec();
-    raw_eigh.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap());
+    // The provider's spectrum is ascending; the values are a diagonal's, up
+    // to the driver's rounding.
+    for (got, want) in raw_eigh.iter().zip([-2.0, 1.0, 2.0]) {
+        assert!(
+            (got - want).abs() <= 64.0 * f64::EPSILON * 2.0,
+            "{raw_eigh:?}"
+        );
+    }
+    assert_eq!(raw_eigh.len(), 3);
     let mut raw_eig = dense
         .eig_vals(DenseRead::F64(
             tenet_dense::DenseView::new(eig_input.data(), &shape, &strides, 0).unwrap(),
@@ -1009,7 +1021,7 @@ fn values_only_stable_ties_match_provider_order_on_direct_and_padded_layouts() {
         .as_c64_slice()
         .unwrap()
         .to_vec();
-    raw_eig.sort_by(|a, b| b.norm().partial_cmp(&a.norm()).unwrap());
+    raw_eig.sort_by(|a, b| (a.re, a.im).partial_cmp(&(b.re, b.im)).unwrap());
 
     let direct_svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &svd_input)).unwrap();
     let padded_svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &svd_padded)).unwrap();

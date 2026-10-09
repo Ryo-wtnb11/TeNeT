@@ -580,7 +580,7 @@ where
     D: FactorizationScalar,
 {
     /// Returns only the real Hermitian eigenvalues, grouped by
-    /// provider-labelled coupled sector and descending by absolute value.
+    /// provider-labelled coupled sector and ascending within each sector.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism and every sector must pass the same Hermiticity admission
@@ -634,8 +634,8 @@ where
     /// MatrixAlgebraKit's absolute `atol`, the tolerance is relative, so the
     /// decision does not change when `self` is rescaled. In each coupled sector,
     /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
-    /// real eigenvalues. Eigenvalues are stable-sorted by
-    /// descending absolute value; each eigenvector's phase is fixed by making
+    /// real eigenvalues. Eigenvalues are ascending within each sector; each
+    /// eigenvector's phase is fixed by making
     /// its largest-magnitude component real and non-negative. Bases inside an
     /// exactly degenerate eigenspace remain backend-dependent.
     ///
@@ -698,7 +698,8 @@ where
 {
     /// Returns only the general eigenvalues as `Complex64` (at every payload
     /// dtype, like every spectrum of this crate), grouped by
-    /// provider-labelled sector and descending by magnitude.
+    /// provider-labelled sector and ascending in lexicographic
+    /// `(real(λ), imag(λ))` order within each sector.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism. An owned Host compact diagonal is read directly for both
@@ -744,8 +745,10 @@ where
     /// `self = v * d * v^-1`. Both factors are complex even when the input is
     /// real, in the payload's own precision: `D::Eig` is `Complex64` for `f64`
     /// and `Complex64`, and `Complex32` for `f32` and `Complex32`. `v : codomain(self) <- W` holds right eigenvectors and compact
-    /// `d : W <- W` holds their eigenvalues. Values are stable-sorted by
-    /// descending magnitude, and the largest-magnitude component of each
+    /// `d : W <- W` holds their eigenvalues. Values are ascending in
+    /// lexicographic `(real(λ), imag(λ))` order within each sector (dense
+    /// sectors are sorted; MatrixAlgebraKit keeps `geev`'s order there), and
+    /// the largest-magnitude component of each
     /// eigenvector is made real and non-negative. Degenerate eigenbases remain
     /// backend-dependent.
     ///

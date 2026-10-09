@@ -248,7 +248,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     assert!(!eig.eigenvalues.is_empty());
     for entry in &eig.eigenvalues {
         for pair in entry.values.windows(2) {
-            assert!(pair[0].norm() >= pair[1].norm() - 1e-6);
+            assert!((pair[0].re, pair[0].im) <= (pair[1].re, pair[1].im));
         }
     }
     let _: &TensorMap<Complex32, 2, 1> = &eig.v;

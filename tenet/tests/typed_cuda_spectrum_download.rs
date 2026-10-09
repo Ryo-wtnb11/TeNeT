@@ -5,10 +5,10 @@
 //!   (#1536): it downloads nothing, and uploads only the three zero-initialized
 //!   factors (the only device allocation path until #740), so `s` costs no
 //!   upload beyond its zero initialization.
-//! - Full EIGH must read its eigenvalues on the host (non-finite check, `|λ|`
+//! - Full EIGH must read its eigenvalues on the host (non-finite check, ascending
 //!   order, factor-space plan), all sectors' with one download (#1484), and
-//!   uploads `d` once, already filled, together with `v`'s zeros and one
-//!   selector (its dataflow is unchanged by #1536).
+//!   uploads `d` once, already filled, together with `v`'s zeros; with
+//!   cuSOLVER's ascending order no selector is uploaded (#1985).
 //!
 //! This file holds a single test because it reads the process-wide
 //! [`cuda_transfer_stats`] counters.
@@ -118,15 +118,19 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         // The eigenvalues must reach the host; the rest of the download is
         // the O(1)-per-sector Hermiticity verdicts.
         assert!(eigh.d2h_bytes >= bytes(eigenvalues), "{charges}: {eigh:?}");
-        // `d` arrives filled in its one dense upload, beside `v`'s zeros and
-        // the `n_c x n_c` selector; the remainder is per-sector scalars.
+        // `d` arrives filled in its one dense upload, beside `v`'s zeros; the
+        // remainder is per-sector scalars. cuSOLVER's order is already the
+        // published ascending one (#1985), so no `n_c x n_c` selector is
+        // uploaded.
+        let d_len = d.materialize().unwrap().dense_data().unwrap().len();
+        let v_len = v.materialize().unwrap().dense_data().unwrap().len();
         assert!(
-            eigh.h2d_bytes
-                >= bytes(
-                    2 * d.materialize().unwrap().dense_data().unwrap().len()
-                        + v.materialize().unwrap().dense_data().unwrap().len()
-                ),
+            eigh.h2d_bytes >= bytes(d_len + v_len),
             "{charges}: {eigh:?}"
+        );
+        assert!(
+            eigh.h2d_bytes < bytes(2 * d_len + v_len),
+            "{charges}: no selector upload: {eigh:?}"
         );
         let Eigh { d: expected, .. } = hermitian
             .eigh_full(

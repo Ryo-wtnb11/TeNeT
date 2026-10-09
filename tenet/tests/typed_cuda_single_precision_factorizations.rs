@@ -139,9 +139,8 @@ where
 const POSITIVE: [f64; 4] = [8.0, 4.0, 2.0, 1.0];
 
 /// Eigenvalues of both signs whose *magnitudes* are not in the order the
-/// values are, so a `lambda`-descending order and a `|lambda|`-descending one
-/// disagree. cuSOLVER returns ascending `lambda`; only the second is TeNeT's
-/// contract.
+/// values are, so an ascending `lambda` order (TeNeT's contract, cuSOLVER's
+/// own) and the former `|lambda|`-descending one disagree.
 const INDEFINITE: [f64; 4] = [3.0, -1.0, 2.0, -4.0];
 
 /// A well-separated diagonal with a small constant off-diagonal: distinct
@@ -744,7 +743,7 @@ fn assert_device_eigh_matches_host<R, D>(
 
     assert_eq!(structure(&d), structure(&host_d), "eigh d [{}]", D::NAME);
 
-    // Eigenvalues are gauge independent up to the documented |lambda|
+    // Eigenvalues are gauge independent up to the documented ascending
     // ordering, which both sides share, so they compare pointwise.
     numerics::assert_slices_close_scaled(
         &format!("{} [{}]", "eigh spectrum", D::NAME),
@@ -754,18 +753,18 @@ fn assert_device_eigh_matches_host<R, D>(
         kappa,
     );
 
-    // |lambda| descending within every coupled sector.
+    // Ascending within every coupled sector.
     for entry in &d.diagview().unwrap() {
-        let mut previous = f64::INFINITY;
+        let mut previous = f64::NEG_INFINITY;
         for (index, value) in entry.values.iter().enumerate() {
-            let magnitude = value.magnitude();
+            let (value, _) = value.parts();
             assert!(
-                magnitude <= previous + bound,
-                "eigh spectrum [{}]: sector {:?} is not |lambda|-descending at {index}",
+                value >= previous - bound,
+                "eigh spectrum [{}]: sector {:?} is not ascending at {index}",
                 D::NAME,
                 entry.sector
             );
-            previous = magnitude;
+            previous = value;
         }
     }
 
@@ -795,8 +794,8 @@ fn device_eigh_full_matches_the_host_at_every_payload() {
     let fermion = fermion_su2_leg_with([2, 2, 1]);
 
     // Both the positive-definite and the indefinite fixture: the second is
-    // what separates the `|lambda|`-descending contract from cuSOLVER's own
-    // ascending-`lambda` order.
+    // what separates the ascending-`lambda` contract from the former
+    // `|lambda|`-descending order.
     for diagonal in [&POSITIVE, &INDEFINITE] {
         assert_device_eigh_matches_host::<_, f64>(&runtime, &u1, diagonal);
         assert_device_eigh_matches_host::<_, Complex64>(&runtime, &u1, diagonal);

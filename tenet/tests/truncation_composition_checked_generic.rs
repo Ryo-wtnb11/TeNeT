@@ -33,8 +33,8 @@ mod numerics;
 mod truncation_oracle;
 
 use truncation_oracle::{
-    assert_error_close, assert_kept_magnitudes, discarded_norm, select, triangular_eigenvalues,
-    Offer,
+    assert_error_close, assert_kept_magnitudes, discarded_norm, kept_values, select,
+    triangular_eigenvalues, Offer,
 };
 
 #[path = "../../tests/support/fixtures.rs"]
@@ -284,7 +284,7 @@ macro_rules! assert_su3_eig_composition {
                 numerics::assert_slices_close(
                     &format!("{case}: kept eigenvalues of {:?}", entry.sector),
                     &entry.values,
-                    &reference[..entry.values.len()],
+                    &kept_values(&offers, &kept, &entry.sector, reference),
                     terms,
                 );
             }
