@@ -584,10 +584,10 @@ fn device_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     let mut wrong = full_transpose!(host).unwrap().to_cuda().unwrap();
     let error = source
         .permute_into(&[2, 0], &[1, 3], &mut wrong, 1.0, 0.0)
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
     assert!(
-        error.contains("does not match the operation result"),
+        matches!(&error, tenet::typed::Error::Operation(operation)
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. })),
         "{error}"
     );
 }
@@ -749,9 +749,8 @@ fn device_into_rejections_happen_before_any_device_work() {
             source.permute_into(&[2, 0], &[1, 3], &mut wrong_space, 1.0, 0.0)
         );
         assert!(
-            error
-                .to_string()
-                .contains("does not match the operation result"),
+            matches!(&error, tenet::typed::Error::Operation(operation)
+                if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. })),
             "{error}"
         );
     }

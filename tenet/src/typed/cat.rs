@@ -84,9 +84,9 @@ where
     ///
     /// [`Error::RuleMismatch`] on differing admitted rule identities and
     /// [`Error::RuntimeMismatch`] on differing runtimes, in that order; then
-    /// [`Error::InvalidArgument`] for more than one leg on `side`, mismatched
-    /// product spaces on the other side, or concatenated legs of opposite
-    /// duality. Checked-Generic output-admission failures retain their typed
+    /// [`Error::InvalidArgument`] for more than one leg on `side`;
+    /// `SpaceMismatch` for mismatched product spaces on the other side or
+    /// concatenated legs of opposite duality. Checked-Generic output-admission failures retain their typed
     /// provider error.
     ///
     /// An adjoint view `other` (`t.adjoint_view()`) returns

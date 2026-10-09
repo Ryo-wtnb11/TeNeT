@@ -666,10 +666,9 @@ where
                     .space
                     .transformed_multiplicity_free(&operation)?;
                 if destination_body.space.space() != expected.space() {
-                    return Err(Error::InvalidArgument(
-                        "destination fusion space or block layout does not match the operation result"
-                            .to_string(),
-                    ));
+                    return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                        message: "destination fusion space or block layout does not match the operation result",
+                    }));
                 }
                 Some(operation)
             }

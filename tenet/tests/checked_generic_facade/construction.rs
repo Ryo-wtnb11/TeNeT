@@ -887,10 +887,21 @@ fn check_generic_structural_constructors<R>(
     let gram = w_dagger.compose(&w).unwrap();
     assert_eq!(gram.dense_data().unwrap(), right.dense_data().unwrap());
     let error = TensorMap::<R, f64>::isomorphism(runtime, [leg, leg], [leg]).unwrap_err();
-    assert!(error.to_string().contains("not isomorphic"), "{error}");
+    assert!(
+        matches!(
+            &error,
+            GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+                if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. })
+        ),
+        "{error}"
+    );
     let error = TensorMap::<R, f64>::isometry(runtime, [leg], [leg, leg]).unwrap_err();
     assert!(
-        error.to_string().contains("not isometrically embeddable"),
+        matches!(
+            &error,
+            GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+                if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. })
+        ),
         "{error}"
     );
 }

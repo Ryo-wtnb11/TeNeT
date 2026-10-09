@@ -250,7 +250,8 @@ fn checked_generic_add_rejects_layout_mismatch_without_queries() {
     let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(_))
+        GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert_eq!(left.dense_data().unwrap(), before.as_slice());
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
@@ -309,7 +310,8 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
     let error = right.axpby_into(&mut left, 1.0, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(_))
+        GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
     assert_eq!(left.dense_data().unwrap(), before_data.as_slice());
     assert_eq!(

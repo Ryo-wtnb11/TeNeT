@@ -39,11 +39,10 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
         typed.axpby(1.0, &elsewhere, 1.0).unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     ));
-    // Keep the established space-mismatch diagnostic.
     assert!(matches!(
         typed.axpby(1.0, &other_split, 1.0).unwrap_err(),
-        tenet::typed::Error::InvalidArgument(message)
-            if message == "tensors live on different spaces or block layouts"
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 
@@ -157,8 +156,8 @@ fn inner_rejects_a_different_runtime_and_a_different_space() {
     ));
     assert!(matches!(
         typed.inner(&other_split).unwrap_err(),
-        tenet::typed::Error::InvalidArgument(message)
-            if message == "tensors live on different spaces or block layouts"
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 
@@ -193,15 +192,14 @@ fn tr_uses_the_nonabelian_dimension_weight() {
 
 #[test]
 fn tr_requires_an_endomorphism() {
-    // Keep the established endomorphism diagnostic.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
     assert!(matches!(
         typed.tr().unwrap_err(),
-        tenet::typed::Error::InvalidArgument(message)
-            if message == "tr() requires an endomorphism (domain == codomain)"
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 

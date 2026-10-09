@@ -582,7 +582,8 @@ fn typed_isometry_rejects_a_non_embeddable_pair() {
 
     assert!(matches!(
         typed_error,
-        tenet::typed::Error::InvalidArgument(_)
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 
@@ -655,7 +656,8 @@ fn typed_isomorphism_rejects_embeddable_but_not_isomorphic_content() {
             .unwrap_err();
     assert!(matches!(
         typed_error,
-        tenet::typed::Error::InvalidArgument(_)
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 
@@ -691,7 +693,8 @@ fn typed_isometry_rejects_a_larger_domain_degeneracy_with_identical_sector_sets(
             .unwrap_err();
     assert!(matches!(
         typed_error,
-        tenet::typed::Error::InvalidArgument(_)
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
     ));
 }
 

@@ -1327,8 +1327,8 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
     ] {
         assert!(matches!(
             tensor.tr().unwrap_err(),
-            GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
-                if message == "tr() requires an endomorphism (domain == codomain)"
+            GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+                if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
         ));
     }
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
@@ -1534,8 +1534,8 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
     ] {
         assert!(matches!(
             a.inner(b).unwrap_err(),
-            GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
-                if message == "tensors live on different spaces or block layouts"
+            GenericTensorError::Facade(tenet::typed::Error::Operation(operation))
+                if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
         ));
     }
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
