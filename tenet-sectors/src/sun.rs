@@ -14,9 +14,23 @@ const CODEC_VERSION: &[u8] = b"tenet:sun:dynkin:graded-total-then-lex:v1";
 const IDENTITY_SCHEMA: u64 = 0x5355_4e5f_434f_4445;
 
 /// Checked Racah-backed SU(N) structural fusion adapter.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct SUNFusionRule {
     n: usize,
+    identity: RuleIdentity,
+}
+
+// The identity is a pure function of `n`, so equality and hashing ignore it.
+impl PartialEq for SUNFusionRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.n == other.n
+    }
+}
+impl Eq for SUNFusionRule {}
+impl std::hash::Hash for SUNFusionRule {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.n.hash(state);
+    }
 }
 
 /// Failure at the SU(N) label/provider boundary.
@@ -135,7 +149,13 @@ impl SUNFusionRule {
         if n - 1 > isize::MAX as usize / size_of::<i64>() {
             return Err(SUNFusionRuleError::RankNotRepresentable { n });
         }
-        Ok(Self { n })
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&(IDENTITY_SCHEMA, n), &mut hasher);
+        let identity = RuleIdentity::from_canonical_bytes::<Self>(
+            std::hash::Hasher::finish(&hasher),
+            Self::identity_bytes(n),
+        );
+        Ok(Self { n, identity })
     }
 
     pub const fn rank(&self) -> usize {
@@ -248,11 +268,11 @@ impl SUNFusionRule {
         Ok(())
     }
 
-    fn identity_bytes(&self) -> Arc<[u8]> {
+    fn identity_bytes(n: usize) -> Arc<[u8]> {
         let mut bytes = Vec::with_capacity(racah::sun::sun_authority_fingerprint().len() + 32);
         bytes.extend_from_slice(CODEC_VERSION);
         bytes.extend_from_slice(&(usize::BITS).to_le_bytes());
-        bytes.extend_from_slice(&self.n.to_le_bytes());
+        bytes.extend_from_slice(&n.to_le_bytes());
         bytes.extend_from_slice(b":generic:bosonic:racah-sun");
         bytes.extend_from_slice(
             b":rigid=f64-finite-exact-dim:f-axes=mu-nu-kappa-lambda:r-axes=mu-nu:pivotal=f-sign-0000",
@@ -279,7 +299,7 @@ impl CheckedGenericFusion for SUNFusionRule {
     type Error = SUNFusionRuleError;
 
     fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::from_canonical_bytes::<Self>(IDENTITY_SCHEMA, self.identity_bytes())
+        self.identity.clone()
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
@@ -673,7 +693,7 @@ mod tests {
             rule.rule_identity(),
             SUNFusionRule::new(4).unwrap().rule_identity()
         );
-        let original = rule.identity_bytes();
+        let original = SUNFusionRule::identity_bytes(3);
         let mut expected = b"tenet:sun:dynkin:graded-total-then-lex:v1".to_vec();
         expected.extend_from_slice(&usize::BITS.to_le_bytes());
         expected.extend_from_slice(&3usize.to_le_bytes());
@@ -692,6 +712,22 @@ mod tests {
                 Arc::from(changed)
             )
         );
+    }
+
+    #[test]
+    fn stored_identity_is_shared_and_distinguishes_rank() {
+        let su3 = SUNFusionRule::new(3).unwrap();
+        let su4 = SUNFusionRule::new(4).unwrap();
+        let (a, b) = (su3.rule_identity(), su3.rule_identity());
+        assert!(a.same_content_allocation(&b));
+        assert_ne!(a, su4.rule_identity());
+        let hash = |rule: &SUNFusionRule| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            rule.rule_identity().hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash(&su3), hash(&su4));
     }
 
     #[test]
