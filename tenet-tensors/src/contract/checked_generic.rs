@@ -1251,6 +1251,49 @@ mod tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
+    fn a_checked_generic_contraction_converts_one_coefficient_pack_per_stage() {
+        // Why (#2101): each stage replays into its own context workspace, so
+        // no stage evicts another's Multi pack. Until #2063 reuses checked
+        // Generic transformers across calls, every call compiles transformers
+        // with a fresh identity, so each stage converts exactly one pack per
+        // call; with #2063 a warm call converts none.
+        let (_left, lhs, _right, rhs) = bound_pair(2, 2);
+        let lhs_data = (0..lhs.space().required_len().unwrap())
+            .map(|index| index as f64 - 1.5)
+            .collect::<Vec<_>>();
+        let rhs_data = (0..rhs.space().required_len().unwrap())
+            .map(|index| 2.0 - index as f64)
+            .collect::<Vec<_>>();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, tenet_core::RuleIdentity>::default();
+        let mut run = || {
+            let (_, data) = tensorcontract_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::new(
+                    &[3, 1],
+                    &[0, 3],
+                    tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
+                ),
+                2,
+            )
+            .unwrap();
+            (data, context.eager_coefficient_pack_builds())
+        };
+        let (cold_data, cold) = run();
+        assert_eq!(cold, [1, 1, 1], "all three stages recouple");
+        for calls in 2..5 {
+            let (data, builds) = run();
+            assert_eq!(data, cold_data);
+            assert_eq!(builds, [calls; 3]);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn preselected_checked_generic_preserves_late_provider_and_shape_errors() {
         const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_PROVIDER_FAILURE_ISOLATED";
         if std::env::var_os(ISOLATED).is_none() {
