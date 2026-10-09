@@ -1313,3 +1313,74 @@ fn checked_adjoint_provider_derivation_cannot_republish_after_reset() {
         1
     );
 }
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; this isolated spy uses Cell counters.
+fn checked_adjoint_of_a_subset_source_reports_the_first_missing_target_key() {
+    // What (#1942): only a Complete source skips the adjoint key check; a
+    // Subset source still enumerates the adjoint trees and reports the first
+    // target-ordered key whose swapped source key is absent.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let provider = Arc::new(FailAtCallRule::new());
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..2).map(|_| SectorLeg::new([(SectorId::new(0), 2)], true))),
+        FusionProductSpace::new((0..2).map(|_| SectorLeg::new([(SectorId::new(0), 3)], true))),
+    );
+    let complete =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(Arc::clone(&provider), hom)
+            .unwrap();
+    let full = complete.space().structure();
+    assert!(full.block_count() > 2);
+    let kept = full.block(full.block_count() - 1).unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(
+        full.rank(),
+        vec![BlockSpec::with_key(
+            kept.key().clone(),
+            kept.shape().to_vec(),
+            kept.strides().to_vec(),
+            kept.offset(),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let subset = BoundDynamicFusionMapSpace {
+        space: DynamicFusionMapSpace {
+            subblock_structure: structure.into_shared(),
+            admission: FusionSpaceAdmission::Subset(provider.identity.clone()),
+            adjoint: OnceLock::new(),
+            ..complete.space().clone()
+        },
+        provider: Arc::clone(&provider),
+        layout_build: complete.layout_build,
+    };
+
+    let homspace = complete.space().homspace();
+    let expected = FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone())
+        .fusion_tree_keys_generic_checked(provider.as_ref())
+        .unwrap()
+        .into_iter()
+        .map(|key| {
+            BlockKey::FusionTree(FusionTreePairKey::pair(
+                key.domain_tree().clone(),
+                key.codomain_tree().clone(),
+            ))
+        })
+        .find(|key| {
+            subset
+                .space()
+                .structure()
+                .find_block_index_by_key(key)
+                .is_none()
+        })
+        .unwrap();
+
+    assert!(crate::adjoint_bound_space_dyn_generic_checked(&complete).is_ok());
+    match crate::adjoint_bound_space_dyn_generic_checked(&subset) {
+        Err(crate::CheckedGenericPlanError::Operation(OperationError::MissingBlockKey { key })) => {
+            assert_eq!(*key, expected);
+        }
+        other => panic!("expected the first missing target key, got {other:?}"),
+    }
+}
