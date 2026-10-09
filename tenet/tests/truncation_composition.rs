@@ -868,8 +868,7 @@ fn diagview_rejects_a_non_bond_map_and_a_lazy_adjoint() {
     let rectangular: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&other]).unwrap();
     assert!(matches!(
         rectangular.diagview(),
-        Err(Error::Operation(operation))
-            if matches!(*operation, tenet::typed::OperationError::SpaceMismatch { .. })
+        Err(Error::InvalidArgument(message)) if message.contains("equal codomain and domain legs")
     ));
 
     let square: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();

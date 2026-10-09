@@ -171,7 +171,6 @@ fn multiplicity_free_misuse_has_one_variant_per_kind() {
     ));
     let narrow_cod: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
-    assert!(multiplicity_free(rectangular.diagview(), is_space_mismatch));
     assert!(multiplicity_free(
         narrow_cod.cat(&rectangular, tenet::typed::Side::Domain),
         is_space_mismatch
@@ -242,7 +241,6 @@ fn checked_misuse_has_one_variant_per_kind() {
     ));
     let narrow_cod: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
-    assert!(checked(rectangular.diagview(), is_space_mismatch));
     assert!(checked(
         narrow_cod.cat(&rectangular, tenet::typed::Side::Domain),
         is_space_mismatch
