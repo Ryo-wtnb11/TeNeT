@@ -5,7 +5,7 @@ use super::*;
 /// whole-factor copy and no selector upload, a non-aligned side is one GEMM
 /// per nonempty target tree.
 #[cfg(feature = "cuda")]
-fn cuda_route_assembly_counts<R>(plan: &TypedCudaQrPlan<R>) -> (usize, usize, usize) {
+fn cuda_route_assembly_counts(plan: &CompactFactorPlan) -> (usize, usize, usize) {
     let nonempty_trees = |trees: &[CoupledTreeExtent]| {
         trees
             .iter()
@@ -13,56 +13,135 @@ fn cuda_route_assembly_counts<R>(plan: &TypedCudaQrPlan<R>) -> (usize, usize, us
             .count()
     };
     let mut counts = (0, 0, 0);
-    for route in &plan.routes {
-        if route.aligned_left {
+    for (route, left, right) in executed_routes(plan) {
+        let aligned_left = plan.left_preserves_trees(route);
+        let aligned_right = plan.right_preserves_trees(route);
+        if aligned_left {
             counts.0 += 1;
         } else {
-            counts.2 += nonempty_trees(plan.left_regions[route.left].row_trees());
+            counts.2 += nonempty_trees(plan.left_regions()[left].row_trees());
         }
-        if route.aligned_right {
+        if aligned_right {
             counts.0 += 1;
         } else {
-            counts.2 += nonempty_trees(plan.right_regions[route.right].col_trees());
+            counts.2 += nonempty_trees(plan.right_regions()[right].col_trees());
         }
-        if !(route.aligned_left && route.aligned_right) {
+        if !(aligned_left && aligned_right) {
             counts.1 += 1;
         }
     }
     counts
 }
 
+/// The factor spaces and routes every device factorization publishes through
+/// are the Host plan's, checked without a device.
+///
+/// A device-typed tensor (a compact diagonal needs no device allocation)
+/// builds its plan through the same `compact_factor_plan` the device QR, SVD
+/// and EIGH call, and a multi-tree source with a dual leg and one-sided
+/// sectors goes through `compact_factor_routes`, `executed_routes` and the SVD
+/// diagonal validation. Every space must equal the Host eager factorization's
+/// output space, so a device-local bond, space or route rule fails here.
 #[cfg(feature = "cuda")]
 #[test]
-fn typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective() {
+fn typed_cuda_factor_plan_publishes_the_host_factor_spaces_without_a_device() {
+    fn assert_host_spaces<R>(source: &TensorMap<R, f64>, plan: &CompactFactorPlan)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let space = source.logical_space();
+        let (rows, cols) = (codomain_axes(source), domain_axes(source));
+        let Qr { q, r } = source.qr_compact(&rows, &cols).unwrap();
+        let Svd { u, s, vh } = source.svd_compact(&rows, &cols).unwrap();
+        let left = plan.left_space(space).unwrap();
+        let right = plan.right_space(space).unwrap();
+        let bond = plan.bond_space(space).unwrap();
+        for (host, device, what) in [
+            (&q, &left, "qr q"),
+            (&r, &right, "qr r"),
+            (&u, &left, "svd u"),
+            (&s, &bond, "svd s"),
+            (&vh, &right, "svd vh"),
+        ] {
+            assert_eq!(host.logical_space().space(), device.space(), "{what}");
+        }
+        let bond_regions = sector_regions(bond.space().structure(), bond.space().nout()).unwrap();
+        let diagonals = validate_cuda_svd_middle_regions(plan, &bond_regions).unwrap();
+        let routes: Vec<_> = executed_routes(plan).collect();
+        assert_eq!(diagonals.len(), routes.len());
+        assert_eq!(routes.len(), bond_regions.len());
+        for ((route, left_region, right_region), diagonal) in routes.iter().zip(&diagonals) {
+            let source_region = &plan.source_regions()[route.source_region()];
+            assert_eq!(route.rank(), source_region.rows().min(source_region.cols()));
+            assert_eq!(plan.left_regions()[*left_region].coupled(), route.sector());
+            assert_eq!(
+                plan.right_regions()[*right_region].coupled(),
+                route.sector()
+            );
+            let middle = bond_regions
+                .iter()
+                .find(|region| region.coupled() == route.sector())
+                .unwrap();
+            assert_eq!(*diagonal, middle.range().start);
+        }
+        if space.space().homspace().codomain() == space.space().homspace().domain() {
+            let Eigh { d, v } = source
+                .eigh_full(&rows, &cols, HermitianTol::DEFAULT)
+                .unwrap();
+            assert_eq!(v.logical_space().space(), left.space(), "eigh v");
+            assert_eq!(d.logical_space().space(), bond.space(), "eigh d");
+        }
+    }
+
+    // Multi-tree sectors, a dual codomain leg, sectors on one side only.
     let source = u1_lazy_fixture();
-    let regions = sector_regions(
-        source.logical_space().space().structure(),
-        source.logical_space().space().nout(),
+    let plan = compact_factor_routes(source.logical_space()).unwrap();
+    assert!(executed_routes(&plan).count() > 1);
+    assert!(plan
+        .source_regions()
+        .iter()
+        .any(|region| region.row_trees().len() > 1));
+    assert_host_spaces(&source, &plan);
+
+    // The device method itself, on a device-typed compact diagonal (a valid
+    // device tensor that needs no allocation) over a multi-sector bond; its
+    // dense Host twin has the same space.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(2), 1),
+        ],
     )
     .unwrap();
-    let trees = regions
-        .iter()
-        .flat_map(|region| [region.row_trees(), region.col_trees()])
-        .find(|trees| trees.len() > 1)
-        .expect("fixture must contain a multi-tree coupled sector");
-    let mut reordered = trees.to_vec();
-    reordered.reverse();
-    assert!(cuda_qr_tree_extents_match(trees, &reordered).unwrap());
-    reordered.pop();
-    assert!(!cuda_qr_tree_extents_match(trees, &reordered).unwrap());
-
-    // The aligned-copy dispatch is the stricter, order-sensitive predicate:
-    // a permuted tree sequence carries the same blocks but a different
-    // layout, so it must fall back to the per-tree GEMM.
-    let extent: usize = trees.iter().map(|tree| tree.extent().unwrap()).sum();
-    assert!(cuda_factor_layout_is_aligned(trees, trees, extent).unwrap());
-    let mut permuted = trees.to_vec();
-    permuted.reverse();
-    assert!(!cuda_factor_layout_is_aligned(trees, &permuted, extent).unwrap());
-    assert!(
-        !cuda_factor_layout_is_aligned(trees, trees, extent + 1).unwrap(),
-        "trees that do not tile the region are never aligned"
-    );
+    let dense =
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            if index[0] == index[1] {
+                2.0 + index[0] as f64
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let spectrum = dense
+        .svd_compact(&codomain_axes(&dense), &domain_axes(&dense))
+        .unwrap()
+        .s;
+    let TypedData::Diagonal(values) = owned(&spectrum).data.as_ref() else {
+        unreachable!("SVD factor is compact")
+    };
+    let device: TensorMap<_, f64, CudaStorage> = TensorMap {
+        runtime: runtime.clone(),
+        repr: owned_repr(TypedTensorBody::new(
+            spectrum.logical_space().clone(),
+            TypedData::<f64, CudaStorage>::Diagonal(values.clone()),
+        )),
+    };
+    let host = spectrum.materialize().unwrap();
+    assert_eq!(host.logical_space().space(), device.logical_space().space());
+    assert_host_spaces(&host, &device.compact_factor_plan().unwrap());
 }
 
 #[cfg(feature = "cuda")]
@@ -506,29 +585,30 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
         .count();
     let source_device = source.to_cuda().unwrap();
     // Per-route transfer and kernel counts follow the proved layout flag.
-    let plan = source_device
-        .compile_cuda_qr_plan(Arc::clone(&regions))
-        .unwrap();
+    let plan = source_device.compact_factor_plan().unwrap();
     let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
-    assert_eq!(plan.routes.len(), nonempty);
+    let routes = executed_routes(&plan).count();
+    assert_eq!(routes, nonempty);
     // Both factor spaces of this fixture reproduce the source tree layout,
     // so every route takes the whole-factor copy and the assembly uploads
     // and downloads nothing. The non-aligned fallback is a layout
-    // property, not a workload one, and is covered by
-    // `typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective`.
+    // property, not a workload one: the Host plan's tree-order predicate
+    // decides it, and the `CUDA_*_TREEWISE` gates force it on the device.
     assert!(
-        plan.routes
-            .iter()
-            .all(|route| route.aligned_left && route.aligned_right),
+        executed_routes(&plan)
+            .all(|(route, _, _)| plan.left_preserves_trees(route)
+                && plan.right_preserves_trees(route)),
         "expected an all-aligned route mix, got {:?}",
-        plan.routes
-            .iter()
-            .map(|route| (route.aligned_left, route.aligned_right))
+        executed_routes(&plan)
+            .map(|(route, _, _)| (
+                plan.left_preserves_trees(route),
+                plan.right_preserves_trees(route)
+            ))
             .collect::<Vec<_>>()
     );
     assert_eq!(
         (factor_copies, selector_uploads, assembly_gemms),
-        (2 * plan.routes.len(), 0, 0)
+        (2 * routes, 0, 0)
     );
 
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -647,9 +727,7 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     let source_device = source.to_cuda().unwrap();
     // Compact SVD assembles through the same aligned-copy dispatch as QR
     // and shares its copy/selector/GEMM observation.
-    let plan = source_device
-        .compile_cuda_qr_plan(Arc::clone(&regions))
-        .unwrap();
+    let plan = source_device.compact_factor_plan().unwrap();
     let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
     CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -1132,21 +1210,17 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
             host.logical_space().space().nout(),
         )
         .unwrap();
-        let plan = device.compile_cuda_qr_plan(Arc::clone(&regions)).unwrap();
-        let max_rows = plan
-            .routes
-            .iter()
-            .map(|route| regions[route.source].rows())
+        let plan = device.compact_factor_plan().unwrap();
+        let max_rows = executed_routes(&plan)
+            .map(|(route, _, _)| regions[route.source_region()].rows())
             .max()
             .unwrap();
         for treewise in [false, true] {
-            let expected_ops: u64 = plan
-                .routes
-                .iter()
-                .map(|route| {
+            let expected_ops: u64 = executed_routes(&plan)
+                .map(|(route, _, _)| {
                     let side = |aligned: bool| if aligned && !treewise { 2 } else { 1 };
-                    13 + side(route.aligned_left)
-                        + side(route.aligned_right)
+                    13 + side(plan.left_preserves_trees(route))
+                        + side(plan.right_preserves_trees(route))
                         + u64::from(<D as tenet_dense::CudaScalar>::IS_COMPLEX)
                 })
                 .sum();

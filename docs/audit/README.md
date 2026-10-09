@@ -18,6 +18,7 @@ by `artifact-classification.md` and must not be hand-edited.
 | [CPU data ownership and Tenferro contract](cpu-data-tenferro-contract.md) | TeNeT `4ea8348dad1cf2dbc3907a89c1734aae29881580`, registry Tenferro 0.3.0 `9505d5bfd60c890212f0ec44aa9cf07fef185f63`, and the comparison revisions listed in the report | Governing audit: [#1140](https://github.com/Ryo-wtnb11/TeNeT/issues/1140); first evidence leaf: [#1141](https://github.com/Ryo-wtnb11/TeNeT/issues/1141). |
 | [CUDA spectrum device admission](issue-1766-cuda-spectrum-device.md) | TeNeT `0e1280780086b29f142a7b632bb892ddfc2eb92a`, TensorKit `cfaa073e`, TensorOperations 5.8.0, QSpace `d2d3d7da` | Device-identity guard for spectra: [#1766](https://github.com/Ryo-wtnb11/TeNeT/issues/1766). |
 | [CUDA tree-transform admission errors](issue-1763-typed-admission-errors.md) | TeNeT `f6f36b481be44680f0cdeb380f867b3db3da0fb5`, TensorKit `cfaa073e`, QSpace `d2d3d7da` | Host error categories for CUDA Stage A: [#1763](https://github.com/Ryo-wtnb11/TeNeT/issues/1763). |
+| [Shared compact factor plan](issue-1774-shared-compact-factor-plan.md) | TeNeT `a596439b794c0e2988e8c19bc266f58dcc7fa595`, TensorKit `cfaa073e`, QSpace `dd2cc7e1` | One Host/CUDA authority for compact QR, SVD and EIGH factor spaces: [#1774](https://github.com/Ryo-wtnb11/TeNeT/issues/1774). |
 
 Later outcomes are indexed here rather than inserted into the original audit
 narrative. Current source, tests, crate documentation, and normative policy

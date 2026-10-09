@@ -545,14 +545,25 @@ pub fn spectrum_bond<M, R, V>(
 where
     M: FactorMode<R>,
 {
+    leg_bond_space::<M, R>(space, spectrum_leg(spectrum))
+}
+
+/// [`spectrum_bond`] for a bond leg already in hand, such as a compact
+/// plan's bond whose spectrum has not reached the host.
+pub(super) fn leg_bond_space<M, R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    leg: SectorLeg,
+) -> Result<BoundDynamicFusionMapSpace<R>, M::Error>
+where
+    M: FactorMode<R>,
+{
     let authority = M::authority(space);
-    if factor_bond_is_input_bond(space.space(), || spectrum_leg(spectrum))
+    if factor_bond_is_input_bond(space.space(), || leg.clone())
         && checked_sector_regions(space.space().structure(), 1)?
             .is_some_and(|regions| aligned_one_tree_regions(&regions))
     {
         return Ok(authority.same_homspace_output(space)?);
     }
-    let leg = spectrum_leg(spectrum);
     Ok(authority.output_space(FusionTreeHomSpace::new(
         FusionProductSpace::new([leg.clone()]),
         FusionProductSpace::new([leg]),

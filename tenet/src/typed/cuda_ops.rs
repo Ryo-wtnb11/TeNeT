@@ -140,16 +140,18 @@ where
     /// A fully aligned route assembles by copy and uploads nothing.
     fn identity_selector(
         cuda: &mut CudaDenseContext,
-        route: &TypedCudaQrRoute,
+        rank: usize,
+        aligned_left: bool,
+        aligned_right: bool,
     ) -> Result<Option<CudaStorage<D>>, Error> {
-        if route.aligned_left && route.aligned_right {
+        if aligned_left && aligned_right {
             return Ok(None);
         }
         upload_selector(
             cuda,
-            route.rank,
-            route.rank,
-            (0..route.rank).map(|index| (index, index, D::ONE)),
+            rank,
+            rank,
+            (0..rank).map(|index| (index, index, D::ONE)),
         )
         .map(Some)
     }
@@ -160,27 +162,10 @@ where
         })
     }
 
-    pub(super) fn compile_cuda_qr_plan(
-        &self,
-        source_regions: Arc<[CoupledSectorRegion]>,
-    ) -> Result<TypedCudaQrPlan<R>, Error> {
-        compile_cuda_qr_plan(self.logical_space(), source_regions)
-    }
-
-    /// Admits the eigenvector and diagonal factor spaces for `spectra` and
-    /// routes every coupled sector from its source region to them.
-    fn compile_cuda_eigh_plan(
-        &self,
-        source_regions: Arc<[CoupledSectorRegion]>,
-        spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
-    ) -> Result<TypedCudaEighPlan<R>, Error> {
-        compile_cuda_eigh_plan(
-            self.logical_space(),
-            source_regions,
-            spectra
-                .iter()
-                .map(|entry| (entry.sector, entry.values.len())),
-        )
+    /// The Host compact factor plan of this tensor's matrix view: the one
+    /// authority for the bond, the factor spaces and the sector routes.
+    pub(super) fn compact_factor_plan(&self) -> Result<CompactFactorPlan, Error> {
+        Ok(compact_factor_routes(self.logical_space())?)
     }
 
     /// Streamed compact SVD of owned dense CUDA storage.
@@ -221,7 +206,9 @@ where
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+        // Region admission precedes the placement preflight; the plan reads
+        // the same cached regions.
+        sector_regions(source_space.structure(), source_space.nout())?;
 
         {
             // Preflight only: the ordinal is immutable, so this placement
@@ -236,33 +223,22 @@ where
         }
         // As for typed CUDA QR, all provider work and final-space admission
         // complete before the execution lock and before any output exists.
-        let plan = self.compile_cuda_qr_plan(source_regions)?;
+        let plan = self.compact_factor_plan()?;
         #[cfg(test)]
-        let plan = {
-            let mut plan = plan;
-            if CUDA_SVD_TREEWISE.with(std::cell::Cell::get) {
-                for route in &mut plan.routes {
-                    route.aligned_left = false;
-                    route.aligned_right = false;
-                }
-            }
-            plan
-        };
-        let bond = plan.left_space.space().homspace().domain().legs()[0].clone();
-        let middle_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
-                    FusionProductSpace::new([bond.clone()]),
-                    FusionProductSpace::new([bond]),
-                ))?;
+        let treewise = CUDA_SVD_TREEWISE.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let treewise = false;
+        let left_space = plan.left_space(self.logical_space())?;
+        let right_space = plan.right_space(self.logical_space())?;
+        let middle_space = plan.bond_space(self.logical_space())?;
         let middle_regions = sector_regions(
             middle_space.space().structure(),
             middle_space.space().nout(),
         )?;
         let diagonals = validate_cuda_svd_middle_regions(&plan, &middle_regions)?;
-        let left_len = plan.left_space.space().required_len()?;
+        let left_len = left_space.space().required_len()?;
         let middle_len = middle_space.space().required_len()?;
-        let right_len = plan.right_space.space().required_len()?;
+        let right_len = right_space.space().required_len()?;
         let (left_data, middle_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
@@ -278,19 +254,20 @@ where
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
 
-            let max_rows = plan
-                .routes
-                .iter()
-                .map(|route| plan.source_regions[route.source].rows())
+            let max_rows = executed_routes(&plan)
+                .map(|(route, _, _)| plan.source_regions()[route.source_region()].rows())
                 .max();
             let weights = max_rows
                 .map(|rows| CudaSvdGaugeWeights::upload(cuda, rows))
                 .transpose()
                 .map_err(dense_err)?;
-            for (route, &diagonal) in plan.routes.iter().zip(&diagonals) {
-                let source_region = &plan.source_regions[route.source];
-                let left_region = &plan.left_regions[route.left];
-                let right_region = &plan.right_regions[route.right];
+            for ((route, left, right), &diagonal) in executed_routes(&plan).zip(&diagonals) {
+                let rank = route.rank();
+                let source_region = &plan.source_regions()[route.source_region()];
+                let left_region = &plan.left_regions()[left];
+                let right_region = &plan.right_regions()[right];
+                let aligned_left = !treewise && plan.left_preserves_trees(route);
+                let aligned_right = !treewise && plan.right_preserves_trees(route);
                 let (raw_left, spectrum, raw_right) = cuda_svd_region::<D>(
                     cuda,
                     &source.0,
@@ -298,7 +275,7 @@ where
                     source_region.rows(),
                     source_region.cols(),
                 )?;
-                if spectrum.len() != route.rank {
+                if spectrum.len() != rank {
                     return Err(internal_layout_error(
                         "compact SVD spectrum length does not match its source route",
                     ));
@@ -314,11 +291,11 @@ where
                     cuda,
                     &raw_left,
                     source_region.rows(),
-                    route.rank,
+                    rank,
                     weights,
                 )
                 .map_err(dense_err)?;
-                let (left, left_selector) = if route.aligned_left {
+                let (left, left_selector) = if aligned_left {
                     let left = phases
                         .scale_left::<D>(cuda, &raw_left, source_region.rows())
                         .map_err(dense_err)?;
@@ -327,7 +304,7 @@ where
                     let selector = phases.left_selector::<D>(cuda).map_err(dense_err)?;
                     (raw_left, Some(selector))
                 };
-                let (right, right_selector) = if route.aligned_right {
+                let (right, right_selector) = if aligned_right {
                     let right = phases
                         .scale_right::<D>(cuda, &raw_right, source_region.cols())
                         .map_err(dense_err)?;
@@ -344,7 +321,7 @@ where
                     TypedCudaSvdScratch::<D>::new(left, right, left_selector, right_selector);
                 // Compact SVD keeps the full rank by construction, so the same
                 // proved layout identity applies as for QR.
-                if route.aligned_left {
+                if aligned_left {
                     copy_whole_factor(cuda, &mut left_data, left_region, &scratch.left)?;
                 } else {
                     assemble_left_factor(
@@ -353,13 +330,13 @@ where
                         left_region,
                         source_region,
                         &scratch.left,
-                        route.rank,
+                        rank,
                         TypedCudaSvdScratch::<D>::selector(&scratch.left_selector)?,
                         0,
-                        route.rank,
+                        rank,
                     )?;
                 }
-                if route.aligned_right {
+                if aligned_right {
                     copy_whole_factor(cuda, &mut right_data, right_region, &scratch.right)?;
                 } else {
                     assemble_right_factor(
@@ -368,8 +345,8 @@ where
                         right_region,
                         source_region,
                         TypedCudaSvdScratch::<D>::selector(&scratch.right_selector)?,
-                        route.rank,
-                        route.rank,
+                        rank,
+                        rank,
                         &scratch.right,
                     )?;
                 }
@@ -378,7 +355,7 @@ where
                     spectrum,
                     &mut middle_data.0,
                     diagonal,
-                    route.rank + 1,
+                    rank + 1,
                 )
                 .map_err(dense_err)?;
             }
@@ -388,7 +365,7 @@ where
         Ok(Svd {
             u: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+                repr: owned_repr(TypedTensorBody::dense(left_space, left_data)),
             },
             s: Self {
                 runtime: self.runtime.clone(),
@@ -396,7 +373,7 @@ where
             },
             vh: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+                repr: owned_repr(TypedTensorBody::dense(right_space, right_data)),
             },
         })
     }
@@ -482,17 +459,17 @@ where
             )?;
         }
 
-        // The existing compact factor plan is the canonical source -> left
-        // factor route. EIGH needs that left route only; no new plan hierarchy.
-        let source_plan = self.compile_cuda_qr_plan(source_regions)?;
+        // The Host compact factor plan: an endomorphism's compact bond keeps
+        // every eigenpair (`min(n, n) = n`), so its left route is EIGH's.
+        let plan = self.compact_factor_plan()?;
 
         // Admission is complete. Validate every block before the first EIGH so
         // a late non-Hermitian sector cannot trigger partial numerical work.
         {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let regions: Vec<_> = source_plan
-                .source_regions
+            let regions: Vec<_> = plan
+                .source_regions()
                 .iter()
                 .map(|region| (region.range().start, region.rows()))
                 .collect();
@@ -508,11 +485,11 @@ where
         let (spectra, mut raw_vectors, orders) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut device_spectra = Vec::with_capacity(source_plan.source_regions.len());
-            let mut vectors = Vec::with_capacity(source_plan.source_regions.len());
+            let mut device_spectra = Vec::with_capacity(plan.source_regions().len());
+            let mut vectors = Vec::with_capacity(plan.source_regions().len());
             #[cfg(test)]
             let mut decomposition_ordinal = 0;
-            for region in source_plan.source_regions.iter() {
+            for region in plan.source_regions().iter() {
                 let n = region.rows();
                 if n == 0 {
                     vectors.push(None);
@@ -529,9 +506,9 @@ where
                 vectors.push(Some(vector));
             }
             let mut downloaded = cuda_download_spectra::<D>(cuda, &device_spectra)?.into_iter();
-            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
-            let mut orders = Vec::with_capacity(source_plan.source_regions.len());
-            for region in source_plan.source_regions.iter() {
+            let mut spectra = Vec::with_capacity(plan.source_regions().len());
+            let mut orders = Vec::with_capacity(plan.source_regions().len());
+            for region in plan.source_regions().iter() {
                 let n = region.rows();
                 let values = if n == 0 {
                     Vec::new()
@@ -564,12 +541,13 @@ where
 
         // Every factor-space admission is provider work on the host: no CUDA
         // lease is held from here until the assembly below.
-        let plan = self.compile_cuda_eigh_plan(source_plan.source_regions, &spectra)?;
-        let vector_len = plan.left_space.space().required_len()?;
-        let diagonal_len = plan.middle_space.space().required_len()?;
+        let left_space = plan.left_space(self.logical_space())?;
+        let middle_space = plan.bond_space(self.logical_space())?;
+        let vector_len = left_space.space().required_len()?;
+        let diagonal_len = middle_space.space().required_len()?;
         let mut diagonal_host = vec![D::ZERO; diagonal_len];
         fill_diagonal_values(
-            plan.middle_space.space().structure(),
+            middle_space.space().structure(),
             &mut diagonal_host,
             &spectra,
         )?;
@@ -581,16 +559,16 @@ where
             let mut vector_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; vector_len])?;
             // Every route's `full_rank x kept` column selector, packed back
             // to back so the call makes one upload whatever its route count.
-            let mut selector_offsets = Vec::with_capacity(plan.routes.len());
+            let mut selector_offsets = Vec::with_capacity(plan.routes().len());
             let mut selector_len = 0usize;
-            for route in plan.routes.iter() {
-                if route.kept > orders[route.source].len() {
+            for (route, _, _) in executed_routes(&plan) {
+                if route.rank() > orders[route.source_region()].len() {
                     return Err(internal_layout_error(
                         "CUDA EIGH rank exceeds its eigenvector order",
                     ));
                 }
                 selector_offsets.push(selector_len);
-                selector_len += route.full_rank * route.kept;
+                selector_len += route.rank() * route.rank();
             }
             let selector = if selector_len == 0 {
                 None
@@ -599,16 +577,15 @@ where
                     cuda,
                     selector_len,
                     1,
-                    plan.routes
-                        .iter()
-                        .zip(&selector_offsets)
-                        .flat_map(|(route, &offset)| {
-                            orders[route.source][..route.kept].iter().enumerate().map(
-                                move |(column, &row)| {
-                                    (offset + row + route.full_rank * column, 0, D::ONE)
-                                },
-                            )
-                        }),
+                    executed_routes(&plan).zip(&selector_offsets).flat_map(
+                        |((route, _, _), &offset)| {
+                            let n = route.rank();
+                            orders[route.source_region()][..n]
+                                .iter()
+                                .enumerate()
+                                .map(move |(column, &row)| (offset + row + n * column, 0, D::ONE))
+                        },
+                    ),
                 )?)
             };
             #[cfg(test)]
@@ -621,7 +598,9 @@ where
             }
             #[cfg(test)]
             let mut assembly_ordinal = 0;
-            for (route, &selector_offset) in plan.routes.iter().zip(&selector_offsets) {
+            for ((route, left, _), &selector_offset) in
+                executed_routes(&plan).zip(&selector_offsets)
+            {
                 #[cfg(test)]
                 {
                     assembly_ordinal += 1;
@@ -630,36 +609,38 @@ where
                 let selector = selector
                     .as_ref()
                     .ok_or_else(|| internal_layout_error("CUDA EIGH route has no selector"))?;
-                let raw = raw_vectors[route.source]
+                let raw = raw_vectors[route.source_region()]
                     .take()
                     .ok_or_else(|| internal_layout_error("CUDA EIGH route has no eigenvectors"))?;
-                let left_region = &plan.left_regions[route.left];
+                let left_region = &plan.left_regions()[left];
+                let n = route.rank();
                 #[cfg(test)]
-                let aligned = route.aligned && !CUDA_EIGH_TREEWISE.with(std::cell::Cell::get);
+                let aligned = plan.left_preserves_trees(route)
+                    && !CUDA_EIGH_TREEWISE.with(std::cell::Cell::get);
                 #[cfg(not(test))]
-                let aligned = route.aligned;
+                let aligned = plan.left_preserves_trees(route);
                 if aligned {
                     assemble_aligned_left_factor(
                         cuda,
                         &mut vector_data,
                         left_region,
                         &raw,
-                        route.full_rank,
+                        n,
                         selector,
                         selector_offset,
-                        route.kept,
+                        n,
                     )?;
                 } else {
                     assemble_left_factor(
                         cuda,
                         &mut vector_data,
                         left_region,
-                        &plan.source_regions[route.source],
+                        &plan.source_regions()[route.source_region()],
                         &raw,
-                        route.full_rank,
+                        n,
                         &selector.0,
                         selector_offset,
-                        route.kept,
+                        n,
                     )?;
                 }
             }
@@ -669,11 +650,11 @@ where
         Ok(Eigh {
             d: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.middle_space, diagonal_data)),
+                repr: owned_repr(TypedTensorBody::dense(middle_space, diagonal_data)),
             },
             v: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.left_space, vector_data)),
+                repr: owned_repr(TypedTensorBody::dense(left_space, vector_data)),
             },
         })
     }
@@ -753,7 +734,9 @@ where
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+        // Region admission precedes the placement preflight; the plan reads
+        // the same cached regions.
+        sector_regions(source_space.structure(), source_space.nout())?;
 
         {
             // Preflight only: the ordinal is immutable, so this placement
@@ -769,9 +752,11 @@ where
 
         // Provider queries and final HomSpace admission belong outside the
         // execution lock; the plan owns every source-to-factor route.
-        let plan = self.compile_cuda_qr_plan(source_regions)?;
-        let left_len = plan.left_space.space().required_len()?;
-        let right_len = plan.right_space.space().required_len()?;
+        let plan = self.compact_factor_plan()?;
+        let left_space = plan.left_space(self.logical_space())?;
+        let right_space = plan.right_space(self.logical_space())?;
+        let left_len = left_space.space().required_len()?;
+        let right_len = right_space.space().required_len()?;
 
         let (left_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
@@ -782,10 +767,13 @@ where
             let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
-            for route in &plan.routes {
-                let source_region = &plan.source_regions[route.source];
-                let left_region = &plan.left_regions[route.left];
-                let right_region = &plan.right_regions[route.right];
+            for (route, left, right) in executed_routes(&plan) {
+                let rank = route.rank();
+                let source_region = &plan.source_regions()[route.source_region()];
+                let left_region = &plan.left_regions()[left];
+                let right_region = &plan.right_regions()[right];
+                let aligned_left = plan.left_preserves_trees(route);
+                let aligned_right = plan.right_preserves_trees(route);
                 let (raw_left, raw_right) = cuda_qr_region::<D>(
                     cuda,
                     &source.0,
@@ -793,9 +781,9 @@ where
                     source_region.rows(),
                     source_region.cols(),
                 )?;
-                let selector = Self::identity_selector(cuda, route)?;
+                let selector = Self::identity_selector(cuda, rank, aligned_left, aligned_right)?;
                 let scratch = TypedCudaQrScratch::new(raw_left, raw_right, selector);
-                if route.aligned_left {
+                if aligned_left {
                     copy_whole_factor(cuda, &mut left_data, left_region, &scratch.left)?;
                 } else {
                     assemble_left_factor(
@@ -804,13 +792,13 @@ where
                         left_region,
                         source_region,
                         &scratch.left,
-                        route.rank,
+                        rank,
                         &Self::route_selector(&scratch.selector)?.0,
                         0,
-                        route.rank,
+                        rank,
                     )?;
                 }
-                if route.aligned_right {
+                if aligned_right {
                     copy_whole_factor(cuda, &mut right_data, right_region, &scratch.right)?;
                 } else {
                     assemble_right_factor(
@@ -819,8 +807,8 @@ where
                         right_region,
                         source_region,
                         &Self::route_selector(&scratch.selector)?.0,
-                        route.rank,
-                        route.rank,
+                        rank,
+                        rank,
                         &scratch.right,
                     )?;
                 }
@@ -831,11 +819,11 @@ where
         Ok(Qr {
             q: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+                repr: owned_repr(TypedTensorBody::dense(left_space, left_data)),
             },
             r: Self {
                 runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+                repr: owned_repr(TypedTensorBody::dense(right_space, right_data)),
             },
         })
     }
