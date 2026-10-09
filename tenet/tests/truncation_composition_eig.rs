@@ -527,7 +527,11 @@ macro_rules! assert_shuffled_eig_composition {
                 terms,
             );
         }
-        assert!(gapped, "{}: some policy must keep a non-contiguous set", $tag);
+        assert!(
+            gapped,
+            "{}: some policy must keep a non-contiguous set",
+            $tag
+        );
     }};
 }
 

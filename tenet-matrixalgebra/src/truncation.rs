@@ -693,9 +693,7 @@ const DISCARD: bool = false;
 fn sector_order(values: &[f64], keep: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..values.len()).collect();
     order.sort_by(|&a, &b| {
-        let ascending = values[a]
-            .partial_cmp(&values[b])
-            .unwrap_or(Ordering::Equal);
+        let ascending = values[a].partial_cmp(&values[b]).unwrap_or(Ordering::Equal);
         if keep {
             ascending.reverse()
         } else {
@@ -1068,7 +1066,10 @@ mod tests {
         kept.iter()
             .map(|mask| {
                 let count = mask.iter().take_while(|&&keep| keep).count();
-                assert!(mask[count..].iter().all(|&keep| !keep), "{mask:?} is not a prefix");
+                assert!(
+                    mask[count..].iter().all(|&keep| !keep),
+                    "{mask:?} is not a prefix"
+                );
                 count
             })
             .collect()
@@ -1076,7 +1077,9 @@ mod tests {
 
     /// A per-sector mask keeping exactly `positions`.
     fn mask(len: usize, positions: &[usize]) -> Vec<bool> {
-        (0..len).map(|position| positions.contains(&position)).collect()
+        (0..len)
+            .map(|position| positions.contains(&position))
+            .collect()
     }
 
     fn profile(pairs: [(usize, usize); 2]) -> TruncationSpace {
@@ -1394,8 +1397,11 @@ mod tests {
             Truncation::rank(3).and(Truncation::absolute_cutoff(1.5).unwrap()),
         ] {
             let decision = select(&eigh, &policy).unwrap();
-            assert_eq!(decision.kept, [both.clone()], "{policy:?}");
-            assert!((decision.error - 1.25f64.sqrt()).abs() < 1e-15, "{policy:?}");
+            assert_eq!(decision.kept, std::slice::from_ref(&both), "{policy:?}");
+            assert!(
+                (decision.error - 1.25f64.sqrt()).abs() < 1e-15,
+                "{policy:?}"
+            );
         }
         let one = TruncationSpace::new(rule(), [(SectorId::new(0), 1)]);
         let decision = select(&eigh, &Truncation::space(one)).unwrap();
@@ -1678,10 +1684,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            cases,
-            5 * 40 * 2 * (RTOLS.len() + RANKS.len() + 1)
-        );
+        assert_eq!(cases, 5 * 40 * 2 * (RTOLS.len() + RANKS.len() + 1));
     }
 
     #[test]
@@ -1753,7 +1756,6 @@ mod tests {
         assert_eq!(decision.kept, [mask(3, &[0, 2])]);
         assert_eq!(decision.error, 1.0);
     }
-
 
     #[test]
     fn discard_weight_stops_at_the_first_failure() {

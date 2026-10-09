@@ -402,7 +402,11 @@ pub fn select<S: Ord + Clone>(offers: &[Offer<S>], policy: &Policy<S>) -> Vec<Ve
     let filter = |threshold: f64| -> Vec<Vec<usize>> {
         offers
             .iter()
-            .map(|o| (0..o.magnitudes.len()).filter(|&p| o.magnitudes[p] >= threshold).collect())
+            .map(|o| {
+                (0..o.magnitudes.len())
+                    .filter(|&p| o.magnitudes[p] >= threshold)
+                    .collect()
+            })
             .collect()
     };
     match policy {
@@ -470,11 +474,7 @@ pub fn select<S: Ord + Clone>(offers: &[Offer<S>], policy: &Policy<S>) -> Vec<Ve
                     .find(|(s, _)| *s == o.sector)
                     .map_or(0, |&(_, r)| r);
                 let mut order = all(o);
-                order.sort_by(|&a, &b| {
-                    o.magnitudes[b]
-                        .total_cmp(&o.magnitudes[a])
-                        .then(a.cmp(&b))
-                });
+                order.sort_by(|&a, &b| o.magnitudes[b].total_cmp(&o.magnitudes[a]).then(a.cmp(&b)));
                 order.truncate(rank);
                 order.sort_unstable();
                 order
