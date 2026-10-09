@@ -540,7 +540,7 @@ pub fn cuda_region_trace_accumulate<D: CudaScalar>(
 /// view but required a compact source view at offset 0 (0.6.0 accepts strided
 /// sources, tenferro-rs#1836; adopting that is leaf M4), so the source is read
 /// from its start; the caller owns the proof that the destination region's tree layout
-/// is identical to what it reads (see `compile_cuda_qr_plan`). A source longer
+/// is identical to what it reads (see `CompactFactorPlan::left_preserves_trees`). A source longer
 /// than the region is accepted because contiguity is a layout predicate: the
 /// leading `rows * cols` elements of a compact buffer are themselves compact,
 /// so one maximum-length buffer can serve every shorter region.

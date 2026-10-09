@@ -42,9 +42,10 @@ pub use truncation::{
 #[doc(hidden)]
 pub mod seam {
     pub use crate::factorize::{
-        admit_compact_diagonal, coupled_sector_block_dimensions_generic_checked,
-        decide_bond_truncation, decide_bond_truncation_generic_checked, diagonal_bond_data,
-        eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
+        admit_compact_diagonal, compact_factor_routes,
+        coupled_sector_block_dimensions_generic_checked, decide_bond_truncation,
+        decide_bond_truncation_generic_checked, diagonal_bond_data, eig_full_dyn,
+        eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
         eigh_full_from_source, eigh_vals_dyn, eigh_vals_from_source, left_null_from_source,
         left_polar_adjoint_from_parent, left_polar_from_source, left_polar_of_diagonal,
         lq_compact_from_source, lq_full_from_source, pinv_diagonal_spectrum,
@@ -55,9 +56,9 @@ pub mod seam {
         svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,
         svd_full_from_source, svd_vals_dyn, svd_vals_from_source,
         validate_endomorphism_region_stacking, validate_hermitian_regions, BoundDynamicTensorRef,
-        CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn, ExecutorLease, FactorMode,
-        FactorOutput, FactorSource, FactorSpaceAuthority, SvdFactorsDyn, SvdFullFactorsDyn,
-        EIGH_EIGENVALUE_CHECK, EIGH_FULL_STACKING,
+        CheckedGenericFactorPlanError, CompactFactorPlan, CompactFactorRoute, EigFullDyn,
+        EighFullDyn, ExecutorLease, FactorMode, FactorOutput, FactorSource, FactorSpaceAuthority,
+        SvdFactorsDyn, SvdFullFactorsDyn, EIGH_EIGENVALUE_CHECK, EIGH_FULL_STACKING,
     };
     #[cfg(feature = "diagnostics")]
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
