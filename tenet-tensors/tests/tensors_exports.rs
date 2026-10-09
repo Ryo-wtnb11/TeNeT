@@ -207,7 +207,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "CudaContractScratch",
         "CudaDynamicTreeMembersWorkspace",
         "DynamicFusionMapSpace",
-        "DynamicTreeMembersWorkspace",
+        "HostContractMembersWorkspace",
         "FusionContractOrientation",
         "FusionContractPlan",
         "FusionOperand",

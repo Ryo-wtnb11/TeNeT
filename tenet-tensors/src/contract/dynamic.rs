@@ -83,6 +83,7 @@ mod typed_eager;
 pub(crate) use artifact::*;
 #[cfg(test)]
 pub(crate) use test_entry::*;
+pub(in crate::contract) use transformed_spaces::DynamicFusionTransformedSourceEntry;
 use transformed_spaces::*;
 pub(super) use twist::*;
 #[cfg(test)]
