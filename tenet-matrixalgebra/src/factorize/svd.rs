@@ -1140,9 +1140,9 @@ where
 }
 
 /// Host-side truncation decision over the spectra of a bond factorization:
-/// the selection magnitude is `|value|` and each `spectra` entry is stored
-/// descending by magnitude (the `*_full` output contract), so the kept set is
-/// always a per-sector prefix.
+/// the selection magnitude is `|value|`, each `spectra` entry is in the
+/// factorization's stored order (any order), and the kept set is a per-sector
+/// mask over those stored positions (TensorKit's `findtruncated`).
 ///
 /// Public and `doc(hidden)` only because the typed facade's
 /// `GradedSpace::find_truncated`, in the `tenet` crate, is its caller; it is

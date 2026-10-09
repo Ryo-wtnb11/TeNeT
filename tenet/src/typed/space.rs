@@ -368,10 +368,10 @@ where
     /// Decides which states of this leg a [`Truncation`] keeps, and how much
     /// weight it discards.
     ///
-    /// This is MatrixAlgebraKit's `findtruncated_svd` plus `truncation_error`
-    /// in one call: `spectra` are per-sector magnitudes, already descending, as
-    /// every TeNeT `*_compact` / `*_full` factorization publishes them, and the
-    /// result names the surviving bond states. A truncated factorization is
+    /// This is TensorKit's `findtruncated` over a `SectorVector` plus
+    /// `truncation_error` in one call: `spectra` are per-sector values in the
+    /// order a TeNeT `*_compact` / `*_full` factorization publishes them, and
+    /// the result names the surviving bond states by their stored positions. A truncated factorization is
     /// this decision composed with an untruncated one: apply it with
     /// [`TensorMap::restrict_leg`]: on the bond leg of each isometric factor,
     /// and on both legs of the spectrum factor, which keeps a compact one
@@ -418,17 +418,24 @@ where
     /// kept sector is the one TensorKit keeps.
     ///
     /// Values are selected by magnitude (`|v|`), so signed `eigh` eigenvalues
-    /// and complex `eig` eigenvalues can be passed as published. Magnitudes
-    /// must be descending within a sector and finite; non-finite values are
-    /// rejected.
+    /// and complex `eig` eigenvalues can be passed as published, in any order
+    /// within a sector; non-finite values are rejected. The kept set is
+    /// TensorKit's: ties in magnitude go to the earlier sector in TensorKit's
+    /// order, then to the earlier position, which [`Truncation::Rank`] keeps
+    /// first and [`Truncation::DiscardWeight`] discards first. Kept states
+    /// stay in stored order (see [`Truncation::Space`] for the one policy
+    /// where TensorKit reorders them).
     ///
     /// # Complexity
     ///
-    /// Spectrum-sized only, never payload-sized: `O(K)` to copy and validate
-    /// the `K = sum_c k_c` values, plus the decision's own cost — `O(K log G)`
-    /// for [`Truncation::Rank`], `O(G + D log G)` for
-    /// [`Truncation::DiscardWeight`] over `D` discarded values, `O(K)`
-    /// otherwise — and `O(G log G)` to build the selection for `G` sectors.
+    /// Spectrum-sized only, never payload-sized, for `K = sum_c n_c` values
+    /// in `G` sectors: `O(K)` to copy and validate; for [`Truncation::Rank`],
+    /// [`Truncation::DiscardWeight`] and [`Truncation::Space`] a stable sort
+    /// per sector, `O(n_c)` when that sector is already monotone in magnitude
+    /// (an SVD spectrum) and `O(n_c log n_c)` otherwise, then
+    /// `O(G + k log G)` to merge `k` kept (`Rank`) or discarded
+    /// (`DiscardWeight`) values; `O(K)` for the other policies and for the
+    /// error; and `O(K + G log G)` to build the selection.
     ///
     /// # Errors
     ///
@@ -500,12 +507,9 @@ where
             encoded
                 .iter()
                 .zip(&decision.kept)
-                .filter(|&(_, &count)| count > 0)
-                .map(|(entry, &count)| {
-                    (
-                        entry.sector,
-                        tenet_tensors::SelectedRuns::from_elem(0..count, 1),
-                    )
+                .filter_map(|(entry, mask)| {
+                    let runs = kept_runs(mask);
+                    (!runs.is_empty()).then_some((entry.sector, runs))
                 })
                 .collect(),
         )?;
@@ -514,6 +518,21 @@ where
             error: decision.error,
         })
     }
+}
+
+/// The canonical maximal runs of the `true` positions of `mask`, in `O(n)`.
+fn kept_runs(mask: &[bool]) -> tenet_tensors::SelectedRuns {
+    let mut runs = tenet_tensors::SelectedRuns::new();
+    for (position, &kept) in mask.iter().enumerate() {
+        if !kept {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(run) if run.end == position => run.end += 1,
+            _ => runs.push(position..position + 1),
+        }
+    }
+    runs
 }
 
 impl<R> GradedSpace<R> {
