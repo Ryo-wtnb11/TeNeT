@@ -293,6 +293,8 @@ pub use batched::{
 mod contract_stacking_tests;
 mod serialization;
 #[cfg(test)]
+mod spectrum_match_tests;
+#[cfg(test)]
 mod view_tests;
 pub use serialization::{
     DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,

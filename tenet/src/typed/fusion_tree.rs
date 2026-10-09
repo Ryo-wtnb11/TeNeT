@@ -763,6 +763,37 @@ where
     Ok(data)
 }
 
+/// Pairs blocks with spectrum entries when both run in the same sector order.
+///
+/// Why a hint and not a merge that assumes sortedness: the result must not
+/// depend on an ordering the type does not enforce. A block whose entry is not
+/// next falls back to a scan, counted in `misses`.
+#[derive(Default)]
+pub(super) struct SpectrumCursor {
+    next: usize,
+    pub(super) misses: usize,
+}
+
+impl SpectrumCursor {
+    pub(super) fn find<'a, V>(
+        &mut self,
+        spectrum: &'a [tenet_matrixalgebra::SectorSpectrum<V>],
+        sector: tenet_core::SectorId,
+    ) -> Option<&'a tenet_matrixalgebra::SectorSpectrum<V>> {
+        if let Some(entry) = spectrum
+            .get(self.next)
+            .filter(|entry| entry.sector == sector)
+        {
+            self.next += 1;
+            return Some(entry);
+        }
+        self.misses += 1;
+        let position = spectrum.iter().position(|entry| entry.sector == sector)?;
+        self.next = position + 1;
+        Some(&spectrum[position])
+    }
+}
+
 pub(super) fn add_spectrum_into<D>(
     space: &DynamicFusionMapSpace,
     data: &mut [D],
@@ -772,16 +803,36 @@ pub(super) fn add_spectrum_into<D>(
 where
     D: TensorScalar,
 {
+    add_spectrum_counting_misses(space, data, spectrum, diagonal_factor).map(drop)
+}
+
+/// [`add_spectrum_into`], returning how many blocks missed the cursor hint
+/// and paid a full scan of `spectrum`.
+///
+/// Blocks and spectrum entries both run in ascending sector order: the bond
+/// leg is sorted by `SectorLeg::build`, and every compact payload is sorted by
+/// its constructor (`diagonal`, `diagonal_factor_on_bound`, the decoder). The
+/// cursor therefore hits on every block and the walk is O(G). The scan on a
+/// miss keeps the result independent of that ordering, so it is a cost
+/// fallback and never a correctness assumption.
+pub(super) fn add_spectrum_counting_misses<D>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    diagonal_factor: D,
+) -> Result<usize, Error>
+where
+    D: TensorScalar,
+{
     let structure = space.structure();
+    let mut cursor = SpectrumCursor::default();
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
         let Some(pair) = block.key().as_fusion_tree_pair() else {
             continue;
         };
         let sector = pair.codomain_tree().coupled();
-        // O(k) per block, so O(k²) over the walk. Fine at the sizes a bond
-        // space reaches; index it if a spectrum ever spans many sectors.
-        let Some(entry) = spectrum.iter().find(|entry| entry.sector == sector) else {
+        let Some(entry) = cursor.find(spectrum, sector) else {
             // Both operands live on one space, and a compact payload's space is
             // built from its own spectrum, so every block's coupled sector has
             // an entry. Skipping is the safe behaviour if that ever breaks —
@@ -807,7 +858,11 @@ where
             data[position] = data[position] + scale_value(value, diagonal_factor);
         }
     }
-    Ok(())
+    debug_assert_eq!(
+        cursor.misses, 0,
+        "blocks and spectrum entries must both run in ascending sector order"
+    );
+    Ok(cursor.misses)
 }
 
 /// Whether `space` is a bond space: rank one on each side, with the same leg on
