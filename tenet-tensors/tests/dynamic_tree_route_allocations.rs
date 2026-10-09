@@ -183,6 +183,7 @@ where
                         (case.rhs.space().structure(), &rhs[..members * rhs_len]),
                         workspace,
                         members,
+                        tenet_tensors::ContractDestinationInit::Axpby(0.0),
                     )
                     .unwrap()
             })
