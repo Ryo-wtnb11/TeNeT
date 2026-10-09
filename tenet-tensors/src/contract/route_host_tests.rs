@@ -514,7 +514,15 @@ fn a_warm_one_member_replay_converts_no_coefficient_pack() {
 fn a_warm_eager_contraction_converts_no_coefficient_pack() {
     // Why (#2101): the eager lhs, rhs and output transforms each replay into
     // their own workspace, so a warm call finds all three Multi coefficient
-    // packs installed instead of evicting each other's.
+    // packs installed instead of evicting each other's. Isolated: an eager
+    // call resolves its transformers through the process-global cache, which
+    // a concurrent test's clear would rebuild under a fresh identity.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_WARM_EAGER_PACKS_ISOLATED",
+        "contract::storage_contract_tests::route_host_tests::a_warm_eager_contraction_converts_no_coefficient_pack",
+    ) {
+        return;
+    }
     fn check<R>(case: &Case<R>, what: &str)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
