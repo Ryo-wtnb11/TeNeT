@@ -81,6 +81,9 @@ pub(super) trait CudaRouteStage<D: CudaScalar, C> {
     const STALE_CORE_DESTINATION: bool;
 
     /// Every check of this call that precedes the first submission.
+    /// `core_init` is the destination init [`core_step`] will apply to the
+    /// core destination, so a provider sizes its inactive-region list from
+    /// the same decision the fill uses.
     #[allow(clippy::too_many_arguments)]
     fn admit(
         &mut self,
@@ -92,6 +95,7 @@ pub(super) trait CudaRouteStage<D: CudaScalar, C> {
         members: usize,
         alpha: D,
         init: ContractDestinationInit<D>,
+        core_init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError>;
 
     /// Overwrite-moves one non-borrowed source into its stage-owned buffer,
@@ -164,9 +168,14 @@ pub(super) fn execute_route_cuda<St, D, C>(
 ) -> Result<(), OperationError>
 where
     St: CudaRouteStage<D, C>,
-    D: CudaScalar,
+    D: CudaScalar + num_traits::Zero,
     C: DenseBlockScalar,
 {
+    let (core_alpha, core_init) = match route.output {
+        None => (alpha, init),
+        Some(_) if St::STALE_CORE_DESTINATION => (D::ONE, ContractDestinationInit::Axpby(D::ZERO)),
+        Some(_) => (D::ONE, ContractDestinationInit::Zeroed),
+    };
     stage.admit(
         ctx,
         &route,
@@ -176,6 +185,7 @@ where
         members,
         alpha,
         init,
+        core_init,
     )?;
     for (side, source, core, payload) in [
         (Stage::Lhs, &route.lhs_source, route.lhs_core, lhs),
@@ -185,11 +195,6 @@ where
             stage.source(ctx, side, source, core, payload)?;
         }
     }
-    let (core_alpha, core_init) = match route.output {
-        None => (alpha, init),
-        Some(_) if St::STALE_CORE_DESTINATION => (D::ONE, ContractDestinationInit::Axpby(D::ZERO)),
-        Some(_) => (D::ONE, ContractDestinationInit::Zeroed),
-    };
     let caller = route.output.is_none().then_some(&mut *dst);
     let io = stage.core_io(ctx, &route, caller, lhs, rhs)?;
     core_step::<St, D, C>(ctx, route.plan, io, core_alpha, core_init)?;
@@ -225,12 +230,9 @@ fn core_step<St, D, C>(
 ) -> Result<(), OperationError>
 where
     St: CudaRouteStage<D, C>,
-    D: CudaScalar,
+    D: CudaScalar + num_traits::Zero,
 {
-    let beta = match init {
-        ContractDestinationInit::Zeroed => D::ZERO,
-        ContractDestinationInit::Axpby(beta) => beta,
-    };
+    let beta = init.active_beta();
     let mode = if alpha == D::ONE && beta == D::ZERO {
         CoreMode::Overwrite
     } else {
@@ -325,7 +327,8 @@ where
         _: &CudaStorage<D>,
         members: usize,
         _: D,
-        init: ContractDestinationInit<D>,
+        _: ContractDestinationInit<D>,
+        core_init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError> {
         if members != 1 {
             return Err(EAGER_IS_ONE_MEMBER);
@@ -334,7 +337,7 @@ where
         CudaMemberZeroRegions::admit(inactive)?;
         // The region list the core step fills, converted before the first
         // submission like every other check.
-        if route.output.is_some() || inactive_blocks_need_beta(init) {
+        if inactive_blocks_need_beta(core_init) {
             CudaMemberZeroRegions::fill_single(&mut self.scratch.zero_regions, inactive)?;
         } else {
             self.scratch.zero_regions.clear();
@@ -505,7 +508,7 @@ pub fn execute_storage_contract_resolution_on_cuda<D, C>(
     init: ContractDestinationInit<D>,
 ) -> Result<(), OperationError>
 where
-    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
+    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + num_traits::Zero + 'static,
     C: DenseBlockScalar,
 {
     execute_route_cuda(
@@ -835,6 +838,7 @@ where
         members: usize,
         alpha: D,
         init: ContractDestinationInit<D>,
+        _: ContractDestinationInit<D>,
     ) -> Result<(), OperationError> {
         admit_member_call(alpha, init, members)?;
         // A copied source reads the caller's payload layout; a borrowed one is
@@ -996,7 +1000,7 @@ pub fn execute_storage_contract_members_cuda<D>(
     init: ContractDestinationInit<D>,
 ) -> Result<(), OperationError>
 where
-    D: CudaScalar + RecouplingCoefficientAction<f64>,
+    D: CudaScalar + RecouplingCoefficientAction<f64> + num_traits::Zero,
 {
     // Core and CopyC members still run `ContractPlan::run_cuda` (#1859 C2).
     dynamic_tree(resolution)?;
