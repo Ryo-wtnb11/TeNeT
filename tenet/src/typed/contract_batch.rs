@@ -5,6 +5,9 @@ use tenet_tensors::{DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContrac
 
 #[path = "contract_batch_copy_c.rs"]
 mod copy_c;
+#[cfg(test)]
+#[path = "contract_batch_pins.rs"]
+mod member_pins;
 use copy_c::CopyCWorkspace;
 
 // Only the two owned-dense stack payloads have an execution implementation.
