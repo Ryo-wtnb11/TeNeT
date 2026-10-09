@@ -888,13 +888,11 @@ fn compact_diagonal_eig_full_ties_and_signed_zeros_are_valid() {
     // Lexicographic (re, im) under IEEE total order, as MAK's `isless`:
     // the `-0.0` real part precedes every `+0.0` one.
     assert_eq!(values[0].re.to_bits(), (-0.0_f64).to_bits());
-    assert!(values
-        .windows(2)
-        .all(|pair| pair[0]
-            .re
-            .total_cmp(&pair[1].re)
-            .then(pair[0].im.total_cmp(&pair[1].im))
-            .is_le()));
+    assert!(values.windows(2).all(|pair| pair[0]
+        .re
+        .total_cmp(&pair[1].re)
+        .then(pair[0].im.total_cmp(&pair[1].im))
+        .is_le()));
     assert_eq!(
         values
             .iter()

@@ -1786,3 +1786,51 @@ fn eigh_admits_gemm_built_gram_and_congruence_matrices_at_n_1000() {
         assert_eigh_preflight(&one_sector_rectangular_matrix(matrix, n, n), true);
     }
 }
+
+#[test]
+fn ascending_provider_eigh_order_is_published_without_a_permutation() {
+    // What: the LAPACK/faer `syev` spectrum is already ascending, so full and
+    // values-only EIGH publish it after the O(n) check alone: no sort, no
+    // value copy, no eigenvector column permutation (#1985).
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    let full = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let values = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    assert_eq!(full.eigenvalues, values);
+    assert!(full
+        .eigenvalues
+        .iter()
+        .any(|spectrum| spectrum.values.iter().any(|&x| x < 0.0)
+            && spectrum.values.iter().any(|&x| x > 0.0)));
+}
+
+#[test]
+fn eigenvalue_order_authority_is_stable_and_skips_sorted_input() {
+    // What: the order authority returns the stable sorting permutation, and
+    // `false` with the identity for already-ordered input (#1985).
+    use crate::factorize::{ascending_eigh_order, lexicographic_eig_order};
+    let mut order = [9; 4];
+    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    assert!(!ascending_eigh_order(&[-3.0, -1.0, -1.0, 2.0], &mut order));
+    assert_eq!(order, [0, 1, 2, 3]);
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    // Ties keep stored order.
+    assert!(ascending_eigh_order(&[2.0, -1.0, 0.5, -1.0], &mut order));
+    assert_eq!(order, [1, 3, 2, 0]);
+    let c = Complex64::new;
+    // A conjugate pair as `geev` returns it (`+` first), equal real parts,
+    // and a value of larger magnitude that sorts first.
+    let values = [c(1.0, 2.0), c(1.0, -2.0), c(-3.0, 0.0), c(1.0, 2.0)];
+    assert!(lexicographic_eig_order(&values, &mut order));
+    assert_eq!(order, [2, 1, 0, 3]);
+    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 2);
+    let mut order = [9; 3];
+    assert!(!lexicographic_eig_order(
+        &[c(-1.0, 5.0), c(0.0, -1.0), c(0.0, 1.0)],
+        &mut order
+    ));
+    assert_eq!(order, [0, 1, 2]);
+}

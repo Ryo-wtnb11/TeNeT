@@ -83,7 +83,7 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
             after.h2d_bytes - before.h2d_bytes,
         ));
 
-        // Device vs host: the same descending-|λ| spectrum, and the device
+        // Device vs host: the same ascending spectrum, and the device
         // eigenvectors (raw cuSOLVER gauge) satisfy the eigen equation.
         let Eigh { d: host_d, .. } = source
             .eigh_full(
