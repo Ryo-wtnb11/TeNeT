@@ -511,6 +511,77 @@ fn a_warm_one_member_replay_converts_no_coefficient_pack() {
 }
 
 #[test]
+fn a_warm_eager_contraction_converts_no_coefficient_pack() {
+    // Why (#2101): the eager lhs, rhs and output transforms each replay into
+    // their own workspace, so a warm call finds all three Multi coefficient
+    // packs installed instead of evicting each other's.
+    fn check<R>(case: &Case<R>, what: &str)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        let resolution = planned_resolution(case);
+        let crate::contract::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+        else {
+            panic!("{what}: fixture must plan DynamicTree");
+        };
+        assert!(artifact.test_has_core_dst(), "{what}");
+        assert_eq!(artifact.borrowed_sources(), (false, false), "{what}");
+        let dst = case.dst();
+        let len = dst.space().required_len().unwrap();
+        let lhs = exact_data(case.lhs.space().required_len().unwrap(), 1);
+        let rhs = exact_data(case.rhs.space().required_len().unwrap(), 3);
+        let mut expected = vec![f64::NAN; len];
+        base_sequence(
+            artifact,
+            dst.space().structure(),
+            &mut expected,
+            &lhs,
+            &rhs,
+            1.0,
+            ContractDestinationInit::Axpby(0.0),
+        );
+        let run = |context: &mut Context<f64>| {
+            let mut out = vec![f64::NAN; len];
+            context
+                .tensorcontract_fusion_dyn_prelowered_into_with_init(
+                    &dst,
+                    &mut out,
+                    FusionOperand::direct(case.lhs.space()),
+                    &lhs,
+                    FusionOperand::direct(case.rhs.space()),
+                    &rhs,
+                    case.axes(),
+                    1.0,
+                    ContractDestinationInit::Axpby(0.0),
+                )
+                .unwrap();
+            assert_eq!(bits(&out), bits(&expected), "{what}");
+            context.eager_coefficient_pack_builds()
+        };
+        let mut context = Context::<f64>::default();
+        let cold = run(&mut context);
+        assert_eq!(cold, [1, 1, 1], "{what}: all three stages recouple");
+        for _ in 0..3 {
+            assert_eq!(run(&mut context), cold, "{what}");
+        }
+    }
+    check(&su2_rank5_case(), "SU2");
+    let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let v = || fermion_su2_leg(&provider, false);
+    check(
+        &Case {
+            lhs: space(&provider, vec![v(), v(), v()], vec![v(), v()]),
+            rhs: space(&provider, vec![v(), v()], vec![v(), v()]),
+            lhs_axes: vec![3, 1],
+            rhs_axes: vec![0, 3],
+            output_axes: vec![2, 0, 4, 1, 3],
+        },
+        "fZ2xSU2",
+    );
+}
+
+#[test]
 fn one_workspace_refills_its_core_destination_only_on_a_replay_change() {
     // Plan and member-count changes on one workspace, B = 1 included:
     // only a new replay (cold, B change, plan change) fills the inactive
@@ -558,16 +629,17 @@ fn a_failed_one_member_replay_rezeroes_on_retry() {
 
 #[test]
 fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes() {
-    use crate::contract::route_host::{execute_dynamic_tree_route_host, HostRouteScratch};
+    use crate::contract::route_host::{
+        execute_dynamic_tree_route_host, EagerTreeStage, HostRouteScratch,
+    };
     let (_, case, _) = overwrite_cases().pop().unwrap();
     let artifact = members_artifact(&case);
     let dst = case.dst();
     let len = dst.space().required_len().unwrap();
     let lhs = host_data(case.lhs.space(), 3).repeat(2);
     let rhs = host_data(case.rhs.space(), 5).repeat(2);
-    let mut tree = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
-        DenseTreeTransformOperations::default(),
-    );
+    let mut tree_backend = DenseTreeTransformOperations::default();
+    let mut tree_workspaces = <[tenet_operations::TreeTransformWorkspace<f64>; 3]>::default();
     let mut backend = DenseTreeTransformOperations::default();
     let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
     let mut slot = crate::contract::route_host::CoreSlot::default();
@@ -596,7 +668,10 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
     ] {
         let mut out = vec![f64::NAN; 2 * len];
         let error = execute_dynamic_tree_route_host(
-            &mut tree,
+            &mut EagerTreeStage {
+                backend: &mut tree_backend,
+                workspaces: &mut tree_workspaces,
+            },
             &mut crate::contract::fusion_block::BackendRank2Gemm::<_, _, f64>::new(
                 &mut backend,
                 &mut backend_workspace,

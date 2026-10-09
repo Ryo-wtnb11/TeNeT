@@ -44,6 +44,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
+    BT::Workspace: Default,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
@@ -310,6 +311,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
+    BT::Workspace: Default,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
@@ -362,6 +364,7 @@ pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D, C>(
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, C>,
+    BT::Workspace: Default,
     BC: TensorContractBackend<D, C>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
@@ -402,6 +405,7 @@ pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, 
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, C>,
+    BT::Workspace: Default,
     BC: TensorContractBackend<D, C>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
@@ -442,12 +446,16 @@ fn execute_dynamic_tree_execution_artifact_with_profile<RuleKey, BT, BC, D, C>(
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, C>,
+    BT::Workspace: Default,
     BC: TensorContractBackend<D, C>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
     super::super::route_host::execute_dynamic_tree_route_host(
-        tree_context,
+        &mut super::super::route_host::EagerTreeStage {
+            backend: tree_context.backend_mut(),
+            workspaces: &mut Default::default(),
+        },
         &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
         fusion_block_workspace,
         scratch.route_scratch(),

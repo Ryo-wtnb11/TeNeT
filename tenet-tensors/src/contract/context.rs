@@ -407,6 +407,8 @@ pub struct TensorContractFusionExecutionContext<
     BC: TensorContractBackend<D, C>,
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    /// One transform workspace per contraction stage, indexed by `Stage`.
+    stage_workspaces: [BT::Workspace; 3],
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
@@ -489,9 +491,13 @@ where
         tree_context: TreeTransformExecutionContext<D, RuleKey, C, BT>,
         contract_backend: BC,
         contract_workspace: BC::Workspace,
-    ) -> Self {
+    ) -> Self
+    where
+        BT::Workspace: Default,
+    {
         Self {
             tree_context,
+            stage_workspaces: Default::default(),
             contract_backend,
             contract_workspace,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
@@ -574,22 +580,22 @@ where
         &mut self,
     ) -> (
         &mut BT,
-        &mut BT::Workspace,
+        &mut [BT::Workspace; 3],
         &mut BC,
         &mut BC::Workspace,
         &mut FusionBlockContractWorkspace<D>,
     ) {
         let Self {
             tree_context,
+            stage_workspaces,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
             ..
         } = self;
-        let (tree_backend, tree_workspace) = tree_context.backend_workspace_mut();
         (
-            tree_backend,
-            tree_workspace,
+            tree_context.backend_mut(),
+            stage_workspaces,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -623,6 +629,14 @@ where
             rhs,
             zero_inactive,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn eager_coefficient_pack_builds(&self) -> [usize; 3]
+    where
+        BT: TreeTransformBackend<D, C, Workspace = tenet_operations::TreeTransformWorkspace<D>>,
+    {
+        std::array::from_fn(|stage| self.stage_workspaces[stage].coefficient_pack_builds())
     }
 
     #[cfg(test)]
@@ -1899,6 +1913,7 @@ where
     {
         let Self {
             tree_context,
+            stage_workspaces,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -1911,7 +1926,10 @@ where
             scratch.core_dst = copy_c_scratch;
         }
         super::route_host::execute_route_host(
-            tree_context,
+            &mut super::route_host::EagerTreeStage {
+                backend: tree_context.backend_mut(),
+                workspaces: stage_workspaces,
+            },
             &mut super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace),
             fusion_block_workspace,
             scratch,
