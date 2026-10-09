@@ -363,33 +363,35 @@ fn indexed_adjoint_identity_allocates_only_owned_output() {
 fn indexed_adjoint_simple_group_allocates_only_owned_rows() {
     let half = SU2Irrep::from_twice_spin(1).sector_id();
     let leg = || SectorLeg::new([(half, 1)], false);
+    // `½^⊗3 ← ½^⊗3`: five tree pairs in one Simple group, so a per-source
+    // allocation would exceed the bound below.
     let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([leg(), leg()]),
-        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg(), leg()]),
+        FusionProductSpace::new([leg(), leg(), leg()]),
     );
     let sources = homspace.fusion_tree_keys(&SU2FusionRule);
-    assert_eq!(sources.len(), 2);
+    assert_eq!(sources.len(), 5);
     let structure = BlockStructure::from_blocks(
         sources
             .iter()
             .cloned()
             .enumerate()
             .map(|(index, key)| {
-                BlockSpec::column_major_with_key(key.into(), vec![1; 4], index).unwrap()
+                BlockSpec::column_major_with_key(key.into(), vec![1; 6], index).unwrap()
             })
             .collect(),
     )
     .unwrap();
     let indices = structure.fusion_tree_group_slice()[0].block_indices();
-    assert_eq!(indices, &[0, 1]);
+    assert_eq!(indices, (0..sources.len()).collect::<Vec<_>>());
     let run = || {
         multiplicity_free_permute_tree_pair_block_indexed(
             &SU2FusionRule,
             &structure,
             indices,
             FusionTreePairOrientation::Adjoint,
-            &[0, 1],
-            &[2, 3],
+            &[0, 1, 2],
+            &[3, 4, 5],
         )
         .unwrap()
     };
@@ -410,10 +412,13 @@ fn indexed_adjoint_simple_group_allocates_only_owned_rows() {
         .collect::<Vec<_>>();
 
     // What: a Simple cohort borrows its parent group and pair frames; the
-    // owned columns are the only allocations, independent of the source
-    // count.
+    // owned columns (three slices) are the only allocations, independent of
+    // the source count (the per-source rows form allocated 1 + 5).
     assert_eq!(columns(&transformed), expected);
-    assert!(allocations <= 3, "{allocations}");
+    assert!(
+        allocations <= 3 && allocations < sources.len(),
+        "{allocations}"
+    );
 }
 
 #[test]

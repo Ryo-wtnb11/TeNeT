@@ -650,7 +650,15 @@ fn present_zero_entry_propagates_nan_warm_as_cold() {
         crate::tensortrace_fusion_dyn_owned_checked(&trace.dst, &trace.src, &data, axes, 1.0)
             .unwrap()
     };
-    let cold_out = run();
+    // The compiles above left the groups resident: reset so this run is cold.
+    let cold_out = {
+        let _guard = cache_lock();
+        clear_structure_caches();
+        take_trace_column_activity();
+        let out = run();
+        assert_eq!(take_trace_column_activity().hits, 0);
+        out
+    };
     let warm_out = run();
     assert_eq!(
         cold_out
