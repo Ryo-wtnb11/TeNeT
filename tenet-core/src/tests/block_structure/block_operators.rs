@@ -365,7 +365,7 @@ fn indexed_adjoint_tree_pair_block_reuses_parent_group_order() {
     );
 
     for group in structure.fusion_tree_group_slice() {
-        let rows = multiplicity_free_permute_tree_pair_block_indexed(
+        let columns = multiplicity_free_permute_tree_pair_block_indexed(
             &SU2FusionRule,
             &structure,
             group.block_indices(),
@@ -374,6 +374,15 @@ fn indexed_adjoint_tree_pair_block_reuses_parent_group_order() {
             &[2, 3],
         )
         .unwrap();
+        let rows = (0..columns.source_count())
+            .map(|source| {
+                columns
+                    .column(source)
+                    .iter()
+                    .map(|(row, coefficient)| (columns.destinations()[*row].clone(), *coefficient))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         // What: indexed adjoint identity emits logical swapped keys once,
         // in parent source order, without changing compact transform rows.
         assert_eq!(

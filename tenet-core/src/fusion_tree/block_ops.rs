@@ -426,6 +426,29 @@ where
         .map(scatter_compact_tree_pair_block)
 }
 
+/// [`multiplicity_free_braid_tree_pair_block_validated`] as present
+/// per-source columns, each column in ascending destination row as the rows
+/// form lists them, so lowering visits the same rows in the same order.
+fn multiplicity_free_braid_tree_pair_block_columns_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<BlockSourceColumns<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    if prepared.is_identity() {
+        return Ok(BlockSourceColumns::identity(
+            (0..group.source_len)
+                .map(|index| validated_identity_tree_pair_row(&group, index).0)
+                .collect(),
+        ));
+    }
+    multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
+        .map(columns_compact_tree_pair_block)
+}
+
 fn validated_identity_tree_pair_row<R>(
     group: &ValidatedTreePairBlockGroup<'_, R>,
     index: usize,
@@ -605,8 +628,11 @@ where
     multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
 }
 
+/// Whole-block multiplicity-free permutation of one fusion-tree group of
+/// `structure`, read in `orientation`, as present per-source columns: the
+/// trace lowering's permutation (TensorKit `_trace_permute!` permutes a
+/// whole `FusionTreeBlock`).
 #[doc(hidden)]
-#[allow(clippy::type_complexity)]
 pub fn multiplicity_free_permute_tree_pair_block_indexed<R>(
     rule: &R,
     structure: &BlockStructure,
@@ -614,7 +640,7 @@ pub fn multiplicity_free_permute_tree_pair_block_indexed<R>(
     orientation: FusionTreePairOrientation,
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
-) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+) -> Result<BlockSourceColumns<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
@@ -627,7 +653,7 @@ where
     }
     validate_multiplicity_free_execution_style(rule)?;
     let Some(&first_index) = src_indices.first() else {
-        return Ok(Vec::new());
+        return Ok(BlockSourceColumns::empty());
     };
     let first = structure.block(first_index)?;
     let BlockKey::FusionTree(first) = first.key() else {
@@ -655,7 +681,7 @@ where
     let group =
         validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
             .expect("nonempty source block produces a validation proof");
-    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
+    multiplicity_free_braid_tree_pair_block_columns_validated(group, &prepared)
 }
 
 #[doc(hidden)]

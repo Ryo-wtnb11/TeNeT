@@ -298,6 +298,21 @@ fn block_identity_permute_allocates_only_owned_output() {
     assert_eq!(allocations, 2);
 }
 
+/// Per-source `(destination, coefficient)` rows of an indexed result.
+fn columns(
+    block: &tenet_core::BlockSourceColumns<FusionTreePairKey, f64>,
+) -> Vec<Vec<(FusionTreePairKey, f64)>> {
+    (0..block.source_count())
+        .map(|source| {
+            block
+                .column(source)
+                .iter()
+                .map(|(row, coefficient)| (block.destinations()[*row].clone(), *coefficient))
+                .collect()
+        })
+        .collect()
+}
+
 #[test]
 fn indexed_adjoint_identity_allocates_only_owned_output() {
     let source = FusionTreePairKey::try_pair_from_sector_ids(
@@ -338,9 +353,10 @@ fn indexed_adjoint_identity_allocates_only_owned_output() {
         FusionTreePairKey::pair(source.domain_tree().clone(), source.codomain_tree().clone());
 
     // What: oriented indexed preparation borrows parent key, group, shape, and
-    // stride metadata; only the intentional owned result and row allocate.
-    assert_eq!(transformed, vec![vec![(logical_source, 1.0)]]);
-    assert_eq!(allocations, 2);
+    // stride metadata; only the owned columns (destinations, column starts,
+    // entries) allocate.
+    assert_eq!(columns(&transformed), vec![vec![(logical_source, 1.0)]]);
+    assert!(allocations <= 3, "{allocations}");
 }
 
 #[test]
@@ -394,9 +410,10 @@ fn indexed_adjoint_simple_group_allocates_only_owned_rows() {
         .collect::<Vec<_>>();
 
     // What: a Simple cohort borrows its parent group and pair frames; the
-    // outer result plus two intentional owned rows are the only allocations.
-    assert_eq!(transformed, expected);
-    assert_eq!(allocations, 1 + sources.len());
+    // owned columns are the only allocations, independent of the source
+    // count.
+    assert_eq!(columns(&transformed), expected);
+    assert!(allocations <= 3, "{allocations}");
 }
 
 #[test]
