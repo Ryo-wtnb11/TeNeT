@@ -607,7 +607,7 @@ where
     /// The Host [`TensorMap::trace_pairs_into`]'s order:
     /// [`Error::RuntimeMismatch`] / [`Error::RuleMismatch`] against the
     /// destination; the braiding gate and pair-list errors of
-    /// [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// [`Self::trace_pairs`]; `SpaceMismatch` for a destination
     /// whose space or layout is not the result's; the duality error; then
     /// [`Self::trace_pairs`]'s device errors, [`Error::InvalidArgument`] for a
     /// destination that is not owned dense CUDA storage, aliases the source,

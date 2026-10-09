@@ -24,7 +24,7 @@ fn class(error: impl Debug) -> &'static str {
         "pair list"
     } else if text.contains(r#"StructureMismatch { tensor: "trace axes" }"#) {
         "non-dual pair"
-    } else if text.contains("does not match the operation result") {
+    } else if text.contains("SpaceMismatch {") {
         "destination space"
     } else {
         panic!("unclassified trace error: {text}")

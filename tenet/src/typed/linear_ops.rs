@@ -208,7 +208,7 @@ where
     /// compact/dense pair allocates only the dense result, and lazy inputs are
     /// read in their logical orientation without filling their caches.
     ///
-    /// Returns [`Error::RuntimeMismatch`] or [`Error::InvalidArgument`] before
+    /// Returns [`Error::RuntimeMismatch`] or `SpaceMismatch` (unequal spaces or block layouts) before
     /// producing a result. See [`Self::norm`] for a runnable example.
     ///
     /// ```compile_fail

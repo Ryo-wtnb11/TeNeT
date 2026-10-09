@@ -230,8 +230,8 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::RuntimeMismatch`]; [`Error::InvalidArgument`] for different
-    /// spaces or block layouts, a destination that is not owned dense CUDA
+    /// [`Error::RuntimeMismatch`]; `SpaceMismatch` for different
+    /// spaces or block layouts; [`Error::InvalidArgument`] for a destination that is not owned dense CUDA
     /// storage, or one that aliases `self`; [`Error::UnsupportedOnDevice`] for
     /// a lazy-adjoint or compact `self`, as for the returning
     /// [`Self::axpby`] with mixed operands; [`Error::DestinationShared`];

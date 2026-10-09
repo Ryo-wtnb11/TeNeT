@@ -331,9 +331,9 @@ where
         }
         let codomain = &homspace.codomain().legs()[0];
         if codomain != &homspace.domain().legs()[0] {
-            return Err(Error::InvalidArgument(format!(
-                "{operation} requires equal codomain and domain legs"
-            ))
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "diagview requires equal codomain and domain legs",
+            })
             .into());
         }
         Ok(codomain)

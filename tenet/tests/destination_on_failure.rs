@@ -444,18 +444,7 @@ macro_rules! u1_suite {
             format!("{op} wrong space before shared"),
             wrong(&traced),
             SpaceMismatch,
-            shared!(|d: &mut _| {
-                let result = t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5);
-                if let Err(Error::Operation(operation)) = &result {
-                    assert!(
-                        operation
-                            .to_string()
-                            .contains("does not match the operation result"),
-                        "{operation}"
-                    );
-                }
-                result
-            })
+            shared!(|d: &mut _| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5))
         );
 
         // contract_into

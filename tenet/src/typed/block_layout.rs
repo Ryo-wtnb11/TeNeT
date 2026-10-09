@@ -682,9 +682,9 @@ pub(crate) fn cat_homspace(
                 ));
             }
             if lhs_codomain != rhs_codomain {
-                return Err(Error::InvalidArgument(
-                    "cat(Side::Domain) requires identical codomain product spaces".to_string(),
-                ));
+                return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                    message: "cat(Side::Domain) requires identical codomain product spaces",
+                }));
             }
             let leg = oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
             Ok((
@@ -700,9 +700,9 @@ pub(crate) fn cat_homspace(
                 ));
             }
             if lhs_domain != rhs_domain {
-                return Err(Error::InvalidArgument(
-                    "cat(Side::Codomain) requires identical domain product spaces".to_string(),
-                ));
+                return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                    message: "cat(Side::Codomain) requires identical domain product spaces",
+                }));
             }
             let leg = oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
             Ok((
@@ -1319,9 +1319,9 @@ pub(crate) fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(
 /// Direct-sums two sector legs by adding matching degeneracies.
 pub(crate) fn oplus_sector_legs(lhs: &SectorLeg, rhs: &SectorLeg) -> Result<SectorLeg, Error> {
     if lhs.is_dual() != rhs.is_dual() {
-        return Err(Error::InvalidArgument(
-            "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
-        ));
+        return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+            message: "oplus: cannot direct-sum spaces of opposite duality (dualize one first)",
+        }));
     }
     let mut sectors: Vec<(SectorId, usize)> = lhs.iter().collect();
     for (sector, deg) in rhs.iter() {

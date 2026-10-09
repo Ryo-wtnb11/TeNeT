@@ -513,6 +513,14 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
         );
         assert!(format!("{error:?}").contains(fragment), "{error:?}");
     };
+    let assert_mismatch = |error: tenet::typed::Error, fragment: &str| {
+        assert!(
+            matches!(&error, tenet::typed::Error::Operation(operation)
+                if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. })),
+            "{error:?}"
+        );
+        assert!(format!("{error:?}").contains(fragment), "{error:?}");
+    };
 
     // Wrong rank: a multi-leg changed side.
     let provider = Arc::new(tenet::sector::U1FusionRule);
@@ -545,7 +553,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
             u1_typed_fill,
         )
         .unwrap();
-    assert_invalid(
+    assert_mismatch(
         typed_lhs
             .cat(&other_codomain_typed, Side::Domain)
             .unwrap_err(),
@@ -571,7 +579,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
         stack_pair(&[(0, 1), (1, 1)]);
     let typed_stack_rhs: TensorMap<tenet::sector::U1FusionRule, f64> =
         stack_pair(&[(0, 2), (1, 1)]);
-    assert_invalid(
+    assert_mismatch(
         typed_stack_lhs
             .cat(&typed_stack_rhs, Side::Codomain)
             .unwrap_err(),
@@ -590,7 +598,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
             u1_typed_fill,
         )
         .unwrap();
-    assert_invalid(
+    assert_mismatch(
         typed_lhs.cat(&dual_domain_typed, Side::Domain).unwrap_err(),
         "opposite duality",
     );
