@@ -1595,6 +1595,12 @@ where
 /// structural admission and pivotal compilation; a failed compile or
 /// execution commits nothing.
 ///
+/// `read` may answer a single-scalar, unconjugated destination from the
+/// compiled terms alone (a compact-diagonal source, #1866); its value is
+/// scaled by `alpha` and neither the payload nor the execution runs. It is
+/// asked nothing for any other destination, and on `None` the same compiled
+/// structure executes in the same transaction.
+///
 /// [TensorKit trace_permute!](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/tensoroperations.jl#L208-L302)
 /// fixes pair selection, splitting and pivotal factors; [QSpace::trace](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.cc#lines-4501:4625)
 /// and its [traceQS](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/traceQS.cc)
@@ -1606,6 +1612,7 @@ where
 fn tensortrace_owned_in<M, R, D, P>(
     stage: M::TraceStage<'_>,
     src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
     payload: impl FnOnce() -> P,
     axes: TensorTraceAxisSpec<'_>,
     alpha: D,
@@ -1627,15 +1634,20 @@ where
 {
     let mut pending = M::open_trace();
     let structure = M::compile_trace(&stage, src, axes, &mut pending)?;
-    let payload = payload();
-    let data = trace_structure_owned_parts(
-        &structure,
-        &structure.dst_structure,
-        M::trace_nout(&stage),
-        src.space().structure(),
-        payload.as_ref(),
-        alpha,
-    )?;
+    let scalar = structure.dst_rank == 0
+        && structure.dst_structure.block_count() == 1
+        && !structure.descriptor().source_conjugate();
+    let data = match scalar.then(|| read(&structure)).flatten() {
+        Some(value) => vec![value * alpha],
+        None => trace_structure_owned_parts(
+            &structure,
+            &structure.dst_structure,
+            M::trace_nout(&stage),
+            src.space().structure(),
+            payload().as_ref(),
+            alpha,
+        )?,
+    };
     Ok((M::commit_trace(src, stage, pending)?, data))
 }
 
@@ -1703,12 +1715,14 @@ where
 }
 
 /// The owned multiplicity-free trace into a
-/// [`tensortrace_stage_multiplicity_free`] destination.
+/// [`tensortrace_stage_multiplicity_free`] destination; `read` may answer a
+/// scalar destination from the compiled terms without the payload.
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
 pub fn tensortrace_multiplicity_free_in<R, D, P>(
     stage: TensorTraceStage<'_, R, BoundDynamicFusionMapSpace<R>>,
     src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
     payload: impl FnOnce() -> P,
     axes: TensorTraceAxisSpec<'_>,
     alpha: D,
@@ -1726,16 +1740,20 @@ where
         + strided_kernel::MaybeSendSync,
     P: AsRef<[D]>,
 {
-    tensortrace_owned_in::<MultiplicityFreeAdmissionMode, R, D, P>(stage, src, payload, axes, alpha)
+    tensortrace_owned_in::<MultiplicityFreeAdmissionMode, R, D, P>(
+        stage, src, read, payload, axes, alpha,
+    )
 }
 
 /// The owned checked Generic trace into a
-/// [`tensortrace_stage_checked_generic`] destination.
+/// [`tensortrace_stage_checked_generic`] destination; `read` may answer a
+/// scalar destination from the compiled terms without the payload.
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
 pub fn tensortrace_checked_generic_in<R, D, P>(
     stage: TensorTraceStage<'_, R, PreparedCheckedGenericDynamicSpace>,
     src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
     payload: impl FnOnce() -> P,
     axes: TensorTraceAxisSpec<'_>,
     alpha: D,
@@ -1753,7 +1771,9 @@ where
         + strided_kernel::MaybeSendSync,
     P: AsRef<[D]>,
 {
-    tensortrace_owned_in::<CheckedGenericAdmissionMode, R, D, P>(stage, src, payload, axes, alpha)
+    tensortrace_owned_in::<CheckedGenericAdmissionMode, R, D, P>(
+        stage, src, read, payload, axes, alpha,
+    )
 }
 
 /// Checked Generic trace lowering through the existing strided executor.

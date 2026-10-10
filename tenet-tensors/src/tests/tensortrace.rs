@@ -1857,9 +1857,15 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
     let stage =
         crate::tensortrace_stage_multiplicity_free(&dynamic_src, axes, dynamic_dst.space().nout())
             .unwrap();
-    let (eager_dst, eager) =
-        crate::tensortrace_multiplicity_free_in(stage, &dynamic_src, || &src_data[..], axes, alpha)
-            .unwrap();
+    let (eager_dst, eager) = crate::tensortrace_multiplicity_free_in(
+        stage,
+        &dynamic_src,
+        |_| None,
+        || &src_data[..],
+        axes,
+        alpha,
+    )
+    .unwrap();
     assert_eq!(
         crate::tensortrace::take_trace_compiler_geometry_derivations(),
         (2, 1)
@@ -1872,9 +1878,15 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
     let stage =
         crate::tensortrace_stage_multiplicity_free(&other, axes, dynamic_dst.space().nout())
             .unwrap();
-    let (_, fallback) =
-        crate::tensortrace_multiplicity_free_in(stage, &dynamic_src, || &src_data[..], axes, alpha)
-            .unwrap();
+    let (_, fallback) = crate::tensortrace_multiplicity_free_in(
+        stage,
+        &dynamic_src,
+        |_| None,
+        || &src_data[..],
+        axes,
+        alpha,
+    )
+    .unwrap();
     assert_eq!(
         crate::tensortrace::take_trace_compiler_geometry_derivations(),
         (2, 2)

@@ -19,6 +19,15 @@
 //! the materialized operands (the dense route). QSpace has no compact
 //! diagonal contraction (`contractQS.cc` expands a diagonal first).
 //!
+//! Full trace (leaf D). TensorKit `cfaa073e` has no `DiagonalTensorMap`
+//! trace method: the generic `tensortrace!` runs, so the compact result must
+//! equal the dense route's. Both modes read the compiled trace coefficients
+//! the dense route replays and sum each spectrum block, so the oracle is the
+//! dense route (within 1e-12, since the widened accumulation differs) plus
+//! the hand supertrace `Σ_c dim(c) θ(c) Σ_i s_c[i]` over a non-dual traced
+//! codomain leg. QSpace has no compact trace (`traceQS.cc` has no diagonal
+//! format).
+//!
 //! Capability absences (compile-time, not counted as passing cells): checked
 //! × CUDA and Fibonacci × CUDA (CUDA ops are bounded
 //! `MultiplicityFreeRigidSymbols<Scalar = f64>`), and Fibonacci twist (the
@@ -1783,6 +1792,301 @@ fn compact_swap_allocates_linear_in_the_spectrum_in_both_modes() {
             "{mode} swap allocated a dense payload: {large} bytes"
         );
         assert!(compact, "{mode} swap densified");
+    }
+}
+
+// ---- Leaf D: full trace ----
+
+/// The full trace of `d` over `pair`, and the same trace of its dense twin.
+fn full_traces<R, D>(d: &TensorMap<R, D>, pair: (usize, usize)) -> (Complex64, Complex64)
+where
+    R: TypedSectorAdmission,
+    R::Mode: tenet::typed::TypedTensorTraceDispatch<R, D>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar,
+    Complex64: From<D>,
+{
+    let trace = |t: &TensorMap<R, D>| {
+        Complex64::from(t.trace_pairs(&[pair]).unwrap().dense_data().unwrap()[0])
+    };
+    (trace(d), trace(&d.materialize().unwrap()))
+}
+
+#[test]
+fn compact_full_trace_agrees_across_modes() {
+    // What: the full trace of a compact bond is one mode-free arm. Checked
+    // Generic used to densify; both modes now read the spectrum with the
+    // dense route's compiled coefficients and agree with it, with each other
+    // and with the hand supertrace (θ(odd) = -1 for fZ2).
+    use tenet::sector::Z2FusionRule;
+    macro_rules! rows {
+        ($mf:expr, $checked:expr, $odd:expr, $conv:expr) => {{
+            let conv = $conv;
+            let hand = SECTORS
+                .iter()
+                .map(|&(p, k)| {
+                    let factor = if p == 1 { $odd } else { 1.0 };
+                    (0..k)
+                        .map(|i| Complex64::from(conv(value(p, i))) * factor)
+                        .sum::<Complex64>()
+                })
+                .sum::<Complex64>();
+            let (mf, _) = z2_diagonal($mf, conv);
+            let (checked, _) = z2_diagonal($checked, conv);
+            for pair in [(0, 1), (1, 0)] {
+                let (mf_compact, mf_dense) = full_traces(&mf, pair);
+                let (checked_compact, checked_dense) = full_traces(&checked, pair);
+                assert!(
+                    close(mf_compact, mf_dense),
+                    "{pair:?}: mf {mf_compact} vs dense {mf_dense}"
+                );
+                assert!(
+                    close(checked_compact, checked_dense),
+                    "{pair:?}: checked {checked_compact} vs dense {checked_dense}"
+                );
+                assert!(
+                    close(mf_compact, checked_compact),
+                    "{pair:?}: mf vs checked"
+                );
+                if pair == (0, 1) {
+                    assert!(
+                        close(mf_compact, hand),
+                        "{pair:?}: {mf_compact} vs hand {hand}"
+                    );
+                }
+            }
+        }};
+    }
+    let real = |x: f64| x;
+    let complex = |x: f64| Complex64::new(x, 0.5 * x - 0.25);
+    let bosonic = || CheckedZ2::new(BraidingStyleKind::Bosonic, 1.0);
+    let fermionic = || CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0);
+    rows!(Z2FusionRule, bosonic(), 1.0, real);
+    rows!(FermionParityFusionRule, fermionic(), -1.0, real);
+    rows!(Z2FusionRule, bosonic(), 1.0, complex);
+    rows!(FermionParityFusionRule, fermionic(), -1.0, complex);
+}
+
+#[test]
+fn checked_anyonic_compact_full_trace_matches_the_dense_route() {
+    // What: a checked-only non-sign θ(odd) = 0.6 enters the compiled
+    // coefficient; the compact trace is the dense route's on either pair
+    // order.
+    let (d, _) = z2_diagonal(
+        CheckedZ2::new(BraidingStyleKind::Anyonic, 0.6).with_odd_r(0.8),
+        |x: f64| Complex64::new(x, 1.0 - x),
+    );
+    for pair in [(0, 1), (1, 0)] {
+        match (
+            d.trace_pairs(&[pair]),
+            d.materialize().unwrap().trace_pairs(&[pair]),
+        ) {
+            (Ok(compact), Ok(dense)) => {
+                let (compact, dense) = (
+                    compact.dense_data().unwrap()[0],
+                    dense.dense_data().unwrap()[0],
+                );
+                assert!(
+                    close(compact, dense),
+                    "{pair:?}: {compact} vs dense {dense}"
+                );
+            }
+            (Err(got), Err(want)) => assert_eq!(format!("{got}"), format!("{want}"), "{pair:?}"),
+            (got, want) => panic!("{pair:?}: compact {got:?} vs dense {want:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn su2_compact_full_trace_agrees_across_modes() {
+    // What: the non-Abelian row; SU(2) is bosonic, so the hand trace is
+    // `Σ_j (2j + 1) Σ_i s_j[i]`.
+    use tenet::sector::{SU2FusionRule, SU2Irrep, SUNFusionRule};
+    let su2 = [(0usize, 2usize), (1, 3), (2, 1)];
+    let values = |twice: usize, k: usize| -> Vec<f64> {
+        (0..k).map(|i| 0.5 + (twice * 4 + i) as f64).collect()
+    };
+    let hand: f64 = su2
+        .iter()
+        .map(|&(twice, k)| (twice + 1) as f64 * values(twice, k).iter().sum::<f64>())
+        .sum();
+    let mf_leg = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        su2.iter()
+            .map(|&(twice, k)| (SU2Irrep::from_twice_spin(twice), k)),
+    )
+    .unwrap();
+    let checked_leg = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(2).unwrap()),
+        su2.iter().map(|&(twice, k)| (vec![twice as i64], k)),
+    )
+    .unwrap();
+    let mf = TensorMap::<_, f64>::diagonal(
+        &host_runtime(),
+        &mf_leg,
+        su2.iter().map(|&(twice, k)| SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(twice),
+            values: values(twice, k),
+        }),
+    )
+    .unwrap();
+    let checked = TensorMap::<_, f64>::diagonal(
+        &host_runtime(),
+        &checked_leg,
+        su2.iter().map(|&(twice, k)| SectorSpectrum {
+            sector: vec![twice as i64],
+            values: values(twice, k),
+        }),
+    )
+    .unwrap();
+    for pair in [(0, 1), (1, 0)] {
+        let (mf_compact, mf_dense) = full_traces(&mf, pair);
+        let (checked_compact, checked_dense) = full_traces(&checked, pair);
+        for (what, got, want) in [
+            ("mf vs dense", mf_compact, mf_dense),
+            ("checked vs dense", checked_compact, checked_dense),
+            ("mf vs checked", mf_compact, checked_compact),
+            ("mf vs hand", mf_compact, Complex64::from(hand)),
+        ] {
+            assert!(close(got, want), "{pair:?} {what}: {got} vs {want}");
+        }
+    }
+}
+
+#[test]
+fn checked_compact_full_trace_queries_the_provider_like_the_dense_route() {
+    // What: the trace arm only reads the dense route's compiled terms, so
+    // cold and warm provider queries are the dense route's.
+    let rule = |salt| CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(salt);
+    let ledger = |tensor: &TensorMap<CheckedZ2, f64>| {
+        let provider = tensor.provider();
+        (0..2)
+            .map(|_| {
+                provider.queries.store(0, Ordering::Relaxed);
+                black_box(tensor.trace_pairs(&[(0, 1)]).unwrap());
+                provider.queries.load(Ordering::Relaxed)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (compact, _) = z2_diagonal(rule(7), |x: f64| x);
+    let dense = z2_diagonal(rule(8), |x: f64| x).0.materialize().unwrap();
+    let compact_counts = ledger(&compact);
+    assert!(compact_counts[0] > 0);
+    assert_eq!(compact_counts, ledger(&dense));
+}
+
+#[test]
+fn checked_compact_full_trace_failure_is_typed_and_nonpublishing() {
+    // What: a provider failing during the trace compile fails the compact
+    // trace with the dense route's typed error, and nothing is published.
+    const ISOLATED: &str = "TENET_COMPACT_TRACE_PUBLICATION_ISOLATED";
+    const NAME: &str = "checked_compact_full_trace_failure_is_typed_and_nonpublishing";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated publication test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+
+    use tenet::typed::{CheckedGenericPlanError, GenericTensorError};
+    use tenet_core::{structure_cache_info, StructureCacheKind};
+    let (compact, _) = z2_diagonal(
+        CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(9),
+        |x: f64| x,
+    );
+    let dense = compact.materialize().unwrap();
+    let spectrum = tenet::expert::diagonal_spectrum(&compact).unwrap();
+    tenet_core::clear_structure_caches();
+    let published = || {
+        StructureCacheKind::ALL.map(|kind| {
+            let info = structure_cache_info(kind);
+            (info.admissions(), info.entries(), info.charged_bytes())
+        })
+    };
+    let before = published();
+    let provider = compact.provider();
+    provider.fail_queries.store(true, Ordering::Relaxed);
+    let result = compact.trace_pairs(&[(0, 1)]);
+    let dense_result = dense.trace_pairs(&[(0, 1)]);
+    provider.fail_queries.store(false, Ordering::Relaxed);
+    assert!(
+        matches!(
+            result,
+            Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+                InvalidSector
+            )))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        format!("{}", result.unwrap_err()),
+        format!("{}", dense_result.unwrap_err())
+    );
+    assert_eq!(published(), before);
+    assert_eq!(
+        tenet::expert::diagonal_spectrum(&compact).unwrap(),
+        spectrum
+    );
+}
+
+fn warmed_trace_bytes<R>(tensor: &TensorMap<R, f64>) -> u64
+where
+    R: TypedSectorAdmission,
+    R::Mode: tenet::typed::TypedTensorTraceDispatch<R, f64>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+{
+    black_box(tensor.trace_pairs(&[(0, 1)]).unwrap());
+    counting_alloc::measure(|| black_box(tensor.trace_pairs(&[(0, 1)]).unwrap()))
+        .1
+        .bytes
+}
+
+#[test]
+fn compact_full_trace_allocates_no_spectrum_sized_buffer_in_both_modes() {
+    // What: the full trace of a compact diagonal reads the spectrum in place:
+    // from k to 2k the bytes do not grow by a spectrum, and stay below one
+    // dense payload.
+    let _measurement = counting_alloc::serial();
+    let dense_payload = (K * K * std::mem::size_of::<f64>()) as u64;
+    let spectrum_growth = (K * std::mem::size_of::<f64>()) as u64;
+    let rows = [
+        (
+            "multiplicity-free",
+            warmed_trace_bytes(&odd_diagonal(FermionParityFusionRule, K)),
+            warmed_trace_bytes(&odd_diagonal(FermionParityFusionRule, 2 * K)),
+        ),
+        (
+            "checked",
+            warmed_trace_bytes(&odd_diagonal(
+                CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0),
+                K,
+            )),
+            warmed_trace_bytes(&odd_diagonal(
+                CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0),
+                2 * K,
+            )),
+        ),
+    ];
+    for (mode, small, large) in rows {
+        assert!(
+            large.saturating_sub(small) < spectrum_growth,
+            "{mode} trace grows with k: {small} -> {large} bytes"
+        );
+        assert!(
+            large < dense_payload,
+            "{mode} trace allocated a dense payload: {large} bytes"
+        );
     }
 }
 
