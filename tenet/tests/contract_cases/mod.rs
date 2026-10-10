@@ -488,6 +488,56 @@ where
     ]
 }
 
+/// #2147: a lazy adjoint `a = t'` (`t: [V, V] <- [V]`) that is already a core
+/// operand (identity tree transform) against a partner that must be permuted,
+/// so the route is DynamicTree with the adjoint borrowed and only the partner
+/// copied: `a` over its whole domain against `u = s.permute([0], [1, 2])`, and
+/// `w = s.permute([2, 0], [1])`'s leg 0 against `a`'s codomain. Returns each
+/// case with whether its lazy operand is the lhs.
+pub fn identity_adjoint_cases<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+) -> [(Case<R, D>, bool); 2]
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let t: TensorMap<R, D> = tensor(runtime, &[v, v], &[v], 61);
+    let a = t.adjoint().unwrap();
+    let u = tensor::<R, D>(runtime, &[v, v], &[v], 62)
+        .permute(&[0], &[1, 2])
+        .unwrap();
+    let w = tensor::<R, D>(runtime, &[v, v], &[v], 63)
+        .permute(&[2, 0], &[1])
+        .unwrap();
+    [
+        (
+            Case {
+                name: "identity adjoint lhs, permuted rhs",
+                lhs: a.clone(),
+                rhs: u,
+                lhs_axes: vec![1, 2],
+                rhs_axes: vec![0, 1],
+                output_axes: vec![0, 1],
+                dense: false,
+            },
+            true,
+        ),
+        (
+            Case {
+                name: "permuted lhs, identity adjoint rhs",
+                lhs: w,
+                rhs: a,
+                lhs_axes: vec![0],
+                rhs_axes: vec![0],
+                output_axes: vec![0, 1, 2, 3],
+                dense: false,
+            },
+            false,
+        ),
+    ]
+}
+
 /// A lazy adjoint over SU(2) (every sector self-dual), contracted in
 /// core-form source order (lhs whole domain, rhs whole codomain, in order),
 /// with a non-identity output. Lazy lhs, then lazy rhs; multi-block,

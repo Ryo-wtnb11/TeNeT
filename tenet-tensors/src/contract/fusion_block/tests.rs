@@ -866,6 +866,124 @@ fn a_non_canonical_composition_misses_the_direct_core_with_the_unchanged_message
     assert!(!swapped && !core.is_fully_direct());
 }
 
+/// #2147: a lazy adjoint `P'` whose own tree transform is the identity, on
+/// the DynamicTree route (the rhs `U` is permuted), is borrowed into the core
+/// GEMM with an adjoint op when its parent tiles canonical coupled-sector
+/// matrices, and copied when the parent stores them reordered. The copied
+/// reordered parent is the reference the borrowed canonical one must match
+/// (the same tensor, block for block).
+#[test]
+fn an_identity_adjoint_source_is_borrowed_only_over_canonical_regions() {
+    let rule = std::sync::Arc::new(Z2FusionRule);
+    let (canonical, reordered) = z2_reordered_rank4();
+    let bind = |space| {
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            space,
+            std::sync::Arc::clone(&rule),
+        )
+        .unwrap()
+    };
+    let (canonical, reordered) = (bind(canonical), bind(reordered));
+    let leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], false);
+    let rhs = crate::BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        std::sync::Arc::clone(&rule),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false),
+                leg(),
+                SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        ),
+    )
+    .unwrap();
+    // `P'`'s domain (its parent's codomain) against `U`'s legs 0 and 2.
+    let (lhs_axes, rhs_axes) = ([2, 3], [0, 2]);
+    let dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+        &canonical.adjoint_view().unwrap(),
+        &rhs,
+        &lhs_axes,
+        &rhs_axes,
+        tenet_operations::OutputAxisOrder::identity(),
+        2,
+    )
+    .unwrap();
+    let axes = tenet_operations::TensorContractSpec::new_with_conjugation(
+        &lhs_axes,
+        &rhs_axes,
+        tenet_operations::OutputAxisOrder::identity(),
+        true,
+        false,
+    );
+    // One element per block (unit degeneracies), valued by its key.
+    let value_of = |key: &tenet_core::BlockKey| {
+        let index = (0..canonical.space().structure().block_count())
+            .find(|&index| canonical.space().structure().block(index).unwrap().key() == key)
+            .unwrap();
+        index as f64 * 0.75 - 2.0
+    };
+    let parent_data = |space: &DynamicFusionMapSpace| {
+        let structure = space.structure();
+        let mut data = vec![0.0; space.required_len().unwrap()];
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).unwrap();
+            data[block.offset()] = value_of(block.key());
+        }
+        data
+    };
+    let rhs_data: Vec<f64> = (0..rhs.space().required_len().unwrap())
+        .map(|i| 1.0 - i as f64 * 0.125)
+        .collect();
+    let run = |parent: &crate::BoundDynamicFusionMapSpace<Z2FusionRule>| {
+        let mut context =
+            crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
+        let lhs = crate::FusionOperand::adjoint(parent.space());
+        let resolution = context
+            .compile_storage_contract_resolution(
+                &dst,
+                lhs,
+                crate::FusionOperand::direct(rhs.space()),
+                axes,
+            )
+            .unwrap();
+        let super::super::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+        else {
+            panic!("the permuted rhs selects DynamicTree");
+        };
+        assert!(!artifact.test_has_core_dst());
+        let borrowed = artifact.borrowed_sources();
+        let mut out = vec![0.0; dst.space().required_len().unwrap()];
+        context
+            .tensorcontract_fusion_dyn_prelowered_into(
+                &dst,
+                &mut out,
+                lhs,
+                &parent_data(parent.space()),
+                crate::FusionOperand::direct(rhs.space()),
+                &rhs_data,
+                axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        (borrowed, out)
+    };
+    let (borrowed, got) = run(&canonical);
+    let (copied, want) = run(&reordered);
+    // What: the canonical parent is read in place; the reordered one, whose
+    // coupled-sector trees the GEMM cannot address with one adjoint op, is
+    // still copied (not packed), and both give the same tensor.
+    assert_eq!(borrowed, (true, false));
+    assert_eq!(copied, (false, false));
+    assert!(want.iter().any(|&value| value != 0.0));
+    for (got, want) in got.iter().zip(&want) {
+        assert!(
+            (got - want).abs() <= 1e-12 * (1.0 + want.abs()),
+            "{got} vs {want}"
+        );
+    }
+}
+
 #[test]
 fn adjoint_operand_without_canonical_regions_uses_exact_fallback() {
     let rule = Z2FusionRule;

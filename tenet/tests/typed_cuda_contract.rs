@@ -44,10 +44,10 @@ mod contract_cases;
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     blas_contract_oracle, candidate_core_probes, copy_c_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
-    poisoned_destination, product_general, su2, su2_bent, su2_core_form_lazy_cases, su2_reordered,
-    u1_inactive_cases, u1_lhs_identity, u1_non_self_dual, u1_rank_five, u1_reordered,
-    u1_rhs_identity, Case, FermionU1, TwistRole,
+    fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops,
+    identity_adjoint_cases, lazy_cases, poisoned_destination, product_general, su2, su2_bent,
+    su2_core_form_lazy_cases, su2_reordered, u1_inactive_cases, u1_lhs_identity, u1_non_self_dual,
+    u1_rank_five, u1_reordered, u1_rhs_identity, Case, FermionU1, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
@@ -234,6 +234,69 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
     lazy_at::<Complex64>(&runtime);
     lazy_at::<f32>(&runtime);
     lazy_at::<Complex32>(&runtime);
+}
+
+/// #2147: a lazy adjoint whose tree transform is the identity, against a
+/// permuted partner, runs the device DynamicTree with the adjoint read from
+/// its parent's device buffer under a GEMM adjoint op (TensorKit
+/// `blas_contract!` without `copyA`, `tensoroperations.jl:383-450` @cfaa073).
+/// Route witness: the contraction scratch holds exactly the copied partner
+/// (Core would hold nothing, CopyC the output, a copied adjoint `|t|` more).
+/// Values: device == Host == the materialize-then-contract oracle.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn identity_adjoint_operands_are_borrowed_by_the_device_dynamic_tree() {
+    fn at<R: DeviceRule, D: DevicePayload>(v: &tenet::typed::GradedSpace<R>, symmetry: &str) {
+        for index in 0..2 {
+            // A fresh Runtime per case: its scratch high-water mark is this
+            // case's alone.
+            let runtime = Runtime::builder().cuda(0).build().unwrap();
+            let (case, lazy_lhs) = identity_adjoint_cases::<R, D>(&runtime, v)
+                .into_iter()
+                .nth(index)
+                .unwrap();
+            let name = format!("{symmetry} {} {}", case.name, D::NAME);
+            let host = case.host();
+            let oracle = case
+                .lhs
+                .materialize()
+                .unwrap()
+                .contract(&case.rhs.materialize().unwrap(), &case.spec())
+                .unwrap();
+            let device = case
+                .lhs
+                .to_cuda()
+                .unwrap()
+                .contract(&case.rhs.to_cuda().unwrap(), &case.spec())
+                .unwrap()
+                .to_host()
+                .unwrap();
+            let partner = if lazy_lhs { &case.rhs } else { &case.lhs };
+            let partner_bytes = std::mem::size_of_val(partner.dense_data().unwrap());
+            assert_ne!(
+                partner_bytes,
+                std::mem::size_of_val(host.dense_data().unwrap()),
+                "{name}: the witness must tell DynamicTree from CopyC"
+            );
+            assert_eq!(
+                runtime.cuda_contract_scratch_bytes().unwrap(),
+                partner_bytes,
+                "{name}: only the permuted partner is copied"
+            );
+            for (what, expected) in [("host", &host), ("materialized oracle", &oracle)] {
+                numerics::assert_nonzero_slices_close(
+                    &format!("{name} vs {what}"),
+                    device.dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    case.terms(),
+                );
+            }
+        }
+    }
+    at::<_, f64>(&su2(), "SU(2)");
+    at::<_, Complex64>(&su2(), "SU(2)");
+    at::<_, f64>(&u1_non_self_dual(), "U(1)");
+    at::<_, Complex64>(&u1_non_self_dual(), "U(1)");
 }
 
 /// #1857: device `contract` / `contract_into` take TensorKit's `copyC`

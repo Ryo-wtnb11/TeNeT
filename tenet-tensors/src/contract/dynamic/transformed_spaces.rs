@@ -15,6 +15,11 @@ pub(crate) struct DynamicFusionTransformedSourceEntry<C = f64> {
     /// deriving anything (an identity permutation); every non-borrowed
     /// source has one (checked when the artifact is assembled).
     pub(crate) transform_structure: Option<TreeTransformStructure<C>>,
+    /// The core operand is exactly the adjoint of the payload
+    /// `replay_structure` describes: a conjugated source under an identity
+    /// transform, which the core may read in place with a GEMM adjoint op
+    /// (TensorKit `blas_contract!` without `copyA`/`copyB`).
+    pub(crate) core_is_storage_adjoint: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +73,7 @@ where
         space: Arc::new(space),
         replay_structure: Arc::clone(src_storage_structure),
         transform_structure: Some(transform_structure),
+        core_is_storage_adjoint: false,
     })
 }
 
@@ -98,6 +104,8 @@ where
         space: Arc::new(space),
         replay_structure: Arc::clone(source.storage_space().structure()),
         transform_structure: Some(transform_structure),
+        core_is_storage_adjoint: !source.is_direct()
+            && operation.is_identity_for(source.nout(), source.rank() - source.nout()),
     })
 }
 

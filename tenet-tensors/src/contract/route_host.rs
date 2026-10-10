@@ -581,8 +581,8 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
                 })
         };
         Self {
-            lhs_core: artifact.lhs_transform.space.structure(),
-            rhs_core: artifact.rhs_transform.space.structure(),
+            lhs_core: artifact.core_source_structure(true),
+            rhs_core: artifact.core_source_structure(false),
             lhs_source: source(&artifact.lhs_transform, artifact.lhs_borrowed, lhs_scales),
             rhs_source: source(&artifact.rhs_transform, artifact.rhs_borrowed, rhs_scales),
             swapped: artifact.core_order(false, true).0,
