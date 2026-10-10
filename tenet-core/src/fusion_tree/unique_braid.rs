@@ -53,8 +53,9 @@ where
 
 /// Symmetric-braiding unique-fusion braid in one step: TensorKit
 /// `braid(f::FusionTree, p, levels)` `SymmetricBraiding` branch
-/// (`braiding_manipulations.jl:217-234`), the product of `R(a, b, a ⊗ b)`
-/// over every inverted pair, then the canonical tree of the permuted legs.
+/// (`braiding_manipulations.jl:217-234`) structure: the product over every
+/// inverted pair of `R(a, b, a ⊗ b)` with `a` before `b` in the source (the
+/// Artin-composition value), then the canonical tree of the permuted legs.
 /// `None` when the source does not satisfy the direct-path invariants.
 ///
 /// `permutation(position)` is the source axis at output `position`, for
@@ -84,17 +85,23 @@ where
             let left_axis = permutation(left_position);
             let right_axis = permutation(right_position);
             if left_axis > right_axis {
-                let left = tree.uncoupled()[left_axis];
-                let right = tree.uncoupled()[right_axis];
+                // The crossing braids the source pair `first ⊗ second`
+                // (source order) and acts by `R(first, second)`, exactly as
+                // the Artin path does. Why not TensorKit's symmetric
+                // shortcut order `R(second, first)`: it differs from its
+                // own `artin_braid` whenever a trivial-gauge symmetric R is
+                // not symmetric in its arguments (alternating bicharacters).
+                let first = tree.uncoupled()[right_axis];
+                let second = tree.uncoupled()[left_axis];
                 // TensorKit treats a unit crossing as structural identity.
                 // Why not ask the provider for R(unit, a): providers are
                 // permitted to omit identity symbols and the Artin path
                 // already skips them.
-                if left == rule.vacuum() || right == rule.vacuum() {
+                if first == rule.vacuum() || second == rule.vacuum() {
                     continue;
                 }
-                let coupled = only_fusion_channel(rule, left, right)?;
-                coefficient = coefficient * rule.r_symbol_scalar(left, right, coupled);
+                let coupled = only_fusion_channel(rule, first, second)?;
+                coefficient = coefficient * rule.r_symbol_scalar(first, second, coupled);
             }
         }
     }

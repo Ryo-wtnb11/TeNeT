@@ -1708,6 +1708,8 @@ impl DenseExecutor for PanicDenseExecutor {
 
 mod adjoint_memo;
 
+mod alternating_bicharacter;
+
 mod copy;
 
 mod contract_dense;
