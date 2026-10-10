@@ -400,8 +400,8 @@ pub(super) fn require_destination_space(
 }
 
 /// The destination checks a `*_into` shares on every placement, in one
-/// order: owned dense storage, no alias of the input payload, the result's
-/// space and block layout, the exact length, then unique ownership.
+/// order: [`destination_precheck`], the result's space and block layout,
+/// then [`destination_postcheck`].
 /// `storage` names the placement in the messages ("host", "CUDA").
 pub(super) fn unique_dense_destination<'d, R, D, S>(
     destination: &'d TensorMap<R, D, S>,
@@ -412,16 +412,21 @@ pub(super) fn unique_dense_destination<'d, R, D, S>(
 where
     S: TensorStorage<D>,
 {
-    let (body, data) = match &destination.repr {
-        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-            TypedData::Dense(data) => (body, data),
-            TypedData::Diagonal(_) => {
-                return Err(Error::InvalidArgument(format!(
-                    "destination must use ordinary dense {storage} storage"
-                )))
-            }
-        },
-        TypedTensorRepr::Adjoint(_) => {
+    destination_precheck(destination, input, storage)?;
+    require_destination_space(destination.logical_space().space(), expected)?;
+    destination_postcheck(destination, expected.required_len()?)
+}
+
+/// The destination checks before its space: owned dense storage, then no
+/// alias of the input payload.
+pub(super) fn destination_precheck<R, D, S>(
+    destination: &TensorMap<R, D, S>,
+    input: &Arc<TypedData<D, S>>,
+    storage: &str,
+) -> Result<(), Error> {
+    let body = match &destination.repr {
+        TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => body,
+        _ => {
             return Err(Error::InvalidArgument(format!(
                 "destination must use ordinary dense {storage} storage"
             )))
@@ -432,8 +437,24 @@ where
             "destination storage must not alias an input".to_string(),
         ));
     }
-    require_destination_space(body.space.space(), expected)?;
-    let required = expected.required_len()?;
+    Ok(())
+}
+
+/// The destination checks after its space: the exact `required` length, then
+/// unique ownership. The caller ran [`destination_precheck`].
+pub(super) fn destination_postcheck<R, D, S>(
+    destination: &TensorMap<R, D, S>,
+    required: usize,
+) -> Result<&S, Error>
+where
+    S: TensorStorage<D>,
+{
+    let TypedTensorRepr::Owned(body) = &destination.repr else {
+        return Err(internal_layout_error("ordinary destination checked above"));
+    };
+    let TypedData::Dense(data) = body.data.as_ref() else {
+        return Err(internal_layout_error("dense destination checked above"));
+    };
     let actual = data.len();
     if actual != required {
         return Err(Error::InvalidArgument(format!(
@@ -444,6 +465,26 @@ where
         return Err(Error::DestinationShared);
     }
     Ok(data)
+}
+
+/// [`destination_postcheck`] against the destination's own space, then the
+/// host payload to write.
+pub(super) fn destination_slice<R, D>(
+    destination: &mut TensorMap<R, D>,
+) -> Result<&mut [D], Error> {
+    destination_postcheck(
+        destination,
+        destination.logical_space().space().required_len()?,
+    )?;
+    let TypedTensorRepr::Owned(body) = &mut destination.repr else {
+        return Err(internal_layout_error("ordinary destination checked above"));
+    };
+    match Arc::get_mut(body).and_then(|body| Arc::get_mut(&mut body.data)) {
+        Some(TypedData::Dense(data)) => Ok(data.as_mut_slice()),
+        _ => Err(internal_layout_error(
+            "unique dense destination checked above",
+        )),
+    }
 }
 
 /// The host `axpby_into` body, shared with the empty-pair `trace_pairs_into`.

@@ -131,6 +131,22 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+
+    /// `destination = alpha · operation(source) + beta · destination` for an
+    /// owned dense `source` and a `destination` that passed
+    /// [`destination_precheck`]: one lease, [`Self::transform`]'s staging, the
+    /// staged space against the destination's, [`destination_slice`], the
+    /// write, then the same commit. A mode with an exact-layout memo offers
+    /// it the borrowed request through `exact_layout_probe` before
+    /// `operation` builds the owned one.
+    fn transform_into(
+        source: &TensorMap<R, D>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Self::FacadeError>;
 }
 
 /// The committed destination of a compact rank-(1,1) transform and its
@@ -175,6 +191,15 @@ where
         tensor: &TensorMap<R, Self>,
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
+
+    fn transform_into(
+        source: &TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Error>;
 }
 
 pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:

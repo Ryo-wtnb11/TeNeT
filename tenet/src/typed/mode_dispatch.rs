@@ -367,6 +367,24 @@ where
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
         D::transform(tensor, operation)
     }
+
+    fn transform_into(
+        source: &TensorMap<R, D>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Error> {
+        D::transform_into(
+            source,
+            destination,
+            alpha,
+            beta,
+            operation,
+            exact_layout_probe,
+        )
+    }
 }
 
 impl<R, D> TypedTensorTransformDispatch<R, D> for CheckedGenericAdmissionMode
@@ -435,6 +453,36 @@ where
                 &operation,
                 D::from_real(1.0),
             )?)
+    }
+
+    /// No exact-layout probe: its key family is multiplicity-free direct
+    /// only, so a checked entry can never hit it.
+    fn transform_into(
+        source: &TensorMap<R, D>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        _exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Self::FacadeError> {
+        let (body, data) = owned_dense_source(source)?;
+        let mut lease = source.runtime.lease_context()?;
+        let operation = operation()?;
+        let destination_space = destination.logical_space().space().clone();
+        lease
+            .context()
+            .generic_lane::<D>()?
+            .tree_context_mut()
+            .tree_transform_into_checked_generic_in(
+                &body.space,
+                None,
+                data,
+                &operation,
+                &destination_space,
+                || destination_slice(destination).map_err(Self::FacadeError::from),
+                alpha,
+                beta,
+            )
     }
 }
 

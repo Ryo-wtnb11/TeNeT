@@ -1143,18 +1143,41 @@ impl Runtime {
         }
     }
 
-    /// The resolved transformer of a typed Host `*_into` request whose spaces
-    /// were proved to match once before (the exact-layout memo on the
-    /// process-global entry); `None` takes the full path.
+    /// [`Self::exact_layout_tree_pair_hit_of`] of the real-coefficient lane.
+    #[cfg(feature = "cuda")]
     pub(crate) fn exact_layout_tree_pair_hit<R>(
         rule: &RuleIdentity,
         operation: tenet_tensors::TreeTransformOperationView<'_>,
         source: &BoundDynamicFusionMapSpace<R>,
         destination: &BoundDynamicFusionMapSpace<R>,
     ) -> Option<tenet_tensors::TreeTransformStructure<f64>> {
+        Self::exact_layout_tree_pair_hit_of(rule, operation, source, destination)
+    }
+
+    /// [`Self::admit_exact_tree_pair_layout_of`] of the real-coefficient lane.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn admit_exact_tree_pair_layout<R>(
+        rule: &RuleIdentity,
+        operation: &TreeTransformOperation,
+        source: &BoundDynamicFusionMapSpace<R>,
+        destination: &BoundDynamicFusionMapSpace<R>,
+    ) -> bool {
+        Self::admit_exact_tree_pair_layout_of::<R, f64>(rule, operation, source, destination)
+    }
+
+    /// The resolved transformer of a typed Host `*_into` request whose spaces
+    /// were proved to match once before (the exact-layout memo on the
+    /// process-global entry of coefficient type `C`); `None` takes the full
+    /// path.
+    pub(crate) fn exact_layout_tree_pair_hit_of<R, C: 'static + Send + Sync>(
+        rule: &RuleIdentity,
+        operation: tenet_tensors::TreeTransformOperationView<'_>,
+        source: &BoundDynamicFusionMapSpace<R>,
+        destination: &BoundDynamicFusionMapSpace<R>,
+    ) -> Option<tenet_tensors::TreeTransformStructure<C>> {
         let (source_homspace, source_layout) = bound_layout_identity(source);
         let (destination_homspace, destination_layout) = bound_layout_identity(destination);
-        tenet_tensors::exact_layout_tree_pair_hit::<f64>(
+        tenet_tensors::exact_layout_tree_pair_hit::<C>(
             rule,
             operation,
             destination.space().structure(),
@@ -1164,7 +1187,7 @@ impl Runtime {
         )
     }
 
-    pub(crate) fn admit_exact_tree_pair_layout<R>(
+    pub(crate) fn admit_exact_tree_pair_layout_of<R, C: 'static + Send + Sync>(
         rule: &RuleIdentity,
         operation: &TreeTransformOperation,
         source: &BoundDynamicFusionMapSpace<R>,
@@ -1172,7 +1195,7 @@ impl Runtime {
     ) -> bool {
         let (source_homspace, source_layout) = bound_layout_identity(source);
         let (destination_homspace, destination_layout) = bound_layout_identity(destination);
-        tenet_tensors::admit_exact_tree_pair_layout::<f64>(
+        tenet_tensors::admit_exact_tree_pair_layout::<C>(
             rule,
             operation,
             destination.space().structure(),

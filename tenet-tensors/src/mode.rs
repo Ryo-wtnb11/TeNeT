@@ -315,6 +315,23 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         txn: &'c mut Self::ContractTxn,
     ) -> &'c mut Self::StructureCache;
 
+    /// TensorKit `spacecheck_transform` for an existing destination `dst`,
+    /// together with the structure resolution, in this mode's order:
+    /// `None` when `dst` is not, by value, the staged destination. `resolve`
+    /// resolves against the given destination structure, or else the staged
+    /// preview; `stage` reads the staged destination back from its result.
+    fn match_and_resolve<'a, T, E>(
+        staged: StagedTransform<Self::TransformStage, Self::SourceProof<'a>>,
+        dst: &'a DynamicFusionMapSpace,
+        resolve: impl FnOnce(
+            StagedTransform<Self::TransformStage, Self::SourceProof<'a>>,
+            Option<&'a Arc<BlockStructure>>,
+        ) -> Result<T, E>,
+        stage: impl FnOnce(&T) -> &Self::TransformStage,
+    ) -> Result<Option<T>, E>
+    where
+        R: 'a;
+
     /// Commits the staged destination after replay, then publishes what the
     /// transform staged.
     fn commit_transform(
@@ -659,6 +676,27 @@ where
         _txn: &'c mut (),
     ) -> &'c mut TreeTransformPlanning {
         planning
+    }
+
+    /// Match first, then resolve against the caller's structure: no
+    /// staging step is deferred to resolution here, and the typed
+    /// exact-layout proof keys the caller's structure content.
+    fn match_and_resolve<'a, T, E>(
+        staged: StagedTransform<BoundDynamicFusionMapSpace<R>, ()>,
+        dst: &'a DynamicFusionMapSpace,
+        resolve: impl FnOnce(
+            StagedTransform<BoundDynamicFusionMapSpace<R>, ()>,
+            Option<&'a Arc<BlockStructure>>,
+        ) -> Result<T, E>,
+        _stage: impl FnOnce(&T) -> &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Option<T>, E>
+    where
+        R: 'a,
+    {
+        if staged.stage.space() != dst {
+            return Ok(None);
+        }
+        resolve(staged, Some(dst.structure())).map(Some)
     }
 
     fn commit_transform(
@@ -1231,6 +1269,28 @@ where
         txn: &'c mut CheckedContractTxn,
     ) -> &'c mut CheckedContractTxn {
         txn
+    }
+
+    /// Resolve first, against the preview, then match. Why this order: a
+    /// memo-staged call defers its plan preflight to resolution (#2154), so
+    /// matching first would let a destination mismatch hide a preflight
+    /// error only when warm. Why the preview: the staged transformer is
+    /// keyed by it and rekeyed at commit. Why not `preview()` for the match:
+    /// it allocates an `Arc<HomSpace>`.
+    fn match_and_resolve<'a, T, E>(
+        staged: StagedTransform<Self::TransformStage, Self::SourceProof<'a>>,
+        dst: &'a DynamicFusionMapSpace,
+        resolve: impl FnOnce(
+            StagedTransform<Self::TransformStage, Self::SourceProof<'a>>,
+            Option<&'a Arc<BlockStructure>>,
+        ) -> Result<T, E>,
+        stage: impl FnOnce(&T) -> &Self::TransformStage,
+    ) -> Result<Option<T>, E>
+    where
+        R: 'a,
+    {
+        let resolved = resolve(staged, None)?;
+        Ok(stage(&resolved).0.matches(dst).then_some(resolved))
     }
 
     /// Publication follows commit: only now are the destination's ids

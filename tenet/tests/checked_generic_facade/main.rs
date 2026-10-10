@@ -734,6 +734,7 @@ mod qr_lq;
 mod reductions;
 mod svd;
 mod transforms;
+mod transforms_into;
 
 /// The process-global completed-transformer cache (`tenet::cache`).
 #[cfg_attr(not(feature = "racah-generated"), allow(dead_code))]
