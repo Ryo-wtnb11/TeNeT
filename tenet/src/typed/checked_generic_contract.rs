@@ -177,7 +177,7 @@ where
             preflight.into_selected_homspace(),
         )
         .map_err(CheckedGenericPlanError::from)?;
-    let (space, data) = tenet_tensors::tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (space, data) = tenet_tensors::tensortrace_checked_generic_in(
         prepared,
         source_space,
         || source.body.materialized_dense_data(),
