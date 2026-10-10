@@ -224,8 +224,9 @@ impl<'a> FusionOperandLayout<'a> {
             MetadataOutput::HomSpace { homspace, .. } => homspace,
             _ => unreachable!("metadata dispatcher returned a non-HomSpace response"),
         };
-        // Why not build an oriented BlockStructure: conjugated sources cannot
-        // borrow their numeric storage, so this equality is only observed for
+        // Why not build an oriented BlockStructure: a conjugated source is
+        // borrowed only through the artifact's canonical storage-adjoint
+        // proof, never through this equality, which is only observed for
         // the direct orientation where the parent structure is authoritative.
         let (required_len, source_structure_matches) = homspace
             .coupled_subblock_layout_probe_uncached(rule, self.storage_space().structure())

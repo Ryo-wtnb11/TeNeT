@@ -341,10 +341,10 @@ pub(crate) fn candidate_walks() -> usize {
 /// whose core-right contracted legs carry the fermionic supertrace twist is
 /// excluded, since `blas_contract!` must then copy one operand to twist it.
 ///
-/// Why before the DynamicTree scorer, not inside it: that scorer charges a
-/// conjugated source as materialized (`source_layout_permutation_is_borrowable`;
-/// the artifact borrows one only over canonical regions, #2147), so a
-/// zero-cost score there could select a candidate that materializes.
+/// Why before the DynamicTree scorer, not inside it: a zero-cost candidate
+/// runs on the Core route with no DynamicTree artifact, and over a
+/// non-Complete admission that scorer still charges an identity adjoint it
+/// cannot certify as borrowable (`score_fusion_contract_candidate`).
 /// Every qualifying candidate has cost zero, the global minimum, so taking
 /// the first in tie order selects what `select_best_scored_contract_candidate`
 /// would under TensorKit's cost; when none compiles, the DynamicTree scorer
@@ -812,6 +812,7 @@ where
             )
         },
         |homspace, axes| rhs_contract_axes_require_twist(rule, homspace, axes),
+        &|space| super::dynamic::storage_layout_is_canonical(rule, space),
         dst,
         lhs,
         rhs,
@@ -842,6 +843,7 @@ where
 pub(crate) fn copy_c_order<E>(
     twist_possible: impl Fn() -> Result<bool, E> + Copy,
     twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E> + Copy,
+    canonical: &dyn Fn(&DynamicFusionMapSpace) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
@@ -905,6 +907,7 @@ where
     let dynamic = |orientation| {
         min_dynamic_tree_materialized_elements(
             twist,
+            canonical,
             dst,
             lhs,
             rhs,

@@ -104,8 +104,13 @@ where
         space: Arc::new(space),
         replay_structure: Arc::clone(source.storage_space().structure()),
         transform_structure: Some(transform_structure),
-        core_is_storage_adjoint: !source.is_direct()
-            && operation.is_identity_for(source.nout(), source.rank() - source.nout()),
+        core_is_storage_adjoint: source_is_storage_adjoint(
+            !source.is_direct(),
+            source.nout(),
+            source.rank(),
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+        ),
     })
 }
 

@@ -492,12 +492,13 @@ where
 /// operand (identity tree transform) against a partner that must be permuted,
 /// so the route is DynamicTree with the adjoint borrowed and only the partner
 /// copied: `a` over its whole domain against `u = s.permute([0], [1, 2])`, and
-/// `w = s.permute([2, 0], [1])`'s leg 0 against `a`'s codomain. Returns each
-/// case with whether its lazy operand is the lhs.
+/// `w = s.permute([2, 0], [1])`'s leg 0 against `a`'s codomain; and (#2159,
+/// candidate selection) `a`'s domain against `r: [V, V] <- []`'s codomain in
+/// reverse order. Returns each case with whether its lazy operand is the lhs.
 pub fn identity_adjoint_cases<R, D>(
     runtime: &Runtime,
     v: &GradedSpace<R>,
-) -> [(Case<R, D>, bool); 2]
+) -> [(Case<R, D>, bool); 3]
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
@@ -510,6 +511,10 @@ where
     let w = tensor::<R, D>(runtime, &[v, v], &[v], 63)
         .permute(&[2, 0], &[1])
         .unwrap();
+    // #2159: `a`'s domain against `r`'s codomain in reverse order. Keeping
+    // `a`'s order permutes only `r` (|r| < |t|), keeping `r`'s permutes `a`:
+    // TensorKit `contract_memcost` takes the former.
+    let r = tensor::<R, D>(runtime, &[v, v], &[], 64);
     [
         (
             Case {
@@ -519,6 +524,18 @@ where
                 lhs_axes: vec![1, 2],
                 rhs_axes: vec![0, 1],
                 output_axes: vec![0, 1],
+                dense: false,
+            },
+            true,
+        ),
+        (
+            Case {
+                name: "identity adjoint lhs, reversed rhs order",
+                lhs: a.clone(),
+                rhs: r,
+                lhs_axes: vec![1, 2],
+                rhs_axes: vec![1, 0],
+                output_axes: vec![0],
                 dense: false,
             },
             true,

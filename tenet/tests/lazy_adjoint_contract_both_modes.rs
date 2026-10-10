@@ -236,6 +236,12 @@ macro_rules! contract_rows {
             .contract(&u, &spec(&[1, 2], &[0, 1], &[0], &[1])));
         row!("w·a identity adjoint, transformed w", |a| w
             .contract(a, &spec(&[0], &[0], &[0, 1], &[2, 3])));
+        // #2159: m1 (keep `a`'s contracted order: `a` free, `t` permuted)
+        // and m2 (keep `t`'s: `a` permuted) both cost |t| under TensorKit
+        // `contract_memcost`, and the tie goes to m1; charging the identity
+        // adjoint as a copy took m2 instead.
+        row!("a·t identity adjoint, reversed t order", |a| a
+            .contract(t, &spec(&[1, 2], &[1, 0], &[0], &[1])));
         row!("a∘t", |a| a.compose(t));
         row!("t∘a", |a| t.compose(a));
         rows
