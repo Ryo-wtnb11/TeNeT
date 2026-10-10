@@ -2,9 +2,8 @@
 //! twist (TensorKit's `DiagonalTensorMap` methods). Each answers `None` when
 //! its operands or destination do not fit, and the dense route runs.
 //!
-//! The twist, compose and contract arms are called from the shared bodies in
-//! both modes; the transform arm is reached only through the multiplicity-free
-//! real-coefficient hook until #1866 calls it from the shared body.
+//! The twist, compose, contract and rank-(1,1) transform arms are called from
+//! the shared bodies in both modes.
 
 use super::*;
 
@@ -359,69 +358,67 @@ where
     Some(tensor.with_spectrum_on(tensor.logical_space().clone(), scaled))
 }
 
-/// A rank-(1,1) leg swap of a compact diagonal kept compact, or an admitted
-/// rank-(1,1) braid read straight from the spectrum into a dense result;
-/// `None` for every other payload or operation.
+/// The compact rank-(1,1) transforms, one body for both modes; `None` for
+/// every other payload or operation.
+///
+/// - **swap** (`permute`/`transpose` with `[1] | [0]`): TensorKit `cfaa073e`
+///   `permute(d::DiagonalTensorMap, ...)` / `transpose` (`diagonal.jl:215-273`)
+///   keep the result diagonal on `dual(d.domain)`; it stays compact here on
+///   the mode's staged destination.
+/// - **braid**: TensorKit has no diagonal `braid`; `similar(t, T, V)`
+///   (`abstracttensor.jl:614-618`) makes it a dense `TensorMap`. The dense
+///   result is read from the spectrum, without a `Σ_c k_c²` source.
+///
+/// Both read the coefficient from the same compiled structure the dense
+/// route replays, staged and committed once by
+/// [`TypedTensorTransformDispatch::transform_bond_spectrum`]. A braid whose
+/// coefficient is not a finite non-zero `D` (an R symbol beyond `f32`) is
+/// that structure's dense replay of the densified spectrum, as on the dense
+/// route.
 pub(super) fn transform_rank_one_diagonal<R, D>(
     tensor: &TensorMap<R, D>,
     operation: &TreeTransformOperation,
-) -> Result<Option<TensorMap<R, D>>, Error>
+) -> Result<Option<TensorMap<R, D>>, TypedFacadeError<R>>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
     D: TensorScalar,
 {
     let Some(spectrum) = tensor.spectrum() else {
         return Ok(None);
     };
     let (codomain_rank, domain_rank) = (tensor.codomain_rank(), tensor.domain_rank());
-    if crate::tensor_core::is_rank_one_diagonal_swap(codomain_rank, domain_rank, operation) {
-        let destination = tensor
-            .logical_space()
-            .transformed_multiplicity_free(operation)?;
-        let transformed = crate::tensor_core::transform_rank_one_diagonal_spectrum(
-            tensor.logical_space().provider(),
-            tensor.logical_space().space(),
-            destination.space(),
-            operation,
-            spectrum,
-        )?;
-        return Ok(Some(tensor.with_spectrum_on(destination, transformed)));
+    let braid =
+        crate::tensor_core::is_rank_one_diagonal_braid(codomain_rank, domain_rank, operation);
+    if !braid
+        && !crate::tensor_core::is_rank_one_diagonal_swap(codomain_rank, domain_rank, operation)
+    {
+        return Ok(None);
     }
-    if crate::tensor_core::is_rank_one_diagonal_braid(codomain_rank, domain_rank, operation) {
-        if let Ok(destination) = tensor
-            .logical_space()
-            .transformed_multiplicity_free(operation)
-        {
-            let compiled = {
-                let mut lease = tensor.runtime.lease_context()?;
-                lease
-                    .context()
-                    .multiplicity_free_lane::<D>()?
-                    .tree_context_mut()
-                    .compile_tree_pair_structure(
-                        tensor.logical_space().provider(),
-                        operation,
-                        destination.space().structure(),
-                        tensor.logical_space().space().structure(),
-                    )
-                    .ok()
-            };
-            if let Some(compiled) = compiled {
-                if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
-                    tensor.logical_space().space(),
-                    destination.space(),
-                    &compiled,
-                    spectrum,
-                ) {
-                    return Ok(Some(TensorMap {
-                        runtime: tensor.runtime.clone(),
-                        repr: owned_repr(TypedTensorBody::dense(destination, data)),
-                    }));
-                }
-            }
+    let BondTransform {
+        destination,
+        output,
+    } = <R::Mode as TypedTensorTransformDispatch<R, D>>::transform_bond_spectrum(
+        tensor, spectrum, operation, braid,
+    )?;
+    let data = match (output, braid) {
+        (BondOutput::Spectrum(spectrum), false) => {
+            return Ok(Some(tensor.with_spectrum_on(destination, spectrum)));
         }
-    }
-    Ok(None)
+        // Why unreachable: rank-one trees compile to one `Single` term per
+        // block, and a swap does not ask for representability.
+        (BondOutput::Dense(_), false) => {
+            return Err(internal_layout_error(
+                "a rank-one diagonal swap resolved to a non-bijective structure",
+            )
+            .into());
+        }
+        (BondOutput::Spectrum(spectrum), true) => {
+            tenet_matrixalgebra::seam::diagonal_bond_data(destination.space(), &spectrum, &|v| v)?
+        }
+        (BondOutput::Dense(data), true) => data,
+    };
+    Ok(Some(tensor.published(destination, data)))
 }
 
 /// The full trace of a rank-(1,1) compact diagonal over its only pair, or

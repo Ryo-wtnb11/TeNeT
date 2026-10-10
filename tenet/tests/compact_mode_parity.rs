@@ -35,9 +35,9 @@ use tenet::sector::{
     GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission, Z2Irrep,
 };
 use tenet::typed::{
-    BlockFusionTrees, Complex64, ContractSpec, Direction, GradedSpace, SectorSpectrum, TensorMap,
-    TensorScalar, TypedTensorConstructionDispatch, TypedTensorContractDispatch,
-    TypedTensorModeDispatch,
+    BlockFusionTrees, Complex64, ContractSpec, Direction, GradedSpace, Runtime, SectorSpectrum,
+    TensorMap, TensorScalar, TypedTensorConstructionDispatch, TypedTensorContractDispatch,
+    TypedTensorModeDispatch, TypedTensorRootDispatch, TypedTensorTransformDispatch,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -60,7 +60,14 @@ const ODD: SectorId = SectorId::new(1);
 struct CheckedZ2 {
     braiding: BraidingStyleKind,
     odd_twist: f64,
+    /// `R^{odd, odd}` of a non-Bosonic style; `-1` is fZ2's exchange sign.
+    odd_r: f64,
+    /// Separates otherwise equal rules in the structure caches, so a cold
+    /// provider ledger can be read twice.
+    salt: u8,
     twist_queries: AtomicUsize,
+    /// Every fallible provider query.
+    queries: AtomicUsize,
     /// Once set, every fallible provider query fails: an operation that
     /// still succeeds made none.
     fail_queries: AtomicBool,
@@ -71,12 +78,24 @@ impl CheckedZ2 {
         Self {
             braiding,
             odd_twist,
+            odd_r: -1.0,
+            salt: 0,
             twist_queries: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
             fail_queries: AtomicBool::new(false),
         }
     }
 
+    fn with_odd_r(self, odd_r: f64) -> Self {
+        Self { odd_r, ..self }
+    }
+
+    fn with_salt(self, salt: u8) -> Self {
+        Self { salt, ..self }
+    }
+
     fn gate(&self) -> Result<(), InvalidSector> {
+        self.queries.fetch_add(1, Ordering::Relaxed);
         if self.fail_queries.load(Ordering::Relaxed) {
             Err(InvalidSector)
         } else {
@@ -114,6 +133,8 @@ impl CheckedGenericFusion for CheckedZ2 {
     fn rule_identity(&self) -> RuleIdentity {
         let mut bytes = vec![self.braiding as u8];
         bytes.extend(self.odd_twist.to_bits().to_le_bytes());
+        bytes.extend(self.odd_r.to_bits().to_le_bytes());
+        bytes.push(self.salt);
         RuleIdentity::from_canonical_bytes::<Self>(0x1866, Arc::<[u8]>::from(bytes))
     }
 
@@ -213,7 +234,7 @@ impl CheckedGenericRigidSymbols for CheckedZ2 {
         // Bosonic Z2 is the trivially braided twin; every other style keeps
         // the super-vector-space exchange sign.
         let odd_pair = a == ODD && b == ODD && self.braiding != BraidingStyleKind::Bosonic;
-        let value = if odd_pair { -1.0 } else { 1.0 };
+        let value = if odd_pair { self.odd_r } else { 1.0 };
         Ok(GenericRMatrix::new(vec![value; size], size, size))
     }
 }
@@ -566,7 +587,24 @@ where
     R::Mode: TypedTensorConstructionDispatch<R, D>,
     D: TensorScalar,
 {
-    let runtime = host_runtime();
+    bond_fixture_on(&host_runtime(), leg, leg, label, conv)
+}
+
+/// [`bond_fixture`] on `runtime`, with `open` as the dense operands' leg that
+/// does not face the bond: `a: W ⊗ open ← W` and `b: W ← open ⊗ W`.
+fn bond_fixture_on<R, D>(
+    runtime: &Runtime,
+    leg: &GradedSpace<R>,
+    open: &GradedSpace<R>,
+    label: impl Fn(&R::Sector) -> f64,
+    conv: impl Fn(f64) -> D,
+) -> BondFixture<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Sector: Clone,
+    R::Mode: TypedTensorConstructionDispatch<R, D>,
+    D: TensorScalar,
+{
     let spectrum = |shift: f64| {
         leg.sectors()
             .unwrap()
@@ -595,10 +633,10 @@ where
         conv(0.25 + 0.375 * sectors - 0.3125 * offsets)
     };
     BondFixture {
-        d: TensorMap::diagonal(&runtime, leg, spectrum(1.5)).unwrap(),
-        e: TensorMap::diagonal(&runtime, leg, spectrum(-0.5)).unwrap(),
-        a: TensorMap::from_subblock_fn(&runtime, [leg, leg], [leg], fill).unwrap(),
-        b: TensorMap::from_subblock_fn(&runtime, [leg], [leg, leg], fill).unwrap(),
+        d: TensorMap::diagonal(runtime, leg, spectrum(1.5)).unwrap(),
+        e: TensorMap::diagonal(runtime, leg, spectrum(-0.5)).unwrap(),
+        a: TensorMap::from_subblock_fn(runtime, [leg, open], [leg], fill).unwrap(),
+        b: TensorMap::from_subblock_fn(runtime, [leg], [open, leg], fill).unwrap(),
     }
 }
 
@@ -1228,4 +1266,630 @@ fn compact_square_allocates_linear_in_the_spectrum_in_both_modes() {
         );
         assert!(compact, "{mode} D * D densified");
     }
+}
+
+#[test]
+fn fermionic_dual_open_leg_compact_compose_and_contract_agree_across_modes() {
+    // What: the dense operands carry a dual open leg (`a: W ⊗ W' ← W`), so
+    // the reordered arms permute a dual leg past the bond under a fermionic
+    // rule; both modes agree with the multiplicity-free dense route.
+    let cases: Vec<BondCase> = COMPOSE_CASES.into_iter().chain(CONTRACT_CASES).collect();
+    fn fixture<R>(leg: GradedSpace<R>) -> BondFixture<R, Complex64>
+    where
+        R: TypedSectorAdmission<Sector = Z2Irrep>,
+        R::Mode: TypedTensorConstructionDispatch<R, Complex64>,
+    {
+        let open = leg.try_dual().unwrap();
+        bond_fixture_on(&host_runtime(), &leg, &open, parity, |x: f64| {
+            Complex64::new(x, 0.25 - x)
+        })
+    }
+    let mf = bond_rows(&fixture(z2_leg(FermionParityFusionRule)), &cases);
+    let checked = bond_rows(
+        &fixture(z2_leg(CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0))),
+        &cases,
+    );
+    let answered = |rows: &[Option<Vec<Complex64>>]| -> Vec<Option<Vec<Complex64>>> {
+        rows.iter()
+            .zip(&checked)
+            .filter(|(_, row)| row.is_some())
+            .map(|(row, _)| row.clone())
+            .collect()
+    };
+    assert_eq!(checked.iter().filter(|row| row.is_none()).count(), 1);
+    assert_rows_close(&answered(&mf), &answered(&checked));
+}
+
+// ---- Leaf C: rank-(1,1) swap and braid ----
+//
+// TensorKit `cfaa073e` `permute(d::DiagonalTensorMap, ((2,), (1,)))` and
+// `transpose` (`src/tensors/diagonal.jl:215-273`) keep the result diagonal on
+// `dual(d.domain)`, scaling each block by the one coefficient of the
+// rank-one tree pair. `braid` has no diagonal method: `similar(t, T, V)`
+// (`src/tensors/abstracttensor.jl:614-618`) makes it a dense `TensorMap`.
+// QSpace has no braiding. The per-sector swap coefficients below were read
+// from TensorKit at `cfaa073e` (script and output in the #1866 leaf C
+// record): fZ2 permute θ-sign `-1` on the odd sector and transpose `+1`; Z2,
+// U(1) and SU(2) (j = 0, 1/2, 1) all `1`.
+
+const TRANSFORMS: [&str; 3] = ["permute", "transpose", "braid"];
+
+fn transform<R, D>(
+    tensor: &TensorMap<R, D>,
+    op: &str,
+) -> Result<TensorMap<R, D>, <R::Mode as TypedTensorModeDispatch<R>>::FacadeError>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
+    D: TensorScalar,
+{
+    match op {
+        "permute" => tensor.permute(&[1], &[0]),
+        "transpose" => tensor.transpose(&[1], &[0]),
+        _ => tensor.braid(&[1], &[0], &[0, 1]),
+    }
+}
+
+/// Runs `ops` on the compact `d` and on its materialized twin: a swap stays
+/// compact on `dual(leg) ← dual(leg)` and a braid is dense, and either equals
+/// the dense route bit for bit (one compiled coefficient authority). Returns
+/// each result's dense image.
+fn transform_rows<R, D>(d: &TensorMap<R, D>, leg: &GradedSpace<R>, ops: &[&str]) -> Vec<Vec<D>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar + std::fmt::Debug,
+{
+    let dense = d.materialize().unwrap();
+    let dual = leg.try_dual().unwrap();
+    ops.iter()
+        .map(|&op| {
+            let got = transform(d, op).unwrap();
+            let want = transform(&dense, op).unwrap();
+            assert_eq!(
+                got.dense_data().is_err(),
+                op != "braid",
+                "{op}: storage form"
+            );
+            assert_eq!(got.codomain()[0], dual, "{op}: codomain is dual(domain)");
+            assert_eq!(got.domain()[0], dual, "{op}: domain is dual(codomain)");
+            assert_eq!(got.codomain(), want.codomain(), "{op}");
+            assert_eq!(got.domain(), want.domain(), "{op}");
+            let image = got.materialize().unwrap().dense_data().unwrap().to_vec();
+            assert_eq!(
+                image,
+                want.dense_data().unwrap(),
+                "{op}: compact != dense route"
+            );
+            image
+        })
+        .collect()
+}
+
+fn assert_images_close<D: Copy>(mf: &[Vec<D>], checked: &[Vec<D>])
+where
+    Complex64: From<D>,
+{
+    assert_eq!(mf.len(), checked.len());
+    for (row, (lhs, rhs)) in mf.iter().zip(checked).enumerate() {
+        assert_eq!(lhs.len(), rhs.len(), "row {row}");
+        for (&x, &y) in lhs.iter().zip(rhs) {
+            let (x, y) = (Complex64::from(x), Complex64::from(y));
+            assert!(
+                close(x, y),
+                "row {row}: multiplicity-free {x} != checked {y}"
+            );
+        }
+    }
+}
+
+/// The swapped spectrum of a Z2-graded compact diagonal against the
+/// TensorKit coefficient: `-1` only on the odd sector of a fermionic permute.
+fn assert_z2_swap_spectrum<R, D>(d: &TensorMap<R, D>, fermionic: bool)
+where
+    R: TypedSectorAdmission<Sector = Z2Irrep>,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedTensorRootDispatch<R>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar + std::fmt::Debug,
+    Complex64: From<D>,
+{
+    let source = d.diagview().unwrap();
+    for op in ["permute", "transpose"] {
+        let swapped = transform(d, op).unwrap().diagview().unwrap();
+        assert_eq!(swapped.len(), source.len(), "{op}");
+        for (got, want) in swapped.iter().zip(&source) {
+            assert_eq!(got.sector, want.sector, "{op}: Z2 is self-dual");
+            let sign = if fermionic && op == "permute" && got.sector.parity() == 1 {
+                -1.0
+            } else {
+                1.0
+            };
+            for (&x, &y) in got.values.iter().zip(&want.values) {
+                assert_eq!(
+                    Complex64::from(x),
+                    Complex64::from(y) * sign,
+                    "{op} sector {:?}",
+                    got.sector
+                );
+            }
+        }
+    }
+}
+
+fn z2_diagonal<R, D>(rule: R, conv: impl Fn(f64) -> D) -> (TensorMap<R, D>, GradedSpace<R>)
+where
+    R: TypedSectorAdmission<Sector = Z2Irrep>,
+    R::Mode: TypedTensorConstructionDispatch<R, D>,
+    D: TensorScalar,
+{
+    let leg = z2_leg(rule);
+    let d = TensorMap::diagonal(
+        &host_runtime(),
+        &leg,
+        SECTORS.iter().map(|&(p, k)| SectorSpectrum {
+            sector: Z2Irrep::new(p),
+            values: (0..k).map(|i| conv(value(p, i))).collect(),
+        }),
+    )
+    .unwrap();
+    (d, leg)
+}
+
+#[test]
+fn compact_swap_and_braid_agree_across_modes() {
+    // What: the rank-(1,1) swap and braid of a compact diagonal are one
+    // mode-free arm. Checked Generic used to densify the swap (and refuse
+    // `map_diagonal` after it); both modes now keep it compact on
+    // `dual(domain)` with TensorKit's coefficient, and both read the braid's
+    // dense result from the spectrum, equal to the dense route.
+    use tenet::sector::Z2FusionRule;
+    macro_rules! rows {
+        ($fermionic:expr, $mf:expr, $checked:expr, $conv:expr) => {{
+            let (mf, mf_leg) = z2_diagonal($mf, $conv);
+            let (checked, checked_leg) = z2_diagonal($checked, $conv);
+            assert_z2_swap_spectrum(&mf, $fermionic);
+            assert_z2_swap_spectrum(&checked, $fermionic);
+            assert_images_close(
+                &transform_rows(&mf, &mf_leg, &TRANSFORMS),
+                &transform_rows(&checked, &checked_leg, &TRANSFORMS),
+            );
+            checked
+        }};
+    }
+    let real = |x: f64| x;
+    let complex = |x: f64| Complex64::new(x, 0.5 * x - 0.25);
+    let bosonic = || CheckedZ2::new(BraidingStyleKind::Bosonic, 1.0);
+    let fermionic = || CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0);
+    for checked in [
+        rows!(false, Z2FusionRule, bosonic(), real),
+        rows!(true, FermionParityFusionRule, fermionic(), real),
+    ] {
+        let swapped = checked.permute(&[1], &[0]).unwrap();
+        let root = swapped.map_diagonal(|x: f64| x.abs().sqrt()).unwrap();
+        assert!(root.dense_data().is_err());
+    }
+    rows!(false, Z2FusionRule, bosonic(), complex);
+    rows!(true, FermionParityFusionRule, fermionic(), complex);
+}
+
+#[test]
+fn checked_anyonic_compact_swap_and_braid_match_the_dense_route() {
+    // What: a checked-only anyonic rule with a non-sign R takes the same arm;
+    // the result is the dense route's, whether the dense route answers or
+    // rejects.
+    let (d, leg) = z2_diagonal(
+        CheckedZ2::new(BraidingStyleKind::Anyonic, 0.6).with_odd_r(0.8),
+        |x: f64| x,
+    );
+    let dense = d.materialize().unwrap();
+    for op in TRANSFORMS {
+        match (transform(&d, op), transform(&dense, op)) {
+            (Ok(_), Ok(_)) => {
+                transform_rows(&d, &leg, &[op]);
+            }
+            (Err(got), Err(want)) => assert_eq!(format!("{got}"), format!("{want}"), "{op}"),
+            (got, want) => panic!("{op}: compact {got:?} vs dense {want:?}"),
+        }
+    }
+}
+
+#[test]
+fn multiplicity_free_u1_compact_swap_moves_each_spectrum_to_the_dual_sector() {
+    // What: U(1) charges ±1 trade places under duality, so each swapped
+    // spectrum sits on the dual charge with coefficient 1.
+    use tenet::sector::{U1FusionRule, U1Irrep};
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    for complex in [false, true] {
+        let conv = |x: f64| Complex64::new(x, if complex { 1.0 - x } else { 0.0 });
+        let d = TensorMap::diagonal(
+            &host_runtime(),
+            &leg,
+            [(-1, 2), (1, 3)].map(|(charge, k)| SectorSpectrum {
+                sector: U1Irrep::new(charge),
+                values: (0..k)
+                    .map(|i| conv(f64::from(charge) - 0.5 * i as f64))
+                    .collect(),
+            }),
+        )
+        .unwrap();
+        transform_rows(&d, &leg, &TRANSFORMS);
+        let source = d.diagview().unwrap();
+        for op in ["permute", "transpose"] {
+            for entry in transform(&d, op).unwrap().diagview().unwrap() {
+                let partner = source
+                    .iter()
+                    .find(|s| s.sector == U1Irrep::new(-entry.sector.charge()))
+                    .unwrap();
+                assert_eq!(entry.values, partner.values, "{op} {:?}", entry.sector);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn su2_compact_swap_and_braid_agree_across_modes() {
+    // What: the non-Abelian row. TensorKit's swap coefficient is 1 on
+    // j = 0, 1/2 and 1 (up to its rounding); both modes keep the spectrum and
+    // agree with each other and with their dense routes.
+    use tenet::sector::{SU2FusionRule, SU2Irrep, SUNFusionRule};
+    let su2 = [(0usize, 2usize), (1, 3), (2, 1)];
+    let tensorkit_coefficient = [1.0, 1.0, 1.0];
+    let values = |twice: usize, k: usize| -> Vec<f64> {
+        (0..k).map(|i| 0.5 + (twice * 4 + i) as f64).collect()
+    };
+    let mf_leg = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        su2.iter()
+            .map(|&(twice, k)| (SU2Irrep::from_twice_spin(twice), k)),
+    )
+    .unwrap();
+    let checked_leg = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(2).unwrap()),
+        su2.iter().map(|&(twice, k)| (vec![twice as i64], k)),
+    )
+    .unwrap();
+    let mf = TensorMap::<_, f64>::diagonal(
+        &host_runtime(),
+        &mf_leg,
+        su2.iter().map(|&(twice, k)| SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(twice),
+            values: values(twice, k),
+        }),
+    )
+    .unwrap();
+    let checked = TensorMap::<_, f64>::diagonal(
+        &host_runtime(),
+        &checked_leg,
+        su2.iter().map(|&(twice, k)| SectorSpectrum {
+            sector: vec![twice as i64],
+            values: values(twice, k),
+        }),
+    )
+    .unwrap();
+    assert_images_close(
+        &transform_rows(&mf, &mf_leg, &TRANSFORMS),
+        &transform_rows(&checked, &checked_leg, &TRANSFORMS),
+    );
+    for op in ["permute", "transpose"] {
+        let mf_swapped = transform(&mf, op).unwrap().diagview().unwrap();
+        let checked_swapped = transform(&checked, op).unwrap().diagview().unwrap();
+        for (index, &(twice, k)) in su2.iter().enumerate() {
+            let mf_entry = mf_swapped
+                .iter()
+                .find(|e| e.sector == SU2Irrep::from_twice_spin(twice))
+                .unwrap();
+            let checked_entry = checked_swapped
+                .iter()
+                .find(|e| e.sector == vec![twice as i64])
+                .unwrap();
+            for (i, want) in values(twice, k).into_iter().enumerate() {
+                let want = Complex64::from(want * tensorkit_coefficient[index]);
+                assert!(
+                    close(Complex64::from(mf_entry.values[i]), want),
+                    "{op} mf j={twice}/2"
+                );
+                assert!(
+                    close(Complex64::from(checked_entry.values[i]), want),
+                    "{op} checked j={twice}/2"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn su3_dual_leg_checked_compact_swap_and_braid_match_the_dense_route() {
+    // What: non-self-dual SU(3) irreps on a dual leg (`[1,0]^2 + [0,1]`
+    // dualized): the swapped spectrum moves to the destination's dual labels,
+    // read from the staged destination, and equals the dense route.
+    use tenet::sector::SUNFusionRule;
+    let leg = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![1i64, 0], 2), (vec![0, 1], 1)],
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    for complex in [false, true] {
+        let conv = |x: f64| Complex64::new(x, if complex { 0.5 * x } else { 0.0 });
+        let d = TensorMap::diagonal(
+            &host_runtime(),
+            &leg,
+            [
+                SectorSpectrum {
+                    sector: vec![0i64, 1],
+                    values: vec![conv(0.5), conv(-1.25)],
+                },
+                SectorSpectrum {
+                    sector: vec![1i64, 0],
+                    values: vec![conv(2.0)],
+                },
+            ],
+        )
+        .unwrap();
+        transform_rows(&d, &leg, &TRANSFORMS);
+    }
+}
+
+#[test]
+fn fibonacci_complex_symbol_compact_transpose_and_braid_take_the_arm() {
+    // What: the complex-symbol coefficient lane takes the same arm (#1866
+    // X6): transpose stays compact and the braid is read from the spectrum.
+    // Fibonacci is anyonic, so `permute` is rejected alike for the compact
+    // and the materialized input.
+    use tenet::sector::{FibonacciFusionRule, FibonacciSector};
+    let leg = GradedSpace::try_new(
+        Arc::new(FibonacciFusionRule),
+        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+    )
+    .unwrap();
+    let d = bond_fixture(
+        &leg,
+        |sector| f64::from(u8::from(*sector == FibonacciSector::Tau)),
+        |x: f64| Complex64::new(x, 0.5 - x),
+    )
+    .d;
+    transform_rows(&d, &leg, &["transpose", "braid"]);
+    assert_eq!(
+        format!("{}", d.permute(&[1], &[0]).unwrap_err()),
+        format!(
+            "{}",
+            d.materialize().unwrap().permute(&[1], &[0]).unwrap_err()
+        ),
+    );
+}
+
+#[test]
+fn checked_compact_braid_decline_replays_in_one_staging() {
+    // What: an R symbol beyond f32 (1e100 overflows, 1e-100 underflows)
+    // declines the spectrum read; the arm replays the densified spectrum with
+    // the structure it already staged, so the result is the dense route's
+    // bit for bit (NaN placement included) and the provider is queried
+    // exactly as often as by the dense route, cold and warm.
+    for (salt, odd_r) in [(1u8, 1e100), (3, 1e-100)] {
+        let rule = |salt| {
+            CheckedZ2::new(BraidingStyleKind::Anyonic, 1.0)
+                .with_odd_r(odd_r)
+                .with_salt(salt)
+        };
+        let ledger = |tensor: &TensorMap<CheckedZ2, f32>| {
+            let provider = tensor.provider();
+            let mut counts = Vec::new();
+            let mut result = None;
+            for _ in 0..2 {
+                provider.queries.store(0, Ordering::Relaxed);
+                result = Some(tensor.braid(&[1], &[0], &[0, 1]).unwrap());
+                counts.push(provider.queries.load(Ordering::Relaxed));
+            }
+            (counts, result.unwrap())
+        };
+        let values = |x: f64| x as f32;
+        let (compact, _) = z2_diagonal(rule(salt), values);
+        let dense = z2_diagonal(rule(salt + 1), values).0.materialize().unwrap();
+        let (compact_counts, got) = ledger(&compact);
+        let (dense_counts, want) = ledger(&dense);
+        assert!(compact_counts[0] > 0);
+        assert_eq!(
+            compact_counts, dense_counts,
+            "R = {odd_r:e}: provider queries"
+        );
+        let (got, want) = (got.dense_data().unwrap(), want.dense_data().unwrap());
+        assert!(
+            want.iter().any(|x| x.is_nan()) || want.iter().filter(|&&x| x != 0.0).count() < 5,
+            "R = {odd_r:e}: the fixture must make the coefficient unrepresentable"
+        );
+        assert_eq!(got.len(), want.len());
+        for (&x, &y) in got.iter().zip(want) {
+            assert!(
+                x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+                "R = {odd_r:e}: {x} != dense {y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_compact_swap_queries_the_provider_like_the_dense_route() {
+    // What: the swap arm stages, resolves and commits with the dense route's
+    // own staging, so cold and warm provider queries are the dense route's.
+    let rule = |salt| CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(salt);
+    let ledger = |tensor: &TensorMap<CheckedZ2, f64>| {
+        let provider = tensor.provider();
+        (0..2)
+            .map(|_| {
+                provider.queries.store(0, Ordering::Relaxed);
+                black_box(tensor.permute(&[1], &[0]).unwrap());
+                provider.queries.load(Ordering::Relaxed)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (compact, _) = z2_diagonal(rule(5), |x: f64| x);
+    let dense = z2_diagonal(rule(6), |x: f64| x).0.materialize().unwrap();
+    let compact_counts = ledger(&compact);
+    assert!(compact_counts[0] > 0);
+    assert_eq!(compact_counts, ledger(&dense));
+}
+
+fn warmed_swap_bytes<R>(tensor: &TensorMap<R, f64>) -> (u64, bool)
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, f64>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+{
+    black_box(tensor.permute(&[1], &[0]).unwrap());
+    let (swapped, allocs) =
+        counting_alloc::measure(|| black_box(tensor.permute(&[1], &[0]).unwrap()));
+    (allocs.bytes, swapped.dense_data().is_err())
+}
+
+#[test]
+fn compact_swap_allocates_linear_in_the_spectrum_in_both_modes() {
+    // What: the swap of a compact diagonal costs Σk, never a k² payload.
+    let _measurement = counting_alloc::serial();
+    let dense_payload = (K * K * std::mem::size_of::<f64>()) as u64;
+    let spectrum_growth = (2 * K * std::mem::size_of::<f64>()) as u64;
+    let rows = [
+        (
+            "multiplicity-free",
+            warmed_swap_bytes(&odd_diagonal(FermionParityFusionRule, K)),
+            warmed_swap_bytes(&odd_diagonal(FermionParityFusionRule, 2 * K)),
+        ),
+        (
+            "checked",
+            warmed_swap_bytes(&odd_diagonal(
+                CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0),
+                K,
+            )),
+            warmed_swap_bytes(&odd_diagonal(
+                CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0),
+                2 * K,
+            )),
+        ),
+    ];
+    for (mode, (small, _), (large, compact)) in rows {
+        assert!(
+            large.saturating_sub(small) <= spectrum_growth,
+            "{mode} swap is not linear in k: {small} -> {large} bytes"
+        );
+        assert!(
+            large < dense_payload,
+            "{mode} swap allocated a dense payload: {large} bytes"
+        );
+        assert!(compact, "{mode} swap densified");
+    }
+}
+
+/// The Host-vs-CUDA column of the matrix: the multiplicity-free rows of every
+/// compact operation run on a device copy (`to_cuda` densifies the compact
+/// operand) and come back equal to the Host result densified. Checked × CUDA
+/// and Fibonacci × CUDA are compile-time capability absences (the device
+/// operations are bounded `MultiplicityFreeRigidSymbols<Scalar = f64>`).
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs a CUDA device"]
+fn cuda_column_matches_the_host_for_every_compact_row() {
+    use tenet::sector::{U1FusionRule, U1Irrep, Z2FusionRule};
+    fn assert_same<D: TensorScalar + Copy>(
+        what: &str,
+        host: &TensorMap<impl TypedSectorAdmission, D>,
+        device: &[D],
+    ) where
+        Complex64: From<D>,
+    {
+        let host = host.materialize().unwrap();
+        let host = host.dense_data().unwrap();
+        assert_eq!(host.len(), device.len(), "{what}");
+        for (&x, &y) in host.iter().zip(device) {
+            let (x, y) = (Complex64::from(x), Complex64::from(y));
+            assert!(close(y, x), "{what}: device {y} != host {x}");
+        }
+    }
+    macro_rules! cuda_rows {
+        ($row:expr, $leg:expr, $label:expr, $conv:expr) => {{
+            let row: &str = $row;
+            let leg = $leg;
+            let host = bond_fixture_on(&fixtures::cuda_runtime(), &leg, &leg, $label, $conv);
+            let device = [&host.d, &host.e, &host.a, &host.b].map(|t| t.to_cuda().unwrap());
+            let pick_device = |code: char| match code {
+                'd' => &device[0],
+                'e' => &device[1],
+                'a' => &device[2],
+                _ => &device[3],
+            };
+            for op in TRANSFORMS {
+                let expected = transform(&host.d, op).unwrap();
+                let actual = match op {
+                    "permute" => device[0].permute(&[1], &[0]),
+                    "transpose" => device[0].transpose(&[1], &[0]),
+                    _ => device[0].braid(&[1], &[0], &[0, 1]),
+                }
+                .unwrap()
+                .to_host()
+                .unwrap();
+                assert_same(
+                    &format!("{row} {op}"),
+                    &expected,
+                    actual.dense_data().unwrap(),
+                );
+            }
+            for legs in LEG_SETS {
+                for direction in [Direction::Forward, Direction::Inverse] {
+                    let expected = host.d.twist(legs, direction).unwrap();
+                    let actual = device[0].twist(legs, direction).unwrap().to_host().unwrap();
+                    assert_same(
+                        &format!("{row} twist {legs:?} {direction:?}"),
+                        &expected,
+                        actual.dense_data().unwrap(),
+                    );
+                }
+            }
+            for (what, _, lhs, rhs, spec) in COMPOSE_CASES.into_iter().chain(CONTRACT_CASES) {
+                let (host_lhs, host_rhs) = (pick(&host, lhs), pick(&host, rhs));
+                let (device_lhs, device_rhs) = (pick_device(lhs), pick_device(rhs));
+                let (expected, actual) = match spec {
+                    None => (host_lhs.compose(host_rhs), device_lhs.compose(device_rhs)),
+                    Some(spec) => (
+                        host_lhs.contract(host_rhs, &spec),
+                        device_lhs.contract(device_rhs, &spec),
+                    ),
+                };
+                match (expected, actual) {
+                    (Ok(expected), Ok(actual)) => assert_same(
+                        &format!("{row} {what}"),
+                        &expected,
+                        actual.to_host().unwrap().dense_data().unwrap(),
+                    ),
+                    (Err(_), Err(_)) => {}
+                    (expected, actual) => panic!(
+                        "{row} {what}: host {:?} vs device {:?}",
+                        expected.err().map(|e| e.to_string()),
+                        actual.err().map(|e| e.to_string())
+                    ),
+                }
+            }
+        }};
+    }
+    let real = |x: f64| x;
+    let complex = |x: f64| Complex64::new(x, 0.5 * x - 0.25);
+    let u1 = || {
+        GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap()
+    };
+    let charge = |sector: &U1Irrep| f64::from(sector.charge());
+    cuda_rows!("Z2 f64", z2_leg(Z2FusionRule), parity, real);
+    cuda_rows!("Z2 c64", z2_leg(Z2FusionRule), parity, complex);
+    cuda_rows!("fZ2 f64", z2_leg(FermionParityFusionRule), parity, real);
+    cuda_rows!("fZ2 c64", z2_leg(FermionParityFusionRule), parity, complex);
+    cuda_rows!("U(1) f64", u1(), charge, real);
+    cuda_rows!("U(1) c64", u1(), charge, complex);
 }

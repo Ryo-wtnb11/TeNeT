@@ -353,6 +353,8 @@ const TYPED: &[&str] = &[
     "TruncationSpace",
     "TypedPersistenceCodec",
     "TypedAdjointSpace",
+    "BondOutput",
+    "BondTransform",
     "TypedSpaceModeDispatch",
     "TypedTensorConstructionDispatch",
     "TypedTensorContractDispatch",

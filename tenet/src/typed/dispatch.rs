@@ -101,14 +101,17 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// A compact-diagonal result without densifying, or `None` to take the
-    /// dense route. Deleted by #1866, which makes the compact arms mode-free.
-    fn try_compact_transform(
-        _tensor: &TensorMap<R, D>,
-        _operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
-        Ok(None)
-    }
+    /// `operation` (a rank-(1,1) leg swap or braid) applied to the compact
+    /// `spectrum` of `tensor` in one staging: the committed destination and
+    /// either the spectrum carried through the resolved single-term square
+    /// bijection, or (when that proof or `require_representable` fails) the
+    /// dense replay of the densified spectrum with the same structure.
+    fn transform_bond_spectrum(
+        tensor: &TensorMap<R, D>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        operation: &TreeTransformOperation,
+        require_representable: bool,
+    ) -> Result<BondTransform<R, D>, Self::FacadeError>;
 
     /// The lazy adjoint of the transformed parent for a lazy-adjoint input,
     /// else `None`. The method is where a mode discharges
@@ -130,16 +133,36 @@ where
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 }
 
+/// The committed destination of a compact rank-(1,1) transform and its
+/// payload.
+///
+/// Internal and unstable despite being public for the dispatch traits.
+#[doc(hidden)]
+pub struct BondTransform<R, D> {
+    pub destination: BoundDynamicFusionMapSpace<R>,
+    pub output: BondOutput<D>,
+}
+
+/// A compact rank-(1,1) transform's payload: the carried spectrum, or the
+/// dense replay of the densified spectrum when the bijection proof declined.
+///
+/// Internal and unstable despite being public for the dispatch traits.
+#[doc(hidden)]
+pub enum BondOutput<D> {
+    Spectrum(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
+    Dense(Vec<D>),
+}
+
 pub(super) trait MultiplicityFreeTransformExecution<R, C>: TensorScalar
 where
     R: TypedSectorAdmission,
 {
-    fn try_compact(
-        _tensor: &TensorMap<R, Self>,
-        _operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        Ok(None)
-    }
+    fn transform_bond_spectrum(
+        tensor: &TensorMap<R, Self>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<Self>],
+        operation: &TreeTransformOperation,
+        require_representable: bool,
+    ) -> Result<BondTransform<R, Self>, Error>;
 
     fn try_lazy_adjoint(
         _tensor: &TensorMap<R, Self>,

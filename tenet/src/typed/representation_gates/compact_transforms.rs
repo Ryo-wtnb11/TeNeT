@@ -716,9 +716,10 @@ fn compact_arms_never_densify_their_spectrum_operand() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compose_and_contract_arms_never_densify_their_spectrum_operand() {
-    // What (#1866): checked Generic takes the same compose and contract arms,
-    // so a compact operand is read as a spectrum there too.
+fn checked_compact_arms_never_densify_their_spectrum_operand() {
+    // What (#1866): checked Generic takes the same compose, contract and
+    // rank-(1,1) transform arms, so a compact operand is read as a spectrum
+    // there too.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 1], 3)]).unwrap();
@@ -747,6 +748,11 @@ fn checked_compose_and_contract_arms_never_densify_their_spectrum_operand() {
         };
         let _ = lhs.contract(rhs, &spec).unwrap();
     }
+    // The rank-(1,1) swap stays compact and the braid reads the spectrum.
+    let swapped = d.permute(&[1], &[0]).unwrap();
+    assert!(swapped.spectrum().is_some());
+    let _ = d.transpose(&[1], &[0]).unwrap();
+    let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 

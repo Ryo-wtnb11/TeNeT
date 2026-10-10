@@ -165,7 +165,7 @@ pub use tensortrace::{
 #[cfg(test)]
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
 pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
-pub use tree_context::TreeTransformExecutionContext;
+pub use tree_context::{StructureOutcome, TreeTransformExecutionContext};
 #[doc(hidden)]
 pub use tree_transform::{
     admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, TreeTransformOperationView,
