@@ -1331,6 +1331,7 @@ where
         dst_space.space().nout(),
         src_space,
         axes,
+        false,
         pending,
     )
 }
@@ -1341,6 +1342,7 @@ fn compile_fusion_generic_checked_parts<R>(
     dst_nout: usize,
     src_space: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
+    admitted: bool,
     pending: &mut CheckedPendingCoefficients,
 ) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
 where
@@ -1352,16 +1354,21 @@ where
     } else {
         FusionTreePairOrientation::Direct
     };
-    let preflight = tensortrace_fusion_dyn_preflight_generic_checked(src_space, axes, dst_nout)?;
-    // TensorKit's order: the destination space, then the pair duality.
-    if preflight.selected_homspace() != dst_homspace {
-        return Err(CheckedGenericPlanError::Operation(
-            OperationError::StructureMismatch { tensor: "dst" },
-        ));
+    // `admitted`: the destination was selected from this source and these
+    // axes by a preflight that also proved the pair duality (#2146).
+    if !admitted {
+        let preflight =
+            tensortrace_fusion_dyn_preflight_generic_checked(src_space, axes, dst_nout)?;
+        // TensorKit's order: the destination space, then the pair duality.
+        if preflight.selected_homspace() != dst_homspace {
+            return Err(CheckedGenericPlanError::Operation(
+                OperationError::StructureMismatch { tensor: "dst" },
+            ));
+        }
+        preflight
+            .require_dual_pairs()
+            .map_err(CheckedGenericPlanError::Operation)?;
     }
-    preflight
-        .require_dual_pairs()
-        .map_err(CheckedGenericPlanError::Operation)?;
     let lowered_axes = lower_tensortrace_source_adjoint_axes_dyn(
         src_space.space().nout(),
         src_space.space().nin(),
@@ -1404,27 +1411,29 @@ where
 pub(crate) trait TraceStaging<R>: crate::PivotalCoefficientAlgebra<R> {
     /// Multiplicity-free: the derived, already-published destination.
     /// Checked: the prepared, unpublished destination.
-    type TraceStage;
+    type TraceStage<'a>
+    where
+        R: 'a;
     /// Multiplicity-free: nothing. Checked: the coefficients the compile
     /// built, published only after the commit.
     type TracePending;
 
     /// Preflight, then the pair duality (with no destination it follows at
     /// once, TensorKit `trace_permute!`), then the destination.
-    fn stage_trace(
-        src: &BoundDynamicFusionMapSpace<R>,
-        axes: TensorTraceAxisSpec<'_>,
+    fn stage_trace<'a>(
+        src: &'a BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'a>,
         dst_nout: usize,
-    ) -> Result<Self::TraceStage, Self::Error>;
+    ) -> Result<Self::TraceStage<'a>, Self::Error>;
 
     /// Opened before the compile, so a checked reset during it leaves the
     /// built groups unpublished.
     fn open_trace() -> Self::TracePending;
 
-    fn trace_nout(stage: &Self::TraceStage) -> usize;
+    fn trace_nout(stage: &Self::TraceStage<'_>) -> usize;
 
     fn compile_trace(
-        stage: &Self::TraceStage,
+        stage: &Self::TraceStage<'_>,
         src: &BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'_>,
         pending: &mut Self::TracePending,
@@ -1433,7 +1442,7 @@ pub(crate) trait TraceStaging<R>: crate::PivotalCoefficientAlgebra<R> {
     /// Publishes the destination and what the compile staged.
     fn commit_trace(
         src: &BoundDynamicFusionMapSpace<R>,
-        stage: Self::TraceStage,
+        stage: Self::TraceStage<'_>,
         pending: Self::TracePending,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error>;
 }
@@ -1442,7 +1451,10 @@ impl<R> TraceStaging<R> for MultiplicityFreeAdmissionMode
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
 {
-    type TraceStage = BoundDynamicFusionMapSpace<R>;
+    type TraceStage<'a>
+        = BoundDynamicFusionMapSpace<R>
+    where
+        R: 'a;
     type TracePending = ();
 
     fn stage_trace(
@@ -1483,49 +1495,60 @@ impl<R> TraceStaging<R> for CheckedGenericAdmissionMode
 where
     R: CheckedGenericPivotal<Scalar = f64>,
 {
-    type TraceStage = PreparedCheckedGenericDynamicSpace;
+    type TraceStage<'a>
+        = CheckedGenericTraceStage<'a, R>
+    where
+        R: 'a;
     type TracePending = CheckedPendingCoefficients;
 
-    fn stage_trace(
-        src: &BoundDynamicFusionMapSpace<R>,
-        axes: TensorTraceAxisSpec<'_>,
+    fn stage_trace<'a>(
+        src: &'a BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'a>,
         dst_nout: usize,
-    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericPlanError<R::Error>> {
+    ) -> Result<CheckedGenericTraceStage<'a, R>, CheckedGenericPlanError<R::Error>> {
         let preflight = tensortrace_fusion_dyn_preflight_generic_checked(src, axes, dst_nout)?;
         preflight
             .require_dual_pairs()
             .map_err(CheckedGenericPlanError::Operation)?;
-        src.prepare_final_homspace_generic_with_checked(
-            src.provider(),
-            preflight.into_selected_homspace(),
-        )
-        .map_err(CheckedGenericPlanError::from)
+        let destination = src
+            .prepare_final_homspace_generic_with_checked(
+                src.provider(),
+                preflight.into_selected_homspace(),
+            )
+            .map_err(CheckedGenericPlanError::from)?;
+        Ok(CheckedGenericTraceStage {
+            destination,
+            src,
+            axes,
+        })
     }
 
     fn open_trace() -> CheckedPendingCoefficients {
         CheckedPendingCoefficients::new()
     }
 
-    fn trace_nout(stage: &PreparedCheckedGenericDynamicSpace) -> usize {
-        stage.nout()
+    fn trace_nout(stage: &CheckedGenericTraceStage<'_, R>) -> usize {
+        stage.destination.nout()
     }
 
     /// A warm complete hit compiles against the live canonical wrapper, so
     /// the published coupled-region memo is reused rather than rebuilt.
     fn compile_trace(
-        stage: &PreparedCheckedGenericDynamicSpace,
+        stage: &CheckedGenericTraceStage<'_, R>,
         src: &BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'_>,
         pending: &mut CheckedPendingCoefficients,
     ) -> Result<TensorTraceFusionStructure<f64>, CheckedGenericPlanError<R::Error>> {
-        src.validate_prepared_final_homspace_generic_checked(stage)
+        let destination = &stage.destination;
+        src.validate_prepared_final_homspace_generic_checked(destination)
             .map_err(CheckedGenericPlanError::Operation)?;
         compile_fusion_generic_checked_parts(
-            stage.homspace(),
-            stage.shared_structure(),
-            stage.nout(),
+            destination.homspace(),
+            destination.shared_structure(),
+            destination.nout(),
             src,
             axes,
+            stage.admits(src, axes),
             pending,
         )
     }
@@ -1533,11 +1556,11 @@ where
     /// The final provider guard remains defensive.
     fn commit_trace(
         src: &BoundDynamicFusionMapSpace<R>,
-        stage: PreparedCheckedGenericDynamicSpace,
+        stage: CheckedGenericTraceStage<'_, R>,
         pending: CheckedPendingCoefficients,
     ) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericPlanError<R::Error>> {
         let space = src
-            .commit_final_homspace_generic_bound_checked(stage)
+            .commit_final_homspace_generic_bound_checked(stage.destination)
             .map_err(CheckedGenericPlanError::Operation)?;
         pending.flush();
         Ok(space)
@@ -1558,7 +1581,7 @@ where
 /// numerical path.
 #[allow(clippy::type_complexity)]
 fn tensortrace_owned_in<M, R, D, P>(
-    stage: M::TraceStage,
+    stage: M::TraceStage<'_>,
     src: &BoundDynamicFusionMapSpace<R>,
     payload: impl FnOnce() -> P,
     axes: TensorTraceAxisSpec<'_>,
@@ -1606,14 +1629,36 @@ where
     MultiplicityFreeAdmissionMode::stage_trace(src, axes, dst_nout)
 }
 
+/// A checked Generic trace destination, prepared and unpublished, with the
+/// source and axes whose preflight selected it.
+///
+/// Why it borrows the source rather than trusting the caller: the
+/// [`tensortrace_checked_generic_in`] compile skips its own preflight and
+/// `dst` comparison only for that same source and those same axes (#2146);
+/// any other pair is compiled as against a committed destination.
+#[doc(hidden)]
+pub struct CheckedGenericTraceStage<'a, R> {
+    pub(crate) destination: PreparedCheckedGenericDynamicSpace,
+    pub(crate) src: &'a BoundDynamicFusionMapSpace<R>,
+    pub(crate) axes: TensorTraceAxisSpec<'a>,
+}
+
+impl<R> CheckedGenericTraceStage<'_, R> {
+    /// Whether the staging preflight covers a compile of `axes` over `src`:
+    /// the shared borrow keeps the very source it ran on unchanged.
+    fn admits(&self, src: &BoundDynamicFusionMapSpace<R>, axes: TensorTraceAxisSpec<'_>) -> bool {
+        std::ptr::eq(self.src, src) && self.axes == axes
+    }
+}
+
 /// Stages a checked Generic trace destination, prepared and unpublished;
 /// [`tensortrace_checked_generic_in`] commits it after execution.
 #[doc(hidden)]
-pub fn tensortrace_stage_checked_generic<R>(
-    src: &BoundDynamicFusionMapSpace<R>,
-    axes: TensorTraceAxisSpec<'_>,
+pub fn tensortrace_stage_checked_generic<'a, R>(
+    src: &'a BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'a>,
     dst_nout: usize,
-) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericPlanError<R::Error>>
+) -> Result<CheckedGenericTraceStage<'a, R>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal<Scalar = f64>,
 {
@@ -1652,7 +1697,7 @@ where
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
 pub fn tensortrace_checked_generic_in<R, D, P>(
-    stage: PreparedCheckedGenericDynamicSpace,
+    stage: CheckedGenericTraceStage<'_, R>,
     src: &BoundDynamicFusionMapSpace<R>,
     payload: impl FnOnce() -> P,
     axes: TensorTraceAxisSpec<'_>,
