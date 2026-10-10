@@ -7,7 +7,7 @@ use tenet_core::{
 };
 #[cfg(test)]
 use tenet_operations::DenseTreeTransformOperations;
-use tenet_operations::{TensorContractSpec, TreeTransformBackend};
+use tenet_operations::{ContractDestinationInit, TensorContractSpec, TreeTransformBackend};
 
 use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
@@ -16,7 +16,7 @@ use crate::{
     RecouplingCoefficientAction, ZeroBytes,
 };
 
-use super::context::TensorContractFusionExecutionContext;
+use super::context::{plan_compose_in, PlanTarget, TensorContractFusionExecutionContext};
 use super::dynamic_space::{
     BoundDynamicFusionMapSpace, FusionOperand, PreparedCheckedGenericDynamicSpace,
 };
@@ -28,6 +28,7 @@ use super::fusion::{
 use super::fusion_block::{
     compile_checked_generic_core_plan, BackendRank2Gemm, FusionBlockContractWorkspace, Rank2Gemm,
 };
+use super::resolution::HostEagerExecutor;
 use super::route_host::Stage;
 use super::structure::TensorContractAxisPlan;
 
@@ -440,9 +441,12 @@ where
 /// Canonical composition (TensorKit `mul!`) of two direct checked Generic
 /// tensors: `lhs.domain` is glued to `rhs.codomain` in order.
 ///
-/// The canonical candidate needs no source or output tree transform, so the
-/// result is one coefficient-free block GEMM per coupled sector. No leg
-/// crosses another, hence no braiding style is required.
+/// It plans through the shared [`plan_compose`](super::plan_compose) rung in
+/// the checked mode and replays on the Host route executor: one
+/// coefficient-free block GEMM per coupled sector, or the checked irregular
+/// core for a non-canonical tiling. No leg crosses another, hence no
+/// braiding style is required. The destination is staged, planned over as
+/// a preview, and committed only after the replay succeeds (#2063).
 #[doc(hidden)]
 pub fn tensorcompose_owned_checked_generic_in_context<P, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
@@ -464,10 +468,8 @@ where
     let lhs_axes = (lhs_nout..lhs_space.space().rank()).collect::<Vec<_>>();
     let rhs_axes = (0..rhs_space.space().nout()).collect::<Vec<_>>();
     let axes = TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes);
-    let CheckedContractLocal {
-        output_rank,
-        axis_plan,
-    } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
+    let CheckedContractLocal { axis_plan, .. } =
+        validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
     let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
     let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
         FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
@@ -481,32 +483,30 @@ where
         )
         .map_err(CheckedGenericPlanError::from)
     })?;
-    // Both axis lists are ascending, so the sole candidate is the given order.
-    let candidate = super::fusion::contracted_axis_order_candidates(&lhs_axes, &rhs_axes).remove(0);
-    let (
-        transform_backend,
-        transform_workspaces,
-        contract_backend,
-        contract_workspace,
-        fusion_workspace,
-    ) = context.checked_generic_resources_mut();
-    execute_preselected_checked_generic_contract(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        lhs_nout,
-        &candidate,
-        FusionContractOrientation::LhsRhs,
-        provider,
-        output_rank,
-        destination,
-        transform_backend,
-        transform_workspaces,
-        &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
-        fusion_workspace,
-    )
+    let preview = destination.preview();
+    let resolution = plan_compose_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
+        PlanTarget {
+            rule: provider,
+            space: &preview,
+            authority: lhs_space,
+        },
+        FusionOperand::direct(lhs_space.space()),
+        FusionOperand::direct(rhs_space.space()),
+    )?;
+    #[cfg(test)]
+    context.record_contract_route(&resolution);
+    let mut data = zeroed_payload(destination.required_len());
+    context.execute_contract_route_host(
+        &resolution,
+        preview.structure(),
+        &mut data,
+        (lhs_space.space().structure(), lhs_data),
+        (rhs_space.space().structure(), rhs_data),
+        D::one(),
+        ContractDestinationInit::Zeroed,
+    )?;
+    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
+    Ok((destination, data))
 }
 
 #[cfg(test)]

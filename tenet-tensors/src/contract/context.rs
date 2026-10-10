@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap, TensorStorage,
+    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement,
+    TensorMap, TensorStorage,
 };
 
 use super::route_host::Stage;
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
-use crate::mode::TreeStructureSource;
+use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
@@ -34,7 +35,7 @@ use super::fusion::{
     prepare_tensorcontract_fusion_plan_dyn_raw_canonical, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
-use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
+use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::try_compile_oriented_storage_contract_plan;
 use super::resolution::{
     compile_core_plan, try_compile_oriented_storage_contract_candidate_plan, ContractKind,
@@ -619,7 +620,7 @@ where
     }
 
     #[cfg(test)]
-    fn record_contract_route(&mut self, resolution: &StorageContractResolution<C>) {
+    pub(super) fn record_contract_route(&mut self, resolution: &StorageContractResolution<C>) {
         self.last_top_level_resolution_was_core =
             matches!(resolution.route, ContractRoute::Core { .. });
         self.last_top_level_resolution_orientation = match &resolution.route {
@@ -818,7 +819,7 @@ where
             PlanTarget {
                 rule,
                 space: &dst_space,
-                primer: encoded_layout_primer::<R>,
+                authority: encoded_layout_primer::<R>,
             },
             dst.data_mut(),
             (legacy_operand(&lhs_space, axes.lhs_conjugate()), lhs.data()),
@@ -942,7 +943,7 @@ where
             PlanTarget {
                 rule,
                 space: dst_space,
-                primer: encoded_layout_primer::<R>,
+                authority: encoded_layout_primer::<R>,
             },
             dst_data,
             (legacy_operand(lhs_space, axes.lhs_conjugate()), lhs_data),
@@ -1334,7 +1335,13 @@ where
             rhs.storage_conjugate(),
         );
         let start = profile.is_some().then(std::time::Instant::now);
-        let core = try_compile_core_route::<X, R>(target, lhs, rhs, axes, ContractKind::Contract)?;
+        let core = try_compile_core_route::<X, MultiplicityFreeAdmissionMode, R>(
+            target,
+            lhs,
+            rhs,
+            axes,
+            ContractKind::Contract,
+        )?;
         if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
             // A hit is dominated by its core plan compile, a miss by the walk.
             match core {
@@ -1485,15 +1492,15 @@ where
                 first_open,
             )
             .map_err(OperationError::from_core_preserving_context)?,
-            target.primer,
+            target.authority,
         )?;
         let temporary_target = PlanTarget {
             rule: target.rule,
             space: &temporary,
-            primer: target.primer,
+            authority: target.authority,
         };
         let core_start = profile.is_some().then(std::time::Instant::now);
-        let core = try_compile_core_route::<X, R>(
+        let core = try_compile_core_route::<X, MultiplicityFreeAdmissionMode, R>(
             temporary_target,
             first,
             second,
@@ -1632,11 +1639,11 @@ where
     {
         // Re-run here, not only in the first half: this entry is callable on
         // its own, and the artifact compilers assume a validated request.
-        validate_raw_contract_request(target, lhs, rhs, axes)?;
+        validate_raw_contract_request::<MultiplicityFreeAdmissionMode, R>(target, lhs, rhs, axes)?;
         let PlanTarget {
             rule,
             space: dst_space,
-            primer: layout_primer,
+            authority: layout_primer,
         } = target;
         let plan_start = profile.is_some().then(std::time::Instant::now);
         let artifact = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
@@ -1755,7 +1762,7 @@ where
     /// scratch carries no core slot, so the core writes the temporary with a
     /// strong-zero `beta = 0`, inactive blocks included.
     #[allow(clippy::too_many_arguments)]
-    fn execute_contract_route_host(
+    pub(super) fn execute_contract_route_host(
         &mut self,
         resolution: &StorageContractResolution<C>,
         dst_structure: &Arc<BlockStructure>,
@@ -1909,7 +1916,7 @@ where
             PlanTarget {
                 rule,
                 space: &dst_space,
-                primer: encoded_layout_primer::<R>,
+                authority: encoded_layout_primer::<R>,
             },
             legacy_operand(&lhs_space, axes.lhs_conjugate()),
             legacy_operand(&rhs_space, axes.rhs_conjugate()),
@@ -2061,7 +2068,7 @@ where
             PlanTarget {
                 rule,
                 space: &dst_space,
-                primer: encoded_layout_primer::<R>,
+                authority: encoded_layout_primer::<R>,
             },
             lhs_operand,
             rhs_operand,
@@ -2506,21 +2513,22 @@ fn spec_output_axes(axes: TensorContractSpec<'_>, rank: usize) -> smallvec::Smal
 }
 
 /// The destination a contraction is planned for: its provider, its space and
-/// the primer that lays out spaces derived from it. Bound spaces carry all
-/// three; the static-rank entries pass their caller's rule.
-pub(crate) struct PlanTarget<'a, R> {
+/// the mode's authority over spaces derived from it (the multiplicity-free
+/// layout primer by default). Bound spaces carry all three; the static-rank
+/// entries pass their caller's rule.
+pub(crate) struct PlanTarget<'a, R, A = LayoutKeyBuilder<R>> {
     pub(crate) rule: &'a R,
     pub(crate) space: &'a DynamicFusionMapSpace,
-    pub(crate) primer: LayoutKeyBuilder<R>,
+    pub(crate) authority: A,
 }
 
 // Why manual: a derive would bound `R: Copy`.
-impl<R> Clone for PlanTarget<'_, R> {
+impl<R, A: Copy> Clone for PlanTarget<'_, R, A> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<R> Copy for PlanTarget<'_, R> {}
+impl<R, A: Copy> Copy for PlanTarget<'_, R, A> {}
 
 impl<'a, R> PlanTarget<'a, R> {
     pub(crate) fn bound(space: &'a BoundDynamicFusionMapSpace<R>) -> Self
@@ -2530,7 +2538,7 @@ impl<'a, R> PlanTarget<'a, R> {
         Self {
             rule: space.provider(),
             space: space.space(),
-            primer: space.layout_primer(),
+            authority: space.layout_primer(),
         }
     }
 }
@@ -2568,18 +2576,18 @@ fn attribute_artifact_prepare(
 /// The request checks both halves of the contraction route run: the provider
 /// against the three spaces, and the operand conjugation flags against the
 /// request.
-fn validate_raw_contract_request<R>(
-    target: PlanTarget<'_, R>,
+fn validate_raw_contract_request<M, R>(
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<(), OperationError>
+) -> Result<(), M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
 {
-    validate_fusion_contract_rule(
+    M::validate_spaces(
         target.rule,
+        target.authority,
         target.space,
         lhs.storage_space(),
         rhs.storage_space(),
@@ -2589,7 +2597,8 @@ where
     {
         return Err(OperationError::InvalidArgument {
             message: "prelowered operand flags must match the contraction request",
-        });
+        }
+        .into());
     }
     Ok(())
 }
@@ -2614,7 +2623,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    try_compile_core_route::<X, R>(
+    try_compile_core_route::<X, MultiplicityFreeAdmissionMode, R>(
         PlanTarget::bound(dst_space),
         lhs,
         rhs,
@@ -2647,6 +2656,19 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
+    plan_compose_in::<X, MultiplicityFreeAdmissionMode, R>(PlanTarget::bound(dst_space), lhs, rhs)
+}
+
+/// [`plan_compose`] in either admission mode `M`.
+pub(crate) fn plan_compose_in<X: ExecCaps, M, R>(
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+) -> Result<StorageContractResolution<M::Scalar>, M::Error>
+where
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
+{
     let (left, right) = (lhs.oriented_homspace(), rhs.oriented_homspace());
     let lhs_axes: Vec<usize> = (left.nout()..left.rank()).collect();
     let rhs_axes: Vec<usize> = (0..right.nout()).collect();
@@ -2657,57 +2679,45 @@ where
         lhs.storage_conjugate(),
         rhs.storage_conjugate(),
     );
-    match try_compile_core_route::<X, R>(
-        PlanTarget::bound(dst_space),
-        lhs,
-        rhs,
-        axes,
-        ContractKind::Compose,
-    )? {
+    match try_compile_core_route::<X, M, R>(target, lhs, rhs, axes, ContractKind::Compose)? {
         CoreRoute::Hit(resolution) => Ok(resolution),
         CoreRoute::Miss(_) => Err(OperationError::UnsupportedTensorContractScope {
             message:
                 "storage-direct composition supports only canonical fully-direct oriented operands",
-        }),
+        }
+        .into()),
     }
 }
 
-fn try_compile_core_route<X: ExecCaps, R>(
-    target: PlanTarget<'_, R>,
+fn try_compile_core_route<X: ExecCaps, M, R>(
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
     kind: ContractKind,
-) -> Result<CoreRoute<R::Scalar>, OperationError>
+) -> Result<CoreRoute<M::Scalar>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
-    validate_raw_contract_request(target, lhs, rhs, axes)?;
-    let irregular = X::IRREGULAR_CORE.then_some(target.primer);
+    validate_raw_contract_request::<M, R>(target, lhs, rhs, axes)?;
+    let irregular = X::IRREGULAR_CORE;
     // A twist that is not uniform within one coupled-sector matrix has no
     // per-job alpha; the DynamicTree artifact applies it per block instead.
     let mut requested_zero_copy = false;
     let route = match kind {
-        ContractKind::Contract => try_compile_oriented_storage_contract_candidate_plan(
-            target.rule,
-            target.space,
+        ContractKind::Contract => try_compile_oriented_storage_contract_candidate_plan::<M, R>(
+            target,
             lhs,
             rhs,
             axes,
             &mut requested_zero_copy,
             irregular,
         )?,
-        ContractKind::Compose => try_compile_oriented_storage_contract_plan(
-            target.rule,
-            target.space,
-            lhs,
-            rhs,
-            axes,
-            kind,
-            irregular,
+        ContractKind::Compose => try_compile_oriented_storage_contract_plan::<M, R>(
+            target, lhs, rhs, axes, kind, irregular,
         )?
-        .filter(|plan| irregular.is_some() || plan.is_fully_direct())
+        .filter(|plan| irregular || plan.is_fully_direct())
         .map(|plan| ContractRoute::Core {
             plan,
             swapped: false,
@@ -2750,16 +2760,15 @@ where
     DLhs: TensorStorage<D>,
     DRhs: TensorStorage<D>,
 {
-    let rule = dst_space.provider();
-    validate_raw_contract_request(PlanTarget::bound(dst_space), lhs, rhs, axes)?;
-    let plan = try_compile_oriented_storage_contract_plan(
-        rule,
-        dst_space.space(),
+    let target = PlanTarget::bound(dst_space);
+    validate_raw_contract_request::<MultiplicityFreeAdmissionMode, R>(target, lhs, rhs, axes)?;
+    let plan = try_compile_oriented_storage_contract_plan::<MultiplicityFreeAdmissionMode, R>(
+        target,
         lhs,
         rhs,
         axes,
         ContractKind::Contract,
-        None,
+        false,
     )?
     .filter(|plan| plan.is_fully_direct())
     .ok_or_else(|| OperationError::UnsupportedTensorContractScope {

@@ -39,6 +39,11 @@ pub(crate) use fusion::{
     reset_candidate_score_calls, FusionContractCandidateFacts,
 };
 mod fusion_block;
+pub(crate) use fusion_block::{
+    compile_checked_generic_core_plan_general,
+    compile_fusion_block_contract_plan_prelowered_validated, core_homspace_matches,
+    validate_fusion_contract_rule, ValidatedCoreContract,
+};
 mod resolution;
 #[cfg(feature = "cuda")]
 mod route_cuda;

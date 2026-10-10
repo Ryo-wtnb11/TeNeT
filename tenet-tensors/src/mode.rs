@@ -31,13 +31,18 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CheckedFusionAlgebra, CheckedGenericAdmissionMode,
-    CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, FusionTreeKey,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    SectorId,
+    CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, CoreError,
+    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace, SectorId,
 };
 use tenet_operations::TreeTransformStructure;
 
-use crate::contract::{rhs_contract_twist_factor_oriented, FusionOperandLayout};
+use crate::contract::{
+    compile_checked_generic_core_plan_general,
+    compile_fusion_block_contract_plan_prelowered_validated, core_homspace_matches,
+    rhs_contract_twist_factor_oriented, validate_fusion_contract_rule, DynamicFusionMapSpace,
+    FusionOperand, FusionOperandLayout, LayoutKeyBuilder, ValidatedCoreContract,
+};
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
     validate_checked_generic_tree_pair_plan_preflight, CheckedPendingCoefficients,
@@ -49,6 +54,7 @@ use crate::{
     CheckedGenericPlanError, DenseBlockScalar, OperationError, TensorTraceAxisSpec,
     TensorTraceFusionStructure, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
+use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
 mod sealed {
     pub trait Sealed {}
@@ -203,6 +209,11 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     /// publish only after that call's commit.
     type StructureCache;
     type Structure;
+    /// What the planner derives spaces under: the multiplicity-free layout
+    /// primer, or the checked binding whose provider admission stages them.
+    type SpaceAuthority<'a>: Copy
+    where
+        R: 'a;
 
     /// The core coefficient of one RHS coupled sector, whose core-codomain
     /// row trees are `row_trees`: `Some(alpha)` when it is uniform over them,
@@ -224,6 +235,47 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         dst: &Arc<BlockStructure>,
         src: TreeStructureSource<'_>,
     ) -> Result<Self::Structure, Self::Error>;
+
+    /// Checks that the destination and both operand spaces belong to `rule`
+    /// before the planner reads sectors through it.
+    fn validate_spaces(
+        rule: &R,
+        authority: Self::SpaceAuthority<'_>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+    ) -> Result<(), Self::Error>;
+
+    /// Whether a contraction may carry TensorKit's fermionic supertrace twist
+    /// (`blas_contract!`, `tensoroperations.jl:398-410` @cfaa073).
+    fn contract_twist_possible(
+        rule: &R,
+        authority: Self::SpaceAuthority<'_>,
+    ) -> Result<bool, Self::Error>;
+
+    /// Whether `dst` is the contracted HomSpace of the two oriented
+    /// operands, as the core rung requires of its destination.
+    fn destination_matches(
+        rule: &R,
+        lhs: OrientedFusionTreeHomSpace<'_>,
+        rhs: OrientedFusionTreeHomSpace<'_>,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst: &FusionTreeHomSpace,
+    ) -> Result<bool, Self::Error>;
+
+    /// The packed core plan of a validated core whose coupled-sector tiling
+    /// is not canonical (#1517), for an executor with `IRREGULAR_CORE`.
+    fn irregular_core(
+        validated: ValidatedCoreContract<'_, R>,
+        authority: Self::SpaceAuthority<'_>,
+        dst: &DynamicFusionMapSpace,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+    ) -> Result<FusionBlockContractPlan<Self::Scalar>, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
 }
 
 impl<R> PlanningAlgebra<R> for MultiplicityFreeAdmissionMode
@@ -239,6 +291,10 @@ where
     type Error = OperationError;
     type StructureCache = TreeTransformPlanning;
     type Structure = TreeTransformStructure<R::Scalar>;
+    type SpaceAuthority<'a>
+        = LayoutKeyBuilder<R>
+    where
+        R: 'a;
 
     /// Unit unless fermionic; a fermionic twist that varies within the
     /// sector declines, so the `DynamicTree` artifact applies it per block.
@@ -294,6 +350,63 @@ where
             ),
         }
     }
+
+    fn validate_spaces(
+        rule: &R,
+        _primer: LayoutKeyBuilder<R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+    ) -> Result<(), OperationError> {
+        validate_fusion_contract_rule(rule, dst, lhs, rhs)
+    }
+
+    fn contract_twist_possible(
+        rule: &R,
+        _primer: LayoutKeyBuilder<R>,
+    ) -> Result<bool, OperationError> {
+        Ok(rule.braiding_style() == BraidingStyleKind::Fermionic)
+    }
+
+    fn destination_matches(
+        rule: &R,
+        lhs: OrientedFusionTreeHomSpace<'_>,
+        rhs: OrientedFusionTreeHomSpace<'_>,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst: &FusionTreeHomSpace,
+    ) -> Result<bool, OperationError> {
+        core_homspace_matches(
+            rule,
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst,
+        )
+    }
+
+    /// The packed plan over logical-key projections laid out by the primer.
+    fn irregular_core(
+        validated: ValidatedCoreContract<'_, R>,
+        primer: LayoutKeyBuilder<R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+    ) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
+        let rule = validated.rule();
+        compile_fusion_block_contract_plan_prelowered_validated(
+            validated,
+            dst,
+            &lhs.prepare(rule, primer)?,
+            &rhs.prepare(rule, primer)?,
+        )
+    }
 }
 
 impl<R> PlanningAlgebra<R> for CheckedGenericAdmissionMode
@@ -306,6 +419,12 @@ where
     /// transformers, flushed only after its commits.
     type StructureCache = CheckedPendingCoefficients;
     type Structure = TreeTransformStructure<f64>;
+    /// The binding whose provider admission stages derived spaces and
+    /// commits them after the call succeeds (#2063).
+    type SpaceAuthority<'a>
+        = &'a BoundDynamicFusionMapSpace<R>
+    where
+        R: 'a;
 
     /// Unit for Bosonic braiding, independent of the trees; the checked
     /// engine implements neither the fermionic twist branch of TensorKit's
@@ -387,5 +506,90 @@ where
         )?;
         coefficients.stage_transformer(key, &built);
         Ok(built)
+    }
+
+    /// Compares the admissions the spaces carry with the authority's.
+    /// Why not `validate_rule`: it reads the provider's identity again, a
+    /// provider event after the destination is staged (#2046); the pair
+    /// admission already compared that identity once.
+    fn validate_spaces(
+        _rule: &R,
+        authority: &BoundDynamicFusionMapSpace<R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+    ) -> Result<(), Self::Error> {
+        let held = authority.space().admission().rule_identity();
+        for space in [dst, lhs, rhs] {
+            match (space.admission().rule_identity(), held) {
+                (Some(expected), Some(actual)) if expected == actual => {}
+                (Some(expected), Some(actual)) => {
+                    return Err(CoreError::FusionRuleMismatch {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    }
+                    .into())
+                }
+                _ => return Err(CoreError::MissingFusionRuleIdentity.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Why an error rather than reading the braiding style here: a provider
+    /// read inside the planner would follow the destination's staging
+    /// (#2046). Checked composition, the one checked caller of the shared
+    /// core rung, never asks; checked contraction will carry its entry's U15
+    /// answer (#1860 leaf B). Until then a twisted question fails closed.
+    fn contract_twist_possible(
+        _rule: &R,
+        _authority: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<bool, Self::Error> {
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "checked Generic contraction requires Bosonic braiding",
+        }
+        .into())
+    }
+
+    /// True by construction: the checked destination is derived from these
+    /// operands by the same call. Why not a leg comparison: it reads duals
+    /// through the provider after the destination is staged (#2046); a
+    /// caller-supplied checked destination (#1870) needs a query-free one.
+    fn destination_matches(
+        _rule: &R,
+        _lhs: OrientedFusionTreeHomSpace<'_>,
+        _rhs: OrientedFusionTreeHomSpace<'_>,
+        _lhs_contracting_axes: &[usize],
+        _rhs_contracting_axes: &[usize],
+        _output_axes: &[usize],
+        _dst: &FusionTreeHomSpace,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    /// The structure-only re-base of the stored tilings; checked operands
+    /// are direct, so no logical-key projection is needed.
+    fn irregular_core(
+        _validated: ValidatedCoreContract<'_, R>,
+        _authority: &BoundDynamicFusionMapSpace<R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+    ) -> Result<FusionBlockContractPlan<f64>, Self::Error> {
+        if lhs.storage_conjugate() || rhs.storage_conjugate() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "checked Generic contraction currently requires eager direct operands",
+            }
+            .into());
+        }
+        let (lhs, rhs) = (lhs.storage_space(), rhs.storage_space());
+        Ok(compile_checked_generic_core_plan_general(
+            dst.structure(),
+            dst.nout(),
+            lhs.structure(),
+            lhs.nout(),
+            rhs.structure(),
+            rhs.nout(),
+        )?)
     }
 }

@@ -69,8 +69,89 @@ pub(super) struct CoreContractPreflight<'a, R> {
     axis_plan: TensorContractAxisPlan,
 }
 
-pub(super) struct ValidatedCoreContract<'a, R> {
+pub(crate) struct ValidatedCoreContract<'a, R> {
     preflight: CoreContractPreflight<'a, R>,
+}
+
+impl<'a, R> CoreContractPreflight<'a, R> {
+    pub(super) fn compile_oriented(
+        rule: &'a R,
+        dst_homspace: &'a FusionTreeHomSpace,
+        lhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        rhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Self, OperationError> {
+        #[cfg(test)]
+        CORE_CONTRACT_PREFLIGHTS.set(CORE_CONTRACT_PREFLIGHTS.get() + 1);
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs_homspace.rank(),
+            rhs_homspace.rank(),
+            dst_homspace.rank(),
+            axes,
+        )?;
+        Ok(Self {
+            rule,
+            dst_homspace,
+            lhs_homspace,
+            rhs_homspace,
+            axis_plan,
+        })
+    }
+
+    /// The core form check (geometry only), then the mode's destination
+    /// check.
+    pub(super) fn validate_core_geometry_in<M>(
+        self,
+    ) -> Result<Option<ValidatedCoreContract<'a, R>>, M::Error>
+    where
+        M: crate::mode::PlanningAlgebra<R>,
+    {
+        self.validate_core_geometry_with(M::destination_matches)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn validate_core_geometry_with<E>(
+        self,
+        destination_matches: impl FnOnce(
+            &R,
+            OrientedFusionTreeHomSpace<'_>,
+            OrientedFusionTreeHomSpace<'_>,
+            &[usize],
+            &[usize],
+            &[usize],
+            &FusionTreeHomSpace,
+        ) -> Result<bool, E>,
+    ) -> Result<Option<ValidatedCoreContract<'a, R>>, E>
+    where
+        E: From<OperationError>,
+    {
+        if !is_core_form_source(
+            self.lhs_homspace.rank(),
+            self.lhs_homspace.nout(),
+            self.rhs_homspace.nout(),
+            &self.axis_plan,
+        ) || !is_core_form_output(
+            self.dst_homspace.codomain().len(),
+            self.lhs_homspace.nout(),
+            self.rhs_homspace.rank(),
+            self.rhs_homspace.nout(),
+            &self.axis_plan,
+        ) {
+            return Ok(None);
+        }
+        if !destination_matches(
+            self.rule,
+            self.lhs_homspace,
+            self.rhs_homspace,
+            self.axis_plan.lhs_contracting_axes.as_slice(),
+            self.axis_plan.rhs_contracting_axes.as_slice(),
+            self.axis_plan.output_axes.as_slice(),
+            self.dst_homspace,
+        )? {
+            return Err(OperationError::StructureMismatch { tensor: "dst" }.into());
+        }
+        Ok(Some(ValidatedCoreContract { preflight: self }))
+    }
 }
 
 impl<'a, R> CoreContractPreflight<'a, R>
@@ -104,59 +185,10 @@ where
         )
     }
 
-    pub(super) fn compile_oriented(
-        rule: &'a R,
-        dst_homspace: &'a FusionTreeHomSpace,
-        lhs_homspace: OrientedFusionTreeHomSpace<'a>,
-        rhs_homspace: OrientedFusionTreeHomSpace<'a>,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Self, OperationError> {
-        #[cfg(test)]
-        CORE_CONTRACT_PREFLIGHTS.set(CORE_CONTRACT_PREFLIGHTS.get() + 1);
-        let axis_plan = TensorContractAxisPlan::compile(
-            lhs_homspace.rank(),
-            rhs_homspace.rank(),
-            dst_homspace.rank(),
-            axes,
-        )?;
-        Ok(Self {
-            rule,
-            dst_homspace,
-            lhs_homspace,
-            rhs_homspace,
-            axis_plan,
-        })
-    }
-
     pub(super) fn validate_core_geometry(
         self,
     ) -> Result<Option<ValidatedCoreContract<'a, R>>, OperationError> {
-        if !is_core_form_source(
-            self.lhs_homspace.rank(),
-            self.lhs_homspace.nout(),
-            self.rhs_homspace.nout(),
-            &self.axis_plan,
-        ) || !is_core_form_output(
-            self.dst_homspace.codomain().len(),
-            self.lhs_homspace.nout(),
-            self.rhs_homspace.rank(),
-            self.rhs_homspace.nout(),
-            &self.axis_plan,
-        ) {
-            return Ok(None);
-        }
-        if !core_homspace_matches(
-            self.rule,
-            self.lhs_homspace,
-            self.rhs_homspace,
-            self.axis_plan.lhs_contracting_axes.as_slice(),
-            self.axis_plan.rhs_contracting_axes.as_slice(),
-            self.axis_plan.output_axes.as_slice(),
-            self.dst_homspace,
-        )? {
-            return Err(OperationError::StructureMismatch { tensor: "dst" });
-        }
-        Ok(Some(ValidatedCoreContract { preflight: self }))
+        self.validate_core_geometry_with(core_homspace_matches)
     }
 
     pub(super) fn require_core_geometry(
@@ -170,7 +202,7 @@ where
 }
 
 impl<'a, R> ValidatedCoreContract<'a, R> {
-    pub(super) fn rule(&self) -> &'a R {
+    pub(crate) fn rule(&self) -> &'a R {
         self.preflight.rule
     }
 
@@ -186,7 +218,7 @@ impl<'a, R> ValidatedCoreContract<'a, R> {
 /// The core destination check: `dst` must be the contracted HomSpace of
 /// the two oriented operands. Decided by leg comparison, without building
 /// that HomSpace, with its errors in its order.
-fn core_homspace_matches<R>(
+pub(crate) fn core_homspace_matches<R>(
     rule: &R,
     lhs: OrientedFusionTreeHomSpace<'_>,
     rhs: OrientedFusionTreeHomSpace<'_>,
