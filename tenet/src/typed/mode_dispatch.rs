@@ -375,31 +375,32 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
+    fn try_lazy_adjoint_transform(
+        tensor: &TensorMap<R, D>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        lazy_adjoint_of_transformed_parent(tensor, operation)
+    }
+
     fn transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
-        let payload;
-        let (logical, adjoint_of, data) = match &tensor.repr {
-            TypedTensorRepr::Owned(body) => {
-                payload = body.materialized_dense_data();
-                (&body.space, None, payload.as_ref())
-            }
-            TypedTensorRepr::Adjoint(view) => (
-                &view.logical_space,
-                Some(&view.parent.space),
-                view.parent_data(),
-            ),
-        };
+        // Why owned: the facade routes every lazy adjoint through
+        // `try_lazy_adjoint_transform` above.
+        let body = tensor
+            .owned_body()
+            .ok_or_else(|| internal_layout_error("checked Generic transform input is owned"))?;
+        let data = body.materialized_dense_data();
         let mut lease = tensor.runtime.lease_context()?;
         Ok(lease
             .context()
             .generic_lane::<D>()?
             .tree_context_mut()
             .tree_transform_owned_checked_generic_in(
-                logical,
-                adjoint_of,
-                data,
+                &body.space,
+                None,
+                data.as_ref(),
                 &operation,
                 D::from_real(1.0),
             )?)

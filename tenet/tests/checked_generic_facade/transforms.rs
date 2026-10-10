@@ -1611,7 +1611,7 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
     // most recouplings are unrepresentable and fail identically for the lazy
     // and the Owned input (error parity is asserted); the real SU(3) sibling
     // below covers every transform. Bends on a one-sided tree do succeed and
-    // exercise the checked lane's lazy-input materialization.
+    // exercise the lazy adjoint's parent route.
     type ToyStep<D> = (
         &'static str,
         Result<TensorMap<CheckedOnlyToy, D>, GenericTensorError<ToyError>>,
@@ -1645,21 +1645,30 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
             ),
         ]
     }
-    // Lazy space `[] <- X, X, X`.
+    // Lazy space `[] <- X, X, X`. Its permute and braid are the reference
+    // steps `adjoint(permute(parent, adjointtensorindices))` (TensorKit
+    // `indexmanipulations.jl:260-264, 343-352`): a codomain braid of the
+    // parent `X, X, X <- []`, which the toy represents, where the Owned twin's
+    // domain braid needs the toy's empty recouplings.
     fn one_sided_ops<D: tenet::typed::TensorScalar>(
         lazy: &TensorMap<CheckedOnlyToy, D>,
         owned: &TensorMap<CheckedOnlyToy, D>,
     ) -> [ToyStep<D>; 5] {
+        let parent = lazy.adjoint().unwrap();
+        assert!(owned.permute(&[], &[1, 0, 2]).is_err());
+        assert!(owned.braid(&[], &[1, 0, 2], &[0, 1, 2]).is_err());
         [
             (
                 "permute",
                 lazy.permute(&[], &[1, 0, 2]),
-                owned.permute(&[], &[1, 0, 2]),
+                parent.permute(&[1, 0, 2], &[]).and_then(|t| t.adjoint()),
             ),
             (
                 "braid",
                 lazy.braid(&[], &[1, 0, 2], &[0, 1, 2]),
-                owned.braid(&[], &[1, 0, 2], &[0, 1, 2]),
+                parent
+                    .braid(&[1, 0, 2], &[], &[0, 1, 2])
+                    .and_then(|t| t.adjoint()),
             ),
             ("repartition", lazy.repartition(1), owned.repartition(1)),
             (
