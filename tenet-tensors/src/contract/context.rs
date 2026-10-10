@@ -3,9 +3,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement,
-    TensorMap, TensorStorage,
+    BlockStructure, CoreError, FusionTensorMapSpace, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement, TensorMap,
+    TensorStorage,
 };
 
 use super::route_host::Stage;
@@ -1161,90 +1161,6 @@ where
             (rhs.storage_space().structure(), rhs_data),
             alpha,
             init,
-        )
-    }
-
-    /// Generic-fusion (Stage B3c-1) sibling of [`Self::tensorcontract_fusion_dyn_into`]:
-    /// the SU(N) core/compose (fully-direct GEMM) route. Non-memoized (mirrors
-    /// the generic tree-transform path) — the block GEMM is symmetry-agnostic,
-    /// so it just needs the group-agnostic block plan. A contraction that would
-    /// need source tree-pair transforms (open contracted legs) or conjugated
-    /// operands is an explicit B3c-2 error; there is NO change to the dense GEMM
-    /// seam. `dst_data` must be sized for `dst_space.required_len()` and
-    /// zero-filled for `beta == 0` (blocks without a contributing GEMM stay).
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_into_generic<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs_space: &BoundDynamicFusionMapSpace<R>,
-        lhs_data: &[D],
-        rhs_space: &BoundDynamicFusionMapSpace<R>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: FusionRule,
-    {
-        self.tensorcontract_fusion_dyn_into_generic_raw(
-            lhs_space.provider(),
-            dst_space.space(),
-            dst_data,
-            lhs_space.space(),
-            lhs_data,
-            rhs_space.space(),
-            rhs_data,
-            axes,
-            alpha,
-            beta,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tensorcontract_fusion_dyn_into_generic_raw<R>(
-        &mut self,
-        rule: &R,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: &mut [D],
-        lhs_space: &DynamicFusionMapSpace,
-        lhs_data: &[D],
-        rhs_space: &DynamicFusionMapSpace,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: FusionRule,
-    {
-        let plan = super::fusion_block::compile_fusion_block_contract_plan_generic(
-            rule, dst_space, lhs_space, rhs_space, axes,
-        )?;
-        let Self {
-            contract_backend,
-            contract_workspace,
-            fusion_block_workspace,
-            ..
-        } = self;
-        let mut kernels = crate::StridedHostKernelAdapter::default();
-        let mut gemm = super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
-            contract_backend,
-            contract_workspace,
-        );
-        plan.execute_raw(
-            &mut kernels,
-            &mut gemm,
-            fusion_block_workspace,
-            dst_space.structure(),
-            dst_data,
-            lhs_space.structure(),
-            lhs_data,
-            rhs_space.structure(),
-            rhs_data,
-            alpha,
-            beta,
         )
     }
 

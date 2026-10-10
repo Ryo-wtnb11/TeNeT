@@ -495,57 +495,6 @@ where
     )
 }
 
-/// Generic-fusion (Stage B3c-1) sibling of the multiplicity-free core classifier:
-/// identical predicate, relaxed to any [`FusionRule`]. The homspace-shape check
-/// (`tensorcontract_homspace`) and the axis-form checks are already fully
-/// symmetry-agnostic — only the mult-free trait bound differed.
-fn is_core_form_fusion_block_contract_generic<R>(
-    rule: &R,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_space: &DynamicFusionMapSpace,
-    rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-) -> Result<bool, OperationError>
-where
-    R: FusionRule,
-{
-    reject_fusion_contract_conjugation(axes)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.rank(),
-        rhs_space.rank(),
-        dst_space.rank(),
-        axes,
-    )?;
-    if !is_core_form_source(
-        lhs_space.rank(),
-        lhs_space.nout(),
-        rhs_space.nout(),
-        &axis_plan,
-    ) || !is_core_form_output(
-        dst_space.nout(),
-        lhs_space.nout(),
-        rhs_space.rank(),
-        rhs_space.nout(),
-        &axis_plan,
-    ) {
-        return Ok(false);
-    }
-    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
-        rule,
-        lhs_space.homspace(),
-        rhs_space.homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axis_plan.output_axes.as_slice(),
-        dst_space.nout(),
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
-    if expected_homspace != *dst_space.homspace() {
-        return Err(OperationError::StructureMismatch { tensor: "dst" });
-    }
-    Ok(true)
-}
-
 fn is_core_form_source(
     lhs_rank: usize,
     lhs_nout: usize,
