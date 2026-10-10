@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairOrientation,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+    MultiplicityFreeRigidSymbols,
 };
 
 use crate::mode::PlanningAlgebra;
@@ -18,16 +18,16 @@ use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TreeTransformStructure;
 
-use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, LayoutKeyBuilder};
+use super::context::PlanTarget;
+use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand};
 use super::fusion::{
     contracted_axis_order_candidates, external_axis_is_dual,
     min_dynamic_tree_materialized_elements, FusionContractOrientation, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
-    compile_fusion_block_contract_plan_core_geometry,
-    compile_fusion_block_contract_plan_prelowered_validated,
-    compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
-    try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
+    compile_fusion_block_contract_plan_core_geometry, compile_fusion_block_contract_plan_validated,
+    try_compile_oriented_canonical_core_plan, try_compile_scaled_canonical_core_plan,
+    CoreContractPreflight, ValidatedCoreContract,
 };
 
 /// Host-compiled, owned route of one contraction whose payloads are not
@@ -337,10 +337,12 @@ pub(crate) fn candidate_walks() -> usize {
 /// `candidate_seen` becomes true when some candidate qualifies (passes the
 /// geometry checks, and the twist check unless `twist_consumable`): the
 /// question the `copyC` decision asks of the requested order, answered by
-/// this walk so the planner walks it once.
+/// this walk so the planner walks it once. `twist_possible` answers whether
+/// the rule's braiding can twist at all (Fermionic), asked once per walk
+/// that reaches the candidates.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
-    rule: &R,
+pub(crate) fn try_zero_copy_contract_candidates<'a, T, E>(
+    twist_possible: impl FnOnce() -> Result<bool, E>,
     dst_nout: usize,
     lhs: FusionOperand<'a>,
     rhs: FusionOperand<'a>,
@@ -352,11 +354,8 @@ pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
         FusionOperand<'a>,
         TensorContractSpec<'_>,
         FusionContractOrientation,
-    ) -> Result<Option<T>, OperationError>,
-) -> Result<Option<T>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-{
+    ) -> Result<Option<T>, E>,
+) -> Result<Option<T>, E> {
     #[cfg(test)]
     CANDIDATE_WALKS.set(CANDIDATE_WALKS.get() + 1);
     let (lhs_axes, rhs_axes) = (axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
@@ -379,7 +378,7 @@ where
     if !output_ok.contains(&true) {
         return Ok(None);
     }
-    let fermionic = rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic;
+    let fermionic = twist_possible()?;
     let candidates = contracted_axis_order_candidates(lhs_axes, rhs_axes);
     for (orientation, output_ok) in CACHED_ORIENTATIONS.into_iter().zip(output_ok) {
         if !output_ok {
@@ -424,17 +423,17 @@ where
 /// twist that varies within one RHS coupled-sector matrix has no per-job
 /// alpha: the core declines (`Ok(None)`), so the `DynamicTree` artifact
 /// applies it per block.
-fn try_compile_scaled_storage_contract_plan<R>(
+fn try_compile_scaled_storage_contract_plan<M, R>(
     rule: &R,
     validated: &ValidatedCoreContract<'_, R>,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     rhs_orientation: FusionTreePairOrientation,
-) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
+) -> Result<Option<FusionBlockContractPlan<M::Scalar>>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
     let Some(regions) = rhs
         .structure()
@@ -449,7 +448,7 @@ where
             FusionTreePairOrientation::Direct => region.row_trees(),
             FusionTreePairOrientation::Adjoint => region.col_trees(),
         };
-        let Some(alpha) = <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::core_alpha(
+        let Some(alpha) = M::core_alpha(
             rule,
             validated.rhs_homspace(),
             validated.rhs_contracting_axes(),
@@ -460,29 +459,39 @@ where
         };
         alpha_by_coupled.push((region.coupled(), alpha));
     }
-    try_compile_scaled_canonical_core_plan(validated, dst, lhs, rhs, &alpha_by_coupled)
+    Ok(try_compile_scaled_canonical_core_plan(
+        validated,
+        dst,
+        lhs,
+        rhs,
+        &alpha_by_coupled,
+    )?)
 }
 
 /// Compiles the core plan of one zero-copy candidate from parent spaces and
-/// lazy operand orientation: the canonical coupled-region plan, and, when
-/// `irregular` carries a layout primer (an executor with
-/// [`ExecCaps::IRREGULAR_CORE`]), the packed plan of a non-canonical tiling
-/// (#1517) when the canonical one declines. A twisted [`ContractKind::Contract`]
-/// candidate takes only the canonical scaled plan; a [`ContractKind::Compose`]
-/// is never twisted.
-pub(crate) fn try_compile_oriented_storage_contract_plan<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
+/// lazy operand orientation: the canonical coupled-region plan, and, for an
+/// executor with [`ExecCaps::IRREGULAR_CORE`] (`irregular`), the mode's
+/// packed plan of a non-canonical tiling (#1517) when the canonical one
+/// declines. A twisted [`ContractKind::Contract`] candidate takes only the
+/// canonical scaled plan; a [`ContractKind::Compose`] is never twisted.
+#[allow(clippy::type_complexity)]
+pub(crate) fn try_compile_oriented_storage_contract_plan<M, R>(
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
     kind: ContractKind,
-    irregular: Option<LayoutKeyBuilder<R>>,
-) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
+    irregular: bool,
+) -> Result<Option<Arc<FusionBlockContractPlan<M::Scalar>>>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
+    let PlanTarget {
+        rule,
+        space: dst,
+        authority,
+    } = target;
     let preflight = CoreContractPreflight::compile_oriented(
         rule,
         dst.homspace(),
@@ -490,13 +499,13 @@ where
         rhs.oriented_homspace(),
         axes,
     )?;
-    let Some(validated) = preflight.validate_core_geometry()? else {
+    let Some(validated) = preflight.validate_core_geometry_in::<M>()? else {
         return Ok(None);
     };
-    let twisted =
-        kind == ContractKind::Contract && validated_rhs_contract_requires_twist(&validated)?;
+    let twisted = kind == ContractKind::Contract
+        && validated_rhs_contract_requires_twist::<M, R>(&validated, authority)?;
     let plan = if twisted {
-        try_compile_scaled_storage_contract_plan(
+        try_compile_scaled_storage_contract_plan::<M, R>(
             rule,
             &validated,
             dst,
@@ -512,17 +521,10 @@ where
             rhs.storage_space(),
         )? {
             Some(plan) => Some(plan),
-            // Only a non-canonical tiling reaches the logical-key projection:
-            // a canonical parent-owned region never prepares it.
-            None => match irregular {
-                Some(primer) => Some(compile_fusion_block_contract_plan_prelowered_validated(
-                    validated,
-                    dst,
-                    &lhs.prepare(rule, primer)?,
-                    &rhs.prepare(rule, primer)?,
-                )?),
-                None => None,
-            },
+            // Only a non-canonical tiling reaches the irregular core: a
+            // canonical parent-owned region never prepares its projection.
+            None if irregular => Some(M::irregular_core(validated, authority, dst, lhs, rhs)?),
+            None => None,
         }
     };
     Ok(plan.map(Arc::new))
@@ -572,31 +574,29 @@ impl ExecCaps for DirectCoreExecutor {
 /// replay has no irregular pack/scatter; the next candidate, or
 /// `DynamicTree`, applies — TensorKit's `mul!` takes every candidate, so
 /// declining never rejects).
-pub(crate) fn try_compile_oriented_storage_contract_candidate_plan<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
+pub(crate) fn try_compile_oriented_storage_contract_candidate_plan<M, R>(
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
     candidate_seen: &mut bool,
-    irregular: Option<LayoutKeyBuilder<R>>,
-) -> Result<Option<ContractRoute<R::Scalar>>, OperationError>
+    irregular: bool,
+) -> Result<Option<ContractRoute<M::Scalar>>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
     try_zero_copy_contract_candidates(
-        rule,
-        dst.nout(),
+        || M::contract_twist_possible(target.rule, target.authority),
+        target.space.nout(),
         lhs,
         rhs,
         axes,
         true,
         candidate_seen,
         |core_lhs, core_rhs, core_axes, orientation| {
-            let plan = try_compile_oriented_storage_contract_plan(
-                rule,
-                dst,
+            let plan = try_compile_oriented_storage_contract_plan::<M, R>(
+                target,
                 core_lhs,
                 core_rhs,
                 core_axes,
@@ -604,7 +604,7 @@ where
                 irregular,
             )?;
             Ok(plan
-                .filter(|plan| irregular.is_some() || plan.is_fully_direct())
+                .filter(|plan| irregular || plan.is_fully_direct())
                 .map(|plan| ContractRoute::Core {
                     plan,
                     swapped: orientation == FusionContractOrientation::RhsLhs,
@@ -682,13 +682,14 @@ where
     rhs_contract_homspace_requires_twist(rule, rhs.homspace(), axes)
 }
 
-fn validated_rhs_contract_requires_twist<R>(
+fn validated_rhs_contract_requires_twist<M, R>(
     validated: &ValidatedCoreContract<'_, R>,
-) -> Result<bool, OperationError>
+    authority: M::SpaceAuthority<'_>,
+) -> Result<bool, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols,
+    M: PlanningAlgebra<R>,
 {
-    if validated.rule().braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
+    if !M::contract_twist_possible(validated.rule(), authority)? {
         return Ok(false);
     }
     Ok(validated
@@ -836,7 +837,11 @@ where
     let zero_copy = |lhs, rhs, lhs_axes, rhs_axes, output, dst_nout| {
         matches!(
             try_zero_copy_contract_candidates(
-                rule,
+                || {
+                    Ok::<_, OperationError>(
+                        rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic,
+                    )
+                },
                 dst_nout,
                 lhs,
                 rhs,

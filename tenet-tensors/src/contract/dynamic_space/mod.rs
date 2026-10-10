@@ -307,6 +307,21 @@ impl PreparedCheckedGenericDynamicSpace {
         self.nout
     }
 
+    /// The staged space as a planner reads it: its HomSpace, the preview
+    /// structure and the admitted identity. Publishes nothing; the planned
+    /// route replays over the preview structure, and only a later
+    /// [`Self::commit`] publishes the layout (#2063).
+    pub(crate) fn preview(&self) -> DynamicFusionMapSpace {
+        DynamicFusionMapSpace {
+            nout: self.nout,
+            nin: self.nin,
+            homspace: Arc::new(self.homspace.clone()),
+            subblock_structure: self.shared_structure(),
+            admission: FusionSpaceAdmission::Complete(self.identity.clone()),
+            adjoint: OnceLock::new(),
+        }
+    }
+
     /// Commits an intermediate's structure through the cache-2 owner and
     /// returns the committed structure (the resident winner after a race).
     /// Why no `DynamicFusionMapSpace`: no caller binds an intermediate, so

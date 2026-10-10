@@ -54,15 +54,14 @@ where
     )
 }
 
-pub(crate) fn try_compile_oriented_canonical_core_plan<R>(
+pub(crate) fn try_compile_oriented_canonical_core_plan<R, C>(
     validated: &ValidatedCoreContract<'_, R>,
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
-) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
+) -> Result<Option<FusionBlockContractPlan<C>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    C: DenseBlockScalar,
 {
     let matrix_op = |orientation| match orientation {
         FusionTreePairOrientation::Direct => MatrixOp::Identity,
@@ -77,16 +76,15 @@ where
     )
 }
 
-pub(crate) fn try_compile_scaled_canonical_core_plan<R>(
+pub(crate) fn try_compile_scaled_canonical_core_plan<R, C>(
     validated: &ValidatedCoreContract<'_, R>,
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
-    alpha_by_coupled: &[(SectorId, R::Scalar)],
-) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
+    alpha_by_coupled: &[(SectorId, C)],
+) -> Result<Option<FusionBlockContractPlan<C>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    C: DenseBlockScalar,
 {
     let matrix_op = |orientation| match orientation {
         FusionTreePairOrientation::Direct => MatrixOp::Identity,
@@ -398,7 +396,7 @@ pub(crate) fn compile_checked_generic_core_plan(
 /// The per-subblock checked core builder: re-bases expert tilings whose
 /// coupled-sector trees are not canonically aligned, or reports the same
 /// structure error as before the coupled-region route.
-pub(super) fn compile_checked_generic_core_plan_general(
+pub(crate) fn compile_checked_generic_core_plan_general(
     dst_structure: &Arc<tenet_core::BlockStructure>,
     dst_nout: usize,
     lhs_structure: &Arc<tenet_core::BlockStructure>,
