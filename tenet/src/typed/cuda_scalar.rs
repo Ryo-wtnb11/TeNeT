@@ -493,83 +493,28 @@ where
             },
         )
     }
+}
 
-    /// Quantum-dimension-weighted Frobenius norm of a device tensor: the
-    /// `p == 2` arm of the Host [`TensorMap::norm`].
-    ///
-    /// Only `p == 2` has a device reduction. Any other valid `p` is
-    /// [`Error::UnsupportedOnDevice`] rather than a hidden Host transfer; an
-    /// invalid `p` is [`Error::InvalidArgument`], as on the Host.
-    ///
-    /// A lazy adjoint delegates to its canonical parent because this norm is
-    /// adjoint invariant; no logical-adjoint payload is materialized.
-    ///
-    /// # Accumulation and range
-    ///
-    /// The norm accumulates in `f64` at every payload dtype, within and
-    /// across coupled sectors, exactly like the Host `norm`: an
-    /// `f32`/`Complex32` payload is widened on the device by one cast
-    /// (one device allocation of twice the payload bytes and one elementwise
-    /// pass) before the per-sector reduction, because Tenferro 0.7.1 offers no
-    /// widening reduction. Its result is therefore finite wherever every entry
-    /// is finite, and nonzero wherever some entry is, matching the Host within
-    /// `f64` rounding (#1344). `f64`/`Complex64` payloads take the unwidened
-    /// reduction and pay nothing extra. [`Self::inner`] shares this reduction.
-    ///
-    /// Unlike the Host `norm`, an `f64`/`Complex64` device sum is not
-    /// rescaled: it returns `inf` once the squared norm exceeds `f64::MAX`
-    /// (entries near `1e154` and above) and loses accuracy once it falls
-    /// below `f64::MIN_POSITIVE` (norms near `1e-154` and below), where the
-    /// Host returns the representable norm.
-    pub fn norm(&self, p: f64) -> Result<f64, Error> {
-        validate_norm_p(p)?;
+impl<R, D> ReduceExec<R, D> for CudaStorage<D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    fn dense_norm(t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, Error> {
         if p != 2.0 {
             return Err(Error::UnsupportedOnDevice(format!(
                 "device norm supports only p = 2, got {p}"
             )));
         }
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            }
-            .norm(p);
-        }
-        let storage = self.direct_cuda_storage("norm")?;
+        let storage = t.direct_cuda_storage("norm")?;
         // `<t, t>` is real up to rounding; the norm is its real part's root,
-        // matching the Host `norm_multiplicity_free`.
-        Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt())
+        // matching the Host norm.
+        Ok(t.weighted_inner_cuda(storage, storage)?.re.sqrt())
     }
 
-    /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
-    /// product with **`self` conjugated**, matching the Host
-    /// `inner_multiplicity_free`. Lazy adjoints remain an explicit
-    /// unsupported device scope.
-    ///
-    /// Accumulates like the Host `inner`: in `f64` within and across coupled
-    /// sectors at every payload dtype, then narrows the total to `D` once
-    /// (`D::from_complex64`, as the Host does). An `f32`/`Complex32` result is
-    /// therefore finite exactly where the Host's is, including a cancelling
-    /// sum whose individual products exceed `f32::MAX`. A single-precision
-    /// call widens each distinct operand on the device first; the cost is
-    /// documented on `weighted_inner_cuda` (#1383).
-    #[doc(alias = "dot")]
-    pub fn inner<'a>(
-        &self,
-        other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
-    ) -> Result<D, Error> {
-        let other = other.into().operand()?;
-        let other = &*other;
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            }));
-        }
-        let lhs = self.direct_cuda_storage("inner")?;
-        let rhs = other.direct_cuda_storage("inner")?;
-        self.weighted_inner_cuda(lhs, rhs).map(D::from_complex64)
+    fn dense_inner(x: &TensorMap<R, D, Self>, y: &TensorMap<R, D, Self>) -> Result<D, Error> {
+        let lhs = x.direct_cuda_storage("inner")?;
+        let rhs = y.direct_cuda_storage("inner")?;
+        x.weighted_inner_cuda(lhs, rhs).map(D::from_complex64)
     }
 }
