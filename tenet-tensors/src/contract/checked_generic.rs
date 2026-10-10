@@ -1153,6 +1153,87 @@ mod tests {
         (left, lhs, right, rhs)
     }
 
+    /// What: checked compose plans the shared Core route over a preview of
+    /// its staged destination. Its provider events are the pair admission,
+    /// the destination stage (identity read, admission style, and cold its
+    /// structure queries) and the commit guard's style (#2046): planning
+    /// and replay query nothing, and no second (core) destination is
+    /// derived. The left binding owns the result; a failing destination
+    /// query surfaces exactly and publishes nothing.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_compose_plans_the_core_route_without_provider_events_after_staging() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_COMPOSE_EVENTS_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::checked_compose_plans_the_core_route_without_provider_events_after_staging",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated compose test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (left, lhs, right, rhs) = bound_pair(1, 1);
+        tenet_core::clear_structure_caches();
+        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        // A failing destination query surfaces exactly and publishes nothing.
+        left.fail.set(Some(Query::Channel));
+        let error = tensorcompose_owned_checked_generic_in_context(
+            &mut context,
+            &lhs,
+            &lhs_data,
+            &rhs,
+            &rhs_data,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::Provider(SpyError(Query::Channel))
+        ));
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
+        use Event::{Identity, Style};
+        let channel = Event::Query(Query::Channel);
+        let expected = [
+            (
+                "cold",
+                vec![Identity, Style, Identity, Style, channel, channel, Style],
+            ),
+            ("warm", vec![Identity, Style, Identity, Style, Style]),
+        ];
+        for (call, events) in expected {
+            left.reset();
+            right.reset();
+            let (output, data) = tensorcompose_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+            )
+            .unwrap();
+            assert!(context.last_resolution_is_core(), "{call}");
+            assert!(Arc::ptr_eq(output.provider_arc(), &left), "{call}");
+            assert_eq!(right.algebra_calls(), 0, "{call}");
+            assert_eq!(data.len(), output.space().required_len().unwrap());
+            assert_eq!(*left.events.borrow(), events, "{call}");
+            assert_eq!(*right.events.borrow(), [Identity, Style], "{call}");
+        }
+    }
+
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn preselected_checked_generic_uses_left_authority_and_commits_left_owner() {

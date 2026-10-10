@@ -474,6 +474,7 @@ where
 /// packed plan of a non-canonical tiling (#1517) when the canonical one
 /// declines. A twisted [`ContractKind::Contract`] candidate takes only the
 /// canonical scaled plan; a [`ContractKind::Compose`] is never twisted.
+#[allow(clippy::type_complexity)]
 pub(crate) fn try_compile_oriented_storage_contract_plan<M, R>(
     target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
     lhs: FusionOperand<'_>,

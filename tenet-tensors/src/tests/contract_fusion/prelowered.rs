@@ -800,7 +800,7 @@ fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
     // What (#1520): checked Generic compose on SU(3), where `8 ⊗ 8 → 8` has
     // vertex multiplicity 2, pairs coupled-sector rows and columns by tree
     // identity (vertex label included) when operands stack those trees in
-    // different orders, through `compile_checked_generic_core_plan`.
+    // different orders, through the checked irregular core of `plan_compose`.
     use std::collections::BTreeMap;
     use tenet_core::CheckedGenericFusion;
     use tenet_sectors::SUNFusionRule;
