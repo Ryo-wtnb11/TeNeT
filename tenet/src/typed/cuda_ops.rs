@@ -345,55 +345,7 @@ where
         })
     }
 
-    /// Hermitian eigendecomposition of an owned dense CUDA endomorphism.
-    ///
-    /// Returns an [`Eigh`] with `self = v * d * v.adjoint()`. Both factors remain
-    /// on the source device. A lazy-adjoint receiver is rejected explicitly;
-    /// no receiver-sized payload is downloaded or materialized.
-    ///
-    /// No truncation decision is made: every eigenpair is kept. Eigenvalues are
-    /// the only numerical payload that crosses to the host, where they are
-    /// put in the Host order (ascending per sector; cuSOLVER `syevd` already
-    /// returns it, so only an O(n) check runs); the eigenvectors stay on the
-    /// device and are copied into `v` (one copy per route, or per codomain
-    /// tree on a non-aligned route). Only if some sector's order is not the
-    /// identity are the columns gathered by a selector GEMM instead.
-    ///
-    /// Transfers, exactly:
-    ///
-    /// - Hermiticity admission (`cuda_hermitian_regions`): at most three
-    ///   downloads of gathered real scalars, one per stage that has an
-    ///   undecided sector (per-sector maxima, then sums of squares and
-    ///   residual maxima, then residual sums of squares; O(1) values per
-    ///   sector), and one rank-0 real normalizer upload per sector entering
-    ///   stage 2 (nonzero, finite input maximum) and per sector entering
-    ///   stage 3 (nonzero, finite residual maximum): at most two per
-    ///   sector.
-    /// - Device to host: all sectors' eigenvalues (`Σ_c n_c` real values) in
-    ///   one download, which the non-finite check, the host ascending order and
-    ///   the factor-space plan consume.
-    /// - Host to device: `d` as one dense upload of `Σ_c n_c²` elements with
-    ///   the sorted eigenvalues already on its diagonal, one zero upload for
-    ///   `v`, and a packed selector upload only when some sector's solver
-    ///   order is not ascending (none for cuSOLVER `syevd`).
-    ///
-    /// Why `d` is filled on the host rather than scattered on the
-    /// device: the only device allocation path is a zero upload of the same
-    /// `Σ_c n_c²` elements (#740), so a device scatter would add a
-    /// `Σ_c n_c` upload and move nothing less.
-    ///
-    /// `rows` and `cols` are the leg roles, as for the Host operation: it
-    /// acts on the matrix view `self.permute(rows, cols)` (one device
-    /// permute), and the current split borrows `self` without a transform.
-    pub fn eigh_full(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-        hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<Self>, Error> {
-        self.with_cuda_leg_roles(rows, cols, |t| t.eigh_full_matrix(hermitian_tol))
-    }
-
+    /// The device kernel of [`TensorMap::eigh_full`] on the current split.
     fn eigh_full_matrix(&self, hermitian_tol: HermitianTol) -> Result<Eigh<Self>, Error> {
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
@@ -834,5 +786,12 @@ where
 
     fn svd_compact(t: &TensorMap<R, D, Self>) -> Result<Svd<TensorMap<R, D, Self>>, Error> {
         t.svd_compact_matrix()
+    }
+
+    fn eigh_full(
+        t: &TensorMap<R, D, Self>,
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<TensorMap<R, D, Self>>, Error> {
+        t.eigh_full_matrix(hermitian_tol)
     }
 }

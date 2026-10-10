@@ -368,6 +368,108 @@ where
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
         self.factor_leg_roles(rows, cols, S::svd_compact)
     }
+
+    /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
+    /// [`Eigh`], which states the spectrum order and the storage routes of `d`.
+    ///
+    /// The input must be an endomorphism whose every coupled-sector block `A`
+    /// is Hermitian to `hermitian_tol` (MatrixAlgebraKit's `hermitian_tol`):
+    /// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F`, where [`HermitianTol::DEFAULT`] is
+    /// `eps(real(D))^(3/4)`, MatrixAlgebraKit's level at unit norm. Unlike
+    /// MatrixAlgebraKit's absolute `atol`, the tolerance is relative, so the
+    /// decision does not change when `self` is rescaled. In each coupled sector,
+    /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
+    /// real eigenvalues. Eigenvalues are ascending within each sector; each
+    /// eigenvector's phase is fixed by making
+    /// its largest-magnitude component real and non-negative. Bases inside an
+    /// exactly degenerate eigenspace remain backend-dependent.
+    ///
+    /// Both multiplicity-free and checked-Generic `d` factors use compact
+    /// diagonal storage. Checked factors retain the exact source provider
+    /// `Arc`. An owned Host compact diagonal is read directly into a
+    /// permutation eigenbasis, for both multiplicity-free and checked-Generic
+    /// providers, after the same finite-input and Hermiticity checks as
+    /// [`Self::eigh_vals`]; its dense output still occupies `Σ_c k_c²`
+    /// elements. Lazy adjoints use an operation-local dense payload.
+    ///
+    /// # Errors and cost
+    ///
+    /// A non-endomorphism, failed Hermiticity check, or dense numerical failure
+    /// returns [`Error::Operation`]. Layout failures retain [`Error::Core`],
+    /// and multiplicity-free algebra failures retain [`Error::FusionAlgebra`]
+    /// where applicable. For checked Generic, the original layout or provider
+    /// error is available as the source. It also validates identical full
+    /// row/column fusion-tree stacking. Factors are returned only after every
+    /// sector succeeds; otherwise the method returns an error and no factors.
+    /// The direct compact path sorts in `O(Σ_c k_c log k_c)` time and writes
+    /// `O(Σ_c k_c²)` eigenvector elements; the general dense route costs
+    /// `O(Σ_c n_c³)` time.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Eigh, GradedSpace, HermitianTol, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0)?;
+    /// let Eigh { d, v: eigenvectors } = a.eigh_full(&[0], &[1], HermitianTol::DEFAULT)?;
+    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    ///
+    /// # CUDA storage
+    ///
+    /// Owned dense device storage is decomposed with both factors left on the
+    /// source device; no receiver-sized payload is downloaded or
+    /// materialized, and the returned `d` is a dense CUDA tensor, because CUDA
+    /// diagonal storage is not part of the typed storage contract. A moved
+    /// leg-role split is one device permute. A lazy adjoint device operand
+    /// returns [`Error::UnsupportedOnDevice`] before any output exists.
+    ///
+    /// No truncation decision is made: every eigenpair is kept. Eigenvalues are
+    /// the only numerical payload that crosses to the host, where they are
+    /// put in the Host order (ascending per sector; cuSOLVER `syevd` already
+    /// returns it, so only an O(n) check runs); the eigenvectors stay on the
+    /// device and are copied into `v` (one copy per route, or per codomain
+    /// tree on a non-aligned route). Only if some sector's order is not the
+    /// identity are the columns gathered by a selector GEMM instead.
+    ///
+    /// Transfers, exactly:
+    ///
+    /// - Hermiticity admission (`cuda_hermitian_regions`): at most three
+    ///   downloads of gathered real scalars, one per stage that has an
+    ///   undecided sector (per-sector maxima, then sums of squares and
+    ///   residual maxima, then residual sums of squares; O(1) values per
+    ///   sector), and one rank-0 real normalizer upload per sector entering
+    ///   stage 2 (nonzero, finite input maximum) and per sector entering
+    ///   stage 3 (nonzero, finite residual maximum): at most two per
+    ///   sector.
+    /// - Device to host: all sectors' eigenvalues (`Σ_c n_c` real values) in
+    ///   one download, which the non-finite check, the host ascending order and
+    ///   the factor-space plan consume.
+    /// - Host to device: `d` as one dense upload of `Σ_c n_c²` elements with
+    ///   the sorted eigenvalues already on its diagonal, one zero upload for
+    ///   `v`, and a packed selector upload only when some sector's solver
+    ///   order is not ascending (none for cuSOLVER `syevd`).
+    ///
+    /// Why `d` is filled on the host rather than scattered on the
+    /// device: the only device allocation path is a zero upload of the same
+    /// `Σ_c n_c²` elements (#740), so a device scatter would add a
+    /// `Σ_c n_c` upload and move nothing less.
+    pub fn eigh_full(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
+        self.factor_leg_roles(rows, cols, |t| S::eigh_full(t, hermitian_tol))
+    }
 }
 
 impl<R, D> TensorMap<R, D>
@@ -693,75 +795,6 @@ where
                 )
             })
         })
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
-    D: FactorizationScalar,
-{
-    /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
-    /// [`Eigh`], which states the spectrum order and the storage routes of `d`.
-    ///
-    /// The input must be an endomorphism whose every coupled-sector block `A`
-    /// is Hermitian to `hermitian_tol` (MatrixAlgebraKit's `hermitian_tol`):
-    /// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F`, where [`HermitianTol::DEFAULT`] is
-    /// `eps(real(D))^(3/4)`, MatrixAlgebraKit's level at unit norm. Unlike
-    /// MatrixAlgebraKit's absolute `atol`, the tolerance is relative, so the
-    /// decision does not change when `self` is rescaled. In each coupled sector,
-    /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
-    /// real eigenvalues. Eigenvalues are ascending within each sector; each
-    /// eigenvector's phase is fixed by making
-    /// its largest-magnitude component real and non-negative. Bases inside an
-    /// exactly degenerate eigenspace remain backend-dependent.
-    ///
-    /// Both multiplicity-free and checked-Generic `d` factors use compact
-    /// diagonal storage. Checked factors retain the exact source provider
-    /// `Arc`. An owned Host compact diagonal is read directly into a
-    /// permutation eigenbasis, for both multiplicity-free and checked-Generic
-    /// providers, after the same finite-input and Hermiticity checks as
-    /// [`Self::eigh_vals`]; its dense output still occupies `Σ_c k_c²`
-    /// elements. Lazy adjoints use an operation-local dense payload.
-    ///
-    /// # Errors and cost
-    ///
-    /// A non-endomorphism, failed Hermiticity check, or dense numerical failure
-    /// returns [`Error::Operation`]. Layout failures retain [`Error::Core`],
-    /// and multiplicity-free algebra failures retain [`Error::FusionAlgebra`]
-    /// where applicable. For checked Generic, the original layout or provider
-    /// error is available as the source. It also validates identical full
-    /// row/column fusion-tree stacking. Factors are returned only after every
-    /// sector succeeds; otherwise the method returns an error and no factors.
-    /// The direct compact path sorts in `O(Σ_c k_c log k_c)` time and writes
-    /// `O(Σ_c k_c²)` eigenvector elements; the general dense route costs
-    /// `O(Σ_c n_c³)` time.
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use tenet::sector::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{Eigh, GradedSpace, HermitianTol, Runtime, TensorMap};
-    ///
-    /// let runtime = Runtime::builder().build()?;
-    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
-    /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0)?;
-    /// let Eigh { d, v: eigenvectors } = a.eigh_full(&[0], &[1], HermitianTol::DEFAULT)?;
-    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
-    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
-    /// # Ok::<(), tenet::typed::Error>(())
-    /// ```
-    ///
-    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
-    /// view `self.permute(rows, cols)`, and the current split costs nothing
-    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn eigh_full(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-        hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, |t| t.factor_eigh_full(hermitian_tol))
     }
 }
 

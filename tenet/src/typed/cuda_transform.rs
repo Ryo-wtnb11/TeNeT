@@ -234,21 +234,6 @@ where
         )
     }
 
-    /// The device form of the Host leg-role composition: `op` runs on
-    /// `permute(self, rows, cols)`, and the current split borrows `self`
-    /// without a transform or a clone.
-    pub(super) fn with_cuda_leg_roles<T>(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-        op: impl FnOnce(&Self) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        if self.axes_are_identity(rows, cols) {
-            return op(self);
-        }
-        op(&self.permute(rows, cols)?)
-    }
-
     /// TensorKit `braid` on a device tensor: the Host [`TensorMap::braid`]
     /// semantics, executed on the device.
     ///

@@ -13,14 +13,16 @@
 //! fixtures on one space are written in one order, so their entries align.
 //! Compact factors (`svd_compact`, `qr_compact`) are checked the same way
 //! through their rebuilt product, and through the norm of `s`/`r`, which an
-//! isometric outer factor preserves.
+//! isometric outer factor preserves. `eigh_full` runs on the Hermitian
+//! fixture `h_c[i,j] = e_c[i,j] + conj(e_c[j,i])` and is checked through
+//! `v d v^H` and the norm of `d`.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
 //!   operand: `UnsupportedOnDevice`, asserted below.
 //! - CUDA `axpby` of one lazy and one owned operand, and `axpby_into` from a
 //!   lazy source: `UnsupportedOnDevice`, asserted below (#1874).
-//! - CUDA `svd_compact`/`qr_compact` of a lazy adjoint operand:
+//! - CUDA `svd_compact`/`qr_compact`/`eigh_full` of a lazy adjoint operand:
 //!   `UnsupportedOnDevice`, asserted below.
 //! - CUDA compact storage does not exist (`to_cuda` densifies), so the
 //!   compact column is Host-only.
@@ -32,7 +34,8 @@ use std::sync::Arc;
 use num_complex::Complex64;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{
-    Error, GradedSpace, OperationError, Qr, Runtime, SectorSpectrum, Svd, TensorMap,
+    Eigh, Error, GradedSpace, HermitianTol, OperationError, Qr, Runtime, SectorSpectrum, Svd,
+    TensorMap,
 };
 
 const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
@@ -72,6 +75,11 @@ fn entry(seed: f64, coupled: usize, i: usize, j: usize) -> Complex64 {
     )
 }
 
+/// The Hermitian entry `e[i,j] + conj(e[j,i])`.
+fn hermitian_entry(seed: f64, coupled: usize, i: usize, j: usize) -> Complex64 {
+    entry(seed, coupled, i, j) + entry(seed, coupled, j, i).conj()
+}
+
 /// `alpha * x + beta * y` entrywise.
 fn combo(
     alpha: Complex64,
@@ -96,7 +104,7 @@ macro_rules! storage_rows {
         let coupled = $coupled;
         let dim = $dim;
         let conv = $conv;
-        let build = |seed: f64| {
+        let build_with = |seed: f64, entry: fn(f64, usize, usize, usize) -> Complex64| {
             let mut entries = Vec::new();
             let t = TensorMap::<_, $D>::from_subblock_fn(runtime, [&leg], [&leg], |trees, ix| {
                 let c = coupled(trees.coupled());
@@ -111,6 +119,7 @@ macro_rules! storage_rows {
                 .collect();
             (t, wide)
         };
+        let build = |seed: f64| build_with(seed, entry);
         let (a, a_entries) = build(0.9);
         let (b, b_entries) = build(-0.4);
 
@@ -278,11 +287,58 @@ macro_rules! storage_rows {
             ));
         }
 
-        $cuda(&a, &b, &lazy_a, alpha, beta);
+        // Hermitian eigendecomposition: `v d v^H` rebuilds `h`, `d` carries
+        // its norm (`v` is unitary), and `h^H = h` so the lazy adjoint
+        // rebuilds `h` too.
+        let tol = HermitianTol::DEFAULT;
+        let (h, h_entries) = build_with(0.9, hermitian_entry);
+        let lazy_h = h.adjoint().unwrap();
+        let norm_h = norm_oracle(&h_entries, 2.0);
+        let eigh_rebuild = |Eigh { d, v }: Eigh<TensorMap<_, $D>>| {
+            assert!(close(d.norm(2.0).unwrap(), norm_h));
+            v.compose(&d).unwrap().compose(&v.adjoint().unwrap()).unwrap()
+        };
+        check("eigh_full", &eigh_rebuild(h.eigh_full(&[0], &[1], tol).unwrap()), &h_entries);
+        check("lazy eigh_full", &eigh_rebuild(lazy_h.eigh_full(&[0], &[1], tol).unwrap()), &h_entries);
+        let swapped = eigh_rebuild(h.eigh_full(&[1], &[0], tol).unwrap());
+        assert!(close(swapped.norm(2.0).unwrap(), norm_h));
+        // A compact diagonal is Hermitian when its entries are real.
+        let mut real_diag = Vec::new();
+        let spectra: Vec<_> = leg
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .map(|sector| {
+                let k = leg.degeneracy(&sector).unwrap();
+                let c = coupled(&sector);
+                let values: Vec<$D> =
+                    (0..k).map(|i| conv(Complex64::from(entry(0.6, c, i, i).re))).collect();
+                real_diag.extend(values.iter().map(|&x| (dim(c), Complex64::from(x))));
+                SectorSpectrum { sector, values }
+            })
+            .collect();
+        let real_compact = TensorMap::<_, $D>::diagonal(runtime, &leg, spectra).unwrap();
+        let Eigh { d, v } = real_compact.eigh_full(&[0], &[1], tol).unwrap();
+        let norm_real = norm_oracle(&real_diag, 2.0);
+        assert!(close(d.norm(2.0).unwrap(), norm_real));
+        let rebuilt = v.compose(&d).unwrap().compose(&v.adjoint().unwrap()).unwrap();
+        assert!(close(rebuilt.norm(2.0).unwrap(), norm_real));
+        assert!(close_c(
+            Complex64::from(real_compact.inner(&rebuilt).unwrap()),
+            inner_oracle(&real_diag, &real_diag),
+        ));
+        // `a` is not Hermitian; malformed axes are the permute's error.
+        assert!(matches!(a.eigh_full(&[0], &[1], tol), Err(Error::Operation(_))));
+        assert!(matches!(
+            h.eigh_full(&[0], &[0], tol),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidPermutation { .. })
+        ));
+
+        $cuda(&a, &b, &lazy_a, &h, alpha, beta);
     }};
 }
 
-fn no_cuda<T, D>(_: &T, _: &T, _: &T, _: D, _: D) {}
+fn no_cuda<T, D>(_: &T, _: &T, _: &T, _: &T, _: D, _: D) {}
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -364,6 +420,7 @@ fn cuda_rows_match_host() {
         a: &TensorMap<R, D>,
         b: &TensorMap<R, D>,
         lazy_a: &TensorMap<R, D>,
+        h: &TensorMap<R, D>,
         alpha: D,
         beta: D,
     ) where
@@ -508,6 +565,42 @@ fn cuda_rows_match_host() {
             lazy_dev.qr_compact(&[0], &[1]).unwrap_err(),
             Error::UnsupportedOnDevice(
                 "qr_compact does not support lazy adjoint CUDA operands".into()
+            )
+        );
+
+        // Hermitian eigendecomposition: the device `d` (dense) and `v d v^H`
+        // equal the Host's.
+        let tol = HermitianTol::DEFAULT;
+        let h_dev = h.to_cuda().unwrap();
+        for (rows, cols) in [([0], [1]), ([1], [0])] {
+            let (device, host) = (
+                h_dev.eigh_full(&rows, &cols, tol).unwrap(),
+                h.eigh_full(&rows, &cols, tol).unwrap(),
+            );
+            same("eigh_full d", device.d.clone(), host.d.clone());
+            same(
+                "eigh_full",
+                device
+                    .v
+                    .compose(&device.d)
+                    .unwrap()
+                    .compose(&device.v.adjoint().unwrap())
+                    .unwrap(),
+                host.v
+                    .compose(&host.d)
+                    .unwrap()
+                    .compose(&host.v.adjoint().unwrap())
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            h_dev
+                .adjoint()
+                .unwrap()
+                .eigh_full(&[0], &[1], tol)
+                .unwrap_err(),
+            Error::UnsupportedOnDevice(
+                "eigh_full does not support lazy adjoint CUDA operands".into()
             )
         );
     }
