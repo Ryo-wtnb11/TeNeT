@@ -107,15 +107,13 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
 
     let mut composed = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into(
+        .tensorcompose_planned_into(
             &dst_bound,
             &mut composed,
-            crate::FusionOperand::direct(&source),
-            &lhs,
-            crate::FusionOperand::direct(&source),
-            &rhs,
+            (crate::FusionOperand::direct(&source), &lhs),
+            (crate::FusionOperand::direct(&source), &rhs),
             1.0,
-            0.0,
+            crate::ContractDestinationInit::Axpby(0.0),
         )
         .unwrap();
 
@@ -166,29 +164,28 @@ fn bosonic_tensorcompose_with_an_adjoint_operand_matches_the_materialized_adjoin
 
     let mut reference = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into(
+        .tensorcompose_planned_into(
             &dst_bound,
             &mut reference,
-            crate::FusionOperand::direct(adjoint_bound.space()),
-            &adjoint_data,
-            crate::FusionOperand::direct(&source),
-            &rhs,
+            (
+                crate::FusionOperand::direct(adjoint_bound.space()),
+                &adjoint_data,
+            ),
+            (crate::FusionOperand::direct(&source), &rhs),
             1.0,
-            0.0,
+            crate::ContractDestinationInit::Axpby(0.0),
         )
         .unwrap();
 
     let mut lazy = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into(
+        .tensorcompose_planned_into(
             &dst_bound,
             &mut lazy,
-            crate::FusionOperand::adjoint(&source),
-            &lhs,
-            crate::FusionOperand::direct(&source),
-            &rhs,
+            (crate::FusionOperand::adjoint(&source), &lhs),
+            (crate::FusionOperand::direct(&source), &rhs),
             1.0,
-            0.0,
+            crate::ContractDestinationInit::Axpby(0.0),
         )
         .unwrap();
 
@@ -220,23 +217,26 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
 
     let mut valid = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into(
-            &dst_bound, &mut valid, operand, &lhs, operand, &rhs, 1.0, 0.0,
+        .tensorcompose_planned_into(
+            &dst_bound,
+            &mut valid,
+            (operand, &lhs),
+            (operand, &rhs),
+            1.0,
+            crate::ContractDestinationInit::Axpby(0.0),
         )
         .unwrap();
 
     let mut destination = vec![7.0; dst.required_len().unwrap()];
     let before = destination.clone();
     let error = context
-        .tensorcompose_fusion_dyn_into(
+        .tensorcompose_planned_into(
             &dst_bound,
             &mut destination,
-            operand,
-            &lhs[..lhs.len() - 1],
-            operand,
-            &rhs,
+            (operand, &lhs[..lhs.len() - 1]),
+            (operand, &rhs),
             1.0,
-            0.5,
+            crate::ContractDestinationInit::Axpby(0.5),
         )
         .unwrap_err();
     assert!(matches!(error, OperationError::ElementCountMismatch { .. }));
@@ -245,15 +245,13 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     let mut short_destination = vec![9.0; dst.required_len().unwrap() - 1];
     let before = short_destination.clone();
     let error = context
-        .tensorcompose_fusion_dyn_into(
+        .tensorcompose_planned_into(
             &dst_bound,
             &mut short_destination,
-            operand,
-            &lhs,
-            operand,
-            &rhs,
+            (operand, &lhs),
+            (operand, &rhs),
             1.0,
-            0.5,
+            crate::ContractDestinationInit::Axpby(0.5),
         )
         .unwrap_err();
     assert!(matches!(error, OperationError::ElementCountMismatch { .. }));
@@ -320,15 +318,13 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let compose = |context: &mut crate::TensorContractFusionExecutionContext<f64, RuleIdentity>| {
         let mut output = vec![0.0; dst.required_len().unwrap()];
         context
-            .tensorcompose_fusion_dyn_into(
+            .tensorcompose_planned_into(
                 &dst_bound,
                 &mut output,
-                crate::FusionOperand::direct(&lhs),
-                &[2.0],
-                crate::FusionOperand::direct(&rhs),
-                &[3.0],
+                (crate::FusionOperand::direct(&lhs), &[2.0]),
+                (crate::FusionOperand::direct(&rhs), &[3.0]),
                 1.0,
-                0.0,
+                crate::ContractDestinationInit::Axpby(0.0),
             )
             .unwrap();
         output

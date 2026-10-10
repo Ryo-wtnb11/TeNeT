@@ -11,16 +11,12 @@ use tenet_core::{
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_operations::TreeTransformBlock;
 use tenet_tensors::{
-    zeroed_payload, BoundDynamicFusionMapSpace, BoundDynamicTensorRef, ContractDestinationInit,
-    DynamicFusionMapSpace, FusionOperand, OutputAxisOrder, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace,
+    RecouplingCoefficientAction, TreeTransformOperation, TreeTransformOperationKind,
     TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 
 use crate::error::Error;
-use crate::runtime::CoefficientCtx;
-#[cfg(test)]
-use crate::runtime::Ctx;
 use crate::typed::ScalarOps;
 
 /// Converts an internal coupled-layout invariant violation into the stable
@@ -513,7 +509,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn observe_contract_seam_call() {
+pub(crate) fn observe_contract_seam_call() {
     CONTRACT_SEAM_CALLS.with(|observation| {
         if let Some(calls) = observation.get() {
             observation.set(Some(calls + 1));
@@ -530,88 +526,20 @@ pub(crate) fn observe_tree_transform_seam_call() {
     });
 }
 
-#[cfg(test)]
-pub(crate) fn tensorcontract_owned_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
-{
-    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-        lhs.space(),
-        rhs.space(),
-        lhs_axes,
-        rhs_axes,
-        output_order,
-    )?;
-    let data = tensorcontract_owned_multiplicity_free_into(
-        context,
-        &destination,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-    )?;
-    Ok((destination, data))
-}
-
-/// Owned multiplicity-free contraction into a `destination` the caller
-/// already derived with `contracted_multiplicity_free_ordered`.
-#[cfg(test)]
-pub(crate) fn tensorcontract_owned_multiplicity_free_into<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
-    destination: &BoundDynamicFusionMapSpace<R>,
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-) -> Result<Vec<D>, tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
-{
-    let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_oriented_multiplicity_free_into_slice(
-        context,
-        destination,
-        &mut data,
-        FusionOperand::direct(lhs.space().space()),
-        lhs.data(),
-        FusionOperand::direct(rhs.space().space()),
-        rhs.data(),
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        OrientedContractionKind::Contract,
-        ContractDestinationInit::Zeroed,
-    )?;
-    Ok(data)
-}
-
-pub(crate) enum OrientedContractionKind {
-    Contract,
-    Compose,
-}
-
 /// [`BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented`], the
-/// one oriented contraction-destination derivation.
+/// one oriented contraction-destination derivation. Host contraction derives
+/// it inside `tenet_tensors`' staged entry; the CUDA contraction keeps this
+/// call until #1756.
+#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn oriented_contract_destination<R>(
     lhs_authority: &BoundDynamicFusionMapSpace<R>,
-    lhs: FusionOperand<'_>,
+    lhs: tenet_tensors::FusionOperand<'_>,
     rhs_authority: &BoundDynamicFusionMapSpace<R>,
-    rhs: FusionOperand<'_>,
+    rhs: tenet_tensors::FusionOperand<'_>,
     lhs_axes: &[usize],
     rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
+    output_order: tenet_tensors::OutputAxisOrder<'_>,
     codomain_rank: Option<usize>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, tenet_tensors::OperationError>
 where
@@ -627,150 +555,6 @@ where
         output_order,
         codomain_rank,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
-    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
-    lhs_authority: &BoundDynamicFusionMapSpace<R>,
-    lhs: FusionOperand<'_>,
-    lhs_data: &[D],
-    rhs_authority: &BoundDynamicFusionMapSpace<R>,
-    rhs: FusionOperand<'_>,
-    rhs_data: &[D],
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-    kind: OrientedContractionKind,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols
-        + CheckedFusionAlgebra
-        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
-{
-    let destination = oriented_contract_destination(
-        lhs_authority,
-        lhs,
-        rhs_authority,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        None,
-    )?;
-    let data = tensorcontract_oriented_multiplicity_free_into(
-        context,
-        &destination,
-        lhs,
-        lhs_data,
-        rhs,
-        rhs_data,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        kind,
-    )?;
-    Ok((destination, data))
-}
-
-/// [`tensorcontract_oriented_multiplicity_free`] into a `destination` the
-/// caller already derived with [`oriented_contract_destination`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_oriented_multiplicity_free_into<R, D>(
-    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
-    destination: &BoundDynamicFusionMapSpace<R>,
-    lhs: FusionOperand<'_>,
-    lhs_data: &[D],
-    rhs: FusionOperand<'_>,
-    rhs_data: &[D],
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-    kind: OrientedContractionKind,
-) -> Result<Vec<D>, tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols
-        + CheckedFusionAlgebra
-        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
-{
-    let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_oriented_multiplicity_free_into_slice(
-        context,
-        destination,
-        &mut data,
-        lhs,
-        lhs_data,
-        rhs,
-        rhs_data,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        kind,
-        ContractDestinationInit::Zeroed,
-    )?;
-    Ok(data)
-}
-
-/// [`tensorcontract_oriented_multiplicity_free_into`] writing a caller-owned
-/// `data` of `destination`'s required length, initialized per `init`. Direct
-/// (owned) operands are the unconjugated case of the same execution.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_oriented_multiplicity_free_into_slice<R, D>(
-    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
-    destination: &BoundDynamicFusionMapSpace<R>,
-    data: &mut [D],
-    lhs: FusionOperand<'_>,
-    lhs_data: &[D],
-    rhs: FusionOperand<'_>,
-    rhs_data: &[D],
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-    kind: OrientedContractionKind,
-    init: ContractDestinationInit<D>,
-) -> Result<(), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
-{
-    match kind {
-        OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into_with_init(
-            destination,
-            data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            D::from_real(1.0),
-            init,
-        ),
-        OrientedContractionKind::Contract => {
-            #[cfg(test)]
-            observe_contract_seam_call();
-            context.tensorcontract_fusion_dyn_prelowered_into_with_init(
-                destination,
-                data,
-                lhs,
-                lhs_data,
-                rhs,
-                rhs_data,
-                TensorContractSpec::new_with_conjugation(
-                    lhs_axes,
-                    rhs_axes,
-                    output_order,
-                    lhs.storage_conjugate(),
-                    rhs.storage_conjugate(),
-                ),
-                D::from_real(1.0),
-                init,
-            )
-        }
-    }
 }
 
 /// TensorKit tensor product: merge codomain trees with codomain trees and
@@ -1297,47 +1081,6 @@ fn increment_coordinates(coordinates: &mut [usize], shape: &[usize]) {
 /// Categorical composition (TensorKit `A * B` / `mul!`) of two owned
 /// multiplicity-free operands.
 ///
-/// Differs from [`tensorcontract_owned_multiplicity_free_into`] in exactly two
-/// places: the output order is fixed to the identity (composition has no
-/// re-ordering freedom — the open axes keep their sides), and the seam is the
-/// composition one, which never inserts the fermionic supertrace twist.
-///
-/// The operands are always direct: this facade has no lazy adjoint view, so
-/// there is no conjugated storage for [`tenet_tensors::FusionOperand`] to
-/// separate from its logical geometry.
-pub(crate) fn tensorcompose_owned_multiplicity_free<R, D>(
-    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
-{
-    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-        lhs.space(),
-        rhs.space(),
-        lhs_axes,
-        rhs_axes,
-        OutputAxisOrder::identity(),
-    )?;
-    let mut data = zeroed_payload(destination.space().required_len()?);
-    context.tensorcompose_fusion_dyn_into_with_init(
-        &destination,
-        &mut data,
-        FusionOperand::direct(lhs.space().space()),
-        lhs.data(),
-        FusionOperand::direct(rhs.space().space()),
-        rhs.data(),
-        D::from_real(1.0),
-        ContractDestinationInit::Zeroed,
-    )?;
-    Ok((destination, data))
-}
-
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -1355,14 +1098,13 @@ mod tests {
         RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
     };
     use tenet_tensors::{
-        BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+        BoundDynamicFusionMapSpace, FusionOperand, OutputAxisOrder, TreeTransformOperation,
     };
 
     use super::{
-        scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
-        tensorproduct_owned_checked_generic, try_braid_rank_one_diagonal_data,
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        scatter_tensor_product_block, tensorproduct_owned_checked_generic,
+        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -2092,18 +1834,29 @@ mod tests {
             7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
         ];
 
-        let lhs = BoundDynamicTensorRef::try_new(&lhs, &lhs_data).unwrap();
-        let rhs = BoundDynamicTensorRef::try_new(&rhs, &rhs_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
-        let (destination, data) = tensorcontract_owned_multiplicity_free(
-            &mut context,
-            lhs,
-            rhs,
+        let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &lhs,
+            &rhs,
             &[1],
             &[0],
             OutputAxisOrder::from_axes(&[1, 0]),
         )
         .unwrap();
+        let mut data = vec![0.0; destination.space().required_len().unwrap()];
+        context
+            .tensorcontract_planned_into(
+                &destination,
+                &mut data,
+                (FusionOperand::direct(lhs.space()), &lhs_data),
+                (FusionOperand::direct(rhs.space()), &rhs_data),
+                &[1],
+                &[0],
+                &[1, 0],
+                1.0,
+                tenet_tensors::ContractDestinationInit::Zeroed,
+            )
+            .unwrap();
 
         let expected_destination = tenet_core::FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(SectorId::new(0), 4)], true)]),

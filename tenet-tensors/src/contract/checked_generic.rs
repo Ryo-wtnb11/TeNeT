@@ -5,23 +5,25 @@ use tenet_core::{
     BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols,
     CoreError, FusionTreeHomSpace, RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
-use tenet_operations::{ContractDestinationInit, TensorContractSpec, TreeTransformBackend};
+use tenet_operations::{TensorContractSpec, TreeTransformBackend};
 
+use crate::mode::{ContractRequest, ContractSide, ContractStaging, StagedContraction};
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use crate::{
-    zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
-    RecouplingCoefficientAction, ZeroBytes,
+    ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, ZeroBytes,
 };
 
 use super::backend::TensorContractBackend;
-use super::context::{
-    plan_compose_in, plan_contract_in, PlanTarget, TensorContractFusionExecutionContext,
-};
+use super::context::TensorContractFusionExecutionContext;
+#[cfg(test)]
+use super::context::{plan_contract_in, PlanTarget};
 use super::dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace,
 };
-use super::resolution::{HostEagerExecutor, StorageContractResolution};
+#[cfg(test)]
+use super::resolution::HostEagerExecutor;
+use super::resolution::StorageContractResolution;
 use super::structure::TensorContractAxisPlan;
 
 type CheckedContractResult<P, D> = Result<
@@ -98,6 +100,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<'a, P> PlanTarget<'a, P, CheckedAuthority<'a, P>> {
     /// The checked destination `space` (a staged preview) planned under
     /// `authority`, whose binding's provider is the rule.
@@ -185,11 +188,11 @@ fn validate_source_structure<E>(
     Ok(())
 }
 
-fn validate_contract_local<P, D>(
+fn validate_contract_local<P>(
     lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
+    lhs_len: usize,
     rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
+    rhs_len: usize,
     axes: TensorContractSpec<'_>,
     dst_nout: usize,
 ) -> Result<TensorContractAxisPlan, CheckedGenericPlanError<P::Error>>
@@ -224,12 +227,12 @@ where
         }
         .into());
     }
-    for (data, space) in [(lhs_data, lhs_space), (rhs_data, rhs_space)] {
+    for (len, space) in [(lhs_len, lhs_space), (rhs_len, rhs_space)] {
         let expected = space.space().required_len()?;
-        if data.len() != expected {
+        if len != expected {
             return Err(OperationError::ElementCountMismatch {
                 expected,
-                actual: data.len(),
+                actual: len,
             }
             .into());
         }
@@ -238,57 +241,104 @@ where
     Ok(axis_plan)
 }
 
-/// Contracts two direct checked Generic tensors, the result split after its
-/// first `codomain_rank` output axes (TensorOperations `pAB`) and owned by
-/// the left provider allocation.
-///
-/// It plans through the shared [`plan_contract`] ladder in the checked mode
-/// (the canonical core, TensorKit's `copyC`, the `DynamicTree` artifact)
-/// and replays on the Host route executor. The destination and every
-/// intermediate are staged and planned over as previews; only after the
-/// replay succeeds is the destination committed, then the intermediates the
-/// route used, then the staged transformers (#2063).
-///
-/// [`plan_contract`]: TensorContractFusionExecutionContext::plan_contract
-#[doc(hidden)]
-pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-    axes: TensorContractSpec<'_>,
-    codomain_rank: usize,
-) -> CheckedContractResult<P, D>
+/// Checked operands are direct (`CHECKED_REQUIRES_DIRECT_OPERANDS`); the
+/// staging order is today's provider-event order: local validation, pair
+/// admission, the contraction's braiding check, then the staged
+/// destination, whose producer derives the HomSpace.
+impl<P> ContractStaging<P> for CheckedGenericAdmissionMode
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
 {
-    tensorcontract_checked_generic(
-        context,
-        (lhs_space, lhs_data),
-        (rhs_space, rhs_data),
-        axes,
-        codomain_rank,
-    )
+    /// The staged destination and the preview the planner targets.
+    type ContractStage = (PreparedCheckedGenericDynamicSpace, DynamicFusionMapSpace);
+
+    fn stage_contraction<'a>(
+        (lhs, lhs_operand, lhs_len): ContractSide<'a, P>,
+        (rhs, rhs_operand, rhs_len): ContractSide<'a, P>,
+        request: ContractRequest<'_>,
+    ) -> Result<
+        StagedContraction<Self::ContractStage, CheckedAuthority<'a, P>, CheckedContractTxn>,
+        CheckedGenericPlanError<P::Error>,
+    > {
+        if lhs_operand.storage_conjugate() || rhs_operand.storage_conjugate() {
+            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
+        }
+        let compose_axes;
+        let (axes, codomain_rank) = match request {
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            } => (axes, codomain_rank),
+            ContractRequest::Compose => {
+                let lhs_nout = lhs.space().nout();
+                compose_axes = (
+                    (lhs_nout..lhs.space().rank()).collect::<Vec<_>>(),
+                    (0..rhs.space().nout()).collect::<Vec<_>>(),
+                );
+                (
+                    TensorContractSpec::with_default_output_order(&compose_axes.0, &compose_axes.1),
+                    lhs_nout,
+                )
+            }
+        };
+        let axis_plan = validate_contract_local(lhs, lhs_len, rhs, rhs_len, axes, codomain_rank)?;
+        let provider = crate::admission::admit_checked_generic_pair(lhs, rhs)?;
+        let authority = match request {
+            ContractRequest::Contract { .. } => CheckedAuthority::contraction(lhs)?,
+            ContractRequest::Compose => CheckedAuthority::composition(lhs),
+        };
+        let destination = lhs.prepare_final_homspace_generic_from_checked(provider, || {
+            FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                provider,
+                lhs.space().homspace(),
+                rhs.space().homspace(),
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &axis_plan.output_axes,
+                codomain_rank,
+            )
+            .map_err(CheckedGenericPlanError::from)
+        })?;
+        let preview = destination.preview();
+        let len = destination.required_len();
+        Ok(StagedContraction {
+            stage: (destination, preview),
+            authority,
+            txn: CheckedContractTxn::new(),
+            len,
+        })
+    }
+
+    fn contract_destination<'s>(
+        (_, preview): &'s Self::ContractStage,
+        lhs: &'s BoundDynamicFusionMapSpace<P>,
+    ) -> (&'s P, &'s DynamicFusionMapSpace) {
+        (lhs.provider(), preview)
+    }
+
+    /// Only after the fallible destination commit: a failed call commits no
+    /// intermediate and publishes nothing. These commits cannot fail; a lost
+    /// or refused admission leaves its preview unpublishable.
+    fn commit_contraction(
+        lhs: &BoundDynamicFusionMapSpace<P>,
+        (destination, preview): Self::ContractStage,
+        txn: CheckedContractTxn,
+        resolution: &StorageContractResolution<f64>,
+    ) -> Result<BoundDynamicFusionMapSpace<P>, CheckedGenericPlanError<P::Error>> {
+        let destination = lhs.commit_final_homspace_generic_bound_checked(destination)?;
+        txn.commit(
+            (
+                Arc::clone(preview.structure()),
+                Arc::clone(destination.space().structure()),
+            ),
+            resolution,
+        );
+        Ok(destination)
+    }
 }
 
-/// [`tensorcontract_owned_checked_generic_in_context`] over any context
-/// backends (a test injects failing ones).
-fn tensorcontract_checked_generic<P, D, BT, BC>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>,
-    (lhs_space, lhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
-    (rhs_space, rhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
-    axes: TensorContractSpec<'_>,
-    codomain_rank: usize,
-) -> CheckedContractResult<P, D>
+impl<D, BT, BC> TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>
 where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar
         + RecouplingCoefficientAction<f64>
         + ConjugateValue
@@ -298,133 +348,90 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {
-    let axis_plan = validate_contract_local(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        codomain_rank,
-    )?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    let authority = CheckedAuthority::contraction(lhs_space)?;
-    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-            provider,
-            lhs_space.space().homspace(),
-            rhs_space.space().homspace(),
-            axes.lhs_contracting_axes(),
-            axes.rhs_contracting_axes(),
-            &axis_plan.output_axes,
-            codomain_rank,
+    /// Contracts two direct checked Generic tensors, the result split after
+    /// its first `codomain_rank` output axes (TensorOperations `pAB`) and
+    /// owned by the left provider allocation.
+    ///
+    /// It plans through the shared [`plan_contract`] ladder in the checked
+    /// mode (the canonical core, TensorKit's `copyC`, the `DynamicTree`
+    /// artifact) and replays on the Host route executor. The destination and
+    /// every intermediate are staged and planned over as previews; only after
+    /// the replay succeeds is the destination committed, then the
+    /// intermediates the route used, then the staged transformers (#2063).
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    ///
+    /// [`plan_contract`]: TensorContractFusionExecutionContext::plan_contract
+    #[doc(hidden)]
+    pub fn tensorcontract_checked_generic_in<P>(
+        &mut self,
+        lhs_space: &BoundDynamicFusionMapSpace<P>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<P>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        codomain_rank: usize,
+    ) -> CheckedContractResult<P, D>
+    where
+        P: CheckedGenericRigidSymbols<Scalar = f64>,
+    {
+        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(
+            (
+                lhs_space,
+                FusionOperand::direct(lhs_space.space()),
+                lhs_data,
+            ),
+            (
+                rhs_space,
+                FusionOperand::direct(rhs_space.space()),
+                rhs_data,
+            ),
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            },
         )
-        .map_err(CheckedGenericPlanError::from)
-    })?;
-    let preview = destination.preview();
-    let mut txn = CheckedContractTxn::new();
-    let resolution = plan_contract_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
-        &mut txn,
-        PlanTarget::checked(authority, &preview),
-        FusionOperand::direct(lhs_space.space()),
-        FusionOperand::direct(rhs_space.space()),
-        (
-            axes.lhs_contracting_axes(),
-            axes.rhs_contracting_axes(),
-            &axis_plan.output_axes,
-        ),
-        None,
-    )?;
-    #[cfg(test)]
-    context.record_contract_route(&resolution);
-    let mut data = zeroed_payload(destination.required_len());
-    context.execute_contract_route_host(
-        &resolution,
-        preview.structure(),
-        &mut data,
-        (lhs_space.space().structure(), lhs_data),
-        (rhs_space.space().structure(), rhs_data),
-        D::one(),
-        ContractDestinationInit::Zeroed,
-    )?;
-    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    // Only after the fallible destination commit: a failed call commits no
-    // intermediate and publishes nothing. These commits cannot fail; a lost
-    // or refused admission leaves its preview unpublishable.
-    txn.commit(
-        (
-            Arc::clone(preview.structure()),
-            Arc::clone(destination.space().structure()),
-        ),
-        &resolution,
-    );
-    Ok((destination, data))
-}
+    }
 
-/// Canonical composition (TensorKit `mul!`) of two direct checked Generic
-/// tensors: `lhs.domain` is glued to `rhs.codomain` in order.
-///
-/// It plans through the shared [`plan_compose`](super::plan_compose) rung in
-/// the checked mode and replays on the Host route executor: one
-/// coefficient-free block GEMM per coupled sector, or the checked irregular
-/// core for a non-canonical tiling. No leg crosses another, hence no
-/// braiding style is required. The destination is staged, planned over as
-/// a preview, and committed only after the replay succeeds (#2063).
-#[doc(hidden)]
-pub fn tensorcompose_owned_checked_generic_in_context<P, D>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-{
-    let lhs_nout = lhs_space.space().nout();
-    let lhs_axes = (lhs_nout..lhs_space.space().rank()).collect::<Vec<_>>();
-    let rhs_axes = (0..rhs_space.space().nout()).collect::<Vec<_>>();
-    let axes = TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes);
-    let axis_plan =
-        validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-            provider,
-            lhs_space.space().homspace(),
-            rhs_space.space().homspace(),
-            &lhs_axes,
-            &rhs_axes,
-            &axis_plan.output_axes,
-            lhs_nout,
+    /// Canonical composition (TensorKit `mul!`) of two direct checked Generic
+    /// tensors: `lhs.domain` is glued to `rhs.codomain` in order.
+    ///
+    /// It plans through the shared [`plan_compose`](super::plan_compose)
+    /// rung in the checked mode and replays on the Host route executor: one
+    /// coefficient-free block GEMM per coupled sector, or the checked
+    /// irregular core for a non-canonical tiling. No leg crosses another,
+    /// hence no braiding style is required. The destination is staged,
+    /// planned over as a preview, and committed only after the replay
+    /// succeeds (#2063).
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn tensorcompose_checked_generic_in<P>(
+        &mut self,
+        lhs_space: &BoundDynamicFusionMapSpace<P>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<P>,
+        rhs_data: &[D],
+    ) -> CheckedContractResult<P, D>
+    where
+        P: CheckedGenericRigidSymbols<Scalar = f64>,
+    {
+        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(
+            (
+                lhs_space,
+                FusionOperand::direct(lhs_space.space()),
+                lhs_data,
+            ),
+            (
+                rhs_space,
+                FusionOperand::direct(rhs_space.space()),
+                rhs_data,
+            ),
+            ContractRequest::Compose,
         )
-        .map_err(CheckedGenericPlanError::from)
-    })?;
-    let preview = destination.preview();
-    let resolution = plan_compose_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
-        PlanTarget::checked(CheckedAuthority::composition(lhs_space), &preview),
-        FusionOperand::direct(lhs_space.space()),
-        FusionOperand::direct(rhs_space.space()),
-    )?;
-    #[cfg(test)]
-    context.record_contract_route(&resolution);
-    let mut data = zeroed_payload(destination.required_len());
-    context.execute_contract_route_host(
-        &resolution,
-        preview.structure(),
-        &mut data,
-        (lhs_space.space().structure(), lhs_data),
-        (rhs_space.space().structure(), rhs_data),
-        D::one(),
-        ContractDestinationInit::Zeroed,
-    )?;
-    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    Ok((destination, data))
+    }
 }
 
 #[cfg(test)]
@@ -816,15 +823,7 @@ mod tests {
         codomain_rank: usize,
     ) -> CheckedContractResult<CheckedGenericSpy, f64> {
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-        tensorcontract_owned_checked_generic_in_context(
-            &mut context,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            codomain_rank,
-        )
+        context.tensorcontract_checked_generic_in(lhs, lhs_data, rhs, rhs_data, axes, codomain_rank)
     }
 
     /// The route the last call of `context` planned.
@@ -932,14 +931,9 @@ mod tests {
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         // A failing destination query surfaces exactly and publishes nothing.
         left.fail.set(Some(Query::Channel));
-        let error = tensorcompose_owned_checked_generic_in_context(
-            &mut context,
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-        )
-        .unwrap_err();
+        let error = context
+            .tensorcompose_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data)
+            .unwrap_err();
         assert!(matches!(
             error,
             CheckedGenericPlanError::Provider(SpyError(Query::Channel))
@@ -961,14 +955,9 @@ mod tests {
         for (call, events) in expected {
             left.reset();
             right.reset();
-            let (output, data) = tensorcompose_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-            )
-            .unwrap();
+            let (output, data) = context
+                .tensorcompose_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data)
+                .unwrap();
             assert!(context.last_resolution_is_core(), "{call}");
             assert!(Arc::ptr_eq(output.provider_arc(), &left), "{call}");
             assert_eq!(right.algebra_calls(), 0, "{call}");
@@ -1027,16 +1016,9 @@ mod tests {
         let axes = || TensorContractSpec::with_default_output_order(&[1], &[0]);
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         left.fail.set(Some(Query::Channel));
-        let error = tensorcontract_owned_checked_generic_in_context(
-            &mut context,
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            axes(),
-            1,
-        )
-        .unwrap_err();
+        let error = context
+            .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), 1)
+            .unwrap_err();
         assert!(matches!(
             error,
             CheckedGenericPlanError::Provider(SpyError(Query::Channel))
@@ -1059,16 +1041,9 @@ mod tests {
         for (call, events) in expected {
             left.reset();
             right.reset();
-            let (output, data) = tensorcontract_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                axes(),
-                1,
-            )
-            .unwrap();
+            let (output, data) = context
+                .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), 1)
+                .unwrap();
             assert_eq!(last_route(&context), Route::Core, "{call}");
             assert!(Arc::ptr_eq(output.provider_arc(), &left), "{call}");
             assert!(!Arc::ptr_eq(output.provider_arc(), &right), "{call}");
@@ -1152,16 +1127,16 @@ mod tests {
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         crate::tree_transform::take_completed_transformer_activity();
-        let (output, data) = tensorcontract_owned_checked_generic_in_context(
-            &mut context,
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
-            2,
-        )
-        .unwrap();
+        let (output, data) = context
+            .tensorcontract_checked_generic_in(
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
+                2,
+            )
+            .unwrap();
         assert_eq!(last_route(&context), Route::DynamicTree);
         assert!(Arc::ptr_eq(output.provider_arc(), &left));
         assert_eq!(right.algebra_calls(), 0);
@@ -1310,14 +1285,9 @@ mod tests {
             tenet_core::clear_structure_caches();
             crate::tree_transform::take_completed_transformer_activity();
             let mut context = failing_context(Some(0));
-            let error = tensorcontract_checked_generic(
-                &mut context,
-                (&lhs, &lhs_data),
-                (&rhs, &rhs_data),
-                axes(),
-                nout,
-            )
-            .unwrap_err();
+            let error = context
+                .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), nout)
+                .unwrap_err();
             assert!(
                 matches!(
                     error,
@@ -1333,28 +1303,18 @@ mod tests {
 
             // Warm failure on the last job, after a success sized the scratch.
             context.contract_backend_mut().fail_at = None;
-            let reference = tensorcontract_checked_generic(
-                &mut context,
-                (&lhs, &lhs_data),
-                (&rhs, &rhs_data),
-                axes(),
-                nout,
-            )
-            .unwrap()
-            .1;
+            let reference = context
+                .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), nout)
+                .unwrap()
+                .1;
             let jobs = context.contract_backend_mut().jobs;
             let resident = cache_entries();
             let retained = context.retained_host_scratch_bytes();
             let backend = context.contract_backend_mut();
             backend.fail_at = Some(backend.jobs + (jobs - 1) / 2);
-            let error = tensorcontract_checked_generic(
-                &mut context,
-                (&lhs, &lhs_data),
-                (&rhs, &rhs_data),
-                axes(),
-                nout,
-            )
-            .unwrap_err();
+            let error = context
+                .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), nout)
+                .unwrap_err();
             assert!(
                 matches!(
                     error,
@@ -1365,15 +1325,10 @@ mod tests {
             assert_eq!(cache_entries(), resident, "{name}");
             assert_eq!(context.retained_host_scratch_bytes(), retained, "{name}");
             context.contract_backend_mut().fail_at = None;
-            let repeat = tensorcontract_checked_generic(
-                &mut context,
-                (&lhs, &lhs_data),
-                (&rhs, &rhs_data),
-                axes(),
-                nout,
-            )
-            .unwrap()
-            .1;
+            let repeat = context
+                .tensorcontract_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data, axes(), nout)
+                .unwrap()
+                .1;
             assert_eq!(
                 repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -1427,10 +1382,11 @@ mod tests {
         let axes = || fixture_axes(&[3, 1], &[0, 3], Some(&[2, 0, 3, 1]));
         let run = |fail_at| {
             let mut context = failing_context(fail_at);
-            let result = tensorcontract_checked_generic(
-                &mut context,
-                (&lhs, &lhs_data),
-                (&rhs, &rhs_data),
+            let result = context.tensorcontract_checked_generic_in(
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
                 axes(),
                 2,
             );
@@ -1519,16 +1475,16 @@ mod tests {
         let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 2.0);
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut run = || {
-            let result = tensorcontract_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                fixture_axes(&[3, 1], &[0, 3], Some(&[2, 0, 3, 1])),
-                2,
-            )
-            .unwrap();
+            let result = context
+                .tensorcontract_checked_generic_in(
+                    &lhs,
+                    &lhs_data,
+                    &rhs,
+                    &rhs_data,
+                    fixture_axes(&[3, 1], &[0, 3], Some(&[2, 0, 3, 1])),
+                    2,
+                )
+                .unwrap();
             assert_eq!(last_route(&context), Route::DynamicTree);
             result
         };
@@ -1595,14 +1551,9 @@ mod tests {
             assert_eq!(left.algebra_calls(), 0);
 
             let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-            let (_, data) = tensorcompose_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-            )
-            .unwrap();
+            let (_, data) = context
+                .tensorcompose_checked_generic_in(&lhs, &lhs_data, &rhs, &rhs_data)
+                .unwrap();
             assert!(data.iter().any(|&value| value != 0.0), "{braiding:?}");
         }
     }
@@ -1734,20 +1685,20 @@ mod tests {
         let mut context =
             TensorContractFusionExecutionContext::<f64, tenet_core::RuleIdentity>::default();
         let mut run = || {
-            let (_, data) = tensorcontract_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                TensorContractSpec::new(
-                    &[3, 1],
-                    &[0, 3],
-                    tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
-                ),
-                2,
-            )
-            .unwrap();
+            let (_, data) = context
+                .tensorcontract_checked_generic_in(
+                    &lhs,
+                    &lhs_data,
+                    &rhs,
+                    &rhs_data,
+                    TensorContractSpec::new(
+                        &[3, 1],
+                        &[0, 3],
+                        tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
+                    ),
+                    2,
+                )
+                .unwrap();
             (data, context.eager_coefficient_pack_builds())
         };
         let (cold_data, cold) = run();
@@ -1808,16 +1759,16 @@ mod tests {
         let lhs_data = vec![one; lhs.space().required_len().unwrap()];
         let rhs_data = vec![two; rhs.space().required_len().unwrap()];
         let mut context = TensorContractFusionExecutionContext::<D, RuleIdentity>::default();
-        let (output, data) = tensorcontract_owned_checked_generic_in_context(
-            &mut context,
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1,
-        )
-        .unwrap();
+        let (output, data) = context
+            .tensorcontract_checked_generic_in(
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::with_default_output_order(&[1], &[0]),
+                1,
+            )
+            .unwrap();
         let structure = output.space().structure();
         assert_eq!(structure.block_count(), 2);
         assert_eq!(data.len(), 1 + 4);
@@ -1878,21 +1829,21 @@ mod tests {
         let mut context =
             TensorContractFusionExecutionContext::<f64, tenet_core::RuleIdentity>::default();
         let mut run = || {
-            tensorcontract_owned_checked_generic_in_context(
-                &mut context,
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                TensorContractSpec::new(
-                    &[3, 1],
-                    &[0, 3],
-                    tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
-                ),
-                2,
-            )
-            .unwrap()
-            .1
+            context
+                .tensorcontract_checked_generic_in(
+                    &lhs,
+                    &lhs_data,
+                    &rhs,
+                    &rhs_data,
+                    TensorContractSpec::new(
+                        &[3, 1],
+                        &[0, 3],
+                        tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
+                    ),
+                    2,
+                )
+                .unwrap()
+                .1
         };
         tenet_core::clear_structure_caches();
         let reference = run();

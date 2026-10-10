@@ -198,11 +198,9 @@ use tenet_operations::scale_value;
 #[cfg(feature = "cuda")]
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
-    expand_physical_host, project_physical_host, tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
-    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    ValidatedDynamicFusionLayout,
+    expand_physical_host, project_physical_host, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
+    DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
+    TreeTransformOperation, TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
 use crate::sector::{
@@ -271,12 +269,12 @@ use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
+#[cfg(feature = "cuda")]
+use crate::tensor_core::oriented_contract_destination;
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
-    internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
-    tensorproduct_owned_multiplicity_free, OrientedContractionKind,
+    internal_layout_error, tensorproduct_owned_checked_generic,
+    tensorproduct_owned_multiplicity_free,
 };
 
 mod batched;

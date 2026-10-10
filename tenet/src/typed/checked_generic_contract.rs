@@ -240,46 +240,6 @@ where
     }
 }
 
-/// The destination space of `lhs·rhs` in `output_order`, split after
-/// `codomain_rank` output axes, derived as the contraction route does: owned
-/// operands through the owned derivation, a lazy adjoint through the oriented
-/// one.
-fn contract_destination<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-    codomain_rank: usize,
-) -> Result<BoundDynamicFusionMapSpace<R>, Error>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    Ok(match (lhs.owned_body(), rhs.owned_body()) {
-        (Some(lhs_body), Some(rhs_body)) => {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
-                &lhs_body.space,
-                &rhs_body.space,
-                lhs_axes,
-                rhs_axes,
-                output_order,
-                codomain_rank,
-            )?
-        }
-        _ => oriented_contract_destination(
-            lhs.logical_space(),
-            lhs.fusion_operand(),
-            rhs.logical_space(),
-            rhs.fusion_operand(),
-            lhs_axes,
-            rhs_axes,
-            output_order,
-            Some(codomain_rank),
-        )?,
-    })
-}
-
 #[allow(private_bounds)]
 fn compose_multiplicity_free<R, D>(
     lhs: &TensorMap<R, D>,
@@ -290,41 +250,15 @@ where
     R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
 {
-    let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
-    let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
     let mut lease = lhs.runtime.lease_context()?;
-    Ok(match (lhs.owned_body(), rhs.owned_body()) {
-        (Some(lhs_body), Some(rhs_body)) => tensorcompose_owned_multiplicity_free(
-            D::lane(lease.context())?,
-            BoundDynamicTensorRef::try_new(
-                &lhs_body.space,
-                lhs_body.materialized_dense_data().as_ref(),
-            )?,
-            BoundDynamicTensorRef::try_new(
-                &rhs_body.space,
-                rhs_body.materialized_dense_data().as_ref(),
-            )?,
-            &lhs_axes,
-            &rhs_axes,
+    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+    Ok(
+        D::lane(lease.context())?.tensorcompose_multiplicity_free_in(
+            (lhs.logical_space(), lhs_operand, &lhs_data),
+            (rhs.logical_space(), rhs_operand, &rhs_data),
         )?,
-        _ => {
-            let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-            let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-            tensorcontract_oriented_multiplicity_free(
-                D::lane(lease.context())?,
-                lhs.logical_space(),
-                lhs_operand,
-                &lhs_data,
-                rhs.logical_space(),
-                rhs_operand,
-                &rhs_data,
-                &lhs_axes,
-                &rhs_axes,
-                OutputAxisOrder::identity(),
-                OrientedContractionKind::Compose,
-            )?
-        }
-    })
+    )
 }
 
 impl<R, D> MultiplicityFreeContractExecution<R, f64> for D
@@ -359,35 +293,18 @@ where
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
         let output_axes = spec.output_axes();
-        let output_order = OutputAxisOrder::from_axes(&output_axes);
-        let destination = contract_destination(
-            lhs,
-            rhs,
-            spec.lhs,
-            spec.rhs,
-            output_order,
-            spec.codomain.len(),
-        )?;
         let mut lease = lhs.runtime.lease_context()?;
-        let mut data = tenet_tensors::zeroed_payload(destination.space().required_len()?);
         let context = lease.context().multiplicity_free_lane::<Self>()?;
         let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
         let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        tensorcontract_oriented_multiplicity_free_into_slice(
-            context,
-            &destination,
-            &mut data,
-            lhs_operand,
-            &lhs_data,
-            rhs_operand,
-            &rhs_data,
-            spec.lhs,
-            spec.rhs,
-            output_order,
-            OrientedContractionKind::Contract,
-            tenet_tensors::ContractDestinationInit::Zeroed,
-        )?;
-        Ok((destination, data))
+        #[cfg(test)]
+        crate::tensor_core::observe_contract_seam_call();
+        Ok(context.tensorcontract_multiplicity_free_in(
+            (lhs.logical_space(), lhs_operand, &lhs_data),
+            (rhs.logical_space(), rhs_operand, &rhs_data),
+            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
+            spec.codomain.len(),
+        )?)
     }
 
     fn compose(
