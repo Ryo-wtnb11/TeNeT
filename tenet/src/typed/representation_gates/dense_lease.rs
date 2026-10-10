@@ -190,7 +190,7 @@ const MATERIALIZING: &[&str] = &[
     "solve divisor lazy",
     "exp lazy",
     "qr_compact lazy",
-    "lq_full lazy",
+    "qr_full lazy",
     "eigh_full lazy",
     "eig_vals lazy",
 ];

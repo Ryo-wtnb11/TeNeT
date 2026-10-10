@@ -187,7 +187,8 @@ where
     }
 
     /// The one body of LQ: `stage` factors the input storage, and each factor
-    /// keeps the storage its route produced.
+    /// keeps the storage its route produced. Under [`AdjointRule::AdjointSeam`]
+    /// a lazy adjoint's dense parent is read in place by `adjoint_stage`.
     fn factor_lq(
         &self,
         op: FactorOp,
@@ -198,11 +199,21 @@ where
             Lq<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
+        adjoint_stage: impl FnOnce(
+            RuntimeDense<'_>,
+            BoundDynamicTensorRef<'_, R, D>,
+            &BoundDynamicFusionMapSpace<R>,
+        ) -> Result<
+            Lq<tenet_matrixalgebra::BoundDynFactor<R, D>>,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
     ) -> Result<Lq<Self>, TypedFacadeError<R>> {
-        let mut local = None;
-        let source = self.factor_input(op, &mut local)?;
-        let Lq { l, q } =
-            stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
+        let Lq { l, q } = self.seam_factors(op, stage, |lease, parent, adjoint_space| {
+            adjoint_stage(lease, parent, adjoint_space).map(|Lq { l, q }| Lq {
+                l: tenet_matrixalgebra::seam::FactorOutput::Dense(l),
+                q: tenet_matrixalgebra::seam::FactorOutput::Dense(q),
+            })
+        })?;
         Ok(Lq {
             l: self.factor_output(l),
             q: self.factor_output(q),
@@ -379,9 +390,10 @@ where
         })
     }
 
-    /// The SVD factors `op` computes. Under [`AdjointRule::AdjointSeam`] a
-    /// lazy adjoint's dense parent is read in place by `adjoint_stage`.
-    fn svd_factors<T>(
+    /// The factors `op` computes. Under [`AdjointRule::AdjointSeam`] a lazy
+    /// adjoint's dense parent is read in place by `adjoint_stage`, which also
+    /// receives the adjoint's own layout.
+    fn seam_factors<T>(
         &self,
         op: FactorOp,
         stage: impl FnOnce(
@@ -392,6 +404,7 @@ where
         adjoint_stage: impl FnOnce(
             RuntimeDense<'_>,
             BoundDynamicTensorRef<'_, R, D>,
+            &BoundDynamicFusionMapSpace<R>,
         ) -> Result<
             T,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
@@ -401,7 +414,7 @@ where
             if op.adjoint_rule() == AdjointRule::AdjointSeam {
                 let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
-                return adjoint_stage(RuntimeDense(&self.runtime), parent)
+                return adjoint_stage(RuntimeDense(&self.runtime), parent, &view.logical_space)
                     .map_err(R::Mode::map_factor_error);
             }
         }
@@ -416,14 +429,14 @@ where
     where
         D: FactorizationScalar,
     {
-        let (u, vh, mut spectrum) = self.svd_factors(
+        let (u, vh, mut spectrum) = self.seam_factors(
             FactorOp::SvdCompact,
             |lease, source| {
                 tenet_matrixalgebra::seam::svd_compact_from_source::<R::Mode, _, _, _, _>(
                     lease, source,
                 )
             },
-            |lease, parent| {
+            |lease, parent, _| {
                 tenet_matrixalgebra::seam::svd_compact_adjoint_from_parent::<R::Mode, _, _, _, _>(
                     lease, parent,
                 )
@@ -453,14 +466,14 @@ where
         if self.spectrum().is_some() {
             return self.factor_svd_compact();
         }
-        let factors = self.svd_factors(
+        let factors = self.seam_factors(
             FactorOp::SvdFull,
             |lease, source| {
                 tenet_matrixalgebra::seam::svd_full_from_source::<R::Mode, _, _, _, _>(
                     lease, source,
                 )
             },
-            |lease, parent| {
+            |lease, parent, _| {
                 tenet_matrixalgebra::seam::svd_full_adjoint_from_parent::<R::Mode, _, _, _, _>(
                     lease, parent,
                 )

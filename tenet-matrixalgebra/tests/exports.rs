@@ -212,7 +212,8 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eigh_vals_dyn eigh_vals_from_source \
              left_null_from_source \
              left_polar_adjoint_from_parent left_polar_from_source left_polar_of_diagonal \
-             lq_compact_from_source lq_full_from_source pinv_diagonal_spectrum \
+             lq_compact_adjoint_from_parent lq_compact_from_source \
+             lq_full_adjoint_from_parent lq_full_from_source pinv_diagonal_spectrum \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
              rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
              right_polar_adjoint_from_parent right_polar_from_source \

@@ -373,7 +373,9 @@ where
     /// owned Host compact diagonals preserve `W = V` and both factors
     /// are compact, including on a dual `V`.
     /// Checked factors use the source provider instance, and a failure returns
-    /// no factors. A lazy adjoint is materialized only for the operation.
+    /// no factors. A lazy adjoint `A^H` is not materialized: the QR
+    /// `A = Q R` of its parent, read in place, gives `l = R^H` and `q = Q^H`
+    /// in the gauge LQ of the materialized adjoint has.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -397,11 +399,23 @@ where
         cols: &[usize],
     ) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(FactorOp::LqCompact, |lease, source| {
-                tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
-                    lease, source,
-                )
-            })
+            t.factor_lq(
+                FactorOp::LqCompact,
+                |lease, source| {
+                    tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+                |lease, parent, adjoint_space| {
+                    tenet_matrixalgebra::seam::lq_compact_adjoint_from_parent::<
+                        R::Mode,
+                        _,
+                        _,
+                        _,
+                        _,
+                    > (lease, parent, adjoint_space)
+                },
+            )
         })
     }
 }
@@ -524,9 +538,21 @@ where
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
-            t.factor_lq(FactorOp::LqFull, |lease, source| {
-                tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(lease, source)
-            })
+            t.factor_lq(
+                FactorOp::LqFull,
+                |lease, source| {
+                    tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+                |lease, parent, adjoint_space| {
+                    tenet_matrixalgebra::seam::lq_full_adjoint_from_parent::<R::Mode, _, _, _, _>(
+                        lease,
+                        parent,
+                        adjoint_space,
+                    )
+                },
+            )
         })
     }
 }
