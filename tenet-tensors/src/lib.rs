@@ -158,8 +158,9 @@ pub use tensortrace::{
     tensortrace_fusion_dyn_preflight_checked, tensortrace_fusion_dyn_preflight_generic_checked,
     tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
     tensortrace_multiplicity_free_in, tensortrace_stage_checked_generic,
-    tensortrace_stage_multiplicity_free, CheckedGenericTraceStage, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm, TracePreflight,
+    tensortrace_stage_multiplicity_free, TensorTraceFusionStructure,
+    TensorTraceFusionStructureTerm, TensorTraceStage, TensorTraceStructure,
+    TensorTraceStructureTerm, TracePreflight,
 };
 #[cfg(test)]
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};

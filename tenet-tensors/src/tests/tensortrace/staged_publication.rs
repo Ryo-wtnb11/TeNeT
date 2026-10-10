@@ -40,7 +40,7 @@ fn source() -> BoundDynamicFusionMapSpace<CheckedTraceToy> {
 
 fn stage(
     src: &BoundDynamicFusionMapSpace<CheckedTraceToy>,
-) -> crate::CheckedGenericTraceStage<'_, CheckedTraceToy> {
+) -> crate::TensorTraceStage<'_, CheckedTraceToy, crate::PreparedCheckedGenericDynamicSpace> {
     crate::tensortrace_stage_checked_generic(src, TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]), 1)
         .unwrap()
 }
@@ -144,7 +144,7 @@ fn destination_error_precedes_pivotal_and_payload() {
     // A stage whose source is another binding is compiled as against a
     // committed destination, so its `dst` comparison runs.
     let other = src.clone();
-    let wrong_dst = crate::CheckedGenericTraceStage {
+    let wrong_dst = crate::TensorTraceStage {
         destination: src
             .prepare_final_homspace_generic_with_checked(
                 src.provider(),

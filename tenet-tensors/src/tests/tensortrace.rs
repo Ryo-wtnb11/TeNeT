@@ -1851,6 +1851,35 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
             .map(|trace| alpha * trace)
             .collect::<Vec<_>>()
     );
+    // What (#2146): the eager multiplicity-free trace selects its output
+    // HomSpace once, in its stage; the compile reuses that admission (it
+    // still compiles its own axis plan, a provider-free derivation).
+    let stage =
+        crate::tensortrace_stage_multiplicity_free(&dynamic_src, axes, dynamic_dst.space().nout())
+            .unwrap();
+    let (eager_dst, eager) =
+        crate::tensortrace_multiplicity_free_in(stage, &dynamic_src, || &src_data[..], axes, alpha)
+            .unwrap();
+    assert_eq!(
+        crate::tensortrace::take_trace_compiler_geometry_derivations(),
+        (2, 1)
+    );
+    assert_eq!(eager_dst.space().homspace(), dynamic_dst.space().homspace());
+    assert_eq!(eager, owned);
+    // A stage of another source binding is compiled as against a committed
+    // destination: its compile selects and compares again.
+    let other = dynamic_src.clone();
+    let stage =
+        crate::tensortrace_stage_multiplicity_free(&other, axes, dynamic_dst.space().nout())
+            .unwrap();
+    let (_, fallback) =
+        crate::tensortrace_multiplicity_free_in(stage, &dynamic_src, || &src_data[..], axes, alpha)
+            .unwrap();
+    assert_eq!(
+        crate::tensortrace::take_trace_compiler_geometry_derivations(),
+        (2, 2)
+    );
+    assert_eq!(fallback, owned);
 
     let mut unchanged = initial.clone();
     let error = tensortrace_fusion_dyn_into_checked(
