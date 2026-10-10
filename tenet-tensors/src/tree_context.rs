@@ -5,303 +5,25 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, FusionTreeHomSpace,
-    FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    Placement, RuleIdentity, TensorMap,
+    BlockStructure, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, TensorMap,
 };
 
-use crate::contract::{
-    tree_transform_operation_axes, BoundDynamicFusionMapSpace, FusionOperand,
-    PreparedCheckedGenericDynamicSpace,
-};
-use crate::mode::{PlanningAlgebra, TreeStructureSource};
+use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
+use crate::mode::{PlanningAlgebra, StagedTransform, TreeStructureSource};
 use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
-    publish_committed, publishable, validate_checked_generic_tree_pair_plan_preflight,
-    CheckedGenericPlanError, CheckedPendingCoefficients, CoefficientGroupReuse,
-    CompletedTransformerKey, OrientedBasisOrder, TransformerMode, TreeTransformOperation,
-    TreeTransformPlanning, TreeTransformRuleCacheKey, TreeTransformScope,
+    CheckedGenericPlanError, TreeTransformOperation, TreeTransformPlanning,
+    TreeTransformRuleCacheKey,
 };
 use crate::{
-    validate_oriented_fusion_layout, RecouplingCoefficientAction, ReportsPlacement,
-    TreeTransformReplayProfile, TreeTransformStructure,
+    RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
+    TreeTransformStructure,
 };
 use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
 use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
-
-enum CheckedTreeTransformInputKind<'a, P, D> {
-    Direct {
-        space: &'a BoundDynamicFusionMapSpace<P>,
-        data: &'a [D],
-    },
-    Adjoint {
-        logical_space: &'a BoundDynamicFusionMapSpace<P>,
-        parent_space: &'a BoundDynamicFusionMapSpace<P>,
-        parent_data: &'a [D],
-    },
-}
-
-/// Borrowed direct or lazy-adjoint request for the checked transform owner.
-pub(crate) struct CheckedTreeTransformInput<'a, P, D> {
-    kind: CheckedTreeTransformInputKind<'a, P, D>,
-}
-
-impl<'a, P, D> CheckedTreeTransformInput<'a, P, D> {
-    pub(crate) fn direct(space: &'a BoundDynamicFusionMapSpace<P>, data: &'a [D]) -> Self {
-        Self {
-            kind: CheckedTreeTransformInputKind::Direct { space, data },
-        }
-    }
-
-    pub(crate) fn adjoint(
-        logical_space: &'a BoundDynamicFusionMapSpace<P>,
-        parent_space: &'a BoundDynamicFusionMapSpace<P>,
-        parent_data: &'a [D],
-    ) -> Self {
-        Self {
-            kind: CheckedTreeTransformInputKind::Adjoint {
-                logical_space,
-                parent_space,
-                parent_data,
-            },
-        }
-    }
-}
-
-/// Common checked owner for direct and lazy-adjoint borrowed input.
-#[allow(clippy::type_complexity)]
-pub(crate) fn tree_transform_dyn_owned_checked_generic_input_in_context<P, D, B>(
-    context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
-    operation: TreeTransformOperation,
-    input: CheckedTreeTransformInput<'_, P, D>,
-    alpha: D,
-) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols,
-    P::Scalar: CategoricalScalar
-        + Copy
-        + Clone
-        + Add<Output = P::Scalar>
-        + Mul<Output = P::Scalar>
-        + Zero
-        + Send
-        + Sync
-        + 'static,
-    D: crate::DenseRecouplingScalar
-        + RecouplingCoefficientAction<P::Scalar>
-        + crate::ConjugateValue,
-    B: TreeTransformBackend<D, P::Scalar>,
-{
-    let (logical_space, storage_space, src_data, operand) = match input.kind {
-        CheckedTreeTransformInputKind::Direct { space, data } => {
-            (space, space, data, FusionOperand::direct(space.space()))
-        }
-        CheckedTreeTransformInputKind::Adjoint {
-            logical_space,
-            parent_space,
-            parent_data,
-        } => (
-            logical_space,
-            parent_space,
-            parent_data,
-            FusionOperand::adjoint(parent_space.space()),
-        ),
-    };
-    let source = logical_space.space();
-    let storage_source = storage_space.space();
-    let provider = logical_space.provider();
-    let expected = storage_source.required_len()?;
-    if src_data.len() != expected {
-        return Err(OperationError::ElementCountMismatch {
-            expected,
-            actual: src_data.len(),
-        }
-        .into());
-    }
-    // Before admission: a clear during this request leaves its transformer
-    // and composed coefficients unpublished.
-    let mut coefficients = CheckedPendingCoefficients::new();
-    let epoch = tenet_core::core_reset_epoch();
-    let identity = std::cell::OnceCell::new();
-    let destination = std::cell::OnceCell::new();
-    let source_proof = std::cell::OnceCell::new();
-    let (codomain_axes, domain_axes) = tree_transform_operation_axes(&operation);
-    let structure =
-        FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
-            _,
-            CheckedGenericPlanError<P::Error>,
-            _,
-        >(provider, |provider_identity| {
-            let actual = source.validate_transformed_generic_checked_identity(provider_identity)?;
-            if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
-                return Err(tenet_core::CoreError::UnsupportedFusionStyle {
-                    expected: tenet_core::FusionStyleKind::Generic,
-                    actual: provider.fusion_style(),
-                }
-                .into());
-            }
-            if operand.storage_conjugate() {
-                if !Arc::ptr_eq(logical_space.provider_arc(), storage_space.provider_arc()) {
-                    return Err(OperationError::StructureMismatch {
-                        tensor: "checked adjoint provider",
-                    }
-                    .into());
-                }
-                if storage_source
-                    .validate_transformed_generic_checked_identity(provider_identity)?
-                    != actual
-                {
-                    return Err(OperationError::StructureMismatch {
-                        tensor: "checked adjoint identity",
-                    }
-                    .into());
-                }
-                if source.nout() != storage_source.nin()
-                    || source.nin() != storage_source.nout()
-                    || source.homspace().codomain() != storage_source.homspace().domain()
-                    || source.homspace().domain() != storage_source.homspace().codomain()
-                {
-                    return Err(OperationError::StructureMismatch {
-                        tensor: "checked adjoint relation",
-                    }
-                    .into());
-                }
-                validate_oriented_fusion_layout(source.structure(), operand)?;
-            }
-            let proof = validate_checked_generic_tree_pair_plan_preflight(
-                provider,
-                &operation,
-                source.structure(),
-            )?;
-            let homspace = source.homspace().try_permute_generic_checked(
-                provider,
-                codomain_axes,
-                domain_axes,
-            )?;
-            identity.set(actual).expect("checked producer runs once");
-            if source_proof.set(proof).is_err() {
-                unreachable!("checked producer runs once");
-            }
-            destination
-                .set(homspace.clone())
-                .expect("checked producer runs once");
-            Ok(homspace)
-        })?;
-    let identity = identity
-        .into_inner()
-        .expect("successful checked producer records identity");
-    let prepared = PreparedCheckedGenericDynamicSpace::from_complete_parts(
-        codomain_axes.len(),
-        domain_axes.len(),
-        destination
-            .into_inner()
-            .expect("successful checked producer records destination"),
-        structure,
-        identity.clone(),
-    );
-    let source_proof = source_proof
-        .into_inner()
-        .expect("successful checked producer records source proof");
-    let logical_source_key = operand
-        .storage_conjugate()
-        .then(|| source.structure().as_ref());
-    let key = |destination: &BlockStructure| {
-        CompletedTransformerKey::new::<P::Scalar>(
-            identity.clone(),
-            TransformerMode::CheckedGeneric,
-            TreeTransformScope::TreePair,
-            &operation,
-            FusionTreePairOrientation::Direct,
-            OrientedBasisOrder::Canonical,
-            operand.storage_conjugate(),
-            logical_source_key,
-            destination,
-            storage_source.structure(),
-        )
-    };
-    let dst_preview = prepared.shared_structure();
-    // A complete-cache hit makes the preview canonical, so its key can hit;
-    // a staged candidate's fresh id never does, and is never published.
-    let cached =
-        lookup_bound::<P::Scalar>(&key(&dst_preview), &dst_preview, storage_source.structure());
-    let compiled = cached.is_none();
-    let replay = match cached {
-        Some(replay) => replay,
-        None => {
-            // Why the logical source's groups key the coefficients: the plan
-            // is built on it; storage conjugation applies at binding.
-            let reuse = CoefficientGroupReuse::<P::Scalar>::new(
-                identity.clone(),
-                TransformerMode::CheckedGeneric,
-                TreeTransformScope::TreePair,
-                &operation,
-                FusionTreePairOrientation::Direct,
-            );
-            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
-                operation.clone(),
-                &source_proof,
-                &reuse,
-            )?;
-            coefficients.stage(reuse.into_pending());
-            if operand.storage_conjugate() {
-                let logical_to_storage_block = |logical_index| {
-                    let logical_block = source.structure().block(logical_index)?;
-                    let BlockKey::FusionTree(logical_key) = logical_block.key() else {
-                        return Err(OperationError::StructureMismatch {
-                            tensor: "checked logical source",
-                        });
-                    };
-                    operand.storage_block_index(logical_key)
-                };
-                plan.compile_shared_structures_with_storage_mapping(
-                    Arc::clone(&dst_preview),
-                    source.structure(),
-                    Arc::clone(storage_source.structure()),
-                    logical_to_storage_block,
-                    |axis| operand.storage_axis(axis),
-                    true,
-                )?
-            } else {
-                plan.compile_shared_structures_with_storage_conjugation(
-                    Arc::clone(&dst_preview),
-                    Arc::clone(source.structure()),
-                    false,
-                )?
-            }
-        }
-    };
-    let mut dst_data = vec![D::zero(); prepared.required_len()];
-
-    context.backend.tree_transform_structure_into_raw(
-        &mut context.workspace,
-        &replay,
-        &dst_preview,
-        storage_source.structure(),
-        &mut dst_data,
-        src_data,
-        alpha,
-        D::zero(),
-    )?;
-    let dst_space = logical_space.commit_final_homspace_generic_bound_checked(prepared)?;
-    coefficients.flush();
-    // Publication follows commit: only now are the destination's ids
-    // committed, and only a resident (canonical) destination is keyed.
-    let committed = dst_space.space().structure();
-    if compiled
-        && committed.as_ref() == dst_preview.as_ref()
-        && publishable(
-            [committed.as_ref(), storage_source.structure().as_ref()]
-                .into_iter()
-                .chain(logical_source_key),
-        )
-    {
-        publish_committed(&key(committed), replay.replay_core(), epoch);
-    }
-    Ok((dst_space, dst_data))
-}
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
@@ -482,30 +204,88 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     {
-        let destination = src.transformed_multiplicity_free(operation)?;
-        let dst_space = destination.space();
-        if let Some(data) = self.try_tree_transform_dyn_overwrite_owned(
-            src.provider(),
+        self.tree_transform_owned_in::<MultiplicityFreeAdmissionMode, R>(
+            src, None, src_data, operation, alpha,
+        )
+    }
+
+    /// The one owned eager tree transform of both modes: stage the
+    /// destination (checked: admit and preflight the source), resolve the
+    /// structure with the staging's proof, write it through the built-in
+    /// overwrite writer or else zero-fill and replay, then commit and
+    /// publish.
+    fn tree_transform_owned_in<M, R>(
+        &mut self,
+        logical: &BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
+        src_data: &[D],
+        operation: &TreeTransformOperation,
+        alpha: D,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), M::Error>
+    where
+        M: PlanningAlgebra<R, Scalar = C>,
+    {
+        let StagedTransform {
+            preview,
+            nout,
+            mut stage,
+            proof,
+        } = M::stage_transform(logical, adjoint_of, src_data.len(), operation)?;
+        let (source, src_structure) = match adjoint_of {
+            None => {
+                let structure = logical.space().structure();
+                (
+                    TreeStructureSource::Stored {
+                        structure,
+                        storage_conjugate: false,
+                    },
+                    structure,
+                )
+            }
+            Some(parent) => (
+                TreeStructureSource::StorageMapped {
+                    logical: logical.space().structure(),
+                    operand: FusionOperand::adjoint(parent.space()),
+                },
+                parent.space().structure(),
+            ),
+        };
+        let structure = M::tree_structure_with(
+            M::transform_cache(self.planning(), &mut stage),
+            logical.provider(),
             operation,
-            dst_space.structure(),
-            src.space().structure(),
-            dst_space.nout(),
-            src_data,
-            alpha,
-        )? {
-            return Ok((destination, data));
-        }
-        let mut data = vec![D::zero(); dst_space.required_len()?];
-        self.tree_transform_dyn_into(
-            src.provider(),
-            operation.clone(),
-            dst_space.structure(),
-            src.space().structure(),
-            &mut data,
-            src_data,
-            alpha,
-            D::zero(),
+            &preview,
+            source,
+            Some(&proof),
         )?;
+        let data = match self
+            .backend
+            .try_tree_transform_structure_overwrite_owned_raw(
+                &mut self.workspace,
+                &structure,
+                &preview,
+                src_structure,
+                nout,
+                src_data,
+                alpha,
+            )? {
+            Some(data) => data,
+            None => {
+                let mut data =
+                    vec![D::zero(); preview.required_len().map_err(OperationError::from)?];
+                self.tree_transform_structure_into_raw(
+                    &structure,
+                    &preview,
+                    src_structure,
+                    &mut data,
+                    src_data,
+                    alpha,
+                    D::zero(),
+                )?;
+                data
+            }
+        };
+        let destination = M::commit_transform(logical, stage, preview)?;
         Ok((destination, data))
     }
 }
@@ -545,15 +325,8 @@ where
     where
         R: CheckedGenericRigidSymbols<Scalar = f64>,
     {
-        let input = match adjoint_of {
-            None => CheckedTreeTransformInput::direct(logical, src_data),
-            Some(parent) => CheckedTreeTransformInput::adjoint(logical, parent, src_data),
-        };
-        tree_transform_dyn_owned_checked_generic_input_in_context(
-            self,
-            operation.clone(),
-            input,
-            alpha,
+        self.tree_transform_owned_in::<CheckedGenericAdmissionMode, R>(
+            logical, adjoint_of, src_data, operation, alpha,
         )
     }
 }

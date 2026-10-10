@@ -13,9 +13,9 @@ pub(crate) use cache::{
     take_trace_column_activity, CoefficientGroupActivity, CompletedActivity,
 };
 pub(crate) use cache::{
-    lookup_bound, publish_committed, publishable, CheckedPendingCoefficients,
-    CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups,
-    TraceColumnReuse, TransformerMode, TreeTransformPlanning, TreeTransformScope,
+    lookup_bound, publishable, CheckedPendingCoefficients, CoefficientGroupReuse,
+    CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups, TraceColumnReuse,
+    TransformerMode, TreeTransformPlanning, TreeTransformScope,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
@@ -47,7 +47,7 @@ pub(crate) use plan::{
 pub(crate) use plan::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
     compile_multiplicity_free_tree_pair_structure,
-    validate_checked_generic_tree_pair_plan_preflight,
+    validate_checked_generic_tree_pair_plan_preflight, CheckedGenericTreePairPreflight,
 };
 #[cfg(test)]
 pub use plan::{build_generic_tree_pair_transform_group_plan, build_tree_transform_group_plan};

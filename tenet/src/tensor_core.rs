@@ -498,10 +498,11 @@ where
     Some(output)
 }
 
-// Test-only observability at the two owned multiplicity-free seams: armed
-// thread-locals count executions of the seam the current thread runs through.
-// A gate over these counters pins "one fused contraction, no separate permute
-// transform" without a facade-side hook. Observability only: nothing
+// Test-only observability at the two multiplicity-free execution seams: the
+// contraction into-slice seam (owned and lazy-adjoint operands alike) and the
+// owned tree-transform hook. Armed thread-locals count executions of the seam
+// the current thread runs through. A gate over these counters pins "one fused
+// contraction, no separate permute transform". Observability only: nothing
 // behavioral reads them.
 #[cfg(test)]
 thread_local! {
@@ -521,78 +522,12 @@ fn observe_contract_seam_call() {
 }
 
 #[cfg(test)]
-fn observe_tree_transform_seam_call() {
+pub(crate) fn observe_tree_transform_seam_call() {
     TREE_TRANSFORM_SEAM_CALLS.with(|observation| {
         if let Some(calls) = observation.get() {
             observation.set(Some(calls + 1));
         }
     });
-}
-
-/// Executes one owned multiplicity-free transform from a validated provider
-/// binding. The caller keeps user-layer dispatch and representation policy;
-/// this helper owns only typed destination derivation and the direct/fallback
-/// execution choice.
-pub(crate) fn tree_transform_owned_multiplicity_free<R, D, C>(
-    context: &mut CoefficientCtx<D, RuleIdentity, C>,
-    input: BoundDynamicTensorRef<'_, R, D>,
-    operation: TreeTransformOperation,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    C: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<C>,
-{
-    #[cfg(test)]
-    observe_tree_transform_seam_call();
-    let destination = input.space().transformed_multiplicity_free(&operation)?;
-    let data =
-        tree_transform_owned_multiplicity_free_into(context, input, operation, &destination)?;
-    Ok((destination, data))
-}
-
-/// [`tree_transform_owned_multiplicity_free`] into a `destination` the
-/// caller already derived: the transformed space of `input` under
-/// `operation`, which the tree-transform replay validates.
-pub(crate) fn tree_transform_owned_multiplicity_free_into<R, D, C>(
-    context: &mut CoefficientCtx<D, RuleIdentity, C>,
-    input: BoundDynamicTensorRef<'_, R, D>,
-    operation: TreeTransformOperation,
-    destination: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Vec<D>, tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    C: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<C>,
-{
-    let dst_space = destination.space();
-    if let Some(data) = context
-        .tree_context_mut()
-        .try_tree_transform_dyn_overwrite_owned(
-            input.space().provider(),
-            &operation,
-            dst_space.structure(),
-            input.space().space().structure(),
-            dst_space.nout(),
-            input.data(),
-            D::from_real(1.0),
-        )?
-    {
-        return Ok(data);
-    }
-
-    let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
-    context.tree_context_mut().tree_transform_dyn_into(
-        input.space().provider(),
-        operation,
-        dst_space.structure(),
-        input.space().space().structure(),
-        &mut data,
-        input.data(),
-        D::from_real(1.0),
-        D::from_real(0.0),
-    )?;
-    Ok(data)
 }
 
 #[cfg(test)]
