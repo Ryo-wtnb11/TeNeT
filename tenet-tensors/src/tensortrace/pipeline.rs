@@ -16,7 +16,7 @@
 //! selection, destination space (when there is one), pair duality.
 
 use super::*;
-use crate::tree_transform::{PendingCoefficientGroups, TraceColumnReuse, TransformerMode};
+use crate::tree_transform::{PendingCoefficientGroups, TraceTermReuse, TransformerMode};
 use crate::TreeTransformOperation;
 use tenet_core::{
     generic_permute_tree_pair_block_indexed_checked, BlockSourceColumns, BraidingStyleKind,
@@ -291,18 +291,15 @@ pub(super) struct TraceLowering<'a> {
 }
 
 impl TraceLowering<'_> {
-    /// Lowers one source block's permuted rows: split at the open ranks,
-    /// keep the rows whose traced trees match, then scale by the channel
-    /// factor and address the destination block.
-    #[allow(clippy::too_many_arguments)]
+    /// Lowers permuted rows: split at the open ranks, keep the rows whose
+    /// traced trees match, scale by the channel factor, and hand each
+    /// `(open tree pair, coefficient)` to `keep`, in row order.
     #[inline]
-    fn lower<'r, M, R, I>(
+    fn lower_rows<'r, M, R, I>(
         &self,
         rule: &R,
-        src_block_index: usize,
-        src_key: impl Fn() -> Result<FusionTreePairKey, M::Error>,
         rows: I,
-        terms: &mut Vec<TensorTraceFusionStructureTerm<M::Scalar>>,
+        mut keep: impl FnMut(FusionTreePairKey, M::Scalar),
     ) -> Result<(), M::Error>
     where
         M: TraceTermMode<R>,
@@ -321,24 +318,84 @@ impl TraceLowering<'_> {
                 continue;
             }
             let trace_factor = M::channel_factor(rule, &trace_codomain_tree)?;
-            let coefficient = permutation_coefficient.clone() * trace_factor;
-            let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
-            let dst_block = self
-                .dst_structure
-                .find_block_index_by_fusion_tree_pair(&dst_key)
-                .ok_or_else(|| {
-                    M::operation(OperationError::MissingBlockKey {
-                        key: Box::new(BlockKey::from(dst_key.clone())),
-                    })
-                })?;
-            terms.push(TensorTraceFusionStructureTerm {
-                dst_key,
-                src_key: src_key()?,
-                dst_block,
-                src_block: src_block_index,
-                coefficient,
-            });
+            keep(
+                FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree),
+                permutation_coefficient.clone() * trace_factor,
+            );
         }
+        Ok(())
+    }
+
+    /// Lowers a whole group's permutation columns, column by column, into
+    /// the value cache 4 keeps for it: destinations are the distinct open
+    /// tree pairs, in first-appearance order.
+    fn lower_group<M, R>(
+        &self,
+        rule: &R,
+        permuted: &BlockSourceColumns<FusionTreePairKey, M::Scalar>,
+    ) -> Result<BlockSourceColumns<FusionTreePairKey, M::Scalar>, M::Error>
+    where
+        M: TraceTermMode<R>,
+    {
+        let rows = permuted.destinations();
+        let mut row_of = rustc_hash::FxHashMap::<FusionTreePairKey, usize>::default();
+        let mut destinations = Vec::new();
+        let mut column_start = Vec::with_capacity(permuted.source_count() + 1);
+        let mut entries = Vec::with_capacity(permuted.entry_count());
+        column_start.push(0);
+        for source in 0..permuted.source_count() {
+            self.lower_rows::<M, R, _>(
+                rule,
+                permuted
+                    .column(source)
+                    .iter()
+                    .map(|(row, coefficient)| (&rows[*row], coefficient)),
+                |dst_key, coefficient| {
+                    let next = destinations.len();
+                    let row = *row_of.entry(dst_key).or_insert_with_key(|key| {
+                        destinations.push(key.clone());
+                        next
+                    });
+                    entries.push((row, coefficient));
+                },
+            )?;
+            column_start.push(entries.len());
+        }
+        Ok(BlockSourceColumns::new(
+            destinations.into(),
+            column_start.into(),
+            entries.into(),
+        ))
+    }
+
+    /// Addresses one lowered row's destination block and records its term.
+    #[inline]
+    fn push_term<M, R>(
+        &self,
+        src_block_index: usize,
+        src_key: &impl Fn() -> Result<FusionTreePairKey, M::Error>,
+        dst_key: FusionTreePairKey,
+        coefficient: M::Scalar,
+        terms: &mut Vec<TensorTraceFusionStructureTerm<M::Scalar>>,
+    ) -> Result<(), M::Error>
+    where
+        M: TraceTermMode<R>,
+    {
+        let dst_block = self
+            .dst_structure
+            .find_block_index_by_fusion_tree_pair(&dst_key)
+            .ok_or_else(|| {
+                M::operation(OperationError::MissingBlockKey {
+                    key: Box::new(BlockKey::from(dst_key.clone())),
+                })
+            })?;
+        terms.push(TensorTraceFusionStructureTerm {
+            dst_key,
+            src_key: src_key()?,
+            dst_block,
+            src_block: src_block_index,
+            coefficient,
+        });
         Ok(())
     }
 }
@@ -392,17 +449,17 @@ where
 }
 
 /// Lowers every source block in block order, resolving a fusion group's
-/// permutation columns once, when its first member is reached: from cache 4
-/// when resident (no admission and no composition, see
-/// [`TraceColumnReuse`]), otherwise by `compose_group`, staged for the
-/// caller to publish.
+/// lowered terms once, when its first member is reached: from cache 4 when
+/// resident (no admission, composition, split or channel-factor query, see
+/// [`TraceTermReuse`]), otherwise by `compose_group` and
+/// [`TraceLowering::lower_group`], staged for the caller to publish.
 ///
 /// Why not compose every group up front: a later group's symbol or
 /// admission error must not overtake an earlier source's lowering error.
-/// The current group stays atomic because per-source replay would repeat
-/// its F/R traversal (TensorKit `_trace_permute!` permutes a whole fusion
-/// block), so provider errors can change order only between members of one
-/// group (#2054).
+/// The current group stays atomic, composed and lowered whole, as TensorKit
+/// `_trace_permute!` lowers each fusion block's `U` right after permuting
+/// it; per-source replay would repeat its F/R traversal. So provider
+/// errors can change order only between members of one group (#2054).
 fn lower_by_fusion_group<M, R>(
     rule: &R,
     lowering: &TraceLowering<'_>,
@@ -420,7 +477,7 @@ where
     let src = lowering.src;
     // Keyed by the storage keys and orientation (not the oriented keys): a
     // warm lookup then allocates no swapped key.
-    let mut reuse = TraceColumnReuse::<M::Scalar>::new(
+    let mut reuse = TraceTermReuse::<M::Scalar>::new(
         M::rule_identity(rule),
         M::MODE,
         TreeTransformOperation::permute(
@@ -428,6 +485,7 @@ where
             domain_permutation.iter().copied(),
         ),
         src.orientation,
+        lowering.dst_codomain_rank,
     );
     let mut storage_keys = Vec::new();
     let block_count = src.structure.block_count();
@@ -439,15 +497,15 @@ where
             member_of_source[src_block_index] = Some((group_index, position));
         }
     }
-    let mut columns_by_group = (0..groups.len()).map(|_| None).collect::<Vec<_>>();
+    let mut lowered_by_group = (0..groups.len()).map(|_| None).collect::<Vec<_>>();
     for (src_block_index, member) in member_of_source.into_iter().enumerate() {
         let (group_index, position) = member.ok_or_else(|| {
             M::operation(OperationError::InvalidArgument {
                 message: "trace source block was not assigned to a fusion group",
             })
         })?;
-        let columns = match &mut columns_by_group[group_index] {
-            Some(columns) => columns,
+        let lowered = match &mut lowered_by_group[group_index] {
+            Some(lowered) => lowered,
             slot @ None => {
                 let group = &groups[group_index];
                 record_trace_transform_invocation(src_block_index);
@@ -455,32 +513,34 @@ where
                 for &index in group.block_indices() {
                     storage_keys.push(src.storage_key(index).map_err(M::operation)?);
                 }
-                let columns = match reuse.lookup((group.group_key(), &storage_keys)) {
-                    Ok(columns) => columns,
+                let lowered = match reuse.lookup((group.group_key(), &storage_keys)) {
+                    Ok(lowered) => lowered,
                     Err(hash) => {
-                        let columns = compose_group(group.block_indices())?;
-                        reuse.stage(hash, (group.group_key(), &storage_keys), columns)
+                        let permuted = compose_group(group.block_indices())?;
+                        if permuted.source_count() != group.block_indices().len() {
+                            return Err(M::operation(OperationError::InvalidArgument {
+                                message:
+                                    "trace block transform returned the wrong source column count",
+                            }));
+                        }
+                        let lowered = lowering.lower_group::<M, R>(rule, &permuted)?;
+                        reuse.stage(hash, (group.group_key(), &storage_keys), lowered)
                     }
                 };
-                if columns.source_count() != group.block_indices().len() {
-                    return Err(M::operation(OperationError::InvalidArgument {
-                        message: "trace block transform returned the wrong source column count",
-                    }));
-                }
-                slot.insert(columns)
+                slot.insert(lowered)
             }
         };
-        let destinations = columns.destinations();
-        lowering.lower::<M, R, _>(
-            rule,
-            src_block_index,
-            || src.source_key(src_block_index).map_err(M::operation),
-            columns
-                .column(position)
-                .iter()
-                .map(|(row, coefficient)| (&destinations[*row], coefficient)),
-            terms,
-        )?;
+        let src_key = || src.source_key(src_block_index).map_err(M::operation);
+        let destinations = lowered.destinations();
+        for (row, coefficient) in lowered.column(position) {
+            lowering.push_term::<M, R>(
+                src_block_index,
+                &src_key,
+                destinations[*row].clone(),
+                coefficient.clone(),
+                terms,
+            )?;
+        }
     }
     Ok(reuse.into_pending())
 }
@@ -534,13 +594,21 @@ where
                 let row = prepared
                     .execute_unique_rigid(rule, &src.source_key(src_block_index)?)
                     .map_err(OperationError::from_core_preserving_context)?;
-                lowering.lower::<Self, R, _>(
+                let mut lowered = None;
+                lowering.lower_rows::<Self, R, _>(
                     rule,
-                    src_block_index,
-                    || src.source_key(src_block_index),
                     core::iter::once((&row.0, &row.1)),
-                    terms,
+                    |dst_key, coefficient| lowered = Some((dst_key, coefficient)),
                 )?;
+                if let Some((dst_key, coefficient)) = lowered {
+                    lowering.push_term::<Self, R>(
+                        src_block_index,
+                        &|| src.source_key(src_block_index),
+                        dst_key,
+                        coefficient,
+                        terms,
+                    )?;
+                }
             }
             // TensorKit `NoCache` for Unique: one uncached phase per tree.
             return Ok(PendingCoefficientGroups::default());

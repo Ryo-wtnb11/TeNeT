@@ -14,7 +14,7 @@ pub(crate) use cache::{
 };
 pub(crate) use cache::{
     lookup_bound, publishable, CheckedPendingCoefficients, CoefficientGroupReuse,
-    CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups, TraceColumnReuse,
+    CompletedTransformerKey, OrientedBasisOrder, PendingCoefficientGroups, TraceTermReuse,
     TransformerMode, TreeTransformPlanning, TreeTransformScope,
 };
 pub use operation::{

@@ -71,7 +71,7 @@ pub(crate) use coefficients::{
 };
 pub(crate) use coefficients::{
     CheckedPendingCoefficients, CoefficientGroupReuse, GroupSlot, PendingCoefficientGroups,
-    SourceGroup, TraceColumnReuse,
+    SourceGroup, TraceTermReuse,
 };
 
 /// Snapshot of one process-global tree-transform cache in the shape of the
@@ -256,8 +256,13 @@ pub(crate) enum TransformerMode {
 pub(crate) enum TreeTransformScope {
     AllCodomain,
     TreePair,
-    /// A trace's permutation columns (cache 4 only; cache 3 never keys it).
-    TraceColumns,
+    /// A trace's lowered terms (cache 4 only; cache 3 never keys it). The
+    /// open codomain rank is keyed because the `(p…, q…)` operation alone
+    /// does not fix where the lowering splits: `[a, b] ← [c, d]` permutes a
+    /// 0-, 1- and 2-pair trace alike.
+    TraceTerms {
+        open_codomain_rank: usize,
+    },
 }
 
 /// The source block order an oriented (lazy-adjoint) transform reads.

@@ -82,19 +82,19 @@ where
 /// For expert layouts built from an incomplete explicit block structure,
 /// errors between distinct external-sector groups likewise follow the first
 /// source block encountered globally. On the non-`Unique` grouped path
-/// (currently `Simple` fusion), one external-sector group is transformed
-/// atomically, so a symbol or tree-transform error from a later member of that
-/// group can precede an earlier member's destination
-/// [`OperationError::MissingBlockKey`].
+/// (currently `Simple` fusion), one external-sector group is transformed and
+/// lowered atomically at its first member, so a symbol, tree-transform or
+/// split error from a later member of that group can precede an earlier
+/// member's destination [`OperationError::MissingBlockKey`].
 ///
 /// This uses the same block-level lowering granularity as TensorKit and QSpace;
 /// those references do not establish identical malformed-layout error
 /// ordering. Why not recover per-source error precedence within a group: doing
 /// so would replay the same F/R traversal for every source tree.
 ///
-/// A fusion group whose permutation is resident in the process-global
-/// transformation-coefficient cache makes no symbol queries; only a whole
-/// successful compile publishes the groups it built.
+/// A fusion group whose lowered terms are resident in the process-global
+/// transformation-coefficient cache makes no symbol queries and no split;
+/// only a whole successful compile publishes the groups it built.
 pub fn tensortrace_fusion_structure<
     R,
     TDst,
