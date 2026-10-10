@@ -1383,22 +1383,47 @@ where
                 core_is_storage_adjoint: false,
             });
         }
+        // A non-identity permute is staged from the source's destination memo
+        // (#2154), as an eager transform is, so a warm call derives nothing;
+        // its admission precedes the derivation in both. The memo publishes
+        // only from the contraction's commit (#2063).
         let space = if identity {
             source.clone()
         } else {
-            let prepared = authority
-                .binding
-                .prepare_final_homspace_generic_from_checked(rule, || {
-                    source
-                        .homspace()
-                        .try_permute_generic_checked(
-                            rule,
-                            operation.codomain_permutation(),
-                            operation.domain_permutation(),
-                        )
-                        .map_err(CheckedGenericPlanError::from)
-                })?;
-            txn.stage(prepared)
+            let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+            let admitted = std::cell::OnceCell::new();
+            let (structure, homspace, permuted) = source
+                .homspace()
+                .prepare_complete_permuted_generic_checked::<_, CheckedGenericPlanError<R::Error>>(
+                    source.structure(),
+                    rule,
+                    codomain_axes,
+                    domain_axes,
+                    |provider_identity| {
+                        authority
+                            .binding
+                            .admit_checked_generic_derivation(rule, provider_identity)?;
+                        admitted
+                            .set(provider_identity.clone())
+                            .expect("checked admission runs once");
+                        Ok(())
+                    },
+                    || Ok(()),
+                )?;
+            let prepared = PreparedCheckedGenericDynamicSpace::from_complete_parts(
+                codomain_axes.len(),
+                domain_axes.len(),
+                homspace,
+                structure,
+                admitted
+                    .into_inner()
+                    .expect("successful checked staging records identity"),
+            );
+            let memo = match permuted {
+                Permuted::Memo => None,
+                Permuted::Derived(ticket) => Some(ticket),
+            };
+            txn.stage(prepared, memo)
         };
         let transform_source = if source_conjugate {
             TreeStructureSource::StorageMapped {
@@ -1455,7 +1480,7 @@ where
                 )
                 .map_err(CheckedGenericPlanError::from)
             })?;
-        let space = txn.stage(prepared);
+        let space = txn.stage(prepared, None);
         let output_transform_structure = Self::tree_structure(
             txn,
             rule,
@@ -1497,7 +1522,7 @@ where
                 )
                 .map_err(CheckedGenericPlanError::from)
             })?;
-        Ok(txn.stage(prepared))
+        Ok(txn.stage(prepared, None))
     }
 
     /// None: a twist is never possible once the entry admitted Bosonic

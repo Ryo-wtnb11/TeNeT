@@ -3,7 +3,8 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols,
-    CoreError, FusionTreeHomSpace, RuleIdentity, StructurallyValidatedFusionTreeSubset,
+    CoreError, FusionTreeHomSpace, PermutedMemoTicket, RuleIdentity,
+    StructurallyValidatedFusionTreeSubset,
 };
 use tenet_operations::{OutputAxisOrder, TensorContractSpec, TreeTransformBackend};
 
@@ -164,9 +165,16 @@ impl<'a, P> PlanTarget<'a, P, CheckedAuthority<'a, P>> {
 pub(crate) struct CheckedContractTxn {
     coefficients: CheckedPendingCoefficients,
     // Why inline three: a contraction stages at most its two sources and its
-    // core destination, or one copyC temporary.
-    staged: smallvec::SmallVec<[(PreparedCheckedGenericDynamicSpace, Arc<BlockStructure>); 3]>,
+    // core destination, or one copyC temporary. A derived source permute
+    // carries its destination-memo publication (#2157).
+    staged: smallvec::SmallVec<[StagedSpace; 3]>,
 }
+
+type StagedSpace = (
+    PreparedCheckedGenericDynamicSpace,
+    Arc<BlockStructure>,
+    Option<PermutedMemoTicket>,
+);
 
 impl CheckedContractTxn {
     /// Captures the reset epoch: create it before the call's first build.
@@ -181,22 +189,25 @@ impl CheckedContractTxn {
         &mut self.coefficients
     }
 
-    /// Stages one derived space and returns the preview the planner reads.
+    /// Stages one derived space, with the destination-memo publication of a
+    /// derived source permute, and returns the preview the planner reads.
     pub(crate) fn stage(
         &mut self,
         prepared: PreparedCheckedGenericDynamicSpace,
+        memo: Option<PermutedMemoTicket>,
     ) -> DynamicFusionMapSpace {
         let preview = prepared.preview();
         self.staged
-            .push((prepared, Arc::clone(preview.structure())));
+            .push((prepared, Arc::clone(preview.structure()), memo));
         preview
     }
 
     /// Publishes after the fallible destination commit (`destination`:
     /// its preview and committed structures): commits only the staged
     /// intermediates `resolution` replays over, in staging order, then
-    /// flushes coefficients and transformers keyed by committed ids. A
-    /// stage the planner declined is dropped unpublished.
+    /// flushes coefficients and transformers keyed by committed ids, then
+    /// the committed source permutes' destination memos (#2157). A stage
+    /// the planner declined is dropped unpublished.
     pub(crate) fn commit(
         self,
         destination: (Arc<BlockStructure>, Arc<BlockStructure>),
@@ -204,15 +215,23 @@ impl CheckedContractTxn {
     ) {
         let used = resolution.derived_structures();
         let mut committed: smallvec::SmallVec<[_; 4]> = smallvec::smallvec![destination];
-        for (prepared, preview) in self.staged {
+        let mut memos: smallvec::SmallVec<[_; 2]> = smallvec::SmallVec::new();
+        for (prepared, preview, memo) in self.staged {
             if used
                 .iter()
                 .any(|structure| Arc::ptr_eq(structure, &preview))
             {
-                committed.push((preview, prepared.commit_structure()));
+                let (homspace, structure) = prepared.commit_structure();
+                if let (Some(memo), Some(homspace)) = (memo, homspace) {
+                    memos.push((memo, homspace, Arc::clone(&structure)));
+                }
+                committed.push((preview, structure));
             }
         }
         self.coefficients.flush_committed(&committed);
+        for (memo, homspace, structure) in memos {
+            memo.publish(&homspace, &structure);
+        }
     }
 
     /// Publishes after an eager transform's destination commit
@@ -1753,7 +1772,7 @@ mod tests {
             })
             .unwrap()
         };
-        drop(txn.stage(declined()));
+        drop(txn.stage(declined(), None));
         assert_eq!(cache_entries(), (0, 0));
         txn.commit(
             (
@@ -2369,6 +2388,116 @@ mod tests {
                     assert_eq!(derived, format!("{memo:?}"));
                 }
                 (derived, memo) => panic!("{braiding:?}: {derived:?} vs {memo:?}"),
+            }
+        }
+    }
+
+    /// What (#2157): a warm checked contraction stages each permuted operand
+    /// from the operand's destination memo (#2154), as a warm transform
+    /// does, on every route, direct or with a lazy-adjoint lhs. Its provider
+    /// events are the pair admission and braiding read, the destination
+    /// stage, one identity read and admission style per staged permute (an
+    /// identity read per transformer lookup) and the commit style; the only
+    /// algebra queries left are the `Dual`s of the contraction destination's
+    /// own derivation (`three_stages`), which no operand memo covers. The
+    /// payload is the cold call's, and the cold per-query counts are the
+    /// base revision's (6efec1ef).
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_warm_checked_contraction_derives_no_staged_operand() {
+        if !isolated("a_warm_checked_contraction_derives_no_staged_operand") {
+            return;
+        }
+        use Event::Query as Q;
+        let (i, s, b, d) = (Identity, Style, Braiding, Q(Query::Dual));
+        // Per fixture: cold per-query counts in `Query` order then the event
+        // count, direct and adjoint; then the warm lhs-provider events.
+        type Pin = (
+            &'static str,
+            [[usize; Query::COUNT + 1]; 2],
+            [Vec<Event>; 2],
+        );
+        let pins: [Pin; 4] = [
+            (
+                "core",
+                [[0, 0, 0, 0, 0, 0, 6]; 2],
+                [vec![i, s, b, i, s, s], vec![i, s, b, i, s, s]],
+            ),
+            (
+                "copy_c",
+                [[34, 10, 103, 14, 3, 76, 263]; 2],
+                [
+                    vec![i, s, b, i, s, i, s, i, s],
+                    vec![i, s, b, i, s, i, s, i, s],
+                ],
+            ),
+            (
+                "lhs_only",
+                [[34, 10, 103, 14, 3, 76, 263], [34, 20, 113, 14, 3, 76, 292]],
+                [
+                    vec![i, s, b, i, s, i, s, i, s],
+                    vec![i, s, b, i, s, i, i, s, i, s],
+                ],
+            ),
+            (
+                "three_stages",
+                [[105, 55, 706, 72, 66, 225, 1322]; 2],
+                [
+                    vec![i, s, b, i, d, d, s, i, s, i, i, s, i, i, s, i, s],
+                    vec![i, s, b, i, d, d, s, i, s, i, i, s, i, i, s, i, s],
+                ],
+            ),
+        ];
+        for adjoint in [false, true] {
+            for ((name, n, lhs_axes, rhs_axes, output, nout, route), pin) in
+                FIXTURES.iter().zip(&pins)
+            {
+                assert_eq!(*name, pin.0);
+                let what = format!("{name} adjoint={adjoint}");
+                tenet_core::clear_structure_caches();
+                let (left, lhs, right, rhs) = bound_pair(*n, *n);
+                let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+                let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+                let logical =
+                    adjoint.then(|| crate::adjoint_bound_space_dyn_generic_checked(&lhs).unwrap());
+                let lhs_side = match &logical {
+                    Some(logical) => (logical, FusionOperand::adjoint(lhs.space()), &lhs_data[..]),
+                    None => direct_side(&lhs, &lhs_data),
+                };
+                let run = || {
+                    left.reset();
+                    right.reset();
+                    let mut context =
+                        TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+                    let (space, out) = context
+                        .tensorcontract_checked_generic_in(
+                            lhs_side,
+                            direct_side(&rhs, &rhs_data),
+                            entry_axes(fixture_axes(lhs_axes, rhs_axes, *output)),
+                            *nout,
+                        )
+                        .unwrap();
+                    assert_eq!(last_route(&context), *route, "{what}");
+                    assert_eq!(right.algebra_calls(), 0, "{what}");
+                    assert_eq!(*right.events.borrow(), [Identity, Style], "{what}");
+                    let events = left.events.borrow().clone();
+                    (space, out, events)
+                };
+                let (cold_space, cold_data, cold_events) = run();
+                let ledger: [usize; Query::COUNT + 1] = std::array::from_fn(|index| {
+                    if index == Query::COUNT {
+                        cold_events.len()
+                    } else {
+                        left.calls.get()[index]
+                    }
+                });
+                assert_eq!(ledger, pin.1[usize::from(adjoint)], "{what} cold");
+                for call in 0..3 {
+                    let (space, out, events) = run();
+                    assert_eq!(events, pin.2[usize::from(adjoint)], "{what} warm {call}");
+                    assert_eq!(space.space(), cold_space.space(), "{what} warm {call}");
+                    assert_eq!(folded_bits(&out), folded_bits(&cold_data), "{what} {call}");
+                }
             }
         }
     }

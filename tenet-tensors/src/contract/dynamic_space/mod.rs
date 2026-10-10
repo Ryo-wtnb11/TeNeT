@@ -323,11 +323,11 @@ impl PreparedCheckedGenericDynamicSpace {
     }
 
     /// Commits an intermediate's structure through the cache-2 owner and
-    /// returns the committed structure (the resident winner after a race).
-    /// Why no `DynamicFusionMapSpace`: no caller binds an intermediate, so
-    /// its canonical HomSpace is not built.
-    pub(crate) fn commit_structure(self) -> Arc<BlockStructure> {
-        self.structure.commit_with_complete_homspace().1
+    /// returns the committed structure (the resident winner after a race)
+    /// with its canonical HomSpace, which keys a destination memo (#2157).
+    /// Why no `DynamicFusionMapSpace`: no caller binds an intermediate.
+    pub(crate) fn commit_structure(self) -> (Option<FusionTreeHomSpace>, Arc<BlockStructure>) {
+        self.structure.commit_with_complete_homspace()
     }
 
     pub(crate) fn commit(self) -> DynamicFusionMapSpace {

@@ -364,21 +364,7 @@ where
                 _,
             >(provider, |provider_identity| {
                 let homspace = build_homspace()?;
-                if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
-                    return Err(CheckedGenericStructureError::from(
-                        CoreError::MalformedFusionTree {
-                            message:
-                                "checked Generic preparation requires a checked provider binding",
-                        },
-                    )
-                    .into());
-                }
-                crate::admission::admit_checked_generic_providers(
-                    self.held_rule_identity(),
-                    provider_identity,
-                    [provider.fusion_style()],
-                )
-                .map_err(CheckedGenericStructureError::from)?;
+                self.admit_checked_generic_derivation(provider, provider_identity)?;
                 actual
                     .set(provider_identity.clone())
                     .expect("checked admission runs exactly once");
@@ -399,6 +385,30 @@ where
                 .into_inner()
                 .expect("successful checked admission records provider identity"),
         })
+    }
+
+    /// Admits a checked Generic space derived under this binding: a checked
+    /// binding, `provider_identity` its held identity, `provider` Generic.
+    pub(crate) fn admit_checked_generic_derivation<P>(
+        &self,
+        provider: &P,
+        provider_identity: &RuleIdentity,
+    ) -> Result<(), CheckedGenericStructureError<P::Error>>
+    where
+        P: CheckedGenericFusion,
+    {
+        if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
+            return Err(CoreError::MalformedFusionTree {
+                message: "checked Generic preparation requires a checked provider binding",
+            }
+            .into());
+        }
+        crate::admission::admit_checked_generic_providers(
+            self.held_rule_identity(),
+            provider_identity,
+            [provider.fusion_style()],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn validate_prepared_final_homspace_generic_checked(
