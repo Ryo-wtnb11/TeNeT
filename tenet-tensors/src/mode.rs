@@ -1321,10 +1321,10 @@ where
     /// derives nothing (TensorKit `has_shared_permute`). Any other
     /// permutation stages its permuted HomSpace under the authority, then
     /// its transformer. A lazy adjoint (`source` its logical space,
-    /// `source_structure` its parent's) is never borrowed: its storage is
-    /// the conjugate of the core operand, so even its identity is a
-    /// storage-mapped conjugating copy, TensorKit `copyA`'s `tensoradd!`
-    /// from the adjoint's subblocks.
+    /// `source_structure` its parent's) gets a storage-mapped conjugating
+    /// copy, TensorKit `copyA`'s `tensoradd!` from the adjoint's subblocks;
+    /// under an identity the artifact may instead read the parent with a
+    /// GEMM adjoint op and leave that copy unused.
     fn transformed_source(
         txn: &mut CheckedContractTxn,
         authority: CheckedAuthority<'_, R>,
@@ -1340,6 +1340,7 @@ where
                 space: Arc::new(source.clone()),
                 replay_structure: Arc::clone(source_structure),
                 transform_structure: None,
+                core_is_storage_adjoint: false,
             });
         }
         let space = if identity {
@@ -1376,6 +1377,7 @@ where
             space: Arc::new(space),
             replay_structure: Arc::clone(source_structure),
             transform_structure: Some(transform_structure),
+            core_is_storage_adjoint: identity && source_conjugate,
         })
     }
 

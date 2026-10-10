@@ -18,7 +18,7 @@ use crate::{
 #[cfg(test)]
 use crate::{DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformBackend};
 use tenet_core::MultiplicityFreeAdmissionMode;
-use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::fusion_replay::{FusionBlockContractPlan, MatrixOp};
 
 #[cfg(test)]
 use super::backend::TensorContractBackend;

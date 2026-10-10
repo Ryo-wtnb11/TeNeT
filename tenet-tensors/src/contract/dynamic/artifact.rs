@@ -52,6 +52,22 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         self.orientation
     }
 
+    /// The structure the core GEMMs read for the physical lhs (`true`) or
+    /// rhs: a borrowed storage adjoint is read in its parent's storage,
+    /// every other source in its core layout.
+    pub(crate) fn core_source_structure(&self, lhs: bool) -> &Arc<BlockStructure> {
+        let (entry, borrowed) = if lhs {
+            (&self.lhs_transform, self.lhs_borrowed)
+        } else {
+            (&self.rhs_transform, self.rhs_borrowed)
+        };
+        if borrowed && entry.core_is_storage_adjoint {
+            &entry.replay_structure
+        } else {
+            entry.space.structure()
+        }
+    }
+
     pub(crate) fn requires_source_twist(&self) -> bool {
         !self.source_twist_destination_scales.is_empty()
     }
@@ -175,13 +191,14 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     )?;
-    let lhs_layout_borrowable = source_is_borrowable_core_layout(
-        lhs_space,
-        lhs_structure,
-        &lhs_transform.space,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    );
+    let lhs_layout_borrowable = lhs_transform.core_is_storage_adjoint
+        || source_is_borrowable_core_layout(
+            lhs_space,
+            lhs_structure,
+            &lhs_transform.space,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+        );
     let rhs_transform = M::transformed_source(
         cache,
         authority,
@@ -191,13 +208,14 @@ where
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     )?;
-    let rhs_layout_borrowable = source_is_borrowable_core_layout(
-        rhs_space,
-        rhs_structure,
-        &rhs_transform.space,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-    );
+    let rhs_layout_borrowable = rhs_transform.core_is_storage_adjoint
+        || source_is_borrowable_core_layout(
+            rhs_space,
+            rhs_structure,
+            &rhs_transform.space,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+        );
     let borrowing = resolve_source_borrowing_in::<M, R>(
         rule,
         authority,
@@ -255,14 +273,15 @@ where
         plan.lhs_transform(),
         layout_primer,
     )?;
-    let lhs_layout_borrowable = lhs_direct
-        && source_is_borrowable_core_layout(
-            lhs.storage_space(),
-            lhs.storage_space().structure(),
-            &lhs_transform.space,
-            plan.lhs_transform(),
-            false,
-        );
+    let lhs_layout_borrowable = lhs_transform.core_is_storage_adjoint
+        || (lhs_direct
+            && source_is_borrowable_core_layout(
+                lhs.storage_space(),
+                lhs.storage_space().structure(),
+                &lhs_transform.space,
+                plan.lhs_transform(),
+                false,
+            ));
     let rhs_direct = rhs.is_direct();
     let rhs_transform = compile_prelowered_source_transform(
         planning,
@@ -271,14 +290,15 @@ where
         plan.rhs_transform(),
         layout_primer,
     )?;
-    let rhs_layout_borrowable = rhs_direct
-        && source_is_borrowable_core_layout(
-            rhs.storage_space(),
-            rhs.storage_space().structure(),
-            &rhs_transform.space,
-            plan.rhs_transform(),
-            false,
-        );
+    let rhs_layout_borrowable = rhs_transform.core_is_storage_adjoint
+        || (rhs_direct
+            && source_is_borrowable_core_layout(
+                rhs.storage_space(),
+                rhs.storage_space().structure(),
+                &rhs_transform.space,
+                plan.rhs_transform(),
+                false,
+            ));
     let borrowing = resolve_source_borrowing(
         rule,
         plan,
@@ -336,7 +356,7 @@ fn finish_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
     dst_space: &DynamicFusionMapSpace,
     lhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
     rhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
-    borrowing: SourceBorrowing,
+    mut borrowing: SourceBorrowing,
     source_start: Option<std::time::Instant>,
     mut profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
@@ -344,19 +364,6 @@ where
     M: PlanningAlgebra<R>,
     M::Scalar: DenseBlockScalar,
 {
-    // Why here, once: every executor reads a source's transformer only when
-    // that source is not borrowed (the route view, the CUDA admission).
-    for (entry, borrowed) in [
-        (&lhs_transform, borrowing.lhs_borrowed),
-        (&rhs_transform, borrowing.rhs_borrowed),
-    ] {
-        if !borrowed && entry.transform_structure.is_none() {
-            return Err(OperationError::InvalidArgument {
-                message: "a copied contraction source has no transformer",
-            }
-            .into());
-        }
-    }
     let physical_lhs_core_space = lhs_transform.space.clone();
     let physical_rhs_core_space = rhs_transform.space.clone();
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
@@ -426,13 +433,38 @@ where
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
     let block_plan_start = PROFILED.then(std::time::Instant::now);
-    let block_plan = M::derived_core_plan(
-        rule,
+    let block_plan = match storage_adjoint_core_plan(
         block_dst_space,
-        core_left_space,
-        core_right_space,
-        plan.core_axes().as_spec(),
-    )?;
+        plan.orientation(),
+        (&lhs_transform, borrowing.lhs_borrowed),
+        (&rhs_transform, borrowing.rhs_borrowed),
+    )? {
+        Some(block_plan) => Arc::new(block_plan),
+        None => {
+            borrowing.lhs_borrowed &= !lhs_transform.core_is_storage_adjoint;
+            borrowing.rhs_borrowed &= !rhs_transform.core_is_storage_adjoint;
+            M::derived_core_plan(
+                rule,
+                block_dst_space,
+                core_left_space,
+                core_right_space,
+                plan.core_axes().as_spec(),
+            )?
+        }
+    };
+    // Why here, once: every executor reads a source's transformer only when
+    // that source is not borrowed (the route view, the CUDA admission).
+    for (entry, borrowed) in [
+        (&lhs_transform, borrowing.lhs_borrowed),
+        (&rhs_transform, borrowing.rhs_borrowed),
+    ] {
+        if !borrowed && entry.transform_structure.is_none() {
+            return Err(OperationError::InvalidArgument {
+                message: "a copied contraction source has no transformer",
+            }
+            .into());
+        }
+    }
     if let Some(start) = block_plan_start {
         profile
             .expect("profiled compilation carries a profile")
@@ -467,4 +499,58 @@ where
         core_dst,
         block_plan,
     })
+}
+
+/// The core plan reading each borrowed storage-adjoint source in its parent's
+/// storage with [`MatrixOp::Adjoint`], when every core operand and the core
+/// destination are canonical coupled-sector matrices whose trees agree: then
+/// `block(A', c) = block(A, c)'` is one strided GEMM operand per coupled
+/// sector (TensorKit `blas_contract!` `mul!` over `A'`; QSpace
+/// `wbarray<T>::contract` folding `conj` into the `'C'` op). `None` when no
+/// side is such a source or the layouts differ; the caller then copies it.
+///
+/// Why not the irregular packed plan for other layouts: it would pack the
+/// parent per group, the same element traffic as the copy it replaces.
+fn storage_adjoint_core_plan<C: DenseBlockScalar>(
+    dst: &DynamicFusionMapSpace,
+    orientation: FusionContractOrientation,
+    lhs: (&DynamicFusionTransformedSourceEntry<C>, bool),
+    rhs: (&DynamicFusionTransformedSourceEntry<C>, bool),
+) -> Result<Option<FusionBlockContractPlan<C>>, OperationError> {
+    fn side<C>(
+        (entry, borrowed): (&DynamicFusionTransformedSourceEntry<C>, bool),
+    ) -> (&Arc<BlockStructure>, usize, MatrixOp) {
+        if borrowed && entry.core_is_storage_adjoint {
+            // The parent's codomain is the core operand's domain.
+            (
+                &entry.replay_structure,
+                entry.space.nin(),
+                MatrixOp::Adjoint,
+            )
+        } else {
+            (
+                entry.space.structure(),
+                entry.space.nout(),
+                MatrixOp::Identity,
+            )
+        }
+    }
+    let (lhs, rhs) = (side(lhs), side(rhs));
+    if lhs.2 == MatrixOp::Identity && rhs.2 == MatrixOp::Identity {
+        return Ok(None);
+    }
+    let (left, right) = match orientation {
+        FusionContractOrientation::LhsRhs => (lhs, rhs),
+        FusionContractOrientation::RhsLhs => (rhs, lhs),
+    };
+    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
+        dst.structure(),
+        dst.nout(),
+        left.0,
+        left.1,
+        right.0,
+        right.1,
+        left.2,
+        right.2,
+    )
 }

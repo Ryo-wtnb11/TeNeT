@@ -227,6 +227,15 @@ macro_rules! contract_rows {
             .contract(t, &spec(&[0, 1], &[2, 0], &[0], &[1])));
         row!("t·a mixed legs", |a| t
             .contract(a, &spec(&[2, 0], &[0, 1], &[1], &[0])));
+        // #2147: `a` is a core operand as is (identity transform) while `t`
+        // is permuted, so the DynamicTree core reads `a`'s parent with a
+        // GEMM adjoint op instead of copying it.
+        let u = t.permute(&[0], &[1, 2]).unwrap();
+        let w = t.permute(&[2, 0], &[1]).unwrap();
+        row!("a·u identity adjoint, transformed u", |a| a
+            .contract(&u, &spec(&[1, 2], &[0, 1], &[0], &[1])));
+        row!("w·a identity adjoint, transformed w", |a| w
+            .contract(a, &spec(&[0], &[0], &[0, 1], &[2, 3])));
         row!("a∘t", |a| a.compose(t));
         row!("t∘a", |a| t.compose(a));
         rows

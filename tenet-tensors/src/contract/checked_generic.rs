@@ -1817,9 +1817,10 @@ mod tests {
 
     /// What: a lazy-adjoint operand (lhs, rhs or both) takes the fixture's
     /// route — the canonical core over `MatrixOp::Adjoint`, CopyC, or the
-    /// `DynamicTree` artifact, whose adjoint source is a storage-mapped
-    /// conjugating copy never borrowed (so `lhs_only`, whose direct rhs is
-    /// borrowed, copies both adjoint sources). Core and CopyC
+    /// `DynamicTree` artifact, whose adjoint source compiles a storage-mapped
+    /// conjugating transformer even when the core borrows it (so `lhs_only`,
+    /// whose direct rhs derives none, derives one per adjoint source). Core
+    /// and CopyC
     /// equal the contraction of the materialized adjoint; so does
     /// composition. Why not `DynamicTree` values here: the spy's symbols are
     /// not a category, so two valid candidates (the materialized operand may
@@ -1887,7 +1888,10 @@ mod tests {
             }
             if name == "lhs_only" {
                 assert_eq!(transformers[0], 1, "{name}: the rhs is borrowed");
-                assert_eq!(transformers[3], 2, "{name}: adjoint sources are copied");
+                assert_eq!(
+                    transformers[3], 2,
+                    "{name}: adjoint sources derive transformers"
+                );
             }
         }
 

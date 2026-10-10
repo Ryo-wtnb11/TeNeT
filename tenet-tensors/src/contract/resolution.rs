@@ -341,9 +341,10 @@ pub(crate) fn candidate_walks() -> usize {
 /// whose core-right contracted legs carry the fermionic supertrace twist is
 /// excluded, since `blas_contract!` must then copy one operand to twist it.
 ///
-/// Why before the DynamicTree scorer, not inside it: DynamicTree cannot
-/// borrow a conjugated source (`source_layout_permutation_is_borrowable`),
-/// so a zero-cost score there would select a candidate that materializes.
+/// Why before the DynamicTree scorer, not inside it: that scorer charges a
+/// conjugated source as materialized (`source_layout_permutation_is_borrowable`;
+/// the artifact borrows one only over canonical regions, #2147), so a
+/// zero-cost score there could select a candidate that materializes.
 /// Every qualifying candidate has cost zero, the global minimum, so taking
 /// the first in tie order selects what `select_best_scored_contract_candidate`
 /// would under TensorKit's cost; when none compiles, the DynamicTree scorer
