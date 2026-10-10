@@ -33,9 +33,13 @@ where
 /// Split a Generic fusion tree without requiring the infallible `FusionRule`
 /// contract.
 ///
-/// This is structural only: no F/R or braid data is queried.  The input and
-/// both output trees are checked through the provider-owned Generic admission
-/// path before publication.
+/// This is structural only: no F/R or braid data is queried. The input tree is
+/// admitted through the provider-owned Generic admission path; both outputs
+/// are structural sub-trees of that admitted tree (every leaf, innerline and
+/// vertex is copied from it, plus a unit leaf or a rank-one tree on a sector
+/// the input already admitted), so they are published without re-admission,
+/// as TensorKit's `split` builds them with its unchecked inner constructor
+/// (`basic_manipulations.jl:30-52`).
 pub fn split_fusion_tree_generic_checked<C>(
     rule: &C,
     tree: &FusionTreeKey,
@@ -44,10 +48,7 @@ pub fn split_fusion_tree_generic_checked<C>(
 where
     C: CheckedGenericFusion,
 {
-    validate_generic_fusion_tree_pair_checked(
-        rule,
-        &FusionTreePairKey::pair(tree.clone(), tree.clone()),
-    )?;
+    validate_generic_fusion_tree_checked(rule, tree)?;
     let rank = tree.uncoupled().len();
     if front_rank > rank {
         return Err(CoreError::DimensionMismatch {
@@ -56,16 +57,7 @@ where
         }
         .into());
     }
-
-    let (front_tree, tail_tree) = split_tree_structural(rule.vacuum(), tree, front_rank)?;
-
-    for output in [&front_tree, &tail_tree] {
-        validate_generic_fusion_tree_pair_checked(
-            rule,
-            &FusionTreePairKey::pair(output.clone(), output.clone()),
-        )?;
-    }
-    Ok((front_tree, tail_tree))
+    Ok(split_tree_structural(rule.vacuum(), tree, front_rank)?)
 }
 
 /// Merge two standard fusion trees without exchanging their external legs.
