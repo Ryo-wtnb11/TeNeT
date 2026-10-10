@@ -235,8 +235,10 @@ macro_rules! u1_suite {
         );
         rejects!(
             $snap,
-            format!("{op} lazy source"),
-            fresh(&permuted),
+            // Host admits a lazy source (#1870 A2) and reports the space;
+            // the device lane rejects its kind until #1870 D.
+            format!("{op} lazy source, wrong space"),
+            wrong(&permuted),
             _,
             |d: &mut _| lazy.permute_into(&[2, 0], &[1, 3], d, 1.0, 0.5)
         );
@@ -291,8 +293,8 @@ macro_rules! u1_suite {
         );
         rejects!(
             $snap,
-            format!("{op} lazy source"),
-            fresh(&braided),
+            format!("{op} lazy source, wrong space"),
+            wrong(&braided),
             _,
             |d: &mut _| lazy.braid_into(&[1, 0], &[3, 2], &levels, d, 1.0, 0.5)
         );
@@ -367,8 +369,8 @@ macro_rules! u1_suite {
         );
         rejects!(
             $snap,
-            format!("{op} lazy source"),
-            fresh(&repartitioned),
+            format!("{op} lazy source, wrong space"),
+            wrong(&repartitioned),
             _,
             |d: &mut _| lazy.repartition_into(d, 1.0, 0.5)
         );
@@ -631,7 +633,8 @@ fn every_host_into_leaves_a_rejected_destination_bit_identical() {
 }
 
 /// Host-only representation and capability classes: a compact or lazy
-/// destination and a compact source the operation cannot take. (A
+/// destination, a compact source the operation cannot take, and an admitted
+/// compact source's destination checks. (A
 /// non-symmetric braiding provider cannot name `contract_into` at all: the
 /// facade's trait bounds exclude it at compile time.)
 #[test]
@@ -775,11 +778,28 @@ fn host_capability_and_representation_rejections_leave_the_destination_bit_ident
         Error::Unsupported { .. },
         |d: &mut _| s.trace_pairs_into(&[(0, 1)], d, 1.0, 0.5)
     );
+    // A lazy-adjoint source is read through its parent's storage, so a
+    // destination that is that parent aliases it (#1870 A2). The adjoint of
+    // `[v] ← [v]` has the destination's own space: only the alias rejects.
     rejects!(
         host_snap,
-        "permute_into compact source",
+        "permute_into lazy source aliasing its parent",
         sentinel!(&rt, t),
         Error::InvalidArgument(_),
+        |d: &mut TensorMap<_, f64>| {
+            let source = d.adjoint().unwrap();
+            source.permute_into(&[0], &[1], d, 1.0, 0.5)
+        }
+    );
+    // A compact source is admitted (#1870 A2), so its destination checks run:
+    // here the space, on every leg dualized.
+    let (_, w) = legs();
+    let dual = TensorMap::<_, f64>::rand_with_seed(&rt, [&w], [&w], 1).unwrap();
+    rejects!(
+        host_snap,
+        "permute_into compact source, wrong space",
+        sentinel!(&rt, dual),
+        SpaceMismatch,
         |d: &mut _| s.permute_into(&[0], &[1], d, 1.0, 0.5)
     );
 }

@@ -207,9 +207,10 @@ pub(crate) enum TreeStructureSource<'a> {
     /// A lazy adjoint addressed through its parent's storage blocks.
     Oriented(&'a FusionOperandLayout<'a>),
     /// A lazy adjoint whose `logical` blocks map one by one onto the storage
-    /// blocks of `operand`'s parent: the checked Generic eager transform's
-    /// source. Why not `Oriented`: that layout is prepared by the
-    /// multiplicity-free layout primer, which a checked provider lacks.
+    /// blocks of `operand`'s parent: the source of the checked Generic eager
+    /// transform and of every mode's existing-destination transform. Why not
+    /// `Oriented`: that layout is prepared by the multiplicity-free layout
+    /// primer, which a checked provider lacks.
     StorageMapped {
         logical: &'a Arc<BlockStructure>,
         operand: FusionOperand<'a>,
@@ -641,20 +642,60 @@ where
                 source.rank(),
                 |axis| source.storage_axis(axis),
             ),
-            TreeStructureSource::StorageMapped { .. } => {
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: "multiplicity-free tree structure reads a lazy adjoint through its oriented layout",
-                })
-            }
+            // Why the oriented key and resolver without the layout primer: the
+            // logical space of a multiplicity-free lazy adjoint is the
+            // canonical adjoint of its parent, so the parent content,
+            // orientation and canonical basis order determine the logical
+            // keys and the entry is the one contraction's oriented path uses.
+            TreeStructureSource::StorageMapped { logical, operand } => cache
+                .resolve_tree_pair_oriented_with(
+                    rule,
+                    operation,
+                    dst,
+                    || {
+                        let count = logical.block_count();
+                        let mut keys = Vec::with_capacity(count);
+                        let mut indices = Vec::with_capacity(count);
+                        for index in 0..count {
+                            let key = logical.block(index)?.key().as_fusion_tree_pair().ok_or(
+                                OperationError::ExpectedFusionTreeBlock {
+                                    tensor: "logical src",
+                                    index,
+                                },
+                            )?;
+                            indices.push(operand.storage_block_index(key)?);
+                            keys.push(key.clone());
+                        }
+                        Ok((keys.into(), indices.into()))
+                    },
+                    operand.storage_space().structure(),
+                    operand.orientation(),
+                    OrientedBasisOrder::Canonical,
+                    operand.storage_space().rank(),
+                    |axis| operand.storage_axis(axis),
+                ),
         }
     }
 
     fn stage_transform<'a>(
         logical: &'a BoundDynamicFusionMapSpace<R>,
-        _adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
-        _src_len: usize,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
         operation: &TreeTransformOperation,
     ) -> Result<StagedTransform<BoundDynamicFusionMapSpace<R>, ()>, OperationError> {
+        let expected = adjoint_of.unwrap_or(logical).space().required_len()?;
+        if src_len != expected {
+            return Err(OperationError::ElementCountMismatch {
+                expected,
+                actual: src_len,
+            });
+        }
+        if let Some(parent) = adjoint_of {
+            validate_checked_operand_relation(
+                logical.space(),
+                FusionOperand::adjoint(parent.space()),
+            )?;
+        }
         let destination = logical.transformed_multiplicity_free(operation)?;
         Ok(StagedTransform {
             preview: Arc::clone(destination.space().structure()),

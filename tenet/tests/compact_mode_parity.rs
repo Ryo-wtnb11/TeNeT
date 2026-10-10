@@ -2238,3 +2238,374 @@ fn checked_transform_into_reports_the_same_error_cold_and_warm() {
         assert_eq!(warm, cold, "{braiding:?}");
     }
 }
+
+// ---- #1870 leaf A2: compact-source transform `_into` ----
+
+/// Every rank-(1, 1) transform a compact source's `_into` takes.
+const BOND_INTO_OPS: [&str; 6] = [
+    "identity",
+    "permute",
+    "transpose",
+    "braid",
+    "repartition (0, 2)",
+    "repartition (2, 0)",
+];
+
+fn bond_eager<R, D>(
+    tensor: &TensorMap<R, D>,
+    op: &str,
+) -> Result<TensorMap<R, D>, <R::Mode as TypedTensorModeDispatch<R>>::FacadeError>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
+    D: TensorScalar,
+{
+    match op {
+        "identity" => tensor.permute(&[0], &[1]),
+        "repartition (0, 2)" => tensor.repartition(0),
+        "repartition (2, 0)" => tensor.repartition(2),
+        _ => transform(tensor, op),
+    }
+}
+
+fn bond_into<R, D>(
+    tensor: &TensorMap<R, D>,
+    op: &str,
+    destination: &mut TensorMap<R, D>,
+    alpha: D,
+    beta: D,
+) -> Result<(), <R::Mode as TypedTensorModeDispatch<R>>::FacadeError>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
+    D: TensorScalar,
+{
+    match op {
+        "identity" => tensor.permute_into(&[0], &[1], destination, alpha, beta),
+        "permute" => tensor.permute_into(&[1], &[0], destination, alpha, beta),
+        "transpose" => tensor.transpose_into(&[1], &[0], destination, alpha, beta),
+        "braid" => tensor.braid_into(&[1], &[0], &[0, 1], destination, alpha, beta),
+        _ => tensor.repartition_into(destination, alpha, beta),
+    }
+}
+
+/// A zero destination on the legs of `op`'s eager result.
+fn bond_destination<R, D>(tensor: &TensorMap<R, D>, op: &str) -> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedTensorConstructionDispatch<R, D>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar,
+{
+    let eager = bond_eager(tensor, op).unwrap();
+    TensorMap::from_subblock_fn(
+        tensor.runtime(),
+        &eager.codomain(),
+        &eager.domain(),
+        |_, _| D::from_real(0.0),
+    )
+    .unwrap()
+}
+
+/// The warm `_into` of `op` from `tensor`: its allocations, counting those
+/// of at least `size` bytes as matched.
+fn warmed_bond_into_allocs<R, D>(
+    tensor: &TensorMap<R, D>,
+    op: &str,
+    size: usize,
+) -> counting_alloc::Allocs
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedTensorConstructionDispatch<R, D>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar,
+{
+    let mut destination = bond_destination(tensor, op);
+    let (one, half) = (D::from_real(1.0), D::from_real(0.5));
+    bond_into(tensor, op, &mut destination, one, half).unwrap();
+    let (result, allocs) = counting_alloc::measure_matching(size..=usize::MAX, || {
+        bond_into(tensor, op, &mut destination, one, half)
+    });
+    result.unwrap();
+    assert!(tensor.dense_data().is_err(), "{op}: the source densified");
+    allocs
+}
+
+#[test]
+fn compact_transform_into_allocates_no_dense_source_in_both_modes() {
+    // What: a compact source's `_into` reads its diagonal from the resolved
+    // structure into the caller's destination: no allocation as large as the
+    // `k²` dense image the decline route would build, in either mode.
+    let _measurement = counting_alloc::serial();
+    let dense_payload = K * K * std::mem::size_of::<f64>();
+    let mf = odd_diagonal(FermionParityFusionRule, K);
+    let checked = odd_diagonal(CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0), K);
+    for op in BOND_INTO_OPS {
+        for (mode, allocs) in [
+            (
+                "multiplicity-free",
+                warmed_bond_into_allocs(&mf, op, dense_payload),
+            ),
+            (
+                "checked",
+                warmed_bond_into_allocs(&checked, op, dense_payload),
+            ),
+        ] {
+            assert_eq!(allocs.matched_calls, 0, "{mode} {op}: {allocs:?}");
+            assert!(
+                allocs.bytes < dense_payload as u64,
+                "{mode} {op}: {allocs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_braid_into_decline_replays_the_densified_source() {
+    // What: a braid coefficient beyond f32 declines the diagonal read, so the
+    // `_into` replays the densified spectrum through the structure it staged:
+    // the dense route's value (NaN placement included), and the one
+    // operation-local `k²` buffer the read otherwise avoids.
+    let _measurement = counting_alloc::serial();
+    for (salt, odd_r) in [(0x81u8, 1e100), (0x83, 1e-100)] {
+        let rule = CheckedZ2::new(BraidingStyleKind::Anyonic, 1.0)
+            .with_odd_r(odd_r)
+            .with_salt(salt);
+        let leg = GradedSpace::try_new(Arc::new(rule), [(Z2Irrep::ODD, K)]).unwrap();
+        let compact = TensorMap::<_, f32>::diagonal(
+            &host_runtime(),
+            &leg,
+            [SectorSpectrum {
+                sector: Z2Irrep::ODD,
+                values: (0..K).map(|i| 1.0 + i as f32).collect(),
+            }],
+        )
+        .unwrap();
+        let want = compact
+            .materialize()
+            .unwrap()
+            .braid(&[1], &[0], &[0, 1])
+            .unwrap();
+        let mut destination = bond_destination(&compact, "braid");
+        bond_into(&compact, "braid", &mut destination, 1.0, 0.0).unwrap();
+        let (got, want) = (
+            destination.dense_data().unwrap(),
+            want.dense_data().unwrap(),
+        );
+        assert_eq!(got.len(), want.len());
+        assert!(
+            want.iter().any(|x| x.is_nan()) || want.iter().filter(|&&x| x != 0.0).count() < K,
+            "R = {odd_r:e}: the fixture must make the coefficient unrepresentable"
+        );
+        for (&x, &y) in got.iter().zip(want) {
+            assert!(
+                x == y || (x.is_nan() && y.is_nan()),
+                "R = {odd_r:e}: {x} != dense {y}"
+            );
+        }
+        let allocs = warmed_bond_into_allocs(&compact, "braid", K * K * std::mem::size_of::<f32>());
+        assert!(allocs.matched_calls >= 1, "R = {odd_r:e}: {allocs:?}");
+    }
+}
+
+#[test]
+fn checked_compact_transform_into_queries_the_provider_like_eager() {
+    // What: the compact `_into` stages and resolves with the eager compact
+    // arm's own staging, so cold and warm provider queries are eager's.
+    let ledger =
+        |tensor: &TensorMap<CheckedZ2, f64>, leg: &GradedSpace<CheckedZ2>, op: &str, into: bool| {
+            let provider = tensor.provider();
+            // Built on the swapped legs directly: deriving them through the eager
+            // op would warm the very caches the cold count reads.
+            let dual = leg.try_dual().unwrap();
+            let mut destination = into.then(|| {
+                TensorMap::from_subblock_fn(tensor.runtime(), [&dual], [&dual], |_, _| 0.0).unwrap()
+            });
+            (0..2)
+                .map(|_| {
+                    provider.queries.store(0, Ordering::Relaxed);
+                    match &mut destination {
+                        Some(destination) => bond_into(tensor, op, destination, 1.0, 0.5).unwrap(),
+                        None => drop(black_box(bond_eager(tensor, op).unwrap())),
+                    }
+                    provider.queries.load(Ordering::Relaxed)
+                })
+                .collect::<Vec<_>>()
+        };
+    for (index, op) in ["permute", "braid"].into_iter().enumerate() {
+        let salt = 0x90 + 2 * index as u8;
+        let rule = |salt| CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(salt);
+        // Two rule identities, so each ledger starts cold.
+        let (eager, eager_leg) = z2_diagonal(rule(salt), |x: f64| x);
+        let (into, into_leg) = z2_diagonal(rule(salt + 1), |x: f64| x);
+        let eager_counts = ledger(&eager, &eager_leg, op, false);
+        let into_counts = ledger(&into, &into_leg, op, true);
+        assert!(eager_counts[0] > 0, "{op}");
+        assert_eq!(into_counts, eager_counts, "{op}");
+    }
+}
+
+fn checked_fermionic(salt: u8) -> CheckedZ2 {
+    CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(salt)
+}
+
+/// `legs` rebuilt on a fresh checked fZ2 rule `salt`: a destination built on
+/// them warms none of that rule's transforms.
+fn z2_legs_on(legs: Vec<GradedSpace<CheckedZ2>>, salt: u8) -> Vec<GradedSpace<CheckedZ2>> {
+    legs.iter()
+        .map(|leg| {
+            let fresh = z2_leg(checked_fermionic(salt));
+            if leg.is_dual() {
+                fresh.try_dual().unwrap()
+            } else {
+                fresh
+            }
+        })
+        .collect()
+}
+
+/// The lazy adjoint `[W] ← [W, W]` of a checked fZ2 tensor on rule `salt`.
+fn lazy_z2(runtime: &Runtime, salt: u8) -> TensorMap<CheckedZ2, f64> {
+    let leg = z2_leg(checked_fermionic(salt));
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg], |_, index| {
+        index.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap()
+    .adjoint()
+    .unwrap()
+}
+
+/// A zero destination for `lazy.permute(&[1, 0], &[2])` on rule `salt`.
+fn lazy_z2_destination(runtime: &Runtime, salt: u8) -> TensorMap<CheckedZ2, f64> {
+    let shape = lazy_z2(runtime, 0xff).permute(&[1, 0], &[2]).unwrap();
+    TensorMap::from_subblock_fn(
+        runtime,
+        &z2_legs_on(shape.codomain(), salt),
+        &z2_legs_on(shape.domain(), salt),
+        |_, _| 0.0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn checked_lazy_transform_into_queries_no_more_than_eager() {
+    // What: eager transforms the parent and re-derives the adjoint result
+    // space; the `_into` reads the parent's storage through the logical
+    // source, with no result space to derive. Cold it asks the provider at
+    // most what eager asks; warm neither asks anything.
+    let runtime = host_runtime();
+    let ledger = |salt: u8, into: bool| {
+        let lazy = lazy_z2(&runtime, salt);
+        let mut destination = lazy_z2_destination(&runtime, salt);
+        let provider = lazy.provider();
+        (0..2)
+            .map(|_| {
+                provider.queries.store(0, Ordering::Relaxed);
+                if into {
+                    lazy.permute_into(&[1, 0], &[2], &mut destination, 1.0, 0.0)
+                        .unwrap();
+                } else {
+                    drop(black_box(lazy.permute(&[1, 0], &[2]).unwrap()));
+                }
+                assert!(lazy.dense_data().is_err(), "the lazy source materialized");
+                provider.queries.load(Ordering::Relaxed)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (eager, into) = (ledger(0xa2, false), ledger(0xa3, true));
+    assert!(
+        into[0] > 0 && into[0] <= eager[0],
+        "eager {eager:?} into {into:?}"
+    );
+    assert_eq!(into[1], eager[1], "warm");
+}
+
+#[test]
+fn checked_compact_and_lazy_transform_into_failure_is_typed_and_nonpublishing() {
+    // What: a provider failing in the staging of a compact or lazy-adjoint
+    // source's `_into` is the typed plan error, leaves the destination bit
+    // for bit, and publishes no layout, transformer or coefficients; the
+    // succeeding call after it does (#2063).
+    const ISOLATED: &str = "TENET_COMPACT_TRANSFORM_INTO_PUBLICATION_ISOLATED";
+    const NAME: &str = "checked_compact_and_lazy_transform_into_failure_is_typed_and_nonpublishing";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated publication test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+
+    use tenet::typed::{CheckedGenericPlanError, GenericTensorError};
+    use tenet_core::{structure_cache_info, StructureCacheKind};
+    tenet_core::clear_structure_caches();
+    let published = || {
+        [
+            StructureCacheKind::CompletedTreeTransformer,
+            StructureCacheKind::TreeTransformCoefficients,
+        ]
+        .map(|kind| {
+            let info = structure_cache_info(kind);
+            (info.admissions(), info.entries(), info.charged_bytes())
+        })
+    };
+    let runtime = host_runtime();
+    let (compact, leg) = z2_diagonal(checked_fermionic(0xc0), |x: f64| x);
+    let dual = leg.try_dual().unwrap();
+    let mut compact_destination =
+        TensorMap::from_subblock_fn(compact.runtime(), [&dual], [&dual], |_, index| {
+            index[0] as f64 + 0.25
+        })
+        .unwrap();
+    let lazy = lazy_z2(&runtime, 0xc1);
+    let mut lazy_destination = lazy_z2_destination(&runtime, 0xc1);
+    let bits = |t: &TensorMap<CheckedZ2, f64>| {
+        t.dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    };
+    macro_rules! fails_then_publishes {
+        ($name:expr, $provider:expr, $destination:expr, |$d:ident| $into:expr) => {{
+            let (name, before, destination) = ($name, published(), bits(&$destination));
+            $provider.fail_queries.store(true, Ordering::Relaxed);
+            let result = {
+                let $d = &mut $destination;
+                $into
+            };
+            $provider.fail_queries.store(false, Ordering::Relaxed);
+            assert!(
+                matches!(
+                    result,
+                    Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+                        InvalidSector
+                    )))
+                ),
+                "{name}: {result:?}"
+            );
+            assert_eq!(bits(&$destination), destination, "{name}: destination");
+            assert_eq!(published(), before, "{name}: the failure published");
+            let $d = &mut $destination;
+            $into.unwrap();
+            assert_ne!(published(), before, "{name}: the success published nothing");
+        }};
+    }
+    fails_then_publishes!(
+        "compact braid",
+        compact.provider(),
+        compact_destination,
+        |d| compact.braid_into(&[1], &[0], &[0, 1], d, 1.0, 0.5)
+    );
+    fails_then_publishes!("lazy permute", lazy.provider(), lazy_destination, |d| lazy
+        .permute_into(&[1, 0], &[2], d, 1.0, 0.5));
+}

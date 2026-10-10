@@ -211,8 +211,8 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
         tenet::typed::Error::RuleMismatch
     );
 
-    // A lazy-adjoint source is rejected — not lowered onto its parent — and
-    // is reported before a lazy-adjoint destination.
+    // A lazy-adjoint source is admitted (#1870 A2), so a lazy-adjoint
+    // destination is what it reports.
     let lazy_source = source.adjoint().unwrap();
     let mut lazy_destination = destination().adjoint().unwrap();
     assert_eq!(
@@ -221,8 +221,7 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
                 .permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
                 .unwrap_err()
         ),
-        "invalid argument: typed destination tree transform requires an ordinary \
-         dense host source"
+        "invalid argument: destination must use ordinary dense host storage"
     );
     assert_eq!(
         message(

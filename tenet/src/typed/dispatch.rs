@@ -132,13 +132,15 @@ where
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 
-    /// `destination = alpha · operation(source) + beta · destination` for an
-    /// owned dense `source` and a `destination` that passed
-    /// [`destination_precheck`]: one lease, [`Self::transform`]'s staging, the
-    /// staged space against the destination's, [`destination_slice`], the
-    /// write, then the same commit. A mode with an exact-layout memo offers
-    /// it the borrowed request through `exact_layout_probe` before
-    /// `operation` builds the owned one.
+    /// `destination = alpha · operation(source) + beta · destination` for a
+    /// `source` of any representation (a lazy adjoint read through its
+    /// parent's storage, a compact diagonal through its bond structure) and a
+    /// `destination` that passed [`destination_precheck`]: one lease,
+    /// [`Self::transform`]'s staging, the staged space against the
+    /// destination's, [`destination_slice`], the write, then the same commit.
+    /// A mode with an exact-layout memo offers it the borrowed request of an
+    /// owned dense source through `exact_layout_probe` before `operation`
+    /// builds the owned one.
     fn transform_into(
         source: &TensorMap<R, D>,
         destination: &mut TensorMap<R, D>,

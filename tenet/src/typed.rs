@@ -137,7 +137,9 @@
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
 //! silently. Rank-(1,1) [`TensorMap::permute`] and [`TensorMap::transpose`]
 //! swaps keep the compact result; an admitted [`TensorMap::braid`] reads the
-//! compact source directly and publishes a dense result. Other transform and
+//! compact source directly and publishes a dense result. The transform
+//! `*_into` entries write a compact source's transformed diagonal into their
+//! destination under the same single-term bijection proof. Other transform and
 //! contraction geometries use the documented dense route.
 //!
 //! # Deliberately absent
@@ -441,7 +443,9 @@ mod twist_flip;
 pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
-use transform_ops::{lazy_adjoint_of_transformed_parent, map_spectrum_dtype, owned_dense_source};
+use transform_ops::{
+    lazy_adjoint_of_transformed_parent, map_spectrum_dtype, with_transform_into_source,
+};
 
 /// In-module gates on the typed facade's private state.
 ///
