@@ -1434,6 +1434,8 @@ macro_rules! compact_contract_allocations {
                 continue;
             }
             assert_eq!(large.matched_calls, 0, "{name}: {large:?}");
+            // `bytes` sums every allocation of the call, not only the matched
+            // ones: many small buffers must not add up to `P` either.
             assert!((large.bytes as usize) < p_bytes, "{name}: {large:?}");
             if direct {
                 let (_, result) = counting_alloc::measure_matching(n_c_bytes..=usize::MAX, || {

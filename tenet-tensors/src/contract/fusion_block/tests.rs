@@ -954,7 +954,7 @@ fn an_identity_adjoint_source_is_borrowed_only_over_canonical_regions() {
         let borrowed = artifact.borrowed_sources();
         let mut out = vec![0.0; dst.space().required_len().unwrap()];
         context
-            .tensorcontract_fusion_dyn_prelowered_into(
+            .tensorcontract_prelowered_into(
                 &dst,
                 &mut out,
                 lhs,
@@ -963,7 +963,7 @@ fn an_identity_adjoint_source_is_borrowed_only_over_canonical_regions() {
                 &rhs_data,
                 axes,
                 1.0,
-                0.0,
+                crate::ContractDestinationInit::Axpby(0.0),
             )
             .unwrap();
         (borrowed, out)
@@ -1083,7 +1083,7 @@ fn an_identity_side_is_free_in_selection_only_over_canonical_layouts() {
             let borrowed = artifact.borrowed_sources();
             let mut out = vec![0.0; dst.space().required_len().unwrap()];
             context
-                .tensorcontract_fusion_dyn_prelowered_into(
+                .tensorcontract_prelowered_into(
                     &dst,
                     &mut out,
                     lhs,
@@ -1092,7 +1092,7 @@ fn an_identity_side_is_free_in_selection_only_over_canonical_layouts() {
                     &rhs_data,
                     axes,
                     1.0,
-                    0.0,
+                    crate::ContractDestinationInit::Axpby(0.0),
                 )
                 .unwrap();
             (borrowed, out)

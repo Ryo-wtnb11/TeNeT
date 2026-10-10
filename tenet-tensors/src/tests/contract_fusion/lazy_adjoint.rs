@@ -846,7 +846,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         crate::contract::reset_fusion_operand_projection_prepares();
         for _ in 0..2 {
             let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
-            ctx.tensorcontract_fusion_dyn_prelowered_into(
+            ctx.tensorcontract_prelowered_into(
                 &dst_bound,
                 &mut fold,
                 lhs_operand,
@@ -855,7 +855,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 &rhs_data,
                 axes(),
                 Complex64::new(1.0, 0.0),
-                Complex64::new(0.0, 0.0),
+                crate::ContractDestinationInit::Axpby(Complex64::new(0.0, 0.0)),
             )
             .unwrap();
             assert!(
@@ -897,7 +897,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
 
             let mut folded_again =
                 vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
-            ctx.tensorcontract_fusion_dyn_prelowered_into(
+            ctx.tensorcontract_prelowered_into(
                 &dst_bound,
                 &mut folded_again,
                 lhs_operand,
@@ -906,7 +906,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 &rhs_data,
                 axes(),
                 Complex64::new(1.0, 0.0),
-                Complex64::new(0.0, 0.0),
+                crate::ContractDestinationInit::Axpby(Complex64::new(0.0, 0.0)),
             )
             .unwrap();
             assert_eq!(folded_again, oracle);

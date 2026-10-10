@@ -122,15 +122,21 @@ where
             return Ok(None);
         };
         match pattern {
+            // Contract is permute(compose) here (the pattern excludes the
+            // fermionic twist): the product spectrum, then the one permute.
+            // Why the permute and not a rebind: `pAB` can move the surviving
+            // bond across the codomain/domain split, where rebinding the
+            // product spectrum is not equivalent (#453). A swap stays compact
+            // through the rank-(1, 1) arm (TensorKit `diagonal.jl:291`);
+            // (2, 0)/(0, 2) results are dense.
             DiagonalContractPattern::Product => {
-                if layout.is_some() {
-                    // Why not a reordered output: `pAB` can move the surviving
-                    // bond across the codomain/domain split, and rebinding the
-                    // product spectrum there is not equivalent to a permute
-                    // (#453).
+                let Some(product) = self.compose_compact(other)? else {
                     return Ok(None);
+                };
+                match layout {
+                    None => Ok(Some(product)),
+                    Some(operation) => product.tree_transform(operation).map(Some),
                 }
-                Ok(self.compose_compact(other)?)
             }
             DiagonalContractPattern::Scaled {
                 scaled,

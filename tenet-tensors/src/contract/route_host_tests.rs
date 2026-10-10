@@ -256,7 +256,7 @@ where
         );
         let mut actual = out;
         context
-            .tensorcontract_fusion_dyn_prelowered_into_with_init(
+            .tensorcontract_prelowered_into(
                 &dst,
                 &mut actual,
                 FusionOperand::direct(case.lhs.space()),
@@ -552,7 +552,7 @@ fn a_warm_eager_contraction_converts_no_coefficient_pack() {
         let run = |context: &mut Context<f64>| {
             let mut out = vec![f64::NAN; len];
             context
-                .tensorcontract_fusion_dyn_prelowered_into_with_init(
+                .tensorcontract_prelowered_into(
                     &dst,
                     &mut out,
                     FusionOperand::direct(case.lhs.space()),

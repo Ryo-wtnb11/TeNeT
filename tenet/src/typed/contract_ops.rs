@@ -307,13 +307,14 @@ where
     /// the contracted leg, in either order — the contracted leg of the compact
     /// operand is its bond, and the other operand's is a leg on the side that
     /// faces it (`t`'s domain against `D`'s codomain, or `D`'s domain against a
-    /// codomain leg of `t`, at any position). A leg on the far side, more than
-    /// one contracted leg, or an output order that would move the surviving
-    /// bond of a `D · D` product across the codomain/domain split all take the
-    /// dense route: the first two are not proved geometries, and the last is not
-    /// equivalent to rebinding the product spectrum (checked in #453). A
-    /// supertrace twist on a dual contracted leg of `other` would also decline,
-    /// and cannot currently arise — see `try_contract_diagonal`.
+    /// codomain leg of `t`, at any position). A `D · D` product in any output
+    /// order is the product spectrum followed by one [`Self::permute`]: a
+    /// swapped result stays compact (TensorKit's `DiagonalTensorMap`), and a
+    /// result with both legs on one side is dense. A leg on the far side or
+    /// more than one contracted leg takes the dense route: they are not proved
+    /// geometries. A supertrace twist on a dual contracted leg of `other`
+    /// would also decline, and cannot currently arise — see
+    /// `diagonal_contract_pattern`.
     ///
     /// Both admission modes take these arms. The reordering permute is the
     /// mode's own tree transform, so in checked Generic mode a provider

@@ -1266,7 +1266,7 @@ where
     let dst = case.dst();
     let mut out = vec![D::zero(); dst.space().required_len().unwrap()];
     Context::<D>::default()
-        .tensorcontract_fusion_dyn_prelowered_into(
+        .tensorcontract_prelowered_into(
             &dst,
             &mut out,
             FusionOperand::direct(case.lhs.space()),
@@ -1275,7 +1275,7 @@ where
             rhs,
             case.axes(),
             D::one(),
-            D::zero(),
+            crate::ContractDestinationInit::Axpby(D::zero()),
         )
         .unwrap();
     out
@@ -1868,7 +1868,7 @@ fn a_self_dual_core_form_lazy_contraction_is_host_copy_c_and_storage_dynamic_tre
         let mut out = vec![0.0; dst.space().required_len().unwrap()];
         let mut context = Context::<f64>::default();
         context
-            .tensorcontract_fusion_dyn_prelowered_into(
+            .tensorcontract_prelowered_into(
                 &dst,
                 &mut out,
                 lhs_operand,
@@ -1877,7 +1877,7 @@ fn a_self_dual_core_form_lazy_contraction_is_host_copy_c_and_storage_dynamic_tre
                 &rhs_data,
                 axes,
                 1.0,
-                0.0,
+                crate::ContractDestinationInit::Axpby(0.0),
             )
             .unwrap();
         // What: the Host took `copyC` (no core, no transformed source).
@@ -2511,7 +2511,7 @@ where
     let mut out = vec![0.0; dst.space().required_len().unwrap()];
     let mut context = Context::<f64>::default();
     context
-        .tensorcontract_fusion_dyn_prelowered_into(
+        .tensorcontract_prelowered_into(
             dst,
             &mut out,
             lhs,
@@ -2526,7 +2526,7 @@ where
                 rhs.storage_conjugate(),
             ),
             1.0,
-            0.0,
+            crate::ContractDestinationInit::Axpby(0.0),
         )
         .unwrap();
     if context.last_resolution_is_core() {

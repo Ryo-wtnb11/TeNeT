@@ -253,6 +253,10 @@ where
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let nout = space.nout();
     let structure = space.structure();
+    // One coordinate buffer for every block. Why not a `SmallVec`: this
+    // crate does not depend on `smallvec`, and one reused buffer already
+    // makes the walk's allocations independent of the block count.
+    let mut coord = Vec::new();
     for index in 0..structure.block_count() {
         let block = structure
             .block(index)
@@ -274,7 +278,8 @@ where
             }
             _ => None,
         };
-        let mut coord = vec![0usize; shape.len()];
+        coord.clear();
+        coord.resize(shape.len(), 0usize);
         let count: usize = shape.iter().product();
         for _ in 0..count {
             let idx = block.offset()

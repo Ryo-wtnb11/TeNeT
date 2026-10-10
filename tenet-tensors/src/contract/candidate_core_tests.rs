@@ -220,7 +220,7 @@ where
         crate::contract::reset_fusion_operand_projection_prepares();
         if lhs_lazy || rhs_lazy {
             context
-                .tensorcontract_fusion_dyn_prelowered_into(
+                .tensorcontract_prelowered_into(
                     &space,
                     &mut dst,
                     operand(&space, lhs_lazy),
@@ -229,7 +229,7 @@ where
                     &rhs_data,
                     axes,
                     1.0,
-                    0.0,
+                    crate::ContractDestinationInit::Axpby(0.0),
                 )
                 .unwrap();
         } else {

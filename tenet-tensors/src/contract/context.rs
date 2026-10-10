@@ -870,7 +870,7 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
-            return self.tensorcontract_fusion_dyn_prelowered_into_core(
+            return self.tensorcontract_prelowered_into(
                 dst_space,
                 dst_data,
                 FusionOperand::direct(lhs_space.space()),
@@ -883,7 +883,7 @@ where
             );
         }
         let lowered = lower_legacy_axes(lhs_space.space(), rhs_space.space(), axes)?;
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
+        self.tensorcontract_prelowered_into(
             dst_space,
             dst_data,
             legacy_operand(lhs_space.space(), axes.lhs_conjugate()),
@@ -939,69 +939,13 @@ where
         .map(drop)
     }
 
-    /// Executes TeNeT's validated prelowered operand seam.
-    ///
-    /// Logical spaces are the categorical authority; storage spaces and slices
-    /// are the physical authority. Why not make this a normal entrypoint:
-    /// arbitrary callers cannot establish the lazy-adjoint coherence contract.
-    #[doc(hidden)]
+    /// The prelowered operand seam: logical spaces are the categorical
+    /// authority, storage operands and slices the physical one. Why not a
+    /// public entrypoint: arbitrary callers cannot establish the lazy-adjoint
+    /// coherence contract; the typed facade enters through
+    /// `tensorcontract_into_*_in` (#1870).
     #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_with_init(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-        )
-    }
-
-    /// [`Self::tensorcontract_fusion_dyn_prelowered_into`] with the
-    /// destination initialisation made explicit.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into_with_init<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        init: ContractDestinationInit<D>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
-            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, init,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn tensorcontract_fusion_dyn_prelowered_into_core<R>(
+    pub(crate) fn tensorcontract_prelowered_into<R>(
         &mut self,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         dst_data: &mut [D],

@@ -209,7 +209,7 @@ where
         );
         let mut actual = out;
         context
-            .tensorcontract_fusion_dyn_prelowered_into_with_init(
+            .tensorcontract_prelowered_into(
                 &dst,
                 &mut actual,
                 FusionOperand::direct(case.lhs.space()),
