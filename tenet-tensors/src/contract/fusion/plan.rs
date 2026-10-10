@@ -1438,8 +1438,9 @@ where
 }
 
 /// The `DynamicTree` candidate of two operands over Complete logical spaces,
-/// a lazy adjoint marked by `axes`' conjugation flags (its source is then
-/// never borrowable), the destination derived from them by construction:
+/// a lazy adjoint marked by `axes`' conjugation flags (borrowed only under
+/// an identity transform, read in its parent's storage), the destination
+/// derived from them by construction:
 /// the Complete scorer
 /// of the selector ([`prepare_tensorcontract_fusion_plan_dyn_raw_canonical`]),
 /// over both orientations, with `twist` reading the core-right twist.
@@ -1494,28 +1495,30 @@ where
     #[cfg(test)]
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
     // Why not probe the transformed layouts: Complete admission proves the
-    // canonical full basis, so permutation preserves reduced element count and
-    // an exact identity operation preserves the source structure.
-    let lhs_exact_identity_borrowable =
+    // canonical full basis, so permutation preserves reduced element count
+    // and, in the canonical block order (TensorKit's only layout), an exact
+    // identity keeps a direct source's structure and passes the artifact's
+    // storage-adjoint proof for a lazy adjoint. An expert Complete tiling in
+    // another block order is copied by the executor on either side.
+    let borrowable = |source: &S, [codomain, domain]: &[AxisVec; 2], conjugate| {
         super::super::dynamic::source_layout_permutation_is_borrowable(
-            lhs.storage_space(),
-            lhs.nout(),
-            lhs.rank(),
+            source.storage_space(),
+            source.nout(),
+            source.rank(),
             || true,
-            &plan.lhs[0],
-            &plan.lhs[1],
-            plan.lhs_source_conjugate,
-        );
-    let rhs_exact_identity_borrowable =
-        super::super::dynamic::source_layout_permutation_is_borrowable(
-            rhs.storage_space(),
-            rhs.nout(),
-            rhs.rank(),
-            || true,
-            &plan.rhs[0],
-            &plan.rhs[1],
-            plan.rhs_source_conjugate,
-        );
+            codomain,
+            domain,
+            conjugate,
+        ) || super::super::dynamic::source_is_storage_adjoint(
+            conjugate,
+            source.nout(),
+            source.rank(),
+            codomain,
+            domain,
+        )
+    };
+    let lhs_exact_identity_borrowable = borrowable(lhs, &plan.lhs, plan.lhs_source_conjugate);
+    let rhs_exact_identity_borrowable = borrowable(rhs, &plan.rhs, plan.rhs_source_conjugate);
     let (core_right, core_right_axes) = match plan.orientation {
         FusionContractOrientation::LhsRhs => (rhs, axis_order.rhs()),
         FusionContractOrientation::RhsLhs => (lhs, axis_order.lhs()),
@@ -1568,6 +1571,11 @@ where
     }
     let lhs_core = probe(rule, lhs, plan.lhs_transform(), primer)?;
     let rhs_core = probe(rule, rhs, plan.rhs_transform(), primer)?;
+    // Why an identity adjoint stays charged here, unlike the Complete scorer:
+    // the artifact borrows it only over canonical coupled-sector layouts of
+    // the parent, the other core operand and the destination, and a
+    // non-Complete (expert) tiling certifies none of them; the copy is the
+    // executor's fallback, so the charge is an upper bound.
     let lhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
         lhs.storage_space(),
         lhs_core.nout,

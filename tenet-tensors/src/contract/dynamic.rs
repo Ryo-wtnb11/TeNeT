@@ -117,6 +117,30 @@ where
         )
 }
 
+/// Whether the core reads a source as the adjoint of its parent's storage: a
+/// conjugated (lazy adjoint) source whose core transform is the identity of
+/// its logical axes, `logical_nout` of `logical_rank` in its codomain
+/// (TensorKit `has_shared_permute(::AdjointTensorMap)` delegating to the
+/// parent). The one predicate behind both transformed-source compilers'
+/// `core_is_storage_adjoint` and the Complete candidate scorer's free side;
+/// the artifact still borrows only after `storage_adjoint_core_plan`'s
+/// canonical coupled-region proof, which every canonically ordered Complete
+/// layout passes.
+pub(crate) fn source_is_storage_adjoint(
+    source_conjugate: bool,
+    logical_nout: usize,
+    logical_rank: usize,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> bool {
+    source_conjugate
+        && codomain_permutation.iter().copied().eq(0..logical_nout)
+        && domain_permutation
+            .iter()
+            .copied()
+            .eq(logical_nout..logical_rank)
+}
+
 /// [`source_layout_metadata_is_borrowable`] for a permutation given as its
 /// two axis lists, before any `TreeTransformOperation` value exists.
 pub(super) fn source_layout_permutation_is_borrowable<HomSpaceMatches>(

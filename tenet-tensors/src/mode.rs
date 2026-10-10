@@ -45,7 +45,7 @@ use crate::contract::{
     compile_stored_dynamic_tree, compile_transformed_source, contract_axes_require_twist,
     core_homspace_matches, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
     rhs_contract_twist_factor_oriented, select_complete_tensorcontract_fusion_plan,
-    tree_transform_operation_axes, validate_checked_operand_relation,
+    source_is_storage_adjoint, tree_transform_operation_axes, validate_checked_operand_relation,
     validate_fusion_contract_rule, CheckedAuthority, CheckedContractTxn, DynamicFusionCoreDstEntry,
     DynamicFusionMapSpace, DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
     FusionContractPlan, FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
@@ -1392,7 +1392,13 @@ where
             space: Arc::new(space),
             replay_structure: Arc::clone(source_structure),
             transform_structure: Some(transform_structure),
-            core_is_storage_adjoint: identity && source_conjugate,
+            core_is_storage_adjoint: source_is_storage_adjoint(
+                source_conjugate,
+                source.nout(),
+                source.rank(),
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+            ),
         })
     }
 

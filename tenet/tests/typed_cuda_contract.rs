@@ -247,7 +247,7 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
 #[ignore = "requires a real CUDA device"]
 fn identity_adjoint_operands_are_borrowed_by_the_device_dynamic_tree() {
     fn at<R: DeviceRule, D: DevicePayload>(v: &tenet::typed::GradedSpace<R>, symmetry: &str) {
-        for index in 0..2 {
+        for index in 0..3 {
             // A fresh Runtime per case: its scratch high-water mark is this
             // case's alone.
             let runtime = Runtime::builder().cuda(0).build().unwrap();
