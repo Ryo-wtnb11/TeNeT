@@ -15,8 +15,8 @@ mod dynamic;
 pub use dynamic::cuda::CudaContractScratch;
 pub(crate) use dynamic::{
     compile_contract_twist, compile_core_dst, compile_transformed_source,
-    source_is_storage_adjoint, DynamicFusionCoreDstEntry, DynamicFusionTransformedSourceEntry,
-    DynamicTreeExecutionArtifact,
+    source_is_storage_adjoint, storage_layout_is_canonical, DynamicFusionCoreDstEntry,
+    DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
 };
 #[cfg(test)]
 pub(crate) use dynamic::{

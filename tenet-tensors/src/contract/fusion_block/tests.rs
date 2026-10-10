@@ -990,9 +990,11 @@ fn an_identity_adjoint_source_is_borrowed_only_over_canonical_regions() {
 /// its domain `(2, 3)` with `U`'s codomain in reverse order `(1, 0)`, `U`
 /// (6 elements). TensorKit's candidates: m1 keeps `A`'s order (`A` free,
 /// `U` permuted: cost |U| = 6), m2 keeps `U`'s (`A` permuted: cost |P| = 8),
-/// the reversed orders also permute the output; m1 wins.
+/// the reversed orders also permute the output; m1 wins. The same holds for
+/// `P` itself read directly (`P[2, 3]·U[1, 0]`). Over a parent in another
+/// block order the executor copies either side, so the scorer must charge it.
 #[test]
-fn a_borrowable_identity_adjoint_is_free_in_candidate_selection() {
+fn an_identity_side_is_free_in_selection_only_over_canonical_layouts() {
     let rule = std::sync::Arc::new(Z2FusionRule);
     let (canonical, reordered) = z2_reordered_rank4();
     let bind = |space| {
@@ -1018,86 +1020,100 @@ fn a_borrowable_identity_adjoint_is_free_in_candidate_selection() {
     assert_eq!(canonical.space().required_len().unwrap(), 8);
     assert_eq!(rhs.space().required_len().unwrap(), 6);
     let (lhs_axes, rhs_axes) = ([2, 3], [1, 0]);
-    let dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
-        &canonical.adjoint_view().unwrap(),
-        &rhs,
-        &lhs_axes,
-        &rhs_axes,
-        tenet_operations::OutputAxisOrder::identity(),
-        2,
-    )
-    .unwrap();
-    let axes = tenet_operations::TensorContractSpec::new_with_conjugation(
-        &lhs_axes,
-        &rhs_axes,
-        tenet_operations::OutputAxisOrder::identity(),
-        true,
-        false,
-    );
-    let value_of = |key: &tenet_core::BlockKey| {
-        let index = (0..canonical.space().structure().block_count())
-            .find(|&index| canonical.space().structure().block(index).unwrap().key() == key)
-            .unwrap();
-        index as f64 * 0.75 - 2.0
-    };
-    let parent_data = |space: &DynamicFusionMapSpace| {
-        let structure = space.structure();
-        let mut data = vec![0.0; space.required_len().unwrap()];
-        for index in 0..structure.block_count() {
-            let block = structure.block(index).unwrap();
-            data[block.offset()] = value_of(block.key());
-        }
-        data
-    };
-    let rhs_data: Vec<f64> = (0..rhs.space().required_len().unwrap())
-        .map(|i| 1.0 - i as f64 * 0.375)
-        .collect();
-    let run = |parent: &crate::BoundDynamicFusionMapSpace<Z2FusionRule>| {
-        let mut context =
-            crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
-        let lhs = crate::FusionOperand::adjoint(parent.space());
-        let resolution = context
-            .compile_storage_contract_resolution(
-                &dst,
-                lhs,
-                crate::FusionOperand::direct(rhs.space()),
-                axes,
-            )
-            .unwrap();
-        let super::super::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
-        else {
-            panic!("no candidate is zero-copy, so the route is DynamicTree");
+    for adjoint in [true, false] {
+        let lhs_logical = if adjoint {
+            canonical.adjoint_view().unwrap()
+        } else {
+            canonical.clone()
         };
-        let borrowed = artifact.borrowed_sources();
-        let mut out = vec![0.0; dst.space().required_len().unwrap()];
-        context
-            .tensorcontract_fusion_dyn_prelowered_into(
-                &dst,
-                &mut out,
-                lhs,
-                &parent_data(parent.space()),
-                crate::FusionOperand::direct(rhs.space()),
-                &rhs_data,
-                axes,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-        (borrowed, out)
-    };
-    let (selected, got) = run(&canonical);
-    // The reordered parent fails the storage-adjoint proof, so `A` is
-    // copied there: an independent route to the same tensor.
-    let (_, want) = run(&reordered);
-    // What: the scorer takes m1, and the artifact reads `P` in place while
-    // copying `U` (m2 would copy `A` and borrow `U`: `(false, true)`).
-    assert_eq!(selected, (true, false));
-    assert!(want.iter().any(|&value| value != 0.0));
-    for (got, want) in got.iter().zip(&want) {
-        assert!(
-            (got - want).abs() <= 1e-12 * (1.0 + want.abs()),
-            "{got} vs {want}"
+        let dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+            &lhs_logical,
+            &rhs,
+            &lhs_axes,
+            &rhs_axes,
+            tenet_operations::OutputAxisOrder::identity(),
+            2,
+        )
+        .unwrap();
+        let axes = tenet_operations::TensorContractSpec::new_with_conjugation(
+            &lhs_axes,
+            &rhs_axes,
+            tenet_operations::OutputAxisOrder::identity(),
+            adjoint,
+            false,
         );
+        let value_of = |key: &tenet_core::BlockKey| {
+            let index = (0..canonical.space().structure().block_count())
+                .find(|&index| canonical.space().structure().block(index).unwrap().key() == key)
+                .unwrap();
+            index as f64 * 0.75 - 2.0
+        };
+        let parent_data = |space: &DynamicFusionMapSpace| {
+            let structure = space.structure();
+            let mut data = vec![0.0; space.required_len().unwrap()];
+            for index in 0..structure.block_count() {
+                let block = structure.block(index).unwrap();
+                data[block.offset()] = value_of(block.key());
+            }
+            data
+        };
+        let rhs_data: Vec<f64> = (0..rhs.space().required_len().unwrap())
+            .map(|i| 1.0 - i as f64 * 0.375)
+            .collect();
+        let run = |parent: &crate::BoundDynamicFusionMapSpace<Z2FusionRule>| {
+            let mut context =
+                crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
+            let lhs = if adjoint {
+                crate::FusionOperand::adjoint(parent.space())
+            } else {
+                crate::FusionOperand::direct(parent.space())
+            };
+            let resolution = context
+                .compile_storage_contract_resolution(
+                    &dst,
+                    lhs,
+                    crate::FusionOperand::direct(rhs.space()),
+                    axes,
+                )
+                .unwrap();
+            let super::super::resolution::ContractRoute::DynamicTree(artifact) = &resolution.route
+            else {
+                panic!("no candidate is zero-copy, so the route is DynamicTree");
+            };
+            let borrowed = artifact.borrowed_sources();
+            let mut out = vec![0.0; dst.space().required_len().unwrap()];
+            context
+                .tensorcontract_fusion_dyn_prelowered_into(
+                    &dst,
+                    &mut out,
+                    lhs,
+                    &parent_data(parent.space()),
+                    crate::FusionOperand::direct(rhs.space()),
+                    &rhs_data,
+                    axes,
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            (borrowed, out)
+        };
+        let (selected, got) = run(&canonical);
+        let (expert, want) = run(&reordered);
+        // What: over the canonical parent the scorer takes m1, and the artifact
+        // reads `P` in place while copying `U`. The reordered parent (Complete,
+        // another block order) fails the executor's layout test (the
+        // storage-adjoint proof, or the direct core-layout match), so the scorer
+        // charges it and takes m2 (copy |P| = 8, borrow `U`) rather than m1,
+        // which would then copy both (14). Both routes give the same tensor.
+        assert_eq!(selected, (true, false), "adjoint {adjoint}");
+        assert_eq!(expert, (false, true), "adjoint {adjoint}");
+        assert!(want.iter().any(|&value| value != 0.0));
+        for (got, want) in got.iter().zip(&want) {
+            assert!(
+                (got - want).abs() <= 1e-12 * (1.0 + want.abs()),
+                "{got} vs {want}"
+            );
+        }
     }
 }
 

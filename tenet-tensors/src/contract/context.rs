@@ -2471,6 +2471,7 @@ where
                 axes,
             )
         },
+        &|space| M::storage_layout_is_canonical(target.rule, space),
         target.space,
         lhs,
         rhs,

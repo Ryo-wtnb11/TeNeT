@@ -123,9 +123,9 @@ where
 /// (TensorKit `has_shared_permute(::AdjointTensorMap)` delegating to the
 /// parent). The one predicate behind both transformed-source compilers'
 /// `core_is_storage_adjoint` and the Complete candidate scorer's free side;
-/// the artifact still borrows only after `storage_adjoint_core_plan`'s
-/// canonical coupled-region proof, which every canonically ordered Complete
-/// layout passes.
+/// the artifact borrows it only after `storage_adjoint_core_plan`'s
+/// canonical coupled-region proof, which the scorer mirrors with
+/// [`storage_layout_is_canonical`].
 pub(crate) fn source_is_storage_adjoint(
     source_conjugate: bool,
     logical_nout: usize,
@@ -217,14 +217,47 @@ fn source_is_borrowable_core_layout(
     ) {
         return false;
     }
-    let core_structure = core_space.structure();
     // Why not compare only the source's declared structure: even identity axes
     // can complete a sparse fusion-tree grid with structural-zero core blocks.
-    Arc::ptr_eq(core_structure, source_structure)
-        || core_structure.content_id() == source_structure.content_id()
+    structure_is_layout(core_space.structure(), source_structure)
+}
+
+/// Whether `structure` is laid out exactly as `layout`: the executor's test
+/// for reading a direct source in place, and (through
+/// [`storage_layout_is_canonical`]) the candidate scorer's.
+fn structure_is_layout(layout: &Arc<BlockStructure>, structure: &Arc<BlockStructure>) -> bool {
+    Arc::ptr_eq(layout, structure)
+        || layout.content_id() == structure.content_id()
         // Why not rely on content ids alone: an intern reset can assign a new
         // monotonic id to equal live content while an operation cache pins both.
-        || core_structure.as_ref() == source_structure.as_ref()
+        || layout.as_ref() == structure.as_ref()
+}
+
+/// Whether a multiplicity-free space's storage is its HomSpace's canonical
+/// coupled-sector layout, the core layout an identity transform derives.
+/// Under it the executor reads a direct source in place
+/// ([`source_is_borrowable_core_layout`]), and a storage adjoint passes
+/// `storage_adjoint_core_plan`'s proof against canonical partners; the
+/// Complete candidate scorer asks the same question of each operand.
+pub(crate) fn storage_layout_is_canonical<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    // Why the residency flag first: a warm eager call then reads one atomic,
+    // not the complete-HomSpace cache. A flagged structure is (or was) the
+    // resident canonical layout of a HomSpace with this Complete space's
+    // trees and shapes, hence this one's.
+    if space.structure().is_canonical() {
+        return Ok(true);
+    }
+    let canonical = space
+        .homspace()
+        .coupled_subblock_structure_from_leg_degeneracies(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    Ok(structure_is_layout(&canonical, space.structure()))
 }
 
 /// Which physical operands are read in place, and which one carries the

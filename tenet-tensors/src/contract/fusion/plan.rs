@@ -1113,6 +1113,10 @@ where
     let complete = matches!(dst.admission(), FusionSpaceAdmission::Complete(_))
         && matches!(lhs.admission(), FusionSpaceAdmission::Complete(_))
         && matches!(rhs.admission(), FusionSpaceAdmission::Complete(_));
+    let canonical = |space: &DynamicFusionMapSpace| {
+        super::super::dynamic::storage_layout_is_canonical(rule, space)
+    };
+    let layouts = CanonicalLayouts::new(&canonical);
 
     select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
         let candidate_axes =
@@ -1130,6 +1134,7 @@ where
         if complete {
             let facts = score_complete_fusion_contract_candidate(
                 |homspace, axes| source_contract_homspace_requires_twist(rule, homspace, axes),
+                &layouts,
                 dst,
                 lhs,
                 rhs,
@@ -1387,6 +1392,33 @@ fn fusion_contract_candidate_facts(
     })
 }
 
+/// Whether each operand's storage and the destination are their HomSpaces'
+/// canonical coupled-sector layouts (`dynamic::storage_layout_is_canonical`
+/// in multiplicity-free planning), asked lazily and at most once per
+/// selection: slots 0, 1 and 2 are the physical lhs, rhs and destination.
+pub(crate) struct CanonicalLayouts<'a, E> {
+    canonical: &'a dyn Fn(&DynamicFusionMapSpace) -> Result<bool, E>,
+    answers: [std::cell::OnceCell<bool>; 3],
+}
+
+impl<'a, E> CanonicalLayouts<'a, E> {
+    pub(crate) fn new(canonical: &'a dyn Fn(&DynamicFusionMapSpace) -> Result<bool, E>) -> Self {
+        Self {
+            canonical,
+            answers: Default::default(),
+        }
+    }
+
+    fn get(&self, slot: usize, space: &DynamicFusionMapSpace) -> Result<bool, E> {
+        if let Some(&answer) = self.answers[slot].get() {
+            return Ok(answer);
+        }
+        let answer = (self.canonical)(space)?;
+        let _ = self.answers[slot].set(answer);
+        Ok(answer)
+    }
+}
+
 /// The fewest elements any DynamicTree candidate of `axes` over
 /// `orientations` materializes into `dst`: TensorKit `_contract_memcost`
 /// (tensoroperations.jl L378) minimized over `_contract_candidates` (L360).
@@ -1396,6 +1428,7 @@ fn fusion_contract_candidate_facts(
 /// probe transformed layouts instead.
 pub(crate) fn min_dynamic_tree_materialized_elements<E>(
     twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
+    canonical: &dyn Fn(&DynamicFusionMapSpace) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
@@ -1411,6 +1444,7 @@ where
     if !complete {
         return Ok(None);
     }
+    let layouts = CanonicalLayouts::new(canonical);
     select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
         let candidate_axes =
             TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
@@ -1426,6 +1460,7 @@ where
         .orient(orientation);
         let facts = score_complete_fusion_contract_candidate(
             &twist,
+            &layouts,
             dst,
             &lhs,
             &rhs,
@@ -1444,6 +1479,9 @@ where
 /// the Complete scorer
 /// of the selector ([`prepare_tensorcontract_fusion_plan_dyn_raw_canonical`]),
 /// over both orientations, with `twist` reading the core-right twist.
+/// Every layout is canonical: checked admission derives the canonical
+/// layout of every operand and destination (`with_test_structure` is the
+/// only, test-only, exception).
 pub(crate) fn select_complete_tensorcontract_fusion_plan<E>(
     twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
@@ -1454,6 +1492,8 @@ pub(crate) fn select_complete_tensorcontract_fusion_plan<E>(
 where
     E: From<OperationError>,
 {
+    let canonical = |_: &DynamicFusionMapSpace| Ok(true);
+    let layouts = CanonicalLayouts::new(&canonical);
     select_best_scored_contract_candidate(axes, &CACHED_ORIENTATIONS, |candidate, orientation| {
         let candidate_axes =
             TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
@@ -1469,6 +1509,7 @@ where
         .orient(orientation);
         let facts = score_complete_fusion_contract_candidate(
             &twist,
+            &layouts,
             dst,
             lhs,
             rhs,
@@ -1482,6 +1523,7 @@ where
 
 fn score_complete_fusion_contract_candidate<S, E>(
     twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
+    layouts: &CanonicalLayouts<'_, E>,
     dst: &DynamicFusionMapSpace,
     lhs: &S,
     rhs: &S,
@@ -1495,13 +1537,15 @@ where
     #[cfg(test)]
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
     // Why not probe the transformed layouts: Complete admission proves the
-    // canonical full basis, so permutation preserves reduced element count
-    // and, in the canonical block order (TensorKit's only layout), an exact
-    // identity keeps a direct source's structure and passes the artifact's
-    // storage-adjoint proof for a lazy adjoint. An expert Complete tiling in
-    // another block order is copied by the executor on either side.
-    let borrowable = |source: &S, [codomain, domain]: &[AxisVec; 2], conjugate| {
-        super::super::dynamic::source_layout_permutation_is_borrowable(
+    // full basis, so permutation preserves reduced element count. An identity
+    // side is read in place exactly when the executor reads it so: a direct
+    // source over its canonical layout (the derived core layout), a storage
+    // adjoint over its parent's canonical layout and, when the output is the
+    // identity, a canonical destination, the coupled-region proof's operands
+    // (a copied partner or core destination is canonical by derivation).
+    let output_exact_identity = plan.output_transform_is_identity();
+    let borrowable = |slot, source: &S, [codomain, domain]: &[AxisVec; 2], conjugate| {
+        let direct = super::super::dynamic::source_layout_permutation_is_borrowable(
             source.storage_space(),
             source.nout(),
             source.rank(),
@@ -1509,16 +1553,21 @@ where
             codomain,
             domain,
             conjugate,
-        ) || super::super::dynamic::source_is_storage_adjoint(
+        );
+        let adjoint = super::super::dynamic::source_is_storage_adjoint(
             conjugate,
             source.nout(),
             source.rank(),
             codomain,
             domain,
-        )
+        );
+        if !(direct || adjoint) || !layouts.get(slot, source.storage_space())? {
+            return Ok::<_, E>(false);
+        }
+        Ok(direct || !output_exact_identity || layouts.get(2, dst)?)
     };
-    let lhs_exact_identity_borrowable = borrowable(lhs, &plan.lhs, plan.lhs_source_conjugate);
-    let rhs_exact_identity_borrowable = borrowable(rhs, &plan.rhs, plan.rhs_source_conjugate);
+    let lhs_exact_identity_borrowable = borrowable(0, lhs, &plan.lhs, plan.lhs_source_conjugate)?;
+    let rhs_exact_identity_borrowable = borrowable(1, rhs, &plan.rhs, plan.rhs_source_conjugate)?;
     let (core_right, core_right_axes) = match plan.orientation {
         FusionContractOrientation::LhsRhs => (rhs, axis_order.rhs()),
         FusionContractOrientation::RhsLhs => (lhs, axis_order.lhs()),
@@ -2036,8 +2085,12 @@ mod tests {
         )
         .unwrap();
 
+        let canonical = |space: &DynamicFusionMapSpace| {
+            super::super::super::dynamic::storage_layout_is_canonical(&rule, space)
+        };
         let complete = super::score_complete_fusion_contract_candidate(
             |homspace, axes| super::source_contract_homspace_requires_twist(&rule, homspace, axes),
+            &super::CanonicalLayouts::new(&canonical),
             &dst,
             &lhs,
             &rhs,

@@ -45,10 +45,11 @@ use crate::contract::{
     compile_stored_dynamic_tree, compile_transformed_source, contract_axes_require_twist,
     core_homspace_matches, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
     rhs_contract_twist_factor_oriented, select_complete_tensorcontract_fusion_plan,
-    source_is_storage_adjoint, tree_transform_operation_axes, validate_checked_operand_relation,
-    validate_fusion_contract_rule, CheckedAuthority, CheckedContractTxn, DynamicFusionCoreDstEntry,
-    DynamicFusionMapSpace, DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
-    FusionContractPlan, FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
+    source_is_storage_adjoint, storage_layout_is_canonical, tree_transform_operation_axes,
+    validate_checked_operand_relation, validate_fusion_contract_rule, CheckedAuthority,
+    CheckedContractTxn, DynamicFusionCoreDstEntry, DynamicFusionMapSpace,
+    DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact, FusionContractPlan,
+    FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
     PreparedCheckedGenericDynamicSpace, StorageContractResolution, ValidatedCoreContract,
     CHECKED_CONTRACTION_REQUIRES_BOSONIC,
 };
@@ -331,6 +332,14 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
     ) -> Result<(), Self::Error>;
+
+    /// Whether `space`'s storage is its HomSpace's canonical coupled-sector
+    /// layout, under which the DynamicTree executor reads an identity
+    /// source in place (the Complete candidate scorer's question).
+    fn storage_layout_is_canonical(
+        rule: &R,
+        space: &DynamicFusionMapSpace,
+    ) -> Result<bool, Self::Error>;
 
     /// Whether a contraction may carry TensorKit's fermionic supertrace twist
     /// (`blas_contract!`, `tensoroperations.jl:398-410` @cfaa073).
@@ -668,6 +677,13 @@ where
         rhs: &DynamicFusionMapSpace,
     ) -> Result<(), OperationError> {
         validate_fusion_contract_rule(rule, dst, lhs, rhs)
+    }
+
+    fn storage_layout_is_canonical(
+        rule: &R,
+        space: &DynamicFusionMapSpace,
+    ) -> Result<bool, OperationError> {
+        storage_layout_is_canonical(rule, space)
     }
 
     fn contract_twist_possible(
@@ -1259,6 +1275,15 @@ where
             }
         }
         Ok(())
+    }
+
+    /// True by construction: checked admission derives the canonical layout
+    /// of every operand and destination.
+    fn storage_layout_is_canonical(
+        _rule: &R,
+        _space: &DynamicFusionMapSpace,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 
     /// The entry's answer (U15): a contraction entry read the braiding style

@@ -812,6 +812,7 @@ where
             )
         },
         |homspace, axes| rhs_contract_axes_require_twist(rule, homspace, axes),
+        &|space| super::dynamic::storage_layout_is_canonical(rule, space),
         dst,
         lhs,
         rhs,
@@ -842,6 +843,7 @@ where
 pub(crate) fn copy_c_order<E>(
     twist_possible: impl Fn() -> Result<bool, E> + Copy,
     twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E> + Copy,
+    canonical: &dyn Fn(&DynamicFusionMapSpace) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
@@ -905,6 +907,7 @@ where
     let dynamic = |orientation| {
         min_dynamic_tree_materialized_elements(
             twist,
+            canonical,
             dst,
             lhs,
             rhs,
