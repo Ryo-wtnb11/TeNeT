@@ -107,31 +107,7 @@ where
     /// what carries every recoupling and bend, so this adds no mathematics of
     /// its own; it is a scale followed by one permutation.
     ///
-    /// # Which patterns, and why only those
-    ///
-    /// The engine admits a contracted pair only when the two legs agree on
-    /// their raw duality flag on the compose-shaped pairing (one operand's
-    /// domain leg against the other's codomain leg), and a compact operand's
-    /// leg *is* its bond on both sides. So each arm requires exactly that
-    /// pairing and compares the two legs itself: raw equality is the engine's
-    /// admissibility condition here, so a mismatch is a contraction the dense
-    /// route must reject rather than one this arm may answer, and the arm
-    /// declines so the expert layer reports it in its own words. `D · D` is
-    /// handed to [`Self::compose_compact`], which is the same product and
-    /// already proves its destination.
-    ///
-    /// # The twist, and why it is not folded
-    ///
-    /// [`Self::contract`] applies the fermionic supertrace twist to a **dual**
-    /// contracted leg of `other`, where [`Self::compose`] does not. Here the case
-    /// cannot arise, so the arm declines instead of carrying arithmetic no test
-    /// could reach: a compact payload's bond leg is built non-dual
-    /// (`seam::spectrum_bond`), the arms pair it with a *codomain*
-    /// leg of `other` whose external duality is exactly its raw flag, and
-    /// admissibility forces that flag to equal the bond's. The guard stays
-    /// because the first constructor of a compact payload on a dual bond leg —
-    /// or of an arm pairing a domain leg of `other` — should decline rather
-    /// than silently return a wrong sign.
+    /// The patterns are [`Self::diagonal_contract_pattern`]'s.
     pub(super) fn try_contract_diagonal(
         &self,
         other: &Self,
@@ -140,38 +116,14 @@ where
         output_axes: &[usize],
         codomain_rank: usize,
     ) -> Result<Option<Self>, TypedFacadeError<R>> {
-        if lhs_axes.len() != 1 || rhs_axes.len() != 1 || !self.same_rule(other) {
+        let Some(DiagonalContract { pattern, layout }) =
+            self.diagonal_contract_pattern(other, lhs_axes, rhs_axes, output_axes, codomain_rank)
+        else {
             return Ok(None);
-        }
-        let (lhs_axis, rhs_axis) = (lhs_axes[0], rhs_axes[0]);
-        if lhs_axis >= self.rank() || rhs_axis >= other.rank() {
-            return Ok(None);
-        }
-        // Why the provider rather than a stored flag: `braiding_style` is the
-        // rule's own answer.
-        let fermionic = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider())
-            == tenet_core::BraidingStyleKind::Fermionic;
-        if fermionic
-            && other
-                .logical_space()
-                .space()
-                .homspace()
-                .external_axis_is_dual(rhs_axis)
-                != Some(false)
-        {
-            return Ok(None);
-        }
-        let (left, right) = (self.logical_space().space(), other.logical_space().space());
-        let (left_home, right_home) = (left.homspace(), right.homspace());
-        match (self.spectrum(), other.spectrum()) {
-            // `D · D`: the same product as `D * D`, which already knows how to
-            // stay compact and which destinations may hold the result.
-            (Some(_), Some(_)) => {
-                if lhs_axis != 1
-                    || rhs_axis != 0
-                    || codomain_rank != 1
-                    || output_axes.iter().copied().ne(0..2)
-                {
+        };
+        match pattern {
+            DiagonalContractPattern::Product => {
+                if layout.is_some() {
                     // Why not a reordered output: `pAB` can move the surviving
                     // bond across the codomain/domain split, and rebinding the
                     // product spectrum there is not equivalent to a permute
@@ -180,39 +132,20 @@ where
                 }
                 Ok(self.compose_compact(other)?)
             }
-            // `t · D` (TensorKit `rmul!`): scale `t`'s contracted domain leg,
-            // then move it to where the contraction's output order wants it.
-            (None, Some(spectrum)) => {
-                if rhs_axis != 0 || lhs_axis < self.codomain_rank() {
-                    return Ok(None);
-                }
-                if left_home.domain().legs()[lhs_axis - self.codomain_rank()]
-                    != right_home.codomain().legs()[0]
-                {
-                    return Ok(None);
-                }
-                let mut source: Vec<usize> = (0..self.rank()).filter(|&a| a != lhs_axis).collect();
-                source.push(lhs_axis);
-                self.scaled_axis(Some(lhs_axis), spectrum)?
-                    .permuted_to_output(&source, output_axes, codomain_rank)
-            }
-            // `D · t` (TensorKit `lmul!`): the mirror image, scaling the
-            // contracted codomain leg of `t` at whatever position it sits.
-            (Some(spectrum), None) => {
-                if lhs_axis != 1 || rhs_axis >= other.codomain_rank() {
-                    return Ok(None);
-                }
-                if left_home.domain().legs()[0] != right_home.codomain().legs()[rhs_axis] {
-                    return Ok(None);
-                }
-                let mut source = vec![rhs_axis];
-                source.extend((0..other.rank()).filter(|&a| a != rhs_axis));
-                let Some(completed) = other
-                    .scaled_axis(Some(rhs_axis), spectrum)?
-                    .permuted_to_output(&source, output_axes, codomain_rank)?
-                else {
-                    return Ok(None);
+            DiagonalContractPattern::Scaled {
+                scaled,
+                axis,
+                spectrum,
+                rebind,
+            } => {
+                let completed = scaled.scaled_axis(Some(axis), spectrum)?;
+                let completed = match layout {
+                    None => completed,
+                    Some(operation) => completed.tree_transform(operation)?,
                 };
+                if !rebind {
+                    return Ok(Some(completed));
+                }
                 // Scaling and permutation deliberately run on `other`; only
                 // after both succeed do we rebind their validated owned-dense
                 // result to the public contract's exact left authority.
@@ -235,47 +168,246 @@ where
                     )),
                 }))
             }
-            (None, None) => Ok(None),
         }
     }
 
-    /// This tensor's axes, listed in `source[output_axes[..]]` order and split
-    /// at `codomain_rank`, or `None` when `output_axes` is not a permutation of
-    /// `0..source.len()`.
+    /// The compact arm of [`Self::contract_into`]: the algebra of
+    /// [`Self::try_contract_diagonal`] written into `destination`, TensorKit
+    /// `blas_contract!` with a `DiagonalTensorMap` operand (`mul!` scaling
+    /// its `Diagonal` blocks, plus `copyC`'s `tensoradd!` for a reordered
+    /// output). `false` when the dense route must run; `destination` already
+    /// passed [`destination_precheck`] against both operands.
     ///
-    /// `source` is the contraction's default output order expressed as axes of
-    /// the scaled operand. An `output_axes` that is not a
-    /// permutation declines rather than errors: the dense route validates it
-    /// and reports it, and one error message beats two.
-    fn permuted_to_output(
+    /// - `t · D` / `D · t` in the scaled operand's order: one pass
+    ///   `destination = β·destination + α·scale_axis(t)`, reading a direct `t`
+    ///   in place (a lazy adjoint `t` is read into one logical-order buffer
+    ///   first, as the eager arm reads it).
+    /// - reordered: the scaled `t` in one operation-local buffer, then the
+    ///   transform `_into` from it with `(α, β)`.
+    /// - `D · D`: the product spectrum, written on the diagonal in its own
+    ///   order, or else read by the compact-source transform `_into` onto
+    ///   the output order (contract is permute(compose) here: the pattern
+    ///   excludes the fermionic twist).
+    pub(super) fn try_contract_diagonal_into(
         &self,
-        source: &[usize],
+        other: &Self,
+        spec: &ContractSpec<'_>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<bool, TypedFacadeError<R>> {
+        let Some(DiagonalContract { pattern, layout }) = self.diagonal_contract_pattern(
+            other,
+            spec.lhs,
+            spec.rhs,
+            &spec.output_axes(),
+            spec.codomain.len(),
+        ) else {
+            return Ok(false);
+        };
+        let (tensor, operation) = match pattern {
+            DiagonalContractPattern::Product => {
+                let Some(product) = self.compose_compact(other)? else {
+                    return Ok(false);
+                };
+                let Some(operation) = layout else {
+                    // On the bond space itself, as eager's compact `D · D`:
+                    // `β·destination`, then `α·s` on each block's diagonal.
+                    let space = product.logical_space().space();
+                    require_destination_space(destination.logical_space().space(), space)?;
+                    let spectrum = product
+                        .spectrum()
+                        .ok_or_else(|| internal_layout_error("a compact product"))?;
+                    let data = destination_slice(destination)?;
+                    scale_by_beta(data, beta);
+                    if !alpha.is_zero() {
+                        add_spectrum_into(space, data, spectrum, alpha)?;
+                    }
+                    return Ok(true);
+                };
+                (product, operation)
+            }
+            DiagonalContractPattern::Scaled {
+                scaled,
+                axis,
+                spectrum,
+                ..
+            } => match layout {
+                None => {
+                    require_destination_space(
+                        destination.logical_space().space(),
+                        scaled.logical_space().space(),
+                    )?;
+                    let _host_pool = self.runtime.enter_host_pool();
+                    let source = scaled.logical_dense_data()?;
+                    tenet_matrixalgebra::seam::axpby_axis_by_spectrum_into(
+                        scaled.logical_space().space(),
+                        destination_slice(destination)?,
+                        &source,
+                        Some(axis),
+                        spectrum,
+                        |value| value,
+                        alpha,
+                        beta,
+                    )
+                    .map_err(Error::from)?;
+                    return Ok(true);
+                }
+                Some(operation) => (scaled.scaled_axis(Some(axis), spectrum)?, operation),
+            },
+        };
+        let probe_operation = operation.clone();
+        tensor.tree_transform_into(
+            destination,
+            alpha,
+            beta,
+            || Ok(operation),
+            |probe| {
+                probe(tenet_tensors::TreeTransformOperationView::of(
+                    &probe_operation,
+                ))
+            },
+        )?;
+        Ok(true)
+    }
+
+    /// The one pattern authority of both compact contraction arms, or `None`
+    /// when the dense route must run.
+    ///
+    /// # Which patterns, and why only those
+    ///
+    /// The engine admits a contracted pair only when the two legs agree on
+    /// their raw duality flag on the compose-shaped pairing (one operand's
+    /// domain leg against the other's codomain leg), and a compact operand's
+    /// leg *is* its bond on both sides. So each arm requires exactly that
+    /// pairing and compares the two legs itself: raw equality is the engine's
+    /// admissibility condition here, so a mismatch is a contraction the dense
+    /// route must reject rather than one this arm may answer, and the arm
+    /// declines so the expert layer reports it in its own words. `D · D` is
+    /// [`Self::compose_compact`]'s product, which already proves its
+    /// destination. These declines are TensorKit's own `copyA`/`copyB` cases
+    /// (`tensoroperations.jl:399-409` @cfaa073e): a non-shared pairing, or the
+    /// fermionic twist.
+    ///
+    /// # The twist, and why it is not folded
+    ///
+    /// [`Self::contract`] applies the fermionic supertrace twist to a **dual**
+    /// contracted leg of `other`, where [`Self::compose`] does not. Here the case
+    /// cannot arise, so the arm declines instead of carrying arithmetic no test
+    /// could reach: a compact payload's bond leg is built non-dual
+    /// (`seam::spectrum_bond`), the arms pair it with a *codomain*
+    /// leg of `other` whose external duality is exactly its raw flag, and
+    /// admissibility forces that flag to equal the bond's. The guard stays
+    /// because the first constructor of a compact payload on a dual bond leg —
+    /// or of an arm pairing a domain leg of `other` — should decline rather
+    /// than silently return a wrong sign.
+    fn diagonal_contract_pattern<'t>(
+        &'t self,
+        other: &'t Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
         output_axes: &[usize],
         codomain_rank: usize,
-    ) -> Result<Option<Self>, TypedFacadeError<R>> {
-        let mut sorted = output_axes.to_vec();
-        sorted.sort_unstable();
-        if sorted.iter().copied().ne(0..source.len()) {
-            return Ok(None);
+    ) -> Option<DiagonalContract<'t, R, D>> {
+        if lhs_axes.len() != 1 || rhs_axes.len() != 1 || !self.same_rule(other) {
+            return None;
         }
-        let ordered: Vec<usize> = output_axes.iter().map(|&axis| source[axis]).collect();
-        if codomain_rank == self.codomain_rank()
-            && ordered[..codomain_rank]
-                .iter()
-                .copied()
-                .eq(0..codomain_rank)
-            && ordered[codomain_rank..]
-                .iter()
-                .copied()
-                .eq(codomain_rank..source.len())
+        let (lhs_axis, rhs_axis) = (lhs_axes[0], rhs_axes[0]);
+        if lhs_axis >= self.rank() || rhs_axis >= other.rank() {
+            return None;
+        }
+        // Why the provider rather than a stored flag: `braiding_style` is the
+        // rule's own answer.
+        let fermionic = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider())
+            == tenet_core::BraidingStyleKind::Fermionic;
+        if fermionic
+            && other
+                .logical_space()
+                .space()
+                .homspace()
+                .external_axis_is_dual(rhs_axis)
+                != Some(false)
         {
-            return Ok(Some(self.clone()));
+            return None;
         }
-        self.tree_transform(TreeTransformOperation::permute(
-            ordered[..codomain_rank].iter().copied(),
-            ordered[codomain_rank..].iter().copied(),
-        ))
-        .map(Some)
+        let (left_home, right_home) = (
+            self.logical_space().space().homspace(),
+            other.logical_space().space().homspace(),
+        );
+        let (pattern, source, scaled_codomain_rank) = match (self.spectrum(), other.spectrum()) {
+            (Some(_), Some(_)) => {
+                if lhs_axis != 1 || rhs_axis != 0 {
+                    return None;
+                }
+                (DiagonalContractPattern::Product, vec![0, 1], 1)
+            }
+            // `t · D` (TensorKit `rmul!`): scale `t`'s contracted domain leg,
+            // then move it to where the contraction's output order wants it.
+            (None, Some(spectrum)) => {
+                if rhs_axis != 0 || lhs_axis < self.codomain_rank() {
+                    return None;
+                }
+                if left_home.domain().legs()[lhs_axis - self.codomain_rank()]
+                    != right_home.codomain().legs()[0]
+                {
+                    return None;
+                }
+                let mut source: Vec<usize> = (0..self.rank()).filter(|&a| a != lhs_axis).collect();
+                source.push(lhs_axis);
+                let pattern = DiagonalContractPattern::Scaled {
+                    scaled: self,
+                    axis: lhs_axis,
+                    spectrum,
+                    rebind: false,
+                };
+                (pattern, source, self.codomain_rank())
+            }
+            // `D · t` (TensorKit `lmul!`): the mirror image, scaling the
+            // contracted codomain leg of `t` at whatever position it sits.
+            (Some(spectrum), None) => {
+                if lhs_axis != 1 || rhs_axis >= other.codomain_rank() {
+                    return None;
+                }
+                if left_home.domain().legs()[0] != right_home.codomain().legs()[rhs_axis] {
+                    return None;
+                }
+                let mut source = vec![rhs_axis];
+                source.extend((0..other.rank()).filter(|&a| a != rhs_axis));
+                let pattern = DiagonalContractPattern::Scaled {
+                    scaled: other,
+                    axis: rhs_axis,
+                    spectrum,
+                    rebind: true,
+                };
+                (pattern, source, other.codomain_rank())
+            }
+            (None, None) => return None,
+        };
+        let layout = output_layout(&source, output_axes, codomain_rank, scaled_codomain_rank)?;
+        Some(DiagonalContract { pattern, layout })
+    }
+
+    /// This tensor's dense payload in its logical orientation: borrowed when
+    /// stored so, a lazy adjoint read through its parent into one buffer.
+    fn logical_dense_data(&self) -> Result<std::borrow::Cow<'_, [D]>, Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            let (operand, source) = self.fusion_operand_and_data();
+            return Ok(std::borrow::Cow::Owned(
+                tenet_tensors::oriented_fusion_add_owned(
+                    self.logical_space().space().structure(),
+                    operand,
+                    &source,
+                    operand,
+                    &source,
+                    D::from_real(1.0),
+                    D::from_real(0.0),
+                )?,
+            ));
+        }
+        Ok(self
+            .owned_body()
+            .expect("owned scaled-axis input")
+            .materialized_dense_data())
     }
 
     /// This tensor with one bond axis of every block scaled by `spectrum`,
@@ -287,24 +419,7 @@ where
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
     ) -> Result<Self, Error> {
         let _host_pool = self.runtime.enter_host_pool();
-        let mut data = if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            let (operand, source) = self.fusion_operand_and_data();
-            tenet_tensors::oriented_fusion_add_owned(
-                self.logical_space().space().structure(),
-                operand,
-                &source,
-                operand,
-                &source,
-                D::from_real(1.0),
-                D::from_real(0.0),
-            )?
-        } else {
-            self.owned_body()
-                .expect("owned scaled-axis input")
-                .materialized_dense_data()
-                .as_ref()
-                .to_vec()
-        };
+        let mut data = self.logical_dense_data()?.into_owned();
         tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
             self.logical_space().space(),
             &mut data,
@@ -324,6 +439,55 @@ where
         self.logical_space().space().admission().rule_identity()
             == other.logical_space().space().admission().rule_identity()
     }
+}
+
+/// A compact contraction pattern and how its default-order result is laid
+/// out on the requested output: `None` in that order already, else the one
+/// permute that moves it.
+struct DiagonalContract<'t, R, D> {
+    pattern: DiagonalContractPattern<'t, R, D>,
+    layout: Option<TreeTransformOperation>,
+}
+
+enum DiagonalContractPattern<'t, R, D> {
+    /// `D · D` on the shared pairing: the product spectrum.
+    Product,
+    /// `t · D` or `D · t`: `scaled`'s `axis` multiplied by `spectrum`;
+    /// `rebind` when `scaled` is the right operand, whose eager result is
+    /// rebound to the left authority.
+    Scaled {
+        scaled: &'t TensorMap<R, D>,
+        axis: usize,
+        spectrum: &'t [tenet_matrixalgebra::SectorSpectrum<D>],
+        rebind: bool,
+    },
+}
+
+/// The permute taking a result whose axes are `source` (the contraction's
+/// default output order, split at `source_codomain_rank`) to `output_axes`
+/// split at `codomain_rank`: `Some(None)` when it is the identity, `None`
+/// when `output_axes` is not a permutation of `0..source.len()`. A malformed
+/// order declines rather than errors: the dense route validates it and
+/// reports it, and one error message beats two.
+fn output_layout(
+    source: &[usize],
+    output_axes: &[usize],
+    codomain_rank: usize,
+    source_codomain_rank: usize,
+) -> Option<Option<TreeTransformOperation>> {
+    let mut sorted = output_axes.to_vec();
+    sorted.sort_unstable();
+    if sorted.iter().copied().ne(0..source.len()) {
+        return None;
+    }
+    let ordered: Vec<usize> = output_axes.iter().map(|&axis| source[axis]).collect();
+    if codomain_rank == source_codomain_rank && ordered.iter().copied().eq(0..source.len()) {
+        return Some(None);
+    }
+    Some(Some(TreeTransformOperation::permute(
+        ordered[..codomain_rank].iter().copied(),
+        ordered[codomain_rank..].iter().copied(),
+    )))
 }
 
 /// `twist` of a compact diagonal, or `None` for any other payload. A bond

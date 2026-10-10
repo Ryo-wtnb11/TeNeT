@@ -3,7 +3,11 @@
 //! TensorKit `cfaa073e`: `permute!`/`braid!`/`transpose!`/`repartition!`
 //! (`src/tensors/indexmanipulations.jl:217, 303, 374, 435`) check the
 //! destination space and run `add_transform!` (L547) with `α, β` for every
-//! fusion style. QSpace (`dd2cc7e1`) has no accumulate-into-existing form
+//! fusion style; `tensorcontract!` (`src/tensors/tensoroperations.jl:126`)
+//! checks it and runs `blas_contract!` (L383), which scales a
+//! `DiagonalTensorMap` operand's `Diagonal` blocks with `mul!` on the shared
+//! pairing and copies it otherwise (L399-409). QSpace (`dd2cc7e1`) has no
+//! accumulate-into-existing form
 //! (`QSpace::Permute` is in place, `contract` overwrites), so TensorKit
 //! semantics govern.
 //!
@@ -28,6 +32,15 @@
 //! symbols (U(1), SU(2), fermion parity, each with dual legs),
 //! multiplicity-free complex symbols (Fibonacci), checked Generic (SU(2),
 //! SU(3) with outer multiplicity) × {f64, Complex64 scaled by `1 + 2i`}.
+//! Contraction rows (leaf B1): `[v, w'] ← [v, w']` against `[v, w'] ← [v]`
+//! over the domain as owned, lazy-adjoint and adjoint-view (`other`) operands
+//! in the core and two reordered output orders; and every compact arm
+//! pattern (`t · D`, `D · t` with a direct and a lazy `t`, `D · D`) in its own
+//! order and reordered, plus a two-axis contraction the arm declines. The
+//! oracle contracts the materialized operands; reordered `D · D` is the row
+//! that proves `contract = permute(compose)` there (eager takes the dense
+//! route).
+//!
 //! A compact cell's destination is dense: its off-diagonal entries are
 //! `β·dst₀` where the dense replay writes `α·(c·0) + β·dst₀`, so cells compare
 //! within tolerance (signed zeros may differ).
@@ -46,7 +59,9 @@ use tenet::sector::{
     FermionParityFusionRule, FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{BlockFusionTrees, Complex64, GradedSpace, SectorSpectrum, TensorMap};
+use tenet::typed::{
+    BlockFusionTrees, Complex64, ContractSpec, GradedSpace, SectorSpectrum, TensorMap,
+};
 
 #[path = "../../tests/support/fixtures.rs"]
 mod fixtures;
@@ -171,18 +186,77 @@ macro_rules! entries {
 macro_rules! cell {
     ($rows:expr, $runtime:expr, $source:expr, $key:expr, $d:ty, $name:expr,
      |$t:ident| $eager:expr, |$dst:ident, $a:ident, $b:ident| $into:expr) => {{
-        let key = $key;
         let cold = $source.dense_data().is_err();
         let eager = {
             let $t = &$source;
             $eager.unwrap()
         };
-        let expected_eager = dense(&eager);
         let oracle = {
             let materialized = $source.materialize().unwrap();
             let $t = &materialized;
-            dense(&$eager.unwrap())
+            $eager.unwrap()
         };
+        beta_cells!(
+            $rows,
+            $runtime,
+            eager,
+            oracle,
+            $key,
+            $d,
+            $name,
+            |$dst, $a, $b| $into,
+            || assert_eq!(
+                $source.dense_data().is_err(),
+                cold,
+                "{}: source representation",
+                $name
+            )
+        );
+    }};
+}
+
+/// One cell per `β` for `$lhs.contract_into($rhs_arg, ..)`: the oracle
+/// contracts the materialized operands, and both operands stay cold.
+macro_rules! contract_cell {
+    ($rows:expr, $runtime:expr, $lhs:expr, $rhs:expr, $rhs_arg:expr, $spec:expr, $key:expr,
+     $d:ty, $name:expr) => {{
+        let spec = $spec;
+        let cold = ($lhs.dense_data().is_err(), $rhs.dense_data().is_err());
+        let eager = $lhs.contract($rhs_arg, &spec).unwrap();
+        let oracle = $lhs
+            .materialize()
+            .unwrap()
+            .contract(&$rhs.materialize().unwrap(), &spec)
+            .unwrap();
+        beta_cells!(
+            $rows,
+            $runtime,
+            eager,
+            oracle,
+            $key,
+            $d,
+            $name,
+            |d, a, b| $lhs.contract_into($rhs_arg, &spec, d, a, b),
+            || assert_eq!(
+                ($lhs.dense_data().is_err(), $rhs.dense_data().is_err()),
+                cold,
+                "{}: operand representation",
+                $name
+            )
+        );
+    }};
+}
+
+/// The `β` loop of a cell: `eager` matches the reference-step `oracle`,
+/// then `$into` on a fresh `dst₀` equals `α·eager + β·dst₀`, keeps the
+/// destination's allocation and provider, and `$cold` holds.
+macro_rules! beta_cells {
+    ($rows:expr, $runtime:expr, $eager:expr, $oracle:expr, $key:expr, $d:ty, $name:expr,
+     |$dst:ident, $a:ident, $b:ident| $into:expr, $cold:expr) => {{
+        let key = $key;
+        let eager = $eager;
+        let expected_eager = dense(&eager);
+        let oracle = dense(&$oracle);
         assert_eq!(oracle.len(), expected_eager.len(), "{}", $name);
         for (i, (&o, &e)) in oracle.iter().zip(&expected_eager).enumerate() {
             assert!(close(e, o), "{} [{i}]: eager {e} vs oracle {o}", $name);
@@ -227,11 +301,7 @@ macro_rules! cell {
                     };
                 assert!(close(got, want), "{what} [{i}]: {got} vs {want}");
             }
-            assert_eq!(
-                $source.dense_data().is_err(),
-                cold,
-                "{what}: source representation"
-            );
+            ($cold)();
             $rows.push((what, entries!(destination, key)));
         }
     }};
@@ -797,5 +867,598 @@ fn lazy_adjoint_transform_into_allocates_no_parent_sized_buffer() {
         lazy_into_allocations!(source!(&runtime, v, v, |t: &BlockFusionTrees<Vec<i64>>| {
             twice(t, sun_spin)
         }));
+    }
+}
+
+/// `(name, codomain, domain)` of the rank-3 result of contracting
+/// `[v, w'] ← [v, w']` with `[v, w'] ← [v]` over the domain: the core
+/// (default) order and two reordered ones (copyC or `DynamicTree`, as the
+/// planner's memcost picks).
+const CONTRACT_ORDERS: [(&str, &[usize], &[usize]); 3] = [
+    ("core", &[0, 1], &[2]),
+    ("reordered [2, 0] ← [1]", &[2, 0], &[1]),
+    ("reordered [1] ← [0, 2]", &[1], &[0, 2]),
+];
+
+/// Every `contract_into` of `$lhs` (`[v, w'] ← [v, w']`) with the
+/// `[v, w'] ← [v]` operand: owned `$rhs`, and `$rhs_parent`'s lazy adjoint
+/// and adjoint view; `$lazy_lhs` (`[v, w'] ← [v, w']`) against the owned one.
+macro_rules! contract_cells {
+    ($runtime:expr, $lhs:expr, $lazy_lhs:expr, $rhs:expr, $rhs_parent:expr, $key:expr,
+     $d:ty) => {{
+        let mut rows: Rows = Vec::new();
+        let lazy_rhs = $rhs_parent.adjoint().unwrap();
+        for (order, codomain, domain) in CONTRACT_ORDERS {
+            let spec = ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain,
+                domain,
+            };
+            contract_cell!(
+                rows,
+                $runtime,
+                $lhs,
+                $rhs,
+                &$rhs,
+                spec,
+                $key,
+                $d,
+                format!("contract O·O {order}")
+            );
+            contract_cell!(
+                rows,
+                $runtime,
+                $lazy_lhs,
+                $rhs,
+                &$rhs,
+                spec,
+                $key,
+                $d,
+                format!("contract L·O {order}")
+            );
+            contract_cell!(
+                rows,
+                $runtime,
+                $lhs,
+                lazy_rhs,
+                &lazy_rhs,
+                spec,
+                $key,
+                $d,
+                format!("contract O·L {order}")
+            );
+            contract_cell!(
+                rows,
+                $runtime,
+                $lhs,
+                lazy_rhs,
+                $rhs_parent.adjoint_view(),
+                spec,
+                $key,
+                $d,
+                format!("contract O·V {order}")
+            );
+        }
+        rows
+    }};
+}
+
+/// The contraction rows of both lanes on `[v, w'] ← [v, w']`: `[f64, c64]`.
+macro_rules! contract_lanes {
+    ($runtime:expr, $v:expr, $w:expr, $key:expr) => {{
+        let key = $key;
+        let w = $w.try_dual().unwrap();
+        let rhs: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn($runtime, [&$v, &w], [&$v], |trees, index| {
+                value(&format!("rhs{}", key(trees)), index)
+            })
+            .unwrap();
+        let rhs_parent: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn($runtime, [&$v], [&$v, &w], |trees, index| {
+                value(&format!("parent{}", key(trees)), index)
+            })
+            .unwrap();
+        let lhs = source!($runtime, $v, $w, key);
+        let lazy_lhs = source!($runtime, $v, $w, key)
+            .scale(-0.75)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let f64_rows = contract_cells!($runtime, lhs, lazy_lhs, rhs, rhs_parent, key, f64);
+        // `1 + 2i` makes a lost or doubled conjugation visible.
+        let c64 = |t: &TensorMap<_, f64>| {
+            t.convert::<Complex64>()
+                .scale(Complex64::new(1.0, 2.0))
+                .unwrap()
+        };
+        let lazy_lhs = c64(&source!($runtime, $v, $w, key).scale(-0.75).unwrap())
+            .adjoint()
+            .unwrap();
+        let c64_rows = contract_cells!(
+            $runtime,
+            c64(&lhs),
+            lazy_lhs,
+            c64(&rhs),
+            c64(&rhs_parent),
+            key,
+            Complex64
+        );
+        [f64_rows, c64_rows]
+    }};
+}
+
+/// The compact contraction rows on a bond `$b` (spectrum on `$sectors`)
+/// against `[v, w'] ← [b]`-shaped operands, lifted by `$lift`: every arm
+/// pattern of `Self::contract` (`t · D`, `D · t` with a direct and a lazy
+/// `t`, `D · D`), each in its own order and reordered, plus the two-axis
+/// `D · D` the arm declines.
+macro_rules! compact_contract_cells {
+    ($runtime:expr, $v:expr, $w:expr, $b:expr, $sectors:expr, $name:expr, $key:expr, $d:ty,
+     $lift:expr) => {{
+        let (key, lift) = ($key, $lift);
+        let w = $w.try_dual().unwrap();
+        let fill = |prefix: &'static str| {
+            move |trees: &BlockFusionTrees<_>, index: &[usize]| -> $d {
+                lift(value(&format!("{prefix}{}", key(trees)), index))
+            }
+        };
+        let d1 = bond!($runtime, $b, $sectors, $name, $d, lift);
+        let d2 = bond!($runtime, $b, $sectors, $name, $d, |x: f64| lift(0.5 - x));
+        // `t · D`: `[v, w'] ← [b]`, owned and as the adjoint of `[b] ← [v, w']`.
+        let t: TensorMap<_, $d> =
+            TensorMap::from_subblock_fn($runtime, [&$v, &w], [&$b], fill("t")).unwrap();
+        let lazy_t = TensorMap::<_, $d>::from_subblock_fn($runtime, [&$b], [&$v, &w], fill("lt"))
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        // `D · t`: `[b, v] ← [w']`, owned and as the adjoint of `[w'] ← [b, v]`.
+        let u: TensorMap<_, $d> =
+            TensorMap::from_subblock_fn($runtime, [&$b, &$v], [&w], fill("u")).unwrap();
+        let lazy_u = TensorMap::<_, $d>::from_subblock_fn($runtime, [&w], [&$b, &$v], fill("lu"))
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let mut rows: Rows = Vec::new();
+        for (pattern, codomain, domain) in [
+            ("own order", &[0usize, 1][..], &[2usize][..]),
+            ("reordered", &[2, 0][..], &[1][..]),
+        ] {
+            let spec = ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain,
+                domain,
+            };
+            contract_cell!(
+                rows,
+                $runtime,
+                t,
+                d1,
+                &d1,
+                spec,
+                key,
+                $d,
+                format!("compact t·D {pattern}")
+            );
+            contract_cell!(
+                rows,
+                $runtime,
+                lazy_t,
+                d1,
+                &d1,
+                spec,
+                key,
+                $d,
+                format!("compact L(t)·D {pattern}")
+            );
+            let spec = ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain,
+                domain,
+            };
+            contract_cell!(
+                rows,
+                $runtime,
+                d1,
+                u,
+                &u,
+                spec,
+                key,
+                $d,
+                format!("compact D·t {pattern}")
+            );
+            contract_cell!(
+                rows,
+                $runtime,
+                d1,
+                lazy_u,
+                &lazy_u,
+                spec,
+                key,
+                $d,
+                format!("compact D·L(t) {pattern}")
+            );
+        }
+        for (pattern, codomain, domain) in [
+            ("own order", &[0usize][..], &[1usize][..]),
+            ("swapped", &[1][..], &[0][..]),
+            ("(2, 0)", &[0, 1][..], &[][..]),
+            ("(0, 2)", &[][..], &[1, 0][..]),
+        ] {
+            let spec = ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain,
+                domain,
+            };
+            contract_cell!(
+                rows,
+                $runtime,
+                d1,
+                d2,
+                &d2,
+                spec,
+                key,
+                $d,
+                format!("compact D·D {pattern}")
+            );
+        }
+        // Both legs of `D` against `[v, b] ← [b]`: two contracted axes, so
+        // the arm declines and `D` is densified (TensorKit copies it too).
+        let x: TensorMap<_, $d> =
+            TensorMap::from_subblock_fn($runtime, [&$v, &$b], [&$b], fill("x")).unwrap();
+        let spec = ContractSpec {
+            lhs: &[2, 1],
+            rhs: &[0, 1],
+            codomain: &[0],
+            domain: &[],
+        };
+        contract_cell!(
+            rows,
+            $runtime,
+            x,
+            d1,
+            &d1,
+            spec,
+            key,
+            $d,
+            "compact t·D two axes (declines)".to_string()
+        );
+        rows
+    }};
+}
+
+/// The compact contraction rows of both lanes: `[f64, c64]`.
+macro_rules! compact_contract_lanes {
+    ($runtime:expr, $v:expr, $w:expr, $b:expr, $sectors:expr, $name:expr, $key:expr) => {{
+        [
+            compact_contract_cells!($runtime, $v, $w, $b, $sectors, $name, $key, f64, |x: f64| x),
+            compact_contract_cells!(
+                $runtime,
+                $v,
+                $w,
+                $b,
+                $sectors,
+                $name,
+                $key,
+                Complex64,
+                |x: f64| Complex64::new(x, 2.0 * x)
+            ),
+        ]
+    }};
+}
+
+#[test]
+fn multiplicity_free_real_symbol_contract_into_is_alpha_eager_plus_beta_destination() {
+    let runtime = host_runtime();
+    let (v, w) = u1_legs();
+    contract_lanes!(&runtime, v, w, debug_key::<U1Irrep>);
+    compact_contract_lanes!(
+        &runtime,
+        v,
+        w,
+        v,
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2)
+        ],
+        |s: &U1Irrep| format!("{s:?}"),
+        debug_key::<U1Irrep>
+    );
+    let (v, w) = fz2_legs();
+    contract_lanes!(&runtime, v, w, debug_key::<Z2Irrep>);
+    compact_contract_lanes!(
+        &runtime,
+        v,
+        w,
+        w,
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+        |s: &Z2Irrep| format!("{s:?}"),
+        debug_key::<Z2Irrep>
+    );
+    // A bond on a dual leg: the fermionic twist on the contracted leg makes
+    // every arm decline to the dense route (TensorKit's `copyA`/`copyB`).
+    let dual = w.try_dual().unwrap();
+    compact_contract_lanes!(
+        &runtime,
+        v,
+        w,
+        dual,
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+        |s: &Z2Irrep| format!("{s:?}"),
+        debug_key::<Z2Irrep>
+    );
+    let v = su2_leg();
+    contract_lanes!(&runtime, v, v, |t: &BlockFusionTrees<SU2Irrep>| twice(
+        t, su2_spin
+    ));
+    compact_contract_lanes!(
+        &runtime,
+        v,
+        v,
+        v,
+        SU2_SECTORS.map(|(s, k)| (SU2Irrep::from_twice_spin(s), k)),
+        |s: &SU2Irrep| su2_spin(s).to_string(),
+        |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin)
+    );
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_contract_into_is_alpha_eager_plus_beta_destination_and_matches_multiplicity_free(
+) {
+    let runtime = host_runtime();
+    let mf = su2_leg();
+    let checked = sun2_leg();
+    let mf_key = |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin);
+    let checked_key = |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin);
+    let mf_rows = contract_lanes!(&runtime, mf, mf, mf_key);
+    let checked_rows = contract_lanes!(&runtime, checked, checked, checked_key);
+    let mf_compact = compact_contract_lanes!(
+        &runtime,
+        mf,
+        mf,
+        mf,
+        SU2_SECTORS.map(|(s, k)| (SU2Irrep::from_twice_spin(s), k)),
+        |s: &SU2Irrep| su2_spin(s).to_string(),
+        mf_key
+    );
+    let checked_compact = compact_contract_lanes!(
+        &runtime,
+        checked,
+        checked,
+        checked,
+        SU2_SECTORS.map(|(s, k)| (vec![s as i64], k)),
+        |s: &Vec<i64>| sun_spin(s).to_string(),
+        checked_key
+    );
+    for (mf, checked) in mf_rows
+        .into_iter()
+        .chain(mf_compact)
+        .zip(checked_rows.into_iter().chain(checked_compact))
+    {
+        assert_eq!(mf.len(), checked.len());
+        for ((name, mf), (_, checked)) in mf.iter().zip(&checked) {
+            assert_eq!(
+                mf.keys().collect::<Vec<_>>(),
+                checked.keys().collect::<Vec<_>>(),
+                "{name}"
+            );
+            for (key, mf) in mf {
+                for (&c, &m) in checked[key].iter().zip(mf) {
+                    assert!(
+                        close(c, m),
+                        "{name} {key}: checked {c} vs multiplicity-free {m}"
+                    );
+                }
+            }
+        }
+    }
+
+    // SU(3): `8 ⊗ 8 → 8` carries outer multiplicity two.
+    let v = GradedSpace::try_new(
+        Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap()),
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    contract_lanes!(&runtime, v, v, debug_key::<Vec<i64>>);
+    compact_contract_lanes!(
+        &runtime,
+        v,
+        v,
+        v,
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+        |s: &Vec<i64>| format!("{s:?}"),
+        debug_key::<Vec<i64>>
+    );
+}
+
+/// Warm compact `contract_into` on every arm pattern writes the eager arm's
+/// algebra into the destination (TensorKit `mul!` scaling a `Diagonal`
+/// block): no allocation of `P = k²` entries, and fewer bytes in total; a
+/// direct `t` in its own order allocates no `n_C` buffer either. The
+/// two-axis control declines and densifies `D`. `$v` (`dim 4`) and the bond
+/// `$b` (`k = 128`) hold one sector, so `P` dominates `n_C`.
+macro_rules! compact_contract_allocations {
+    ($runtime:expr, $v:expr, $b:expr, $sector:expr) => {{
+        let k = 128;
+        let spectrum = |offset: f64| {
+            vec![SectorSpectrum {
+                sector: $sector,
+                values: (0..k)
+                    .map(|i| offset + i as f64 / 7.0)
+                    .collect::<Vec<f64>>(),
+            }]
+        };
+        let d1 = TensorMap::<_, f64>::diagonal($runtime, &$b, spectrum(1.0)).unwrap();
+        let d2 = TensorMap::<_, f64>::diagonal($runtime, &$b, spectrum(-0.5)).unwrap();
+        let fill = |_: &BlockFusionTrees<_>, index: &[usize]| value("t", index);
+        let t = TensorMap::<_, f64>::from_subblock_fn($runtime, [&$v], [&$b], fill).unwrap();
+        let lazy_t = TensorMap::<_, f64>::from_subblock_fn($runtime, [&$b], [&$v], fill)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let u = TensorMap::<_, f64>::from_subblock_fn($runtime, [&$b], [&$v], fill).unwrap();
+        let lazy_u = TensorMap::<_, f64>::from_subblock_fn($runtime, [&$v], [&$b], fill)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let x = TensorMap::<_, f64>::from_subblock_fn($runtime, [&$v, &$b], [&$b], fill).unwrap();
+        let p_bytes = k * k * std::mem::size_of::<f64>();
+        let n_c_bytes = 4 * k * std::mem::size_of::<f64>();
+        let own: (&[usize], &[usize]) = (&[0], &[1]);
+        let swapped: (&[usize], &[usize]) = (&[1], &[0]);
+        // (name, lhs, rhs, contracted, order, direct own-order, declines)
+        let cases = [
+            (
+                "t·D own order",
+                &t,
+                &d1,
+                (&[1usize][..], &[0usize][..]),
+                own,
+                true,
+                false,
+            ),
+            (
+                "t·D reordered",
+                &t,
+                &d1,
+                (&[1][..], &[0][..]),
+                swapped,
+                false,
+                false,
+            ),
+            (
+                "L(t)·D own order",
+                &lazy_t,
+                &d1,
+                (&[1][..], &[0][..]),
+                own,
+                false,
+                false,
+            ),
+            (
+                "L(t)·D reordered",
+                &lazy_t,
+                &d1,
+                (&[1][..], &[0][..]),
+                swapped,
+                false,
+                false,
+            ),
+            (
+                "D·t own order",
+                &d1,
+                &u,
+                (&[1][..], &[0][..]),
+                own,
+                true,
+                false,
+            ),
+            (
+                "D·t reordered",
+                &d1,
+                &u,
+                (&[1][..], &[0][..]),
+                swapped,
+                false,
+                false,
+            ),
+            (
+                "D·L(t) own order",
+                &d1,
+                &lazy_u,
+                (&[1][..], &[0][..]),
+                own,
+                false,
+                false,
+            ),
+            (
+                "D·L(t) reordered",
+                &d1,
+                &lazy_u,
+                (&[1][..], &[0][..]),
+                swapped,
+                false,
+                false,
+            ),
+            (
+                "D·D own order",
+                &d1,
+                &d2,
+                (&[1][..], &[0][..]),
+                own,
+                false,
+                false,
+            ),
+            (
+                "D·D reordered",
+                &d1,
+                &d2,
+                (&[1][..], &[0][..]),
+                swapped,
+                false,
+                false,
+            ),
+            (
+                "t·D two axes",
+                &x,
+                &d1,
+                (&[2, 1][..], &[0, 1][..]),
+                (&[0][..], &[][..]),
+                false,
+                true,
+            ),
+        ];
+        for (name, lhs, rhs, (lhs_axes, rhs_axes), (codomain, domain), direct, declines) in cases {
+            let spec = ContractSpec {
+                lhs: lhs_axes,
+                rhs: rhs_axes,
+                codomain,
+                domain,
+            };
+            let mut destination = lhs.contract(rhs, &spec).unwrap().materialize().unwrap();
+            for _ in 0..2 {
+                lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5)
+                    .unwrap();
+            }
+            let (_, large) = counting_alloc::measure_matching(p_bytes..=usize::MAX, || {
+                lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5)
+                    .unwrap()
+            });
+            if declines {
+                assert!(large.matched_calls > 0, "{name}: the control densifies D");
+                continue;
+            }
+            assert_eq!(large.matched_calls, 0, "{name}: {large:?}");
+            assert!((large.bytes as usize) < p_bytes, "{name}: {large:?}");
+            if direct {
+                let (_, result) = counting_alloc::measure_matching(n_c_bytes..=usize::MAX, || {
+                    lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5)
+                        .unwrap()
+                });
+                assert_eq!(result.matched_calls, 0, "{name}: {result:?}");
+            }
+        }
+    }};
+}
+
+#[test]
+fn compact_contract_into_allocates_no_dense_compact_operand_in_both_modes() {
+    let _serial = counting_alloc::serial();
+    let runtime = host_runtime();
+    let rule = Arc::new(U1FusionRule);
+    let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 4)]).unwrap();
+    let b = GradedSpace::try_new(rule, [(U1Irrep::new(0), 128)]).unwrap();
+    compact_contract_allocations!(&runtime, v, b, U1Irrep::new(0));
+    #[cfg(feature = "racah-generated")]
+    {
+        let rule = Arc::new(tenet::sector::SUNFusionRule::new(2).unwrap());
+        let v = GradedSpace::try_new(Arc::clone(&rule), [(vec![0i64], 4)]).unwrap();
+        let b = GradedSpace::try_new(rule, [(vec![0i64], 128)]).unwrap();
+        compact_contract_allocations!(&runtime, v, b, vec![0i64]);
     }
 }

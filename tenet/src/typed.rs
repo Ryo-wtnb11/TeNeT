@@ -201,8 +201,8 @@ use tenet_operations::scale_value;
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
     expand_physical_host, project_physical_host, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
-    DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
-    TreeTransformOperation, TreeTransformOperationKind, ValidatedDynamicFusionLayout,
+    DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide, TreeTransformOperation,
+    TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
 use crate::sector::{
@@ -444,7 +444,8 @@ pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
 use transform_ops::{
-    lazy_adjoint_of_transformed_parent, map_spectrum_dtype, with_transform_into_source,
+    lazy_adjoint_of_transformed_parent, map_spectrum_dtype, scale_by_beta,
+    with_transform_into_source,
 };
 #[doc(hidden)]
 pub use twist_flip::TwistExec;

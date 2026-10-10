@@ -4,17 +4,6 @@ impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
 {
-    pub(super) fn fusion_operand(&self) -> tenet_tensors::FusionOperand<'_> {
-        match &self.repr {
-            TypedTensorRepr::Owned(body) => {
-                tenet_tensors::FusionOperand::direct(body.space.space())
-            }
-            TypedTensorRepr::Adjoint(view) => {
-                tenet_tensors::FusionOperand::adjoint(view.parent.space.space())
-            }
-        }
-    }
-
     pub(super) fn fusion_operand_and_data(
         &self,
     ) -> (tenet_tensors::FusionOperand<'_>, std::borrow::Cow<'_, [D]>) {
@@ -130,198 +119,6 @@ where
             destination_data,
             source_space.space(),
             source_data,
-            alpha,
-            beta,
-        )?;
-        Ok(())
-    }
-
-    /// `destination = alpha * self.contract(other, spec) + beta * destination`,
-    /// TensorKit `tensorcontract!(C, A, pA, false, B, pB, false, pAB, α, β)`,
-    /// preserving the destination's provider, space, body and dense host
-    /// allocation. `destination` must have the space of that result, including
-    /// its codomain/domain split. A compact diagonal operand is densified into
-    /// an operation-local buffer where [`Self::contract`] has no scaling arm.
-    ///
-    /// `alpha` and `beta` ride the epilogue of whatever writes each element:
-    /// the core GEMMs (TensorKit's `mul!(C, A, B, α, β)`) or an output
-    /// transform's add (`tensoradd!(C, Cnew, pAB, false, α, β)`). `beta == 0`
-    /// never reads `destination` (NaN does not survive; unreached blocks
-    /// become `+0`), and `alpha == 0` never reads the operands. Nothing clears
-    /// the destination first.
-    ///
-    /// A coupled sector no GEMM reaches: on the core route, where the GEMMs
-    /// write the destination directly, it becomes `beta * destination`
-    /// (TensorKit's `rmul!(C, β)`), so `beta == 1` leaves it bit for bit. On a
-    /// route with an output transform (the one-call route's C transform, or
-    /// copyC below) the transform writes every element, so an unreached one
-    /// becomes `alpha * (+0) + beta * destination`: IEEE addition turns a
-    /// `-0.0` into `+0.0` even for `beta == 1`, and a non-finite `alpha`
-    /// gives NaN — as TensorKit's `tensoradd!`, and as the eager
-    /// [`Self::contract`] followed by [`Self::axpby`].
-    ///
-    /// **Route.** The same memcost choice as [`Self::contract`]: when a
-    /// zero-copy candidate plus one output permute is cheaper, the product is
-    /// written with its own output order into Runtime-pooled scratch and one
-    /// tree transform adds it into `destination` with `alpha`/`beta`
-    /// (TensorKit `blas_contract!`'s `copyC`); no operand is rebuilt.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::RuntimeMismatch`]; then
-    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
-    /// non-symmetric (anyonic or `NoBraiding`) providers, as for
-    /// [`Self::contract`]; [`Error::RuleMismatch`]; `SpaceMismatch` for a
-    /// destination of the wrong space or layout; [`Error::InvalidArgument`]
-    /// for a destination that is not owned dense host storage, aliases an
-    /// operand, or has the wrong length;
-    /// [`Error::DestinationShared`] when `destination` shares its storage
-    /// with a clone. Runtime-context leasing counts as validation.
-    ///
-    /// # Failure
-    ///
-    /// A validation or capability error leaves `destination` bit-identical:
-    /// every check completes before the first write. On failure after
-    /// validation (a backend or other execution error) the destination's
-    /// contents are unspecified, while its space and block structure stay
-    /// intact.
-    pub fn contract_into<'a>(
-        &self,
-        other: impl Into<TensorRef<'a, R, D>>,
-        spec: &ContractSpec<'_>,
-        destination: &mut Self,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), Error> {
-        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
-        let output_axes = &spec.output_axes()[..];
-        let other = other.into().operand()?;
-        let other = &*other;
-        if !self.runtime.same_runtime(&other.runtime)
-            || !self.runtime.same_runtime(&destination.runtime)
-        {
-            return Err(Error::RuntimeMismatch);
-        }
-        reject_non_symmetric_contraction(self.logical_space().provider().braiding_style())?;
-        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
-        if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
-            || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
-        {
-            return Err(Error::RuleMismatch);
-        }
-
-        let destination_body = match &destination.repr {
-            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
-                body
-            }
-            _ => {
-                return Err(Error::InvalidArgument(
-                    "contraction destination must use ordinary dense host storage".to_string(),
-                ))
-            }
-        };
-        if Arc::ptr_eq(&destination_body.data, &self.storage_body().data)
-            || Arc::ptr_eq(&destination_body.data, &other.storage_body().data)
-        {
-            return Err(Error::InvalidArgument(
-                "destination storage must not alias an input".to_string(),
-            ));
-        }
-
-        let output_order = OutputAxisOrder::from_axes(output_axes);
-        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
-            self.logical_space(),
-            other.logical_space(),
-            lhs_axes,
-            rhs_axes,
-            output_order,
-            spec.codomain.len(),
-        )?;
-        if destination_body.space.space() != expected.space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message:
-                    "destination fusion space or block layout does not match the contraction result",
-            }));
-        }
-        let execution_destination = self
-            .logical_space()
-            .rebind_validated(&destination_body.space.validated_layout())?;
-
-        // Why not measure `fusion_operand_and_data()`: it densifies a compact
-        // operand, and the copyC route densifies it again for its own
-        // contraction. A compact payload densifies to exactly the required
-        // length by construction, so only stored dense lengths are checked.
-        let stored_dense_len = |tensor: &Self| match &tensor.repr {
-            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Dense(data) => Some(data.len()),
-                TypedData::Diagonal(_) => None,
-            },
-            TypedTensorRepr::Adjoint(view) => Some(view.parent_data().len()),
-        };
-        let required_destination = destination_body.space.space().required_len()?;
-        let actual_destination = match destination_body.data.as_ref() {
-            TypedData::Dense(data) => data.len(),
-            TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
-        };
-        for (tensor, actual, required) in [
-            (
-                "lhs",
-                stored_dense_len(self),
-                self.fusion_operand().storage_space().required_len()?,
-            ),
-            (
-                "rhs",
-                stored_dense_len(other),
-                other.fusion_operand().storage_space().required_len()?,
-            ),
-            (
-                "destination",
-                Some(actual_destination),
-                required_destination,
-            ),
-        ] {
-            let Some(actual) = actual else {
-                continue;
-            };
-            if actual != required {
-                return Err(Error::InvalidArgument(format!(
-                    "{tensor} storage length {actual} does not match required length {required}"
-                )));
-            }
-        }
-        if Arc::strong_count(destination_body) != 1
-            || Arc::strong_count(&destination_body.data) != 1
-        {
-            return Err(Error::DestinationShared);
-        }
-        let mut lease = self.runtime.lease_context()?;
-        let context = lease.context().multiplicity_free_lane::<D>()?;
-        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
-            unreachable!("ordinary destination checked above")
-        };
-        let destination_body =
-            Arc::get_mut(destination_body).expect("unique destination body checked above");
-        let destination_data = Arc::get_mut(&mut destination_body.data)
-            .expect("unique destination payload checked above");
-        let TypedData::Dense(destination_data) = destination_data else {
-            unreachable!("dense destination checked above")
-        };
-        let (lhs, lhs_data) = self.fusion_operand_and_data();
-        let (rhs, rhs_data) = other.fusion_operand_and_data();
-        context.tensorcontract_fusion_dyn_prelowered_into(
-            &execution_destination,
-            destination_data,
-            lhs,
-            &lhs_data,
-            rhs,
-            &rhs_data,
-            TensorContractSpec::new_with_conjugation(
-                lhs_axes,
-                rhs_axes,
-                output_order,
-                lhs.storage_conjugate(),
-                rhs.storage_conjugate(),
-            ),
             alpha,
             beta,
         )?;
@@ -611,6 +408,119 @@ where
         let (space, data) =
             <R::Mode as TypedTensorContractDispatch<R, D>>::contract(self, other, spec)?;
         Ok(self.published(space, data))
+    }
+
+    /// `destination = alpha * self.contract(other, spec) + beta * destination`,
+    /// TensorKit `tensorcontract!(C, A, pA, false, B, pB, false, pAB, α, β)`,
+    /// preserving the destination's provider, space, body and dense host
+    /// allocation. `destination` must have the space of that result, including
+    /// its codomain/domain split. Every admission mode and operand
+    /// representation [`Self::contract`] takes is taken.
+    ///
+    /// `alpha` and `beta` ride the epilogue of whatever writes each element:
+    /// the core GEMMs (TensorKit's `mul!(C, A, B, α, β)`) or an output
+    /// transform's add (`tensoradd!(C, Cnew, pAB, false, α, β)`). `beta == 0`
+    /// never reads `destination` (NaN does not survive; unreached blocks
+    /// become `+0`), and `alpha == 0` never reads the operands. Nothing clears
+    /// the destination first.
+    ///
+    /// A coupled sector no GEMM reaches: on the core route, where the GEMMs
+    /// write the destination directly, it becomes `beta * destination`
+    /// (TensorKit's `rmul!(C, β)`), so `beta == 1` leaves it bit for bit. On a
+    /// route with an output transform (the one-call route's C transform, or
+    /// copyC below) the transform writes every element, so an unreached one
+    /// becomes `alpha * (+0) + beta * destination`: IEEE addition turns a
+    /// `-0.0` into `+0.0` even for `beta == 1`, and a non-finite `alpha`
+    /// gives NaN — as TensorKit's `tensoradd!`, and as the eager
+    /// [`Self::contract`] followed by [`Self::axpby`].
+    ///
+    /// **Route.** The same memcost choice as [`Self::contract`]: when a
+    /// zero-copy candidate plus one output permute is cheaper, the product is
+    /// written with its own output order into Runtime-pooled scratch and one
+    /// tree transform adds it into `destination` with `alpha`/`beta`
+    /// (TensorKit `blas_contract!`'s `copyC`); no operand is rebuilt.
+    ///
+    /// **Compact operand.** [`Self::contract`]'s compact patterns write into
+    /// `destination` without densifying (TensorKit `mul!` scaling a
+    /// `Diagonal` block): in the scaled operand's own order, one pass
+    /// `beta * destination + alpha * scaled`; otherwise one operation-local
+    /// buffer of the scaled operand and one [`Self::permute_into`]; `D · D`
+    /// as the product spectrum read by [`Self::permute_into`], in any output
+    /// order. Any other pattern densifies the compact operand into an
+    /// operation-local buffer, where TensorKit copies it too.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`]; then
+    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
+    /// non-symmetric (anyonic or `NoBraiding`) providers, as for
+    /// [`Self::contract`]; [`Error::RuleMismatch`];
+    /// [`Error::InvalidArgument`] for a destination that is not owned dense
+    /// host storage or aliases an operand (a lazy adjoint's parent
+    /// included); then the contraction's own errors, as for
+    /// [`Self::contract`]; `SpaceMismatch` for a destination of the wrong
+    /// space or layout; [`Error::InvalidArgument`] for one of the wrong
+    /// length; [`Error::DestinationShared`] when `destination` shares its
+    /// storage with a clone. Runtime-context leasing counts as validation.
+    /// Checked Generic reports these in [`GenericTensorError::Facade`] and
+    /// staging failures in [`GenericTensorError::Plan`], as for
+    /// [`Self::contract`].
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
+    pub fn contract_into<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D>>,
+        spec: &ContractSpec<'_>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
+        if !self.runtime.same_runtime(&other.runtime)
+            || !self.runtime.same_runtime(&destination.runtime)
+        {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        reject_non_symmetric_contraction(<R::Mode as TypedTensorModeDispatch<R>>::braiding_style(
+            self.provider(),
+        ))
+        .map_err(Error::from)?;
+        // The held admitted identities: provider-free, and the provider's
+        // own by #2046.
+        let identity = self.logical_space().space().admission().rule_identity();
+        if identity != other.logical_space().space().admission().rule_identity()
+            || identity
+                != destination
+                    .logical_space()
+                    .space()
+                    .admission()
+                    .rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        // Why the storage bodies: a lazy-adjoint operand aliases its parent.
+        destination_precheck(destination, &self.storage_body().data, "host")?;
+        destination_precheck(destination, &other.storage_body().data, "host")?;
+        if (self.spectrum().is_some() || other.spectrum().is_some())
+            && self.try_contract_diagonal_into(other, spec, destination, alpha, beta)?
+        {
+            return Ok(());
+        }
+        <R::Mode as TypedTensorContractDispatch<R, D>>::contract_into(
+            self,
+            other,
+            spec,
+            destination,
+            alpha,
+            beta,
+        )
     }
 }
 

@@ -213,6 +213,99 @@ where
     Ok(())
 }
 
+/// `dst = beta · dst + alpha · scale_axis(src)`, where `scale_axis` is
+/// [`scale_axis_by_spectrum_mapped`] on `src` (laid out per `space`, the
+/// layout `dst` shares): TensorKit `mul!(C, A, Diagonal, α, β)` in one pass,
+/// without the scaled copy of `src`. Every element of `dst` is written; one
+/// [`scale_axis_by_spectrum_mapped`] leaves unscaled is `alpha · src`.
+/// `beta == 0` never reads `dst` and `alpha == 0` never reads `src`.
+#[allow(clippy::too_many_arguments)]
+pub fn axpby_axis_by_spectrum_into<D, V>(
+    space: &DynamicFusionMapSpace,
+    dst: &mut [D],
+    src: &[D],
+    axis: Option<usize>,
+    spectrum: &[SectorSpectrum<V>],
+    to_scalar: impl Fn(V) -> D,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: FactorScalar,
+    V: Copy,
+{
+    if dst.len() != src.len() {
+        return Err(OperationError::InvalidArgument {
+            message: "scaled-axis axpby source and destination lengths differ",
+        });
+    }
+    if alpha.is_zero() {
+        if beta.is_zero() {
+            dst.fill(D::zero());
+        } else if beta != D::one() {
+            for value in dst.iter_mut() {
+                *value = beta * *value;
+            }
+        }
+        return Ok(());
+    }
+    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum<V>> =
+        spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    let nout = space.nout();
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let shape = block.shape();
+        let strides = block.strides();
+        // The same per-leg-charge lookup as `scale_axis_by_spectrum_mapped`.
+        let scaled = match block.key() {
+            BlockKey::FusionTree(tree) if !shape.is_empty() => {
+                let bond_axis = axis.unwrap_or(shape.len() - 1);
+                let leg_charge = if bond_axis < nout {
+                    tree.codomain_tree().uncoupled()[bond_axis]
+                } else {
+                    tree.domain_tree().uncoupled()[bond_axis - nout]
+                };
+                spectrum_by_sector
+                    .get(&leg_charge)
+                    .map(|&entry| (bond_axis, entry))
+            }
+            _ => None,
+        };
+        let mut coord = vec![0usize; shape.len()];
+        let count: usize = shape.iter().product();
+        for _ in 0..count {
+            let idx = block.offset()
+                + coord
+                    .iter()
+                    .zip(strides)
+                    .map(|(&c, &stride)| c * stride)
+                    .sum::<usize>();
+            let mut value = src[idx];
+            if let Some((bond_axis, entry)) = scaled {
+                if let Some(&factor) = entry.values.get(coord[bond_axis]) {
+                    value = value * to_scalar(factor);
+                }
+            }
+            dst[idx] = if beta.is_zero() {
+                alpha * value
+            } else {
+                beta * dst[idx] + alpha * value
+            };
+            for k in (0..coord.len()).rev() {
+                coord[k] += 1;
+                if coord[k] < shape[k] {
+                    break;
+                }
+                coord[k] = 0;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
 /// `svd_vals`). Runs the dense SVD per sector through the executor and keeps

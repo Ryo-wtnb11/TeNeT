@@ -287,6 +287,32 @@ where
         )?)
     }
 
+    fn contract_into(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        spec: &ContractSpec<'_>,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
+    ) -> Result<(), Error> {
+        let output_axes = spec.output_axes();
+        let mut lease = lhs.runtime.lease_context()?;
+        let context = lease.context().multiplicity_free_lane::<Self>()?;
+        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+        let destination_space = destination.logical_space().space().clone();
+        context.tensorcontract_into_multiplicity_free_in(
+            (lhs.logical_space(), lhs_operand, &lhs_data),
+            (rhs.logical_space(), rhs_operand, &rhs_data),
+            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
+            spec.codomain.len(),
+            &destination_space,
+            || destination_slice(destination),
+            alpha,
+            beta,
+        )
+    }
+
     fn compose(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
@@ -310,6 +336,20 @@ where
             }
             .into(),
         )
+    }
+
+    /// The complex-symbol lane's eager contraction is unsupported (#1870
+    /// leaf B2 admits both together), so its `_into` is too.
+    fn contract_into(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        spec: &ContractSpec<'_>,
+        _destination: &mut TensorMap<R, Self>,
+        _alpha: Self,
+        _beta: Self,
+    ) -> Result<(), Error> {
+        <Self as MultiplicityFreeContractExecution<R, Complex64>>::contract(lhs, rhs, spec)
+            .map(drop)
     }
 
     fn compose(
@@ -553,11 +593,13 @@ mod copy_c_scratch_tests {
             .all(|&value| value == 1.0));
     }
 
-    /// #1631: a compact diagonal operand on the copyC route is densified
-    /// once, for the temporary's contraction; the length check reads the
-    /// stored representation.
+    /// #1870 B1 (was #1631's "densified once on the copyC route"): a
+    /// reordered `t · D` writes the scaled `t` through one transform `_into`
+    /// (TensorKit's `copyC` of a `mul!` with a `Diagonal`), so the compact
+    /// operand is never densified and the contraction's copyC scratch is
+    /// not used.
     #[test]
-    fn copy_c_contract_into_densifies_a_compact_operand_once() {
+    fn reordered_compact_contract_into_scales_without_densifying() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let space =
@@ -580,11 +622,8 @@ mod copy_c_scratch_tests {
         crate::typed::DIAGONAL_MATERIALIZATIONS.set(0);
         t.contract_into(&d, &MOVED, &mut destination, 1.0, 0.0)
             .unwrap();
-        assert_eq!(crate::typed::DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert!(
-            retained_len(&runtime) < MARKER_LEN,
-            "the copyC route must run"
-        );
+        assert_eq!(crate::typed::DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(retained_len(&runtime), MARKER_LEN, "no contraction ran");
         let expected = t.contract(&d.materialize().unwrap(), &MOVED).unwrap();
         assert_eq!(
             destination.dense_data().unwrap(),

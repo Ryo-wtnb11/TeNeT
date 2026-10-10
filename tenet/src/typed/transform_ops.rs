@@ -287,7 +287,7 @@ where
     /// The one admission boundary of every typed Host beta-accumulating tree
     /// transform; the mode's [`TypedTensorTransformDispatch::transform_into`]
     /// stages, checks the destination's space and writes.
-    fn tree_transform_into(
+    pub(super) fn tree_transform_into(
         &self,
         destination: &mut Self,
         alpha: D,
@@ -664,6 +664,18 @@ where
     )
 }
 
+/// `data = beta · data`: a strong zero for `beta == 0`, which never reads
+/// `data`, and nothing for `beta == 1`.
+pub(super) fn scale_by_beta<D: TensorScalar>(data: &mut [D], beta: D) {
+    if beta.is_zero() {
+        data.fill(D::zero());
+    } else if beta != D::one() {
+        for value in data.iter_mut() {
+            *value = beta * *value;
+        }
+    }
+}
+
 /// `data = alpha · diag(diagonal) + beta · data` on the bond blocks of
 /// `structure`, where `diagonal[i]` is block `i`'s diagonal
 /// ([`crate::tensor_core::bond_spectrum`] proved the bijection and the
@@ -676,13 +688,7 @@ fn axpby_bond_diagonal<D: TensorScalar>(
     alpha: D,
     beta: D,
 ) -> Result<(), Error> {
-    if beta.is_zero() {
-        data.fill(D::zero());
-    } else if beta != D::one() {
-        for value in data.iter_mut() {
-            *value = beta * *value;
-        }
-    }
+    scale_by_beta(data, beta);
     if alpha.is_zero() {
         return Ok(());
     }

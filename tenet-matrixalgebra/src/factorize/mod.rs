@@ -173,9 +173,10 @@ pub use qr_lq::{
 pub(crate) use scalar::{require_finite_factor_input, FactorFamily};
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
-    decide_bond_truncation, decide_bond_truncation_generic_checked, diagonal_bond_data,
-    rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
-    scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
-    svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,
-    svd_full_from_source, svd_vals_dyn, svd_vals_from_source, SvdFactorsDyn, SvdFullFactorsDyn,
+    axpby_axis_by_spectrum_into, decide_bond_truncation, decide_bond_truncation_generic_checked,
+    diagonal_bond_data, rectangular_diagonal_bond_tensor,
+    rectangular_diagonal_bond_tensor_generic_checked, scale_axis_by_spectrum_mapped,
+    svd_compact_adjoint_from_parent, svd_compact_dyn_checked_generic, svd_compact_from_source,
+    svd_full_adjoint_from_parent, svd_full_from_source, svd_vals_dyn, svd_vals_from_source,
+    SvdFactorsDyn, SvdFullFactorsDyn,
 };
