@@ -2197,3 +2197,44 @@ fn cuda_column_matches_the_host_for_every_compact_row() {
     cuda_rows!("U(1) f64", u1(), charge, real);
     cuda_rows!("U(1) c64", u1(), charge, complex);
 }
+
+/// Checked tree-transform `_into` (#1870): which error a call with two
+/// faults reports does not depend on cache history. A warm checked transform
+/// defers its plan preflight from staging to resolution (#2154), so the
+/// destination's space is compared only after resolution in that mode;
+/// otherwise a `SpaceMismatch` would hide the preflight error only when warm.
+/// Lives here for the `CheckedZ2` rule, whose braiding is a parameter.
+#[test]
+fn checked_transform_into_reports_the_same_error_cold_and_warm() {
+    let runtime = host_runtime();
+    for (salt, braiding, expected) in [
+        // Non-planar on an anyonic rule: the preflight error wins.
+        (0x71, BraidingStyleKind::Anyonic, "UnsupportedBraidingStyle"),
+        // Admissible motion: only the destination is wrong.
+        (0x72, BraidingStyleKind::Bosonic, "SpaceMismatch"),
+    ] {
+        let leg = z2_leg(CheckedZ2::new(braiding, 0.6).with_salt(salt));
+        let source =
+            TensorMap::<_, f64>::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, index| {
+                index.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        // `[W, W] <- [W]`, where the result is `[W] <- [W, W]`.
+        let mut wrong = source.axpby(0.0, &source, 0.0).unwrap();
+        let mut into = || {
+            format!(
+                "{:?}",
+                source
+                    .permute_into(&[0], &[1, 2], &mut wrong, 1.0, 0.0)
+                    .unwrap_err()
+            )
+        };
+        let cold = into();
+        // Warms the destination memo of these axes; a braid is admitted
+        // where the permute is not.
+        drop(source.braid(&[0], &[1, 2], &[0, 1, 2]).unwrap());
+        let warm = into();
+        assert!(cold.contains(expected), "{braiding:?}: {cold}");
+        assert_eq!(warm, cold, "{braiding:?}");
+    }
+}

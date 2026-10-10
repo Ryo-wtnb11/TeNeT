@@ -297,7 +297,10 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-use linear_ops::{host_axpby_into, require_destination_space, unique_dense_destination};
+use linear_ops::{
+    destination_precheck, destination_slice, host_axpby_into, require_destination_space,
+    unique_dense_destination,
+};
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
 #[cfg(feature = "cuda")]
@@ -429,7 +432,7 @@ mod twist_flip;
 pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
-use transform_ops::{lazy_adjoint_of_transformed_parent, map_spectrum_dtype};
+use transform_ops::{lazy_adjoint_of_transformed_parent, map_spectrum_dtype, owned_dense_source};
 
 /// In-module gates on the typed facade's private state.
 ///

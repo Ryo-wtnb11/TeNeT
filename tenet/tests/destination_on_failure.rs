@@ -784,6 +784,155 @@ fn host_capability_and_representation_rejections_leave_the_destination_bit_ident
     );
 }
 
+/// Checked Generic tree-transform `_into` (#1870): every destination class
+/// in the multiplicity-free order — runtime, rule, then (for the destination
+/// kind, alias and space) the same `Error` in [`GenericTensorError::Facade`],
+/// space before sharing.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_transform_into_leaves_a_rejected_destination_bit_identical() {
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::GenericTensorError;
+
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let other_rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2 = Arc::new(SUNFusionRule::new(2).unwrap());
+    let v = GradedSpace::try_new(Arc::clone(&su2), [(vec![0], 2), (vec![1], 1)]).unwrap();
+    let w = v.try_dual().unwrap();
+    let t = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &w], [&v], 1).unwrap();
+    let permuted = t.permute(&[1], &[2, 0]).unwrap();
+    let fresh = |rt: &Runtime| sentinel!(rt, permuted);
+    // The same shape under SU(3)'s identity: only the rule differs.
+    let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
+    let su3_leg = |dual: bool| {
+        let leg =
+            GradedSpace::try_new(Arc::clone(&su3), [(vec![0, 0], 2), (vec![1, 0], 1)]).unwrap();
+        if dual {
+            leg.try_dual().unwrap()
+        } else {
+            leg
+        }
+    };
+    let foreign_rule = {
+        let mut next = 0u64;
+        TensorMap::<_, f64>::from_subblock_fn(
+            &rt,
+            [&su3_leg(true)],
+            [&su3_leg(false), &su3_leg(false)],
+            |_, _| {
+                next += 1;
+                sentinel_value(next)
+            },
+        )
+        .unwrap()
+    };
+    let wrong = {
+        let mut next = 0u64;
+        TensorMap::<_, f64>::from_subblock_fn(&rt, [&v], [&v, &w], |_, _| {
+            next += 1;
+            sentinel_value(next)
+        })
+        .unwrap()
+    };
+    let into = |d: &mut TensorMap<SUNFusionRule, f64>| t.permute_into(&[1], &[2, 0], d, 1.0, 0.5);
+
+    t.permute_into(&[1], &[2, 0], &mut fresh(&rt), 1.0, 0.5)
+        .unwrap();
+    rejects!(
+        host_snap,
+        "checked permute_into runtime",
+        fresh(&other_rt),
+        GenericTensorError::Facade(Error::RuntimeMismatch),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked permute_into rule",
+        foreign_rule,
+        GenericTensorError::Facade(Error::RuleMismatch),
+        into
+    );
+    let compact = TensorMap::<_, f64>::diagonal(
+        &rt,
+        &v,
+        [
+            SectorSpectrum {
+                sector: vec![0],
+                values: vec![f64::NAN, 2.0],
+            },
+            SectorSpectrum {
+                sector: vec![1],
+                values: vec![3.0],
+            },
+        ],
+    )
+    .unwrap();
+    let compact_snap = |d: &TensorMap<SUNFusionRule, f64>| {
+        d.diagview()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry.values.iter().map(|x| x.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    rejects!(
+        compact_snap,
+        "checked permute_into compact destination",
+        compact,
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        into
+    );
+    rejects!(
+        |d: &TensorMap<SUNFusionRule, f64>| host_snap(&d.materialize().unwrap()).0,
+        "checked permute_into lazy destination",
+        permuted.adjoint().unwrap(),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked permute_into alias",
+        t.clone(),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let source = d.clone();
+            source.permute_into(&[0, 1], &[2], d, 1.0, 0.5)
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked permute_into space",
+        wrong.clone(),
+        GenericTensorError::Facade(Error::Operation(operation))
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked permute_into space before shared",
+        wrong,
+        GenericTensorError::Facade(Error::Operation(operation))
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let clone = d.clone();
+            let result = into(d);
+            drop(clone);
+            result
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked permute_into shared",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::DestinationShared),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let clone = d.clone();
+            let result = into(d);
+            drop(clone);
+            result
+        }
+    );
+}
+
 /// `scale_assign` takes the destination rule: in place on the receiver's own
 /// storage, `DestinationShared` (receiver untouched) when it is shared.
 #[test]

@@ -307,6 +307,16 @@ impl PreparedCheckedGenericDynamicSpace {
         self.nout
     }
 
+    /// `space == self.commit()` by value, without committing or allocating:
+    /// the fields `DynamicFusionMapSpace`'s `PartialEq` compares.
+    pub(crate) fn matches(&self, space: &DynamicFusionMapSpace) -> bool {
+        self.nout == space.nout
+            && self.nin == space.nin
+            && *space.homspace == self.homspace
+            && *space.subblock_structure == *self.structure()
+            && space.admission.rule_identity() == Some(&self.identity)
+    }
+
     /// The staged space as a planner reads it: its HomSpace, the preview
     /// structure and the admitted identity. Publishes nothing; the planned
     /// route replays over the preview structure, and only a later
