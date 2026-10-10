@@ -307,6 +307,14 @@ impl PreparedCheckedGenericDynamicSpace {
         self.nout
     }
 
+    /// Commits an intermediate's structure through the cache-2 owner and
+    /// returns the committed structure (the resident winner after a race).
+    /// Why no `DynamicFusionMapSpace`: no caller binds an intermediate, so
+    /// its canonical HomSpace is not built.
+    pub(crate) fn commit_structure(self) -> Arc<BlockStructure> {
+        self.structure.commit_with_complete_homspace().1
+    }
+
     pub(crate) fn commit(self) -> DynamicFusionMapSpace {
         let (canonical_homspace, subblock_structure) =
             self.structure.commit_with_complete_homspace();

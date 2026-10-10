@@ -56,7 +56,13 @@ use tenet_core::{
     StructureCacheKind,
 };
 
-use super::{TransformerMode, TreeTransformScope, ENTRY_OVERHEAD_BYTES};
+use tenet_core::BlockStructure;
+use tenet_operations::TreeTransformStructure;
+
+use super::{
+    publish_committed, publishable, CompletedTransformerKey, TransformerMode, TreeTransformScope,
+    ENTRY_OVERHEAD_BYTES,
+};
 use crate::tree_transform::operation::TreeTransformOperation;
 use crate::TreeTransformGroupBlockSpec;
 
@@ -274,14 +280,15 @@ impl PendingCoefficientGroups {
     }
 }
 
-/// The checked Generic contraction's composed coefficients, staged across
-/// its staged-operand and output transforms and published only by
-/// [`Self::flush`] once the contraction's destination commit succeeded.
-/// One instance per contraction call: holding it across calls would publish
-/// groups of a failed call.
+/// The checked Generic contraction's composed coefficients and completed
+/// transformers, staged across its staged-operand and output transforms and
+/// published only by [`Self::flush_committed`] once the contraction's
+/// commits succeeded. One instance per contraction call: holding it across
+/// calls would publish what a failed call built.
 #[must_use = "built groups are cached only when flushed after the commit"]
 pub(crate) struct CheckedPendingCoefficients {
     pending: PendingCoefficientGroups,
+    transformers: Vec<(CompletedTransformerKey, TreeTransformStructure<f64>)>,
     epoch: usize,
 }
 
@@ -290,6 +297,7 @@ impl CheckedPendingCoefficients {
     pub(crate) fn new() -> Self {
         Self {
             pending: PendingCoefficientGroups::default(),
+            transformers: Vec::new(),
             epoch: tenet_core::core_reset_epoch(),
         }
     }
@@ -298,9 +306,53 @@ impl CheckedPendingCoefficients {
         self.pending.groups.extend(built.groups);
     }
 
+    /// Stages a completed transformer built on a cache-3 miss under its
+    /// preview `key`; [`Self::flush_committed`] re-keys it.
+    pub(crate) fn stage_transformer(
+        &mut self,
+        key: CompletedTransformerKey,
+        built: &TreeTransformStructure<f64>,
+    ) {
+        self.transformers.push((key, built.clone()));
+    }
+
     /// Call only after the destination commit succeeded.
     pub(crate) fn flush(self) {
+        self.flush_committed(&[]);
+    }
+
+    /// Publishes the staged groups, then each staged transformer whose
+    /// structures are committed. `committed` maps each preview a transformer
+    /// was built on to its committed structure (the resident winner after a
+    /// race). #2128's rule: the key is re-formed over the committed ids and
+    /// published only when the committed structure equals the preview and
+    /// every keyed structure is canonical, so two previews of one HomSpace
+    /// in a call converge on one id within that call.
+    pub(crate) fn flush_committed(self, committed: &[(Arc<BlockStructure>, Arc<BlockStructure>)]) {
         self.pending.publish(self.epoch);
+        let committed_of = |built: &Arc<BlockStructure>| {
+            committed
+                .iter()
+                .find(|(preview, _)| preview.content_id() == built.content_id())
+                .map_or_else(|| Arc::clone(built), |(_, committed)| Arc::clone(committed))
+        };
+        for (key, built) in self.transformers {
+            let (dst, src) = (
+                committed_of(built.dst_structure()),
+                committed_of(built.src_structure()),
+            );
+            if dst.as_ref() == built.dst_structure().as_ref()
+                && src.as_ref() == built.src_structure().as_ref()
+                && publishable([dst.as_ref(), src.as_ref()])
+            {
+                let key = CompletedTransformerKey {
+                    dst: dst.content_id(),
+                    src: src.content_id(),
+                    ..key
+                };
+                publish_committed(&key, built.replay_core(), self.epoch);
+            }
+        }
     }
 }
 

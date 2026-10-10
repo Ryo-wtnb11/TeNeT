@@ -228,6 +228,7 @@ fn staged_groups_publish_only_when_flushed_in_their_epoch() {
     // What: a flush whose epoch a reset overtook is refused.
     let mut stale = CheckedPendingCoefficients {
         pending: PendingCoefficientGroups::default(),
+        transformers: Vec::new(),
         epoch: tenet_core::core_reset_epoch().wrapping_add(2),
     };
     let built = handle();

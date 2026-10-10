@@ -39,7 +39,7 @@ use tenet_operations::TreeTransformStructure;
 
 use crate::contract::{rhs_contract_twist_factor_oriented, FusionOperandLayout};
 use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan_validated, publishable, resolve,
+    build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
     validate_checked_generic_tree_pair_plan_preflight, CheckedPendingCoefficients,
     CoefficientGroupReuse, CompletedTransformerKey, OrientedBasisOrder, TransformerMode,
     TreeTransformPlanning, TreeTransformScope,
@@ -302,9 +302,8 @@ where
 {
     type Scalar = f64;
     type Error = CheckedGenericPlanError<R::Error>;
-    /// The contraction call's composed coefficients, flushed only after its
-    /// destination commit; completed transformers resolve through the
-    /// process-global cache.
+    /// The contraction call's composed coefficients and completed
+    /// transformers, flushed only after its commits.
     type StructureCache = CheckedPendingCoefficients;
     type Structure = TreeTransformStructure<f64>;
 
@@ -344,9 +343,9 @@ where
             }
             .into());
         };
-        // Staged and core intermediates are uncommitted, hence not
-        // canonical: their keys are lookup-only until #2014-3c commits them.
-        let epoch = tenet_core::core_reset_epoch();
+        // A warm call's intermediates are committed, so their canonical ids
+        // hit; a miss builds and stages its publication until the call's
+        // commits (#2063).
         let identity = rule.rule_identity();
         let key = CompletedTransformerKey::new::<f64>(
             identity.clone(),
@@ -360,31 +359,33 @@ where
             dst,
             structure,
         );
-        let may_publish = publishable([dst.as_ref(), structure.as_ref()]);
-        resolve(key, may_publish, epoch, dst, structure, || {
-            // Admission precedes any composed-coefficient lookup. Why the
-            // uncommitted intermediates still reuse coefficients: their keys
-            // hold sectors and trees, never content ids.
-            let source_proof =
-                validate_checked_generic_tree_pair_plan_preflight(rule, operation, structure)?;
-            let reuse = CoefficientGroupReuse::<f64>::new(
-                identity,
-                TransformerMode::CheckedGeneric,
-                TreeTransformScope::TreePair,
-                operation,
-                tenet_core::FusionTreePairOrientation::Direct,
-            );
-            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
-                operation.clone(),
-                &source_proof,
-                &reuse,
-            )?;
-            coefficients.stage(reuse.into_pending());
-            Ok(plan.compile_shared_structures_with_storage_conjugation(
-                Arc::clone(dst),
-                Arc::clone(structure),
-                storage_conjugate,
-            )?)
-        })
+        if let Some(hit) = lookup_bound(&key, dst, structure) {
+            return Ok(hit);
+        }
+        // Admission precedes any composed-coefficient lookup. Why the
+        // cold call's uncommitted intermediates reuse coefficients: their keys
+        // hold sectors and trees, never content ids.
+        let source_proof =
+            validate_checked_generic_tree_pair_plan_preflight(rule, operation, structure)?;
+        let reuse = CoefficientGroupReuse::<f64>::new(
+            identity,
+            TransformerMode::CheckedGeneric,
+            TreeTransformScope::TreePair,
+            operation,
+            tenet_core::FusionTreePairOrientation::Direct,
+        );
+        let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
+            operation.clone(),
+            &source_proof,
+            &reuse,
+        )?;
+        coefficients.stage(reuse.into_pending());
+        let built = plan.compile_shared_structures_with_storage_conjugation(
+            Arc::clone(dst),
+            Arc::clone(structure),
+            storage_conjugate,
+        )?;
+        coefficients.stage_transformer(key, &built);
+        Ok(built)
     }
 }

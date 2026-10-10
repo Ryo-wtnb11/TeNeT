@@ -68,6 +68,23 @@ impl CheckedStagedOperand<'_> {
             Self::Transformed { structure, .. } => structure,
         }
     }
+
+    /// `(preview, committed)`; a borrowed operand is already committed.
+    fn commit(
+        self,
+    ) -> (
+        Arc<tenet_core::BlockStructure>,
+        Arc<tenet_core::BlockStructure>,
+    ) {
+        match self {
+            Self::Borrowed(space) => (Arc::clone(space.structure()), Arc::clone(space.structure())),
+            Self::Transformed {
+                prepared,
+                structure,
+                ..
+            } => (structure, prepared.commit_structure()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -815,7 +832,19 @@ where
         )?;
     }
     let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    coefficients.flush();
+    // Only after the fallible destination commit: a failed call commits no
+    // intermediate and publishes nothing. These commits cannot fail; a lost
+    // or refused admission leaves its preview unpublishable.
+    let committed = [
+        (
+            destination_structure,
+            Arc::clone(destination.space().structure()),
+        ),
+        lhs_prepared.commit(),
+        rhs_prepared.commit(),
+        (core_structure, core_destination.commit_structure()),
+    ];
+    coefficients.flush_committed(&committed);
     Ok((destination, data))
 }
 
@@ -1252,11 +1281,30 @@ mod tests {
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage() {
+        // Isolated: a concurrent cache clear would force a rebuild.
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_PACKS_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::a_warm_checked_generic_contraction_converts_at_most_one_pack_per_stage",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated pack test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         // Why (#2101): each stage replays into its own context workspace, so
         // no stage evicts another's Multi pack: a warm call converts at most
         // one pack per stage (a shared workspace would convert three into one
-        // slot). #2063 tightens this to none: until it reuses checked Generic
-        // transformers across calls, each call compiles them afresh.
+        // slot). #2063 tightens this to none: a warm call binds the completed
+        // transformers of the first call, whose packs are already converted.
         let (_left, lhs, _right, rhs) = bound_pair(2, 2);
         let lhs_data = (0..lhs.space().required_len().unwrap())
             .map(|index| index as f64 - 1.5)
@@ -1289,9 +1337,7 @@ mod tests {
         for _ in 0..3 {
             let (data, builds) = run();
             assert_eq!(data, cold_data);
-            for (now, before) in builds.iter().zip(previous) {
-                assert!(*now - before <= 1, "{builds:?} after {previous:?}");
-            }
+            assert_eq!(builds, previous, "a warm call converts no pack");
             previous = builds;
         }
     }
@@ -1602,6 +1648,15 @@ mod tests {
         }
     }
 
+    /// Resident `(cache 2, cache 3)` entries.
+    fn cache_entries() -> (usize, usize) {
+        let entries = |kind| tenet_core::structure_cache_info(kind).entries();
+        (
+            entries(tenet_core::StructureCacheKind::DegeneracyStructure),
+            entries(tenet_core::StructureCacheKind::CompletedTreeTransformer),
+        )
+    }
+
     fn coefficient_admissions() -> u64 {
         tenet_core::structure_cache_info(tenet_core::StructureCacheKind::TreeTransformCoefficients)
             .admissions()
@@ -1699,6 +1754,11 @@ mod tests {
             assert!(groups.misses > 0);
             assert_eq!((groups.hits, groups.publications), (0, 0));
             assert_eq!(coefficient_admissions(), 0);
+            // Caches 2 and 3 too: a failed call commits no intermediate and
+            // publishes no transformer it built.
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!((transformers.builds, transformers.publications), (3, 0));
+            assert_eq!(cache_entries(), (0, 0));
             assert!(left.count(Query::F) > 0 && left.count(Query::R) > 0);
             // The F/R ledger: layout walks may publish pure-data layouts
             // (#2030), so structural queries can shrink on a retry.
@@ -1713,24 +1773,178 @@ mod tests {
         }
         assert_eq!(ledgers[0], ledgers[1]);
 
-        // What: a committed call publishes its groups; a repeat (every
-        // intermediate still uncommitted, so cache 3 cannot serve it) makes
-        // no F or R query and returns the same bits.
+        // What: a committed call publishes its groups, its three
+        // intermediates (cache 2, with the destination) and its three
+        // transformers (cache 3); a repeat binds those transformers, so it
+        // makes no group lookup and no F or R query and returns the same bits.
         left.reset();
         let (first_space, first) = succeeding().unwrap();
         assert!(coefficient_admissions() > 0);
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.builds, transformers.publications), (3, 3));
+        // The destination and the three intermediates span two HomSpaces.
+        let committed = cache_entries();
+        assert_eq!(committed, (2, 3));
         left.reset();
         crate::tree_transform::take_coefficient_group_activity();
         let (repeat_space, repeat) = succeeding().unwrap();
         let groups = crate::tree_transform::take_coefficient_group_activity();
-        assert_eq!((groups.misses, groups.publications), (0, 0));
-        assert!(groups.hits > 0);
+        assert_eq!((groups.hits, groups.misses, groups.publications), (0, 0, 0));
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!(
+            (
+                transformers.hits,
+                transformers.builds,
+                transformers.publications
+            ),
+            (3, 0, 0)
+        );
+        assert_eq!(cache_entries(), committed);
         assert_eq!((left.count(Query::F), left.count(Query::R)), (0, 0));
         assert_eq!(first_space.space(), repeat_space.space());
         assert_eq!(
             first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn intermediates_sharing_a_homspace_converge_on_one_id_within_the_call() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_SHARED_HOMSPACE_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::intermediates_sharing_a_homspace_converge_on_one_id_within_the_call",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated shared-HomSpace test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // What: contracting the codomain leg of `V <- V` with the domain leg
+        // of another stages both operands to `V* <- V*`, which the core
+        // shares; the transposed output transforms from that core. Within
+        // the first call the rhs and core previews lose their admission to
+        // the staged lhs, so their transformers publish under its id: the
+        // second call builds nothing.
+        let (_left, lhs, _right, rhs) = bound_pair(1, 1);
+        tenet_core::clear_structure_caches();
+        let lhs_data = [1.5_f64];
+        let rhs_data = [-2.0];
+        let candidate = contracted_axis_order_candidates(&[0], &[1]).remove(0);
+        let run = || {
+            tensorcontract_owned_checked_generic_preselected(
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::new(
+                    &[0],
+                    &[1],
+                    tenet_operations::OutputAxisOrder::Axes(&[1, 0]),
+                ),
+                1,
+                &candidate,
+                FusionContractOrientation::LhsRhs,
+            )
+            .unwrap()
+        };
+        crate::tree_transform::take_completed_transformer_activity();
+        let (cold_space, cold) = run();
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.hits, transformers.builds), (0, 3));
+        let committed = cache_entries();
+        for _ in 0..3 {
+            let (space, data) = run();
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!(
+                (
+                    transformers.hits,
+                    transformers.builds,
+                    transformers.publications
+                ),
+                (3, 0, 0)
+            );
+            assert_eq!(cache_entries(), committed);
+            assert_eq!(space.space(), cold_space.space());
+            assert_eq!(data[0].to_bits(), cold[0].to_bits());
+        }
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_reset_straddling_the_publication_leaves_nothing_resident() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_RESET_STRADDLE_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::a_reset_straddling_the_publication_leaves_nothing_resident",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated reset-straddle test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // What: a clear between the commits and the first transformer
+        // publication refuses every staged publication (the call's epoch is
+        // older), the result is unchanged, and the next call rebuilds.
+        let (_left, lhs, _right, rhs) = bound_pair(2, 2);
+        let lhs_data = (0..lhs.space().required_len().unwrap())
+            .map(|index| index as f64 - 1.5)
+            .collect::<Vec<_>>();
+        let rhs_data = (0..rhs.space().required_len().unwrap())
+            .map(|index| 2.0 - index as f64)
+            .collect::<Vec<_>>();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, tenet_core::RuleIdentity>::default();
+        let mut run = || {
+            tensorcontract_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::new(
+                    &[3, 1],
+                    &[0, 3],
+                    tenet_operations::OutputAxisOrder::Axes(&[2, 0, 3, 1]),
+                ),
+                2,
+            )
+            .unwrap()
+            .1
+        };
+        tenet_core::clear_structure_caches();
+        let reference = run();
+        tenet_core::clear_structure_caches();
+        crate::tree_transform::take_completed_transformer_activity();
+        crate::tree_transform::before_next_completed_publication(Box::new(
+            tenet_core::clear_structure_caches,
+        ));
+        let straddled = run();
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.builds, transformers.publications), (3, 3));
+        assert_eq!(cache_entries().1, 0);
+        assert_eq!(straddled, reference);
+        let rebuilt = run();
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.hits, transformers.builds), (0, 3));
+        assert_eq!(rebuilt, reference);
     }
 
     #[test]
