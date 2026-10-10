@@ -310,21 +310,24 @@ where
         D: 'd,
     {
         let staged = M::stage_transform(logical, adjoint_of, src_data.len(), operation)?;
-        if !M::staged_destination_matches(&staged.stage, dst_space) {
+        let Some(resolved) = M::match_and_resolve(
+            staged,
+            dst_space,
+            |staged, dst| self.resolve_staged::<M, R>(logical, adjoint_of, operation, staged, dst),
+            |resolved| &resolved.stage,
+        )?
+        else {
             // Why `E` directly: a destination mismatch is the caller's
             // argument error in every mode, never a checked plan failure.
             return Err(E::from(OperationError::SpaceMismatch {
                 message:
                     "destination fusion space or block layout does not match the operation result",
             }));
-        }
-        let caller = M::INTO_RESOLVES_CALLER_DESTINATION.then(|| dst_space.structure());
-        let resolved =
-            self.resolve_staged::<M, R>(logical, adjoint_of, operation, staged, caller)?;
+        };
         let dst = dst_data()?;
         self.tree_transform_structure_into_raw(
             &resolved.structure,
-            caller.unwrap_or(&resolved.preview),
+            resolved.replay_destination.unwrap_or(&resolved.preview),
             resolved.src_structure,
             dst,
             src_data,
@@ -393,7 +396,7 @@ where
         adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
         operation: &TreeTransformOperation,
         staged: StagedTransform<M::TransformStage, M::SourceProof<'a>>,
-        dst: Option<&Arc<BlockStructure>>,
+        dst: Option<&'a Arc<BlockStructure>>,
     ) -> Result<ResolvedTransform<'a, M::TransformStage, C>, M::Error>
     where
         M: PlanningAlgebra<R, Scalar = C>,
@@ -433,6 +436,7 @@ where
         )?;
         Ok(ResolvedTransform {
             preview,
+            replay_destination: dst,
             nout,
             stage,
             structure,
@@ -487,6 +491,9 @@ where
 /// commit.
 struct ResolvedTransform<'a, S, C> {
     preview: Arc<BlockStructure>,
+    /// The structure resolved against when not `preview`: an existing
+    /// destination's, which the replay then writes.
+    replay_destination: Option<&'a Arc<BlockStructure>>,
     nout: usize,
     stage: S,
     structure: TreeTransformStructure<C>,
