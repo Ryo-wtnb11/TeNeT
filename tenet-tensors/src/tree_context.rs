@@ -210,10 +210,12 @@ where
     }
 
     /// `dst = alpha · operation(src) + beta · dst` for a multiplicity-free
-    /// direct source and an existing destination: the owned entry's staging
-    /// and commit around a write into the caller's buffer. `dst_space` is
-    /// compared with the staged destination before `dst_data` is asked for
-    /// the buffer.
+    /// source and an existing destination: the owned entry's staging and
+    /// commit around a write into the caller's buffer. `adjoint_of` is `None`
+    /// for a source stored as `src`, or the parent whose storage
+    /// [`TreeTransformIntoSource::Stored`] holds when `src` is that parent's
+    /// lazy adjoint. `dst_space` is compared with the staged destination
+    /// before `dst_data` is asked for the buffer.
     ///
     /// This concrete cross-crate entrypoint is internal and unstable despite
     /// being public for `tenet`; downstream callers must not rely on it.
@@ -222,7 +224,8 @@ where
     pub fn tree_transform_into_multiplicity_free_in<'d, R, E>(
         &mut self,
         src: &BoundDynamicFusionMapSpace<R>,
-        src_data: &[D],
+        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
+        source: TreeTransformIntoSource<'_, D, C, E>,
         operation: &TreeTransformOperation,
         dst_space: &DynamicFusionMapSpace,
         dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
@@ -235,7 +238,7 @@ where
         D: 'd,
     {
         self.tree_transform_into_in::<MultiplicityFreeAdmissionMode, R, E>(
-            src, None, src_data, operation, dst_space, dst_data, alpha, beta,
+            src, adjoint_of, source, operation, dst_space, dst_data, alpha, beta,
         )
     }
 
@@ -289,15 +292,17 @@ where
     /// [`Self::tree_transform_owned_in`] writing into an existing
     /// destination: the same staging, then the space check against `dst_space`
     /// before `dst_data` runs the caller's remaining checks, then
-    /// `alpha · operation(src) + beta · dst` and the same commit. Any error
-    /// before the write leaves the destination untouched; the commit follows
-    /// the write, so a failed write publishes nothing.
+    /// `alpha · operation(src) + beta · dst` and the same commit. A compact
+    /// bond source is read from the resolved structure when it can be, and
+    /// is otherwise densified and replayed through that same structure. Any
+    /// error before the write leaves the destination untouched; the commit
+    /// follows the write, so a failed write publishes nothing.
     #[allow(clippy::too_many_arguments)]
     fn tree_transform_into_in<'d, M, R, E>(
         &mut self,
         logical: &BoundDynamicFusionMapSpace<R>,
         adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
-        src_data: &[D],
+        source: TreeTransformIntoSource<'_, D, C, E>,
         operation: &TreeTransformOperation,
         dst_space: &DynamicFusionMapSpace,
         dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
@@ -309,7 +314,15 @@ where
         E: From<M::Error> + From<OperationError>,
         D: 'd,
     {
-        let staged = M::stage_transform(logical, adjoint_of, src_data.len(), operation)?;
+        let src_len = match &source {
+            TreeTransformIntoSource::Stored(data) => data.len(),
+            // The dense image of the compact payload, as for the owned read.
+            TreeTransformIntoSource::Bond { .. } => logical
+                .space()
+                .required_len()
+                .map_err(OperationError::from)?,
+        };
+        let staged = M::stage_transform(logical, adjoint_of, src_len, operation)?;
         let Some(resolved) = M::match_and_resolve(
             staged,
             dst_space,
@@ -325,9 +338,22 @@ where
             }));
         };
         let dst = dst_data()?;
+        let replay_destination = resolved.replay_destination.unwrap_or(&resolved.preview);
+        let densified;
+        let src_data = match source {
+            TreeTransformIntoSource::Stored(data) => data,
+            TreeTransformIntoSource::Bond { read, dense_source } => {
+                if read(&resolved.structure, replay_destination, dst)? {
+                    M::commit_transform(logical, resolved.stage, resolved.preview)?;
+                    return Ok(());
+                }
+                densified = dense_source()?;
+                &densified[..]
+            }
+        };
         self.tree_transform_structure_into_raw(
             &resolved.structure,
-            resolved.replay_destination.unwrap_or(&resolved.preview),
+            replay_destination,
             resolved.src_structure,
             dst,
             src_data,
@@ -510,6 +536,29 @@ pub enum StructureOutcome<T, D> {
     Replayed(Vec<D>),
 }
 
+/// The source of an existing-destination tree transform.
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub enum TreeTransformIntoSource<'s, D, C, E> {
+    /// The stored payload: the source's own, or its lazy-adjoint parent's.
+    Stored(&'s [D]),
+    /// A compact bond. `read` either writes `alpha · operation(src) +
+    /// beta · dst` from the resolved structure and the destination structure
+    /// it was resolved against and returns `true`, or returns `false` with
+    /// `dst` untouched; `dense_source` then builds the dense image that
+    /// structure replays.
+    Bond {
+        read: &'s mut dyn FnMut(
+            &TreeTransformStructure<C>,
+            &BlockStructure,
+            &mut [D],
+        ) -> Result<bool, E>,
+        dense_source: &'s dyn Fn() -> Result<Vec<D>, OperationError>,
+    },
+}
+
 impl<D>
     TreeTransformExecutionContext<
         D,
@@ -564,7 +613,7 @@ where
         &mut self,
         logical: &BoundDynamicFusionMapSpace<R>,
         adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
-        src_data: &[D],
+        source: TreeTransformIntoSource<'_, D, f64, E>,
         operation: &TreeTransformOperation,
         dst_space: &DynamicFusionMapSpace,
         dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
@@ -577,7 +626,7 @@ where
         D: 'd,
     {
         self.tree_transform_into_in::<CheckedGenericAdmissionMode, R, E>(
-            logical, adjoint_of, src_data, operation, dst_space, dst_data, alpha, beta,
+            logical, adjoint_of, source, operation, dst_space, dst_data, alpha, beta,
         )
     }
 

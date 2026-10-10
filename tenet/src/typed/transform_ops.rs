@@ -79,12 +79,18 @@ where
     /// `beta == 1` leaves those blocks untouched. `alpha == 0` does not read
     /// the source (VectorInterface's `scale(x, 0) = zero(x)`).
     ///
+    /// A lazy-adjoint source is read through its parent's storage, and a
+    /// compact diagonal source writes its transformed diagonal whenever the
+    /// transform maps each bond block to one block of the same shape with one
+    /// coefficient (otherwise it is densified into an operation-local buffer
+    /// first); neither is materialized as a result.
+    ///
     /// # Errors
     ///
     /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], then
-    /// [`Error::InvalidArgument`] for a lazy-adjoint or compact source, a
-    /// destination that is not owned dense host storage, or one that aliases
-    /// the source; then the operation's own errors, as for [`Self::permute`];
+    /// [`Error::InvalidArgument`] for a destination that is not owned dense
+    /// host storage, or one that aliases the source (a lazy adjoint's
+    /// parent included); then the operation's own errors, as for [`Self::permute`];
     /// `SpaceMismatch` for a destination whose space or block layout does not
     /// match the result, [`Error::InvalidArgument`] for one whose length does
     /// not, and [`Error::DestinationShared`] when `destination` shares its
@@ -303,8 +309,8 @@ where
         {
             return Err(Error::RuleMismatch.into());
         }
-        let (source_body, _) = owned_dense_source(self)?;
-        destination_precheck(destination, &source_body.data, "host")?;
+        // Why the storage body: a lazy-adjoint source aliases its parent.
+        destination_precheck(destination, &self.storage_body().data, "host")?;
         <R::Mode as TypedTensorTransformDispatch<R, D>>::transform_into(
             self,
             destination,
@@ -581,24 +587,115 @@ where
     }
 }
 
-/// The owned dense body and payload of a transform `_into` source.
+/// The source of a transform `_into` as the tenet-tensors entry reads it,
+/// handed to `run` with its logical space and, for a lazy adjoint, the parent
+/// whose storage it reads (TensorKit `add_transform_kernel!` reading
+/// `subblock(::AdjointTensorMap)` through the parent). A compact bond is read
+/// from the resolved structure when that structure is a single-term square
+/// bijection, as the owned compact arm reads it, and is otherwise densified
+/// once for the dense replay.
 #[allow(clippy::type_complexity)]
-pub(super) fn owned_dense_source<R, D>(
+pub(super) fn with_transform_into_source<R, D, C, E, T>(
     source: &TensorMap<R, D>,
-) -> Result<(&Arc<TypedTensorBody<R, D>>, &[D]), Error> {
-    match &source.repr {
-        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-            TypedData::Dense(data) => Ok((body, data.as_slice())),
-            TypedData::Diagonal(_) => Err(non_dense_into_source()),
+    operation: &TreeTransformOperation,
+    alpha: D,
+    beta: D,
+    run: impl FnOnce(
+        &BoundDynamicFusionMapSpace<R>,
+        Option<&BoundDynamicFusionMapSpace<R>>,
+        tenet_tensors::TreeTransformIntoSource<'_, D, C, E>,
+    ) -> Result<T, E>,
+) -> Result<T, E>
+where
+    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<C>,
+    C: Copy,
+    E: From<Error>,
+{
+    use tenet_tensors::TreeTransformIntoSource;
+    let body = match &source.repr {
+        TypedTensorRepr::Owned(body) => body,
+        TypedTensorRepr::Adjoint(view) => {
+            return run(
+                &view.logical_space,
+                Some(&view.parent.space),
+                TreeTransformIntoSource::Stored(view.parent_data()),
+            );
+        }
+    };
+    let spectrum = match body.data.as_ref() {
+        TypedData::Dense(data) => {
+            return run(&body.space, None, TreeTransformIntoSource::Stored(data));
+        }
+        TypedData::Diagonal(spectrum) => spectrum,
+    };
+    let logical = &body.space;
+    // As the owned arm: a swap keeps whatever coefficient it carries, and any
+    // other read keeps the dense replay's off-diagonal `0 · c` products.
+    let require_representable = !crate::tensor_core::is_rank_one_diagonal_swap(
+        source.codomain_rank(),
+        source.domain_rank(),
+        operation,
+    );
+    let mut read = |structure: &tenet_tensors::TreeTransformStructure<C>,
+                    destination: &tenet_core::BlockStructure,
+                    data: &mut [D]|
+     -> Result<bool, E> {
+        let Some(diagonal) = crate::tensor_core::bond_spectrum(
+            logical.space().structure(),
+            destination,
+            structure,
+            spectrum,
+            require_representable,
+        ) else {
+            return Ok(false);
+        };
+        axpby_bond_diagonal(destination, data, &diagonal, alpha, beta)?;
+        Ok(true)
+    };
+    let dense_source =
+        || tenet_matrixalgebra::seam::diagonal_bond_data(logical.space(), spectrum, &|v| v);
+    run(
+        logical,
+        None,
+        TreeTransformIntoSource::Bond {
+            read: &mut read,
+            dense_source: &dense_source,
         },
-        TypedTensorRepr::Adjoint(_) => Err(non_dense_into_source()),
-    }
+    )
 }
 
-fn non_dense_into_source() -> Error {
-    Error::InvalidArgument(
-        "typed destination tree transform requires an ordinary dense host source".to_string(),
-    )
+/// `data = alpha · diag(diagonal) + beta · data` on the bond blocks of
+/// `structure`, where `diagonal[i]` is block `i`'s diagonal
+/// ([`crate::tensor_core::bond_spectrum`] proved the bijection and the
+/// shapes). `beta == 0` never reads `data` and `alpha == 0` never reads the
+/// diagonal, as for the dense replay.
+fn axpby_bond_diagonal<D: TensorScalar>(
+    structure: &tenet_core::BlockStructure,
+    data: &mut [D],
+    diagonal: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error> {
+    if beta.is_zero() {
+        data.fill(D::zero());
+    } else if beta != D::one() {
+        for value in data.iter_mut() {
+            *value = beta * *value;
+        }
+    }
+    if alpha.is_zero() {
+        return Ok(());
+    }
+    for (index, entry) in diagonal.iter().enumerate() {
+        let block = structure.block(index)?;
+        let strides = block.strides();
+        let stride = strides[0] + strides[1];
+        for (position, &value) in entry.values.iter().enumerate() {
+            let slot = &mut data[block.offset() + position * stride];
+            *slot = *slot + alpha * value;
+        }
+    }
+    Ok(())
 }
 
 /// The multiplicity-free [`TypedTensorTransformDispatch::transform_into`] of
@@ -623,49 +720,71 @@ where
             <R as MultiplicityFreeFusionSymbols>::Scalar,
         >,
 {
-    let (source_body, source_data) = owned_dense_source(source)?;
-    let identity = source_body.space.space().admission().rule_identity();
+    // Only an owned dense source keys the exact-layout proof: its key is a
+    // direct, unconjugated source content, which neither a lazy adjoint's
+    // parent nor a compact payload is (#1870 D5).
+    let direct = match &source.repr {
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(data) => body
+                .space
+                .space()
+                .admission()
+                .rule_identity()
+                .map(|identity| (identity, body, data.as_slice())),
+            TypedData::Diagonal(_) => None,
+        },
+        TypedTensorRepr::Adjoint(_) => None,
+    };
     let mut lease = source.runtime.lease_context()?;
     let context = D::lane(lease.context())?.tree_context_mut();
     // A destination proved once to be this operation's result space of
     // this source hits the completed transformer directly: the owned
     // operation and the result space are not rebuilt.
     let mut exact_layout_hit = None;
-    if let Some(identity) = identity {
+    if let Some((identity, body, _)) = direct {
         exact_layout_probe(&mut |view| {
             exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit_of(
                 identity,
                 view,
-                &source_body.space,
+                &body.space,
                 destination.logical_space(),
             );
         });
     }
-    if let Some(structure) = exact_layout_hit {
+    if let (Some(structure), Some((_, body, data))) = (exact_layout_hit, direct) {
         let destination_structure = Arc::clone(destination.logical_space().space().structure());
         return Ok(context.replay_tree_transform_dyn_into(
             &structure,
             &destination_structure,
-            source_body.space.space().structure(),
+            body.space.space().structure(),
             destination_slice(destination)?,
-            source_data,
+            data,
             alpha,
             beta,
         )?);
     }
     let operation = operation()?;
     let destination_space = destination.logical_space().space().clone();
-    context.tree_transform_into_multiplicity_free_in(
-        &source_body.space,
-        source_data,
+    with_transform_into_source(
+        source,
         &operation,
-        &destination_space,
-        || destination_slice(destination),
         alpha,
         beta,
+        |logical, adjoint_of, input| {
+            context.tree_transform_into_multiplicity_free_in(
+                logical,
+                adjoint_of,
+                input,
+                &operation,
+                &destination_space,
+                || destination_slice(destination),
+                alpha,
+                beta,
+            )
+        },
     )?;
     drop(lease);
-    if let Some(identity) = identity {
+    if let Some((identity, body, _)) = direct {
         // Retention is an optimization: a lookup-only key keeps no proof.
         let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout_of::<
             R,
@@ -673,7 +792,7 @@ where
         >(
             identity,
             &operation,
-            &source_body.space,
+            &body.space,
             destination.logical_space(),
         );
     }

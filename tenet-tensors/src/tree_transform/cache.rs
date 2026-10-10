@@ -929,6 +929,52 @@ impl TreeTransformPlanning {
         FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
+        self.resolve_tree_pair_oriented_with(
+            rule,
+            operation,
+            dst_structure,
+            || {
+                Ok((
+                    std::borrow::Cow::Borrowed(logical_keys),
+                    std::borrow::Cow::Borrowed(storage_indices()?),
+                ))
+            },
+            storage_src_structure,
+            orientation,
+            basis_order,
+            logical_rank,
+            logical_to_storage_axis,
+        )
+    }
+
+    /// [`Self::resolve_tree_pair_oriented`] whose logical keys, in the keyed
+    /// basis order, and their parent storage indices are derived only on a
+    /// miss, so a warm call reads neither.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn resolve_tree_pair_oriented_with<'k, 'p, R, T, FProjection, FAxis>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        source_projection: FProjection,
+        storage_src_structure: &Arc<BlockStructure>,
+        orientation: FusionTreePairOrientation,
+        basis_order: OrientedBasisOrder,
+        logical_rank: usize,
+        logical_to_storage_axis: FAxis,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        FProjection: FnOnce() -> Result<
+            (
+                std::borrow::Cow<'k, [FusionTreePairKey]>,
+                std::borrow::Cow<'p, [usize]>,
+            ),
+            OperationError,
+        >,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
         let epoch = tenet_core::core_reset_epoch();
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
         validate_tree_pair_namespace_before_cache(operation, storage_src_structure)?;
@@ -937,19 +983,19 @@ impl TreeTransformPlanning {
         // Why lazy: only a miss reads the storage map, so a warm call derives
         // no per-block projection.
         let build = || {
-            let storage_indices = storage_indices()?;
+            let (logical_keys, storage_indices) = source_projection()?;
             if logical_keys.len() != storage_indices.len() {
                 return Err(OperationError::StructureMismatch {
                     tensor: "oriented source projection",
                 });
             }
             let projection =
-                oriented_source_projection(logical_keys, storage_indices, storage_src_structure)?;
+                oriented_source_projection(&logical_keys, &storage_indices, storage_src_structure)?;
             compile_oriented_tree_pair_structure(
                 rule,
                 operation,
                 dst_structure,
-                logical_keys,
+                &logical_keys,
                 storage_src_structure,
                 orientation,
                 basis_order,
@@ -969,8 +1015,10 @@ impl TreeTransformPlanning {
         // Why not key the logical keys, projection, rank, or axis map: the two
         // operand preparations derive them from the parent structure and the
         // keyed basis order: canonical enumeration for Dynamic, parent block
-        // order for static views. The axis map reads the parent split; a
-        // blockless parent compiles no spec.
+        // order for static views. A transform's lazy-adjoint source keys the
+        // same entry: its logical space is the multiplicity-free adjoint,
+        // derived canonically from the parent. The axis map reads the parent
+        // split; a blockless parent compiles no spec.
         let key = CompletedTransformerKey::new::<T>(
             rule.rule_identity(),
             TransformerMode::MultiplicityFree,
