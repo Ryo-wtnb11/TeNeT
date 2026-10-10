@@ -681,21 +681,17 @@ where
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
-        let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
+        let output_axes = spec.output_axes();
         let mut lease = lhs.runtime.lease_context()?;
+        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
         Ok(lease
             .context()
             .generic_lane::<D>()?
             .tensorcontract_checked_generic_in(
-                &lhs_body.space,
-                lhs_body.materialized_dense_data().as_ref(),
-                &rhs_body.space,
-                rhs_body.materialized_dense_data().as_ref(),
-                TensorContractSpec::new(
-                    spec.lhs,
-                    spec.rhs,
-                    OutputAxisOrder::from_axes(&spec.output_axes()),
-                ),
+                (lhs.logical_space(), lhs_operand, &lhs_data),
+                (rhs.logical_space(), rhs_operand, &rhs_data),
+                (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
                 spec.codomain.len(),
             )?)
     }
@@ -704,33 +700,15 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
-        let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
         let mut lease = lhs.runtime.lease_context()?;
+        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
         Ok(lease
             .context()
             .generic_lane::<D>()?
             .tensorcompose_checked_generic_in(
-                &lhs_body.space,
-                lhs_body.materialized_dense_data().as_ref(),
-                &rhs_body.space,
-                rhs_body.materialized_dense_data().as_ref(),
+                (lhs.logical_space(), lhs_operand, &lhs_data),
+                (rhs.logical_space(), rhs_operand, &rhs_data),
             )?)
-    }
-}
-
-/// The owned bodies [`TypedTensorContractDispatch::admit_operands`] admitted.
-#[allow(clippy::type_complexity)]
-fn checked_generic_owned_bodies<'a, R, D>(
-    lhs: &'a TensorMap<R, D>,
-    rhs: &'a TensorMap<R, D>,
-) -> Result<(&'a TypedTensorBody<R, D>, &'a TypedTensorBody<R, D>), Error>
-where
-    D: TensorScalar,
-{
-    match (lhs.owned_body(), rhs.owned_body()) {
-        (Some(lhs), Some(rhs)) => Ok((lhs, rhs)),
-        _ => Err(internal_layout_error(
-            "checked Generic operands admitted owned",
-        )),
     }
 }

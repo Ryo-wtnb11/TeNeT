@@ -296,15 +296,13 @@ where
     crate::tree_transform::take_completed_transformer_activity();
     let (output, data) = context
         .tensorcontract_checked_generic_in(
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::new(
+            direct_side(&lhs, &lhs_data),
+            direct_side(&rhs, &rhs_data),
+            entry_axes(TensorContractSpec::new(
                 case.lhs_axes,
                 case.rhs_axes,
                 OutputAxisOrder::Axes(case.output),
-            ),
+            )),
             case.codomain_rank,
         )
         .unwrap();
@@ -554,11 +552,13 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
             TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
         let (output_space, data) = context
             .tensorcontract_checked_generic_in(
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::Axes(output)),
+                direct_side(&lhs, &lhs_data),
+                direct_side(&rhs, &rhs_data),
+                entry_axes(TensorContractSpec::new(
+                    lhs_axes,
+                    rhs_axes,
+                    OutputAxisOrder::Axes(output),
+                )),
                 codomain_rank,
             )
             .unwrap();
@@ -598,7 +598,10 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
         )
         .unwrap();
         let (core, core_data) = context
-            .tensorcompose_checked_generic_in(&lhs_core, &lhs_core_data, &rhs_core, &rhs_core_data)
+            .tensorcompose_checked_generic_in(
+                direct_side(&lhs_core, &lhs_core_data),
+                direct_side(&rhs_core, &rhs_core_data),
+            )
             .unwrap();
         let (codomain, domain) = output.split_at(codomain_rank);
         let (expected_space, expected) = crate::TreeTransformExecutionContext::<

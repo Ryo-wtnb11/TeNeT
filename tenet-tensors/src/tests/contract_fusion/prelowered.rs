@@ -1020,7 +1020,10 @@ fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
     for (lhs_name, (lhs_space, lhs_data)) in &tilings {
         for (rhs_name, (rhs_space, rhs_data)) in &tilings {
             let (space, product) = context
-                .tensorcompose_checked_generic_in(lhs_space, lhs_data, rhs_space, rhs_data)
+                .tensorcompose_checked_generic_in(
+                    direct_side(lhs_space, lhs_data),
+                    direct_side(rhs_space, rhs_data),
+                )
                 .unwrap();
             let actual = entries(space.space().structure(), &product);
             assert_eq!(

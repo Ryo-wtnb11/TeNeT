@@ -27,6 +27,30 @@ where
 /// of the removed free `tensorcontract_fusion_into`, for fixtures that need
 /// no context reuse.
 #[allow(clippy::too_many_arguments)]
+/// A direct operand of a contraction entry: its space, stored as itself.
+pub(crate) fn direct_side<'a, R, D>(
+    space: &'a crate::BoundDynamicFusionMapSpace<R>,
+    data: &'a [D],
+) -> (
+    &'a crate::BoundDynamicFusionMapSpace<R>,
+    crate::FusionOperand<'a>,
+    &'a [D],
+) {
+    (space, crate::FusionOperand::direct(space.space()), data)
+}
+
+/// The axes of a contraction entry, from a spec without conjugation.
+pub(crate) fn entry_axes(
+    axes: tenet_operations::TensorContractSpec<'_>,
+) -> (&[usize], &[usize], tenet_operations::OutputAxisOrder<'_>) {
+    assert!(!axes.lhs_conjugate() && !axes.rhs_conjugate());
+    (
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    )
+}
+
 pub(crate) fn fusion_contract_into<
     R,
     D,
