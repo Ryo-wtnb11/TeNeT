@@ -170,12 +170,27 @@ where
     }
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
+    S: FactorExec<R, D>,
 {
+    /// Runs `op` on the matrix view `permute(self, rows, cols)`; the current
+    /// split borrows `self` without a transform or a clone.
+    fn factor_leg_roles<T>(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        op: impl FnOnce(&Self) -> Result<T, TypedFacadeError<R>>,
+    ) -> Result<T, TypedFacadeError<R>> {
+        if self.axes_are_identity(rows, cols) {
+            return op(self);
+        }
+        op(&S::permute(self, rows, cols)?)
+    }
+
     /// Returns the compact QR factorization `self = q * r` as a [`Qr`].
     ///
     /// In coupled sector `c`, with block shape `m_c x n_c`, the bond dimension
@@ -235,27 +250,26 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    ///
+    /// # CUDA storage
+    ///
+    /// Owned dense device storage is factored as a stream over the coupled
+    /// sectors, each gauge-fixed on the device by the backend's
+    /// positive-diagonal QR (`R_jj` real and non-negative, phase 1 kept where
+    /// `R_jj == 0`), so nothing of either factor crosses to the host. A route
+    /// whose factor region reproduces the source's tree layout is assembled
+    /// by one whole-factor device copy; any other route keeps the per-tree
+    /// identity-selector GEMM. A moved leg-role split is one device permute.
+    /// A lazy adjoint device operand returns [`Error::UnsupportedOnDevice`]
+    /// before any output exists.
     pub fn qr_compact(
         &self,
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, |t| {
-            t.factor_qr(FactorOp::QrCompact, |lease, source| {
-                tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(
-                    lease, source,
-                )
-            })
-        })
+        self.factor_leg_roles(rows, cols, S::qr_compact)
     }
-}
 
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
-    D: FactorizationScalar,
-{
     /// Returns the compact singular-value decomposition
     /// `self = u * s * vh` as an [`Svd`], which states the spectrum order and
     /// the storage routes of `s`.
@@ -317,14 +331,51 @@ where
     /// other than the current one needs a symmetric braiding; otherwise the
     /// permute's `UnsupportedBraidingStyle` error is returned before any
     /// factorization work, as are its errors for malformed axes.
+    ///
+    /// # CUDA storage
+    ///
+    /// Owned dense device storage is factored as a stream over the coupled
+    /// sectors: each nonempty route is decomposed and assembled before its
+    /// raw device factors are dropped. The returned `s` is a dense CUDA
+    /// tensor, because CUDA diagonal storage is not part of the typed storage
+    /// contract; each route's singular values are copied into its diagonal on
+    /// the device (element stride `k + 1`). A moved leg-role split is one
+    /// device permute. A lazy adjoint device operand returns
+    /// [`Error::UnsupportedOnDevice`] before any output exists.
+    ///
+    /// Transfers, exactly: host to device, one zero upload per factor
+    /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
+    /// elements, since a host zero buffer is the only device allocation
+    /// path until #740) plus one upload of `max_c rows_c` `i64` gauge weights
+    /// when any route is nonempty. Device to host, no tensor payload:
+    /// the singular values never cross to the host, so the call ends
+    /// without a spectrum download. The backend still reads O(1)
+    /// solver-status metadata per route, a host barrier each.
+    ///
+    /// `u` and `vh` carry the Host gauge: in every column of each sector's
+    /// `u`, the first largest-magnitude entry is real and non-negative, and
+    /// the matching `vh` row takes the inverse phase. The fix-up runs on the
+    /// device without a download (`tenet_dense::cuda_svd_gauge_phases`):
+    /// 13 Tenferro ops per route for the phases, then per side either a
+    /// `k x k` diagonal selector that the non-aligned assembly GEMM
+    /// multiplies by anyway (1 op) or a scaling of the aligned factor before
+    /// its copy (2 ops), plus one `conj` for a complex left side. They are
+    /// counted in `CudaTransferStats::gauge_ops`.
     pub fn svd_compact(
         &self,
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, Self::factor_svd_compact)
+        self.factor_leg_roles(rows, cols, S::svd_compact)
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
+    D: FactorizationScalar,
+{
     /// Returns the full SVD `self = u * s * vh` with square outer factors.
     ///
     /// In sector `c`, `u` is `m_c x m_c`, `vh` is `n_c x n_c`, and `s` is

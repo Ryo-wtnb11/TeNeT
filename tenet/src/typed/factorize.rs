@@ -506,3 +506,60 @@ where
         })
     }
 }
+
+/// The storage kernels of the compact factorizations: one typed body per
+/// operation, with each storage supplying only its execution (#1756).
+///
+/// Each kernel factors the matrix view the body's leg roles selected, in
+/// whatever representation it holds; a representation the storage cannot
+/// factor is its `UnsupportedOnDevice`, raised before any output exists.
+#[doc(hidden)]
+pub trait FactorExec<R, D>: TypedStorage<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: FusionMode<R>,
+{
+    /// `permute(t, rows, cols)` for a moved leg-role split.
+    // Why a member: each storage still has its own `permute` until the
+    // transforms have one body (#1756 L7), which then replaces it.
+    fn permute(
+        t: &TensorMap<R, D, Self>,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<TensorMap<R, D, Self>, TypedFacadeError<R>>;
+
+    /// Compact QR of `t`'s current split.
+    fn qr_compact(
+        t: &TensorMap<R, D, Self>,
+    ) -> Result<Qr<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+
+    /// Compact SVD of `t`'s current split.
+    fn svd_compact(
+        t: &TensorMap<R, D, Self>,
+    ) -> Result<Svd<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+}
+
+impl<R, D> FactorExec<R, D> for Vec<D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
+    D: FactorizationScalar,
+{
+    fn permute(
+        t: &TensorMap<R, D>,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<TensorMap<R, D>, TypedFacadeError<R>> {
+        t.permute(rows, cols)
+    }
+
+    fn qr_compact(t: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, TypedFacadeError<R>> {
+        t.factor_qr(FactorOp::QrCompact, |lease, source| {
+            tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(lease, source)
+        })
+    }
+
+    fn svd_compact(t: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, TypedFacadeError<R>> {
+        t.factor_svd_compact()
+    }
+}

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{GradedSpace, Qr, Runtime, Svd, TensorMap};
 
 #[test]
 fn unified_methods_resolve_in_path_form() {
@@ -28,4 +28,10 @@ fn unified_methods_resolve_in_path_form() {
     assert_eq!(TensorMap::norm(&zero, 2.0).unwrap(), 0.0);
     TensorMap::axpby_into(&t, &mut zero, 2.0, 0.0).unwrap();
     assert_eq!(zero.dense_data().unwrap(), twice.dense_data().unwrap());
+
+    // L3 compact factors.
+    let Svd { s, .. } = TensorMap::svd_compact(&t, &[0], &[1]).unwrap();
+    assert!((TensorMap::norm(&s, 2.0).unwrap() - 2f64.sqrt()).abs() < 1e-12);
+    let Qr { r, .. } = TensorMap::qr_compact(&t, &[1], &[0]).unwrap();
+    assert!((TensorMap::norm(&r, 2.0).unwrap() - 2f64.sqrt()).abs() < 1e-12);
 }

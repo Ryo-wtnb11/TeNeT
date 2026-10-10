@@ -369,6 +369,8 @@ pub use dispatch::{
 };
 use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 mod factorize;
+#[doc(hidden)]
+pub use factorize::FactorExec;
 pub use factorize::FusionMode;
 mod checked_generic_contract;
 mod mode_dispatch;

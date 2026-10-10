@@ -11,12 +11,17 @@
 //! `axpby_into`) are checked through `norm` and the linear functional
 //! `inner(c, ·)` against the entrywise combination of the written entries;
 //! fixtures on one space are written in one order, so their entries align.
+//! Compact factors (`svd_compact`, `qr_compact`) are checked the same way
+//! through their rebuilt product, and through the norm of `s`/`r`, which an
+//! isometric outer factor preserves.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
 //!   operand: `UnsupportedOnDevice`, asserted below.
 //! - CUDA `axpby` of one lazy and one owned operand, and `axpby_into` from a
 //!   lazy source: `UnsupportedOnDevice`, asserted below (#1874).
+//! - CUDA `svd_compact`/`qr_compact` of a lazy adjoint operand:
+//!   `UnsupportedOnDevice`, asserted below.
 //! - CUDA compact storage does not exist (`to_cuda` densifies), so the
 //!   compact column is Host-only.
 //! - Checked Generic and complex-coefficient rules have no CUDA methods
@@ -26,7 +31,9 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, OperationError, Runtime, SectorSpectrum, TensorMap};
+use tenet::typed::{
+    Error, GradedSpace, OperationError, Qr, Runtime, SectorSpectrum, Svd, TensorMap,
+};
 
 const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
 
@@ -228,6 +235,49 @@ macro_rules! storage_rows {
             Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
         ));
 
+        // Compact factors: `u s vh` and `q r` rebuild the operand, and `s`
+        // and `r` carry its dim-weighted Frobenius norm (the outer factors are
+        // isometries).
+        let norm_a = norm_oracle(&a_entries, 2.0);
+        let svd_rebuild = |Svd { u, s, vh }: Svd<TensorMap<_, $D>>| {
+            assert!(close(s.norm(2.0).unwrap(), u.compose(&s).unwrap().norm(2.0).unwrap()));
+            u.compose(&s).unwrap().compose(&vh).unwrap()
+        };
+        let qr_rebuild = |Qr { q, r }: Qr<TensorMap<_, $D>>| {
+            assert!(close(r.norm(2.0).unwrap(), q.compose(&r).unwrap().norm(2.0).unwrap()));
+            q.compose(&r).unwrap()
+        };
+        check("svd_compact", &svd_rebuild(a.svd_compact(&[0], &[1]).unwrap()), &a_entries);
+        check("qr_compact", &qr_rebuild(a.qr_compact(&[0], &[1]).unwrap()), &a_entries);
+        assert!(close(a.svd_compact(&[0], &[1]).unwrap().s.norm(2.0).unwrap(), norm_a));
+        check_lazy(
+            "lazy svd_compact",
+            &svd_rebuild(lazy_a.svd_compact(&[0], &[1]).unwrap()),
+            &a_entries,
+        );
+        check_lazy(
+            "lazy qr_compact",
+            &qr_rebuild(lazy_a.qr_compact(&[0], &[1]).unwrap()),
+            &a_entries,
+        );
+        // A moved split factors `permute(a, [1], [0])`, of the same norm.
+        let swapped = svd_rebuild(a.svd_compact(&[1], &[0]).unwrap());
+        assert!(close(swapped.norm(2.0).unwrap(), norm_a));
+        let swapped = qr_rebuild(a.qr_compact(&[1], &[0]).unwrap());
+        assert!(close(swapped.norm(2.0).unwrap(), norm_a));
+        let norm_diag = norm_oracle(&diag_entries, 2.0);
+        let compact_svd = compact.svd_compact(&[0], &[1]).unwrap();
+        assert!(close(compact_svd.s.norm(2.0).unwrap(), norm_diag));
+        assert!(close(svd_rebuild(compact_svd).norm(2.0).unwrap(), norm_diag));
+        let compact_qr = compact.qr_compact(&[0], &[1]).unwrap();
+        assert!(close(qr_rebuild(compact_qr).norm(2.0).unwrap(), norm_diag));
+        for malformed in [a.svd_compact(&[0], &[0]).map(|_| ()), a.qr_compact(&[0], &[2]).map(|_| ())] {
+            assert!(matches!(
+                malformed,
+                Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidPermutation { .. })
+            ));
+        }
+
         $cuda(&a, &b, &lazy_a, alpha, beta);
     }};
 }
@@ -308,7 +358,7 @@ fn host_rows_match_the_hand_oracle() {
 #[ignore = "requires a real CUDA device"]
 fn cuda_rows_match_host() {
     use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-    use tenet::typed::{CudaPayload, CudaStorage};
+    use tenet::typed::{CudaFactorizationPayload, CudaStorage};
 
     fn device_rows<R, D>(
         a: &TensorMap<R, D>,
@@ -318,7 +368,7 @@ fn cuda_rows_match_host() {
         beta: D,
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: CudaPayload + Into<Complex64> + std::fmt::Debug,
+        D: CudaFactorizationPayload + Into<Complex64> + std::fmt::Debug,
     {
         let (a_dev, b_dev) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
         let host = a.norm(2.0).unwrap();
@@ -417,6 +467,49 @@ fn cuda_rows_match_host() {
             Error::DestinationShared
         );
         drop(shared);
+
+        // Compact factors: the device rebuilds, `s` and `r` equal the Host's
+        // (both storages fix the Host gauge), and a lazy device operand is
+        // the storage's capability error.
+        for (rows, cols) in [([0], [1]), ([1], [0])] {
+            let (device, host) = (
+                a_dev.svd_compact(&rows, &cols).unwrap(),
+                a.svd_compact(&rows, &cols).unwrap(),
+            );
+            same("svd_compact s", device.s.clone(), host.s.clone());
+            same(
+                "svd_compact",
+                device
+                    .u
+                    .compose(&device.s)
+                    .unwrap()
+                    .compose(&device.vh)
+                    .unwrap(),
+                host.u.compose(&host.s).unwrap().compose(&host.vh).unwrap(),
+            );
+            let (device, host) = (
+                a_dev.qr_compact(&rows, &cols).unwrap(),
+                a.qr_compact(&rows, &cols).unwrap(),
+            );
+            same("qr_compact r", device.r.clone(), host.r.clone());
+            same(
+                "qr_compact",
+                device.q.compose(&device.r).unwrap(),
+                host.q.compose(&host.r).unwrap(),
+            );
+        }
+        assert_eq!(
+            lazy_dev.svd_compact(&[0], &[1]).unwrap_err(),
+            Error::UnsupportedOnDevice(
+                "svd_compact does not support lazy adjoint CUDA operands".into()
+            )
+        );
+        assert_eq!(
+            lazy_dev.qr_compact(&[0], &[1]).unwrap_err(),
+            Error::UnsupportedOnDevice(
+                "qr_compact does not support lazy adjoint CUDA operands".into()
+            )
+        );
     }
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
