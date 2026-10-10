@@ -47,7 +47,7 @@ use crate::contract::{
     CheckedContractTxn, DynamicFusionCoreDstEntry, DynamicFusionMapSpace,
     DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact, FusionContractPlan,
     FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
-    PreparedCheckedGenericDynamicSpace, ValidatedCoreContract,
+    PreparedCheckedGenericDynamicSpace, StorageContractResolution, ValidatedCoreContract,
     CHECKED_CONTRACTION_REQUIRES_BOSONIC, CHECKED_REQUIRES_DIRECT_OPERANDS,
 };
 use crate::tree_transform::{
@@ -64,7 +64,7 @@ use crate::{
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::fusion_replay::MatrixOp;
-use tenet_operations::{TensorContractFusionProfile, TensorContractSpec};
+use tenet_operations::{OutputAxisOrder, TensorContractFusionProfile, TensorContractSpec};
 
 mod sealed {
     pub trait Sealed {}
@@ -245,6 +245,10 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         R: 'a;
     /// What an eager transform holds between staging and commit.
     type TransformStage;
+    /// The per-call planning state a contraction owns beside the context's:
+    /// none for multiplicity-free, the call's transaction for checked
+    /// Generic.
+    type ContractTxn;
     /// What the planner derives spaces under: the multiplicity-free layout
     /// primer, or the checked binding whose provider admission stages them.
     type SpaceAuthority<'a>: Copy
@@ -300,6 +304,13 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     fn transform_cache<'c>(
         planning: &'c mut TreeTransformPlanning,
         stage: &'c mut Self::TransformStage,
+    ) -> &'c mut Self::StructureCache;
+
+    /// The planning state a contraction resolves its plan with: the
+    /// context's own, or the call's transaction.
+    fn contract_cache<'c>(
+        planning: &'c mut TreeTransformPlanning,
+        txn: &'c mut Self::ContractTxn,
     ) -> &'c mut Self::StructureCache;
 
     /// Commits the staged destination after replay, then publishes what the
@@ -444,6 +455,76 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         Self::Scalar: DenseBlockScalar;
 }
 
+/// What the one owned contraction entry is asked for.
+#[derive(Clone, Copy)]
+pub(crate) enum ContractRequest<'s> {
+    /// `lhs·rhs` over `axes`, whose conjugation flags are the operands',
+    /// split after the first `codomain_rank` output axes.
+    Contract {
+        axes: TensorContractSpec<'s>,
+        codomain_rank: usize,
+    },
+    /// TensorKit `mul!`: `lhs.domain` glued to `rhs.codomain` in order.
+    Compose,
+}
+
+/// One contraction operand: its logical space (the authority its
+/// destination derives from), its storage operand and its payload length.
+pub(crate) type ContractSide<'a, R> = (&'a BoundDynamicFusionMapSpace<R>, FusionOperand<'a>, usize);
+
+/// One owned contraction between its staged destination and commit.
+pub(crate) struct StagedContraction<S, A, T> {
+    /// What [`ContractStaging::commit_contraction`] consumes.
+    pub(crate) stage: S,
+    /// What the planner derives spaces under.
+    pub(crate) authority: A,
+    /// The call's planning state ([`PlanningAlgebra::ContractTxn`]).
+    pub(crate) txn: T,
+    /// The destination payload length.
+    pub(crate) len: usize,
+}
+
+/// The destination steps of the one owned contraction/composition entry
+/// (#1864): multiplicity-free derives and publishes its destination at
+/// once; checked Generic admits, stages it, and commits after replay
+/// (#2063).
+///
+/// Why a sibling of [`PlanningAlgebra`]: the multiplicity-free destination
+/// of a lazy adjoint derives through the checked fusion algebra
+/// (`contracted_multiplicity_free_oriented`), a provider bound the
+/// multiplicity-free planner does not carry.
+pub(crate) trait ContractStaging<R>: PlanningAlgebra<R> {
+    /// What a contraction holds between staging and commit.
+    type ContractStage;
+
+    /// Admits the operands and derives or stages the destination of
+    /// `request`.
+    #[allow(clippy::type_complexity)]
+    fn stage_contraction<'a>(
+        lhs: ContractSide<'a, R>,
+        rhs: ContractSide<'a, R>,
+        request: ContractRequest<'_>,
+    ) -> Result<
+        StagedContraction<Self::ContractStage, Self::SpaceAuthority<'a>, Self::ContractTxn>,
+        Self::Error,
+    >;
+
+    /// The provider and destination space the plan targets.
+    fn contract_destination<'s>(
+        stage: &'s Self::ContractStage,
+        lhs: &'s BoundDynamicFusionMapSpace<R>,
+    ) -> (&'s R, &'s DynamicFusionMapSpace);
+
+    /// Commits the staged destination after replay, then publishes what the
+    /// call staged for the route `resolution` replayed.
+    fn commit_contraction(
+        lhs: &BoundDynamicFusionMapSpace<R>,
+        stage: Self::ContractStage,
+        txn: Self::ContractTxn,
+        resolution: &StorageContractResolution<Self::Scalar>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error>;
+}
+
 /// The coefficient bounds of the multiplicity-free tree-structure cache.
 /// Why not `DenseBlockScalar`: the eager transform entries share the
 /// multiplicity-free [`PlanningAlgebra`] impl without it; only the core
@@ -472,6 +553,7 @@ where
         R: 'a;
     /// The destination, derived and published by staging.
     type TransformStage = BoundDynamicFusionMapSpace<R>;
+    type ContractTxn = ();
     type SpaceAuthority<'a>
         = LayoutKeyBuilder<R>
     where
@@ -556,6 +638,13 @@ where
     fn transform_cache<'c>(
         planning: &'c mut TreeTransformPlanning,
         _stage: &'c mut BoundDynamicFusionMapSpace<R>,
+    ) -> &'c mut TreeTransformPlanning {
+        planning
+    }
+
+    fn contract_cache<'c>(
+        planning: &'c mut TreeTransformPlanning,
+        _txn: &'c mut (),
     ) -> &'c mut TreeTransformPlanning {
         planning
     }
@@ -748,6 +837,101 @@ where
     }
 }
 
+impl<R> ContractStaging<R> for MultiplicityFreeAdmissionMode
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + TreeTransformRuleCacheKey,
+    R::Scalar: MultiplicityFreePlanningScalar,
+{
+    /// The destination, derived and published by staging.
+    type ContractStage = BoundDynamicFusionMapSpace<R>;
+
+    /// Two direct operands derive through the owned derivation, a lazy
+    /// adjoint through the oriented one.
+    fn stage_contraction<'a>(
+        (lhs, lhs_operand, _): ContractSide<'a, R>,
+        (rhs, rhs_operand, _): ContractSide<'a, R>,
+        request: ContractRequest<'_>,
+    ) -> Result<
+        StagedContraction<BoundDynamicFusionMapSpace<R>, LayoutKeyBuilder<R>, ()>,
+        OperationError,
+    > {
+        let direct = !lhs_operand.storage_conjugate() && !rhs_operand.storage_conjugate();
+        let destination = match request {
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            } if direct => BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+                lhs,
+                rhs,
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                axes.output_permutation(),
+                codomain_rank,
+            )?,
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            } => BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+                lhs,
+                lhs_operand,
+                rhs,
+                rhs_operand,
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                axes.output_permutation(),
+                Some(codomain_rank),
+            )?,
+            ContractRequest::Compose => {
+                let lhs_axes = (lhs.space().nout()..lhs.space().rank()).collect::<Vec<_>>();
+                let rhs_axes = (0..rhs.space().nout()).collect::<Vec<_>>();
+                if direct {
+                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                        lhs,
+                        rhs,
+                        &lhs_axes,
+                        &rhs_axes,
+                        OutputAxisOrder::identity(),
+                    )?
+                } else {
+                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+                        lhs,
+                        lhs_operand,
+                        rhs,
+                        rhs_operand,
+                        &lhs_axes,
+                        &rhs_axes,
+                        OutputAxisOrder::identity(),
+                        None,
+                    )?
+                }
+            }
+        };
+        let len = destination.space().required_len()?;
+        Ok(StagedContraction {
+            authority: destination.layout_primer(),
+            stage: destination,
+            txn: (),
+            len,
+        })
+    }
+
+    fn contract_destination<'s>(
+        stage: &'s BoundDynamicFusionMapSpace<R>,
+        _lhs: &'s BoundDynamicFusionMapSpace<R>,
+    ) -> (&'s R, &'s DynamicFusionMapSpace) {
+        (stage.provider(), stage.space())
+    }
+
+    fn commit_contraction(
+        _lhs: &BoundDynamicFusionMapSpace<R>,
+        stage: BoundDynamicFusionMapSpace<R>,
+        _txn: (),
+        _resolution: &StorageContractResolution<R::Scalar>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError> {
+        Ok(stage)
+    }
+}
+
 impl<R> PlanningAlgebra<R> for CheckedGenericAdmissionMode
 where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
@@ -766,6 +950,7 @@ where
         R: 'a;
     /// The staged destination and the call's transaction.
     type TransformStage = (PreparedCheckedGenericDynamicSpace, CheckedContractTxn);
+    type ContractTxn = CheckedContractTxn;
     /// The binding whose provider admission stages derived spaces, with the
     /// entry's twist answer.
     type SpaceAuthority<'a>
@@ -1020,6 +1205,13 @@ where
         stage: &'c mut Self::TransformStage,
     ) -> &'c mut CheckedContractTxn {
         &mut stage.1
+    }
+
+    fn contract_cache<'c>(
+        _planning: &'c mut TreeTransformPlanning,
+        txn: &'c mut CheckedContractTxn,
+    ) -> &'c mut CheckedContractTxn {
+        txn
     }
 
     /// Publication follows commit: only now are the destination's ids

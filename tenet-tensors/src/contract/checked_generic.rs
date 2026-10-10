@@ -5,23 +5,25 @@ use tenet_core::{
     BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols,
     CoreError, FusionTreeHomSpace, RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
-use tenet_operations::{ContractDestinationInit, TensorContractSpec, TreeTransformBackend};
+use tenet_operations::{TensorContractSpec, TreeTransformBackend};
 
+use crate::mode::{ContractRequest, ContractSide, ContractStaging, StagedContraction};
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use crate::{
-    zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
-    RecouplingCoefficientAction, ZeroBytes,
+    ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, ZeroBytes,
 };
 
 use super::backend::TensorContractBackend;
-use super::context::{
-    plan_compose_in, plan_contract_in, PlanTarget, TensorContractFusionExecutionContext,
-};
+use super::context::TensorContractFusionExecutionContext;
+#[cfg(test)]
+use super::context::{plan_contract_in, PlanTarget};
 use super::dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace,
 };
-use super::resolution::{HostEagerExecutor, StorageContractResolution};
+#[cfg(test)]
+use super::resolution::HostEagerExecutor;
+use super::resolution::StorageContractResolution;
 use super::structure::TensorContractAxisPlan;
 
 type CheckedContractResult<P, D> = Result<
@@ -98,6 +100,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<'a, P> PlanTarget<'a, P, CheckedAuthority<'a, P>> {
     /// The checked destination `space` (a staged preview) planned under
     /// `authority`, whose binding's provider is the rule.
@@ -185,11 +188,11 @@ fn validate_source_structure<E>(
     Ok(())
 }
 
-fn validate_contract_local<P, D>(
+fn validate_contract_local<P>(
     lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
+    lhs_len: usize,
     rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
+    rhs_len: usize,
     axes: TensorContractSpec<'_>,
     dst_nout: usize,
 ) -> Result<TensorContractAxisPlan, CheckedGenericPlanError<P::Error>>
@@ -224,12 +227,12 @@ where
         }
         .into());
     }
-    for (data, space) in [(lhs_data, lhs_space), (rhs_data, rhs_space)] {
+    for (len, space) in [(lhs_len, lhs_space), (rhs_len, rhs_space)] {
         let expected = space.space().required_len()?;
-        if data.len() != expected {
+        if len != expected {
             return Err(OperationError::ElementCountMismatch {
                 expected,
-                actual: data.len(),
+                actual: len,
             }
             .into());
         }
@@ -238,147 +241,100 @@ where
     Ok(axis_plan)
 }
 
-/// The body behind
-/// [`TensorContractFusionExecutionContext::tensorcontract_checked_generic_in`].
-fn tensorcontract_checked_generic<P, D, BT, BC>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>,
-    (lhs_space, lhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
-    (rhs_space, rhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
-    axes: TensorContractSpec<'_>,
-    codomain_rank: usize,
-) -> CheckedContractResult<P, D>
+/// Checked operands are direct (`CHECKED_REQUIRES_DIRECT_OPERANDS`); the
+/// staging order is today's provider-event order: local validation, pair
+/// admission, the contraction's braiding check, then the staged
+/// destination, whose producer derives the HomSpace.
+impl<P> ContractStaging<P> for CheckedGenericAdmissionMode
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
 {
-    let axis_plan = validate_contract_local(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        codomain_rank,
-    )?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    let authority = CheckedAuthority::contraction(lhs_space)?;
-    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-            provider,
-            lhs_space.space().homspace(),
-            rhs_space.space().homspace(),
-            axes.lhs_contracting_axes(),
-            axes.rhs_contracting_axes(),
-            &axis_plan.output_axes,
-            codomain_rank,
-        )
-        .map_err(CheckedGenericPlanError::from)
-    })?;
-    let preview = destination.preview();
-    let mut txn = CheckedContractTxn::new();
-    let resolution = plan_contract_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
-        &mut txn,
-        PlanTarget::checked(authority, &preview),
-        FusionOperand::direct(lhs_space.space()),
-        FusionOperand::direct(rhs_space.space()),
-        (
-            axes.lhs_contracting_axes(),
-            axes.rhs_contracting_axes(),
-            &axis_plan.output_axes,
-        ),
-        None,
-    )?;
-    #[cfg(test)]
-    context.record_contract_route(&resolution);
-    let mut data = zeroed_payload(destination.required_len());
-    context.execute_contract_route_host(
-        &resolution,
-        preview.structure(),
-        &mut data,
-        (lhs_space.space().structure(), lhs_data),
-        (rhs_space.space().structure(), rhs_data),
-        D::one(),
-        ContractDestinationInit::Zeroed,
-    )?;
-    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    // Only after the fallible destination commit: a failed call commits no
-    // intermediate and publishes nothing. These commits cannot fail; a lost
-    // or refused admission leaves its preview unpublishable.
-    txn.commit(
-        (
-            Arc::clone(preview.structure()),
-            Arc::clone(destination.space().structure()),
-        ),
-        &resolution,
-    );
-    Ok((destination, data))
-}
+    /// The staged destination and the preview the planner targets.
+    type ContractStage = (PreparedCheckedGenericDynamicSpace, DynamicFusionMapSpace);
 
-/// The body behind
-/// [`TensorContractFusionExecutionContext::tensorcompose_checked_generic_in`].
-fn tensorcompose_owned_checked_generic_in_context<P, D, BT, BC>(
-    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>,
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-{
-    let lhs_nout = lhs_space.space().nout();
-    let lhs_axes = (lhs_nout..lhs_space.space().rank()).collect::<Vec<_>>();
-    let rhs_axes = (0..rhs_space.space().nout()).collect::<Vec<_>>();
-    let axes = TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes);
-    let axis_plan =
-        validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-            provider,
-            lhs_space.space().homspace(),
-            rhs_space.space().homspace(),
-            &lhs_axes,
-            &rhs_axes,
-            &axis_plan.output_axes,
-            lhs_nout,
-        )
-        .map_err(CheckedGenericPlanError::from)
-    })?;
-    let preview = destination.preview();
-    let resolution = plan_compose_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
-        PlanTarget::checked(CheckedAuthority::composition(lhs_space), &preview),
-        FusionOperand::direct(lhs_space.space()),
-        FusionOperand::direct(rhs_space.space()),
-    )?;
-    #[cfg(test)]
-    context.record_contract_route(&resolution);
-    let mut data = zeroed_payload(destination.required_len());
-    context.execute_contract_route_host(
-        &resolution,
-        preview.structure(),
-        &mut data,
-        (lhs_space.space().structure(), lhs_data),
-        (rhs_space.space().structure(), rhs_data),
-        D::one(),
-        ContractDestinationInit::Zeroed,
-    )?;
-    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    Ok((destination, data))
+    fn stage_contraction<'a>(
+        (lhs, lhs_operand, lhs_len): ContractSide<'a, P>,
+        (rhs, rhs_operand, rhs_len): ContractSide<'a, P>,
+        request: ContractRequest<'_>,
+    ) -> Result<
+        StagedContraction<Self::ContractStage, CheckedAuthority<'a, P>, CheckedContractTxn>,
+        CheckedGenericPlanError<P::Error>,
+    > {
+        if lhs_operand.storage_conjugate() || rhs_operand.storage_conjugate() {
+            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
+        }
+        let compose_axes;
+        let (axes, codomain_rank) = match request {
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            } => (axes, codomain_rank),
+            ContractRequest::Compose => {
+                let lhs_nout = lhs.space().nout();
+                compose_axes = (
+                    (lhs_nout..lhs.space().rank()).collect::<Vec<_>>(),
+                    (0..rhs.space().nout()).collect::<Vec<_>>(),
+                );
+                (
+                    TensorContractSpec::with_default_output_order(&compose_axes.0, &compose_axes.1),
+                    lhs_nout,
+                )
+            }
+        };
+        let axis_plan = validate_contract_local(lhs, lhs_len, rhs, rhs_len, axes, codomain_rank)?;
+        let provider = crate::admission::admit_checked_generic_pair(lhs, rhs)?;
+        let authority = match request {
+            ContractRequest::Contract { .. } => CheckedAuthority::contraction(lhs)?,
+            ContractRequest::Compose => CheckedAuthority::composition(lhs),
+        };
+        let destination = lhs.prepare_final_homspace_generic_from_checked(provider, || {
+            FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                provider,
+                lhs.space().homspace(),
+                rhs.space().homspace(),
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &axis_plan.output_axes,
+                codomain_rank,
+            )
+            .map_err(CheckedGenericPlanError::from)
+        })?;
+        let preview = destination.preview();
+        let len = destination.required_len();
+        Ok(StagedContraction {
+            stage: (destination, preview),
+            authority,
+            txn: CheckedContractTxn::new(),
+            len,
+        })
+    }
+
+    fn contract_destination<'s>(
+        (_, preview): &'s Self::ContractStage,
+        lhs: &'s BoundDynamicFusionMapSpace<P>,
+    ) -> (&'s P, &'s DynamicFusionMapSpace) {
+        (lhs.provider(), preview)
+    }
+
+    /// Only after the fallible destination commit: a failed call commits no
+    /// intermediate and publishes nothing. These commits cannot fail; a lost
+    /// or refused admission leaves its preview unpublishable.
+    fn commit_contraction(
+        lhs: &BoundDynamicFusionMapSpace<P>,
+        (destination, preview): Self::ContractStage,
+        txn: CheckedContractTxn,
+        resolution: &StorageContractResolution<f64>,
+    ) -> Result<BoundDynamicFusionMapSpace<P>, CheckedGenericPlanError<P::Error>> {
+        let destination = lhs.commit_final_homspace_generic_bound_checked(destination)?;
+        txn.commit(
+            (
+                Arc::clone(preview.structure()),
+                Arc::clone(destination.space().structure()),
+            ),
+            resolution,
+        );
+        Ok(destination)
+    }
 }
 
 impl<D, BT, BC> TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>
@@ -420,12 +376,21 @@ where
     where
         P: CheckedGenericRigidSymbols<Scalar = f64>,
     {
-        tensorcontract_checked_generic(
-            self,
-            (lhs_space, lhs_data),
-            (rhs_space, rhs_data),
-            axes,
-            codomain_rank,
+        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(
+            (
+                lhs_space,
+                FusionOperand::direct(lhs_space.space()),
+                lhs_data,
+            ),
+            (
+                rhs_space,
+                FusionOperand::direct(rhs_space.space()),
+                rhs_data,
+            ),
+            ContractRequest::Contract {
+                axes,
+                codomain_rank,
+            },
         )
     }
 
@@ -453,8 +418,18 @@ where
     where
         P: CheckedGenericRigidSymbols<Scalar = f64>,
     {
-        tensorcompose_owned_checked_generic_in_context(
-            self, lhs_space, lhs_data, rhs_space, rhs_data,
+        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(
+            (
+                lhs_space,
+                FusionOperand::direct(lhs_space.space()),
+                lhs_data,
+            ),
+            (
+                rhs_space,
+                FusionOperand::direct(rhs_space.space()),
+                rhs_data,
+            ),
+            ContractRequest::Compose,
         )
     }
 }

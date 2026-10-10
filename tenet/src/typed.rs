@@ -269,12 +269,12 @@ use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
+#[cfg(feature = "cuda")]
+use crate::tensor_core::oriented_contract_destination;
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
-    internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
-    tensorproduct_owned_multiplicity_free, OrientedContractionKind,
+    internal_layout_error, tensorproduct_owned_checked_generic,
+    tensorproduct_owned_multiplicity_free,
 };
 
 mod batched;

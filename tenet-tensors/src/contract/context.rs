@@ -12,7 +12,10 @@ use super::route_host::Stage;
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
-use crate::mode::{MultiplicityFreePlanningScalar, PlanningAlgebra, TreeStructureSource};
+use crate::mode::{
+    ContractRequest, ContractStaging, MultiplicityFreePlanningScalar, PlanningAlgebra,
+    StagedContraction, TreeStructureSource,
+};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{TreeTransformPlanning, TreeTransformRuleCacheKey};
 use crate::{
@@ -789,7 +792,8 @@ where
         let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
         let axes = lowered.as_spec();
         let output_axes = spec_output_axes(axes, dst_space.rank());
-        self.tensorcontract_planned_raw_into(
+        self.tensorcontract_planned_raw_into::<MultiplicityFreeAdmissionMode, R>(
+            &mut (),
             PlanTarget {
                 rule,
                 space: &dst_space,
@@ -798,14 +802,15 @@ where
             dst.data_mut(),
             (legacy_operand(&lhs_space, axes.lhs_conjugate()), lhs.data()),
             (legacy_operand(&rhs_space, axes.rhs_conjugate()), rhs.data()),
-            (
+            PlannedContraction::Contract((
                 axes.lhs_contracting_axes(),
                 axes.rhs_contracting_axes(),
                 &output_axes,
-            ),
+            )),
             alpha,
             ContractDestinationInit::Axpby(beta),
         )
+        .map(drop)
     }
 
     /// Dynamic-rank `tensorcontract!`: same eager route selection and gates
@@ -913,7 +918,8 @@ where
         let lowered = lower_legacy_axes(lhs_space, rhs_space, axes)?;
         let axes = lowered.as_spec();
         let output_axes = spec_output_axes(axes, dst_space.rank());
-        self.tensorcontract_planned_raw_into(
+        self.tensorcontract_planned_raw_into::<MultiplicityFreeAdmissionMode, R>(
+            &mut (),
             PlanTarget {
                 rule,
                 space: dst_space,
@@ -922,14 +928,15 @@ where
             dst_data,
             (legacy_operand(lhs_space, axes.lhs_conjugate()), lhs_data),
             (legacy_operand(rhs_space, axes.rhs_conjugate()), rhs_data),
-            (
+            PlannedContraction::Contract((
                 axes.lhs_contracting_axes(),
                 axes.rhs_contracting_axes(),
                 &output_axes,
-            ),
+            )),
             alpha,
             ContractDestinationInit::Axpby(beta),
         )
+        .map(drop)
     }
 
     /// Executes TeNeT's validated prelowered operand seam.
@@ -1054,35 +1061,56 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        self.tensorcontract_planned_raw_into(
+        self.tensorcontract_planned_raw_into::<MultiplicityFreeAdmissionMode, R>(
+            &mut (),
             PlanTarget::bound(dst_space),
             dst_data,
             (lhs, lhs_data),
             (rhs, rhs_data),
-            (lhs_axes, rhs_axes, output_axes),
+            PlannedContraction::Contract((lhs_axes, rhs_axes, output_axes)),
             alpha,
             init,
         )
+        .map(drop)
     }
 
+    /// The Host plan + execute path of every contraction and composition
+    /// entry in either admission mode `M`: [`plan_contract_in`] (under the
+    /// context's planning state or the call's transaction `txn`) or
+    /// [`plan_compose_in`], then the route replay `dst = alpha · op +
+    /// init(dst)` into an existing destination. Returns the replayed route,
+    /// which a checked call's commit publishes over.
     #[allow(clippy::too_many_arguments)]
-    fn tensorcontract_planned_raw_into<R>(
+    fn tensorcontract_planned_raw_into<M, R>(
         &mut self,
-        target: PlanTarget<'_, R>,
+        txn: &mut M::ContractTxn,
+        target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
         dst_data: &mut [D],
         (lhs, lhs_data): (FusionOperand<'_>, &[D]),
         (rhs, rhs_data): (FusionOperand<'_>, &[D]),
-        axes: (&[usize], &[usize], &[usize]),
+        planned: PlannedContraction<'_>,
         alpha: D,
         init: ContractDestinationInit<D>,
-    ) -> Result<(), OperationError>
+    ) -> Result<StorageContractResolution<C>, M::Error>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        M: PlanningAlgebra<R, Scalar = C>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
-            target, lhs, rhs, axes, None,
-        )?;
+        let resolution = match planned {
+            PlannedContraction::Contract(axes) => {
+                plan_contract_in::<super::resolution::HostEagerExecutor, M, R>(
+                    M::contract_cache(self.tree_context.planning(), txn),
+                    target,
+                    lhs,
+                    rhs,
+                    axes,
+                    None,
+                )?
+            }
+            PlannedContraction::Compose => {
+                plan_compose_in::<super::resolution::HostEagerExecutor, M, R>(target, lhs, rhs)?
+            }
+        };
         #[cfg(test)]
         self.record_contract_route(&resolution);
         self.execute_contract_route_host(
@@ -1093,81 +1121,19 @@ where
             (rhs.storage_space().structure(), rhs_data),
             alpha,
             init,
-        )
+        )?;
+        Ok(resolution)
     }
 
     /// Categorical map composition on the coupled-sector block matrices,
-    /// TensorKit `mul!`: A's domain against B's codomain, no fermionic
-    /// supertrace twist, every braiding style. It plans through
-    /// [`plan_compose`], as `ComposePlan` does, for the Host eager executor,
-    /// whose irregular core packs a non-canonical tiling. Lazy adjoints stay
-    /// storage-conjugate operands; neither is materialized.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcompose_fusion_dyn_into<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        self.tensorcompose_fusion_dyn_into_with_init(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-        )
-    }
-
-    /// [`Self::tensorcompose_fusion_dyn_into`] with the destination
-    /// initialisation made explicit.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcompose_fusion_dyn_into_with_init<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        alpha: D,
-        init: ContractDestinationInit<D>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        let resolution =
-            plan_compose::<super::resolution::HostEagerExecutor, R>(dst_space, lhs, rhs)?;
-        #[cfg(test)]
-        self.record_contract_route(&resolution);
-        self.execute_contract_route_host(
-            &resolution,
-            dst_space.space().structure(),
-            dst_data,
-            (lhs.storage_space().structure(), lhs_data),
-            (rhs.storage_space().structure(), rhs_data),
-            alpha,
-            init,
-        )
-    }
-
-    /// The existing-destination form of the multiplicity-free composition:
-    /// `dst = alpha · (lhs ∘ rhs) + init(dst)`, the composition sibling of
-    /// [`Self::tensorcontract_planned_into`].
+    /// TensorKit `mul!`, into an existing destination: `dst = alpha · (lhs ∘
+    /// rhs) + init(dst)`, the composition sibling of
+    /// [`Self::tensorcontract_planned_into`]. A's domain against B's
+    /// codomain, no fermionic supertrace twist, every braiding style. It
+    /// plans through [`plan_compose`], as `ComposePlan` does, for the Host
+    /// eager executor, whose irregular core packs a non-canonical tiling.
+    /// Lazy adjoints stay storage-conjugate operands; neither is
+    /// materialized.
     #[doc(hidden)]
     pub fn tensorcompose_planned_into<R>(
         &mut self,
@@ -1182,9 +1148,17 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        self.tensorcompose_fusion_dyn_into_with_init(
-            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, alpha, init,
+        self.tensorcontract_planned_raw_into::<MultiplicityFreeAdmissionMode, R>(
+            &mut (),
+            PlanTarget::bound(dst_space),
+            dst_data,
+            (lhs, lhs_data),
+            (rhs, rhs_data),
+            PlannedContraction::Compose,
+            alpha,
+            init,
         )
+        .map(drop)
     }
 
     /// The owned multiplicity-free contraction `lhs·rhs` into a fresh
@@ -1209,46 +1183,20 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
     {
-        let destination = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
-                lhs_authority,
-                rhs_authority,
-                lhs_axes,
-                rhs_axes,
-                output_order,
+        self.tensorcontract_in::<MultiplicityFreeAdmissionMode, R>(
+            (lhs_authority, lhs, lhs_data),
+            (rhs_authority, rhs, rhs_data),
+            ContractRequest::Contract {
+                axes: TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                ),
                 codomain_rank,
-            )?
-        } else {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
-                lhs_authority,
-                lhs,
-                rhs_authority,
-                rhs,
-                lhs_axes,
-                rhs_axes,
-                output_order,
-                Some(codomain_rank),
-            )?
-        };
-        let mut data = crate::zeroed_payload(destination.space().required_len()?);
-        self.tensorcontract_fusion_dyn_prelowered_into_with_init(
-            &destination,
-            &mut data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            TensorContractSpec::new_with_conjugation(
-                lhs_axes,
-                rhs_axes,
-                output_order,
-                lhs.storage_conjugate(),
-                rhs.storage_conjugate(),
-            ),
-            D::one(),
-            ContractDestinationInit::Zeroed,
-        )?;
-        Ok((destination, data))
+            },
+        )
     }
 
     /// The owned multiplicity-free composition `lhs ∘ rhs` (TensorKit
@@ -1261,8 +1209,8 @@ where
     #[allow(clippy::type_complexity)]
     pub fn tensorcompose_multiplicity_free_in<R>(
         &mut self,
-        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        lhs: (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        rhs: (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C>
@@ -1270,40 +1218,68 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
     {
-        let lhs_space = lhs_authority.space();
-        let lhs_axes = (lhs_space.nout()..lhs_space.rank()).collect::<Vec<_>>();
-        let rhs_axes = (0..rhs_authority.space().nout()).collect::<Vec<_>>();
-        let destination = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-                lhs_authority,
-                rhs_authority,
-                &lhs_axes,
-                &rhs_axes,
-                OutputAxisOrder::identity(),
-            )?
-        } else {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
-                lhs_authority,
-                lhs,
-                rhs_authority,
-                rhs,
-                &lhs_axes,
-                &rhs_axes,
-                OutputAxisOrder::identity(),
-                None,
-            )?
-        };
-        let mut data = crate::zeroed_payload(destination.space().required_len()?);
-        self.tensorcompose_fusion_dyn_into_with_init(
-            &destination,
-            &mut data,
+        self.tensorcontract_in::<MultiplicityFreeAdmissionMode, R>(
             lhs,
-            lhs_data,
             rhs,
-            rhs_data,
+            ContractRequest::Compose,
+        )
+    }
+
+    /// The one owned contraction and composition of both modes: stage the
+    /// destination (multiplicity-free derives it; checked Generic admits the
+    /// operands and stages it), plan and replay into a fresh zeroed payload
+    /// through [`Self::tensorcontract_planned_raw_into`], then commit and
+    /// publish (#2063).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn tensorcontract_in<M, R>(
+        &mut self,
+        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        request: ContractRequest<'_>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), M::Error>
+    where
+        M: ContractStaging<R, Scalar = C>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
+    {
+        let StagedContraction {
+            stage,
+            authority,
+            mut txn,
+            len,
+        } = M::stage_contraction(
+            (lhs_authority, lhs, lhs_data.len()),
+            (rhs_authority, rhs, rhs_data.len()),
+            request,
+        )?;
+        let (rule, space) = M::contract_destination(&stage, lhs_authority);
+        let output_axes;
+        let planned = match request {
+            ContractRequest::Contract { axes, .. } => {
+                output_axes = spec_output_axes(axes, space.rank());
+                PlannedContraction::Contract((
+                    axes.lhs_contracting_axes(),
+                    axes.rhs_contracting_axes(),
+                    &output_axes,
+                ))
+            }
+            ContractRequest::Compose => PlannedContraction::Compose,
+        };
+        let mut data = crate::zeroed_payload(len);
+        let resolution = self.tensorcontract_planned_raw_into::<M, R>(
+            &mut txn,
+            PlanTarget {
+                rule,
+                space,
+                authority,
+            },
+            &mut data,
+            (lhs, lhs_data),
+            (rhs, rhs_data),
+            planned,
             D::one(),
             ContractDestinationInit::Zeroed,
         )?;
+        let destination = M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
         Ok((destination, data))
     }
 
@@ -2231,6 +2207,14 @@ fn legacy_operand(space: &DynamicFusionMapSpace, conjugate: bool) -> FusionOpera
     } else {
         FusionOperand::direct(space)
     }
+}
+
+/// What [`TensorContractFusionExecutionContext::tensorcontract_planned_raw_into`]
+/// plans: a contraction over `(lhs, rhs, output)` axes, or a composition.
+#[derive(Clone, Copy)]
+pub(crate) enum PlannedContraction<'s> {
+    Contract((&'s [usize], &'s [usize], &'s [usize])),
+    Compose,
 }
 
 /// The output permutation of `axes` over a rank-`rank` destination.
