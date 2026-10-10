@@ -492,13 +492,10 @@ where
         if self.axes_are_identity(codomain_axes, domain_axes) {
             return Ok(self.clone());
         }
-        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
-            self,
-            TreeTransformOperation::permute(
-                codomain_axes.iter().copied(),
-                domain_axes.iter().copied(),
-            ),
-        )
+        self.tree_transform(TreeTransformOperation::permute(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+        ))
     }
 
     /// Runs `op` on the matrix view `permute(self, rows, cols)`: the leg roles
@@ -570,15 +567,12 @@ where
             return Ok(self.clone());
         }
         let nout = self.codomain_rank();
-        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
-            self,
-            TreeTransformOperation::braid(
-                codomain_axes.iter().copied(),
-                domain_axes.iter().copied(),
-                levels[..nout].iter().copied(),
-                levels[nout..].iter().copied(),
-            ),
-        )
+        self.tree_transform(TreeTransformOperation::braid(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+            levels[..nout].iter().copied(),
+            levels[nout..].iter().copied(),
+        ))
     }
 
     /// TensorKit `repartition(t, N₁, N₂)`: moves the planar boundary so the
@@ -673,12 +667,47 @@ where
             },
         )
         .map_err(TypedFacadeError::<R>::from)?;
-        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(self, operation)
+        self.tree_transform(operation)
+    }
+
+    /// The one body of every admitted permutation, braid and planar
+    /// transpose: the mode's compact and lazy-adjoint arms, else one dense
+    /// transform published as an owned tensor.
+    pub(super) fn tree_transform(
+        &self,
+        operation: TreeTransformOperation,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        if self.spectrum().is_some() {
+            if let Some(compact) =
+                <R::Mode as TypedTensorTransformDispatch<R, D>>::try_compact_transform(
+                    self, &operation,
+                )?
+            {
+                return Ok(compact);
+            }
+        }
+        if let TypedTensorRepr::Adjoint(_) = &self.repr {
+            if let Some(lazy) =
+                <R::Mode as TypedTensorTransformDispatch<R, D>>::try_lazy_adjoint_transform(
+                    self, &operation,
+                )?
+            {
+                return Ok(lazy);
+            }
+        }
+        let (space, data) =
+            <R::Mode as TypedTensorTransformDispatch<R, D>>::transform(self, operation)?;
+        Ok(self.published(space, data))
     }
 }
 
+/// The owned multiplicity-free transform of either coefficient lane: one
+/// destination derivation and one replay (or overwrite) into a fresh payload.
 #[allow(private_bounds)]
-impl<R, D> TensorMap<R, D>
+fn tree_transform_multiplicity_free_owned<R, D>(
+    tensor: &TensorMap<R, D>,
+    operation: TreeTransformOperation,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error>
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     <R as MultiplicityFreeFusionSymbols>::Scalar:
@@ -688,166 +717,80 @@ where
             <R as MultiplicityFreeFusionSymbols>::Scalar,
         >,
 {
-    fn tree_transform_multiplicity_free_owned(
-        &self,
-        operation: TreeTransformOperation,
-    ) -> Result<Self, Error> {
-        // Leasing rather than locking: independent operations on one runtime
-        // must not serialize behind each other.
-        let mut lease = self.runtime.lease_context()?;
-        let body = self.owned_body().expect("owned tree transform input");
-        let (space, data) = tree_transform_owned_multiplicity_free(
-            D::lane(lease.context())?,
-            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
-            operation,
-        )?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    /// Runs one prepared real-coefficient tree transform, retaining the
-    /// established compact and lazy-adjoint fast paths.
-    pub(super) fn tree_transform_multiplicity_free_real(
-        &self,
-        operation: TreeTransformOperation,
-    ) -> Result<Self, Error> {
-        if let Some(spectrum) = self.spectrum() {
-            if crate::tensor_core::is_rank_one_diagonal_swap(
-                self.codomain_rank(),
-                self.rank() - self.codomain_rank(),
-                &operation,
-            ) {
-                let destination = self
-                    .logical_space()
-                    .transformed_multiplicity_free(&operation)?;
-                let transformed = crate::tensor_core::transform_rank_one_diagonal_spectrum(
-                    self.logical_space().provider(),
-                    self.logical_space().space(),
-                    destination.space(),
-                    &operation,
-                    spectrum,
-                )?;
-                return Ok(self.with_spectrum_on(destination, transformed));
-            }
-            if crate::tensor_core::is_rank_one_diagonal_braid(
-                self.codomain_rank(),
-                self.rank() - self.codomain_rank(),
-                &operation,
-            ) {
-                if let Ok(destination) = self
-                    .logical_space()
-                    .transformed_multiplicity_free(&operation)
-                {
-                    let compiled = {
-                        let mut lease = self.runtime.lease_context()?;
-                        lease
-                            .context()
-                            .multiplicity_free_lane::<D>()?
-                            .tree_context_mut()
-                            .compile_tree_pair_structure(
-                                self.logical_space().provider(),
-                                &operation,
-                                destination.space().structure(),
-                                self.logical_space().space().structure(),
-                            )
-                            .ok()
-                    };
-                    if let Some(compiled) = compiled {
-                        if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
-                            self.logical_space().space(),
-                            destination.space(),
-                            &compiled,
-                            spectrum,
-                        ) {
-                            return Ok(Self {
-                                runtime: self.runtime.clone(),
-                                repr: owned_repr(TypedTensorBody::dense(destination, data)),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent_space = view.parent.space.space();
-            let lowered = lower_adjoint_tree_transform_operation(
-                parent_space.nout(),
-                parent_space.nin(),
-                &operation,
-            )?;
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent
-                .tree_transform_multiplicity_free_real(lowered)?
-                .adjoint();
-        }
-        let mut lease = self.runtime.lease_context()?;
-        let body = self.owned_body().expect("owned tree transform input");
-        let (space, data) = tree_transform_owned_multiplicity_free(
-            lease.context().multiplicity_free_lane::<D>()?,
-            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
-            operation,
-        )?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
-    }
-}
-
-impl<R> TensorMap<R, num_complex::Complex64>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-{
-    fn tree_transform_multiplicity_free_complex(
-        &self,
-        operation: TreeTransformOperation,
-    ) -> Result<Self, Error> {
-        self.materialized_tensor_uncached()?
-            .tree_transform_multiplicity_free_owned(operation)
-    }
+    // Leasing rather than locking: independent operations on one runtime
+    // must not serialize behind each other.
+    let mut lease = tensor.runtime.lease_context()?;
+    // Why owned: a lazy adjoint takes the lane's lazy arm, and a
+    // complex-coefficient rule cannot hold one.
+    let body = tensor
+        .owned_body()
+        .ok_or_else(|| internal_layout_error("multiplicity-free transform input is owned"))?;
+    Ok(tree_transform_owned_multiplicity_free(
+        D::lane(lease.context())?,
+        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
+        operation,
+    )?)
 }
 
 impl<R, D> MultiplicityFreeTransformExecution<R, f64> for D
 where
-    R: TypedSectorAdmission
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn execute(
+    fn try_compact(
+        tensor: &TensorMap<R, Self>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        compact_arms::transform_rank_one_diagonal(tensor, operation)
+    }
+
+    fn try_lazy_adjoint(
+        tensor: &TensorMap<R, Self>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
+            return Ok(None);
+        };
+        let parent_space = view.parent.space.space();
+        let lowered = lower_adjoint_tree_transform_operation(
+            parent_space.nout(),
+            parent_space.nin(),
+            operation,
+        )?;
+        // A lazy adjoint's parent is owned and dense, so it takes the owned
+        // route directly.
+        let parent = TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+        };
+        let (space, data) = tree_transform_multiplicity_free_owned(&parent, lowered)?;
+        TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        }
+        .adjoint()
+        .map(Some)
+    }
+
+    fn transform(
         tensor: &TensorMap<R, Self>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, Self>, Error> {
-        tensor.tree_transform_multiplicity_free_real(operation)
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+        tree_transform_multiplicity_free_owned(tensor, operation)
     }
 }
 
 impl<R> MultiplicityFreeTransformExecution<R, num_complex::Complex64> for num_complex::Complex64
 where
-    R: TypedSectorAdmission
-        + MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
+    R: MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
         + CheckedFusionAlgebra
         + SectorCodec,
 {
-    fn execute(
+    fn transform(
         tensor: &TensorMap<R, Self>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, Self>, Error> {
-        tensor.tree_transform_multiplicity_free_complex(operation)
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+        tree_transform_multiplicity_free_owned(tensor, operation)
     }
 }
 

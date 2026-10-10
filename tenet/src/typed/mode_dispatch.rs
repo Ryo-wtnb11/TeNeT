@@ -141,6 +141,10 @@ where
         tenet_core::FusionRule::fusion_style(provider)
     }
 
+    fn braiding_style(provider: &R) -> tenet_core::BraidingStyleKind {
+        tenet_core::FusionRule::braiding_style(provider)
+    }
+
     fn facade_error_into_error(error: Error) -> Error {
         error
     }
@@ -243,6 +247,10 @@ where
         tenet_core::FusionStyleKind::Generic
     }
 
+    fn braiding_style(provider: &R) -> tenet_core::BraidingStyleKind {
+        CheckedGenericFusion::braiding_style(provider)
+    }
+
     // Why lossy: `TensorRef` is provider-neutral, so its adjoint constructor
     // returns `Error`. The only non-facade failure of a checked-Generic
     // adjoint is a broken invariant of an admitted layout.
@@ -337,11 +345,25 @@ where
     D: TensorScalar
         + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
-    fn tree_transform(
+    fn try_compact_transform(
+        tensor: &TensorMap<R, D>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        D::try_compact(tensor, operation)
+    }
+
+    fn try_lazy_adjoint_transform(
+        tensor: &TensorMap<R, D>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        D::try_lazy_adjoint(tensor, operation)
+    }
+
+    fn transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        D::execute(tensor, operation)
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+        D::transform(tensor, operation)
     }
 }
 
@@ -353,10 +375,10 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    fn tree_transform(
+    fn transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
         let payload;
         let input = match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
@@ -370,16 +392,12 @@ where
             ),
         };
         let mut lease = tensor.runtime.lease_context()?;
-        let (space, data) = tree_transform_dyn_owned_checked_generic_input_in_context(
+        Ok(tree_transform_dyn_owned_checked_generic_input_in_context(
             lease.context().generic_lane::<D>()?.tree_context_mut(),
             operation,
             input,
             D::from_real(1.0),
-        )?;
-        Ok(TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+        )?)
     }
 }
 
@@ -391,12 +409,30 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn twist(
+    fn try_compact_twist(
         tensor: &TensorMap<R, D>,
         legs: &[usize],
         inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.twist_with_inverse(legs, inverse)
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        let provider = tensor.logical_space().provider();
+        Ok(compact_arms::twist_spectrum(
+            tensor,
+            legs,
+            inverse,
+            |sector| provider.twist_scalar(sector),
+        ))
+    }
+
+    fn twist_values<'a>(
+        provider: &'a R,
+        structure: &tenet_core::BlockStructure,
+        codomain_rank: usize,
+        legs: &[usize],
+    ) -> Result<Option<impl Fn(SectorId) -> f64 + 'a>, Error> {
+        if twist_is_identity_over_blocks(provider, structure, codomain_rank, legs)? {
+            return Ok(None);
+        }
+        Ok(Some(move |sector| provider.twist_scalar(sector)))
     }
 }
 
@@ -408,12 +444,38 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar,
 {
-    fn twist(
-        tensor: &TensorMap<R, D>,
+    fn twist_values<'a>(
+        provider: &'a R,
+        structure: &tenet_core::BlockStructure,
+        codomain_rank: usize,
         legs: &[usize],
-        inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        twist_checked_generic(tensor, legs, inverse)
+    ) -> Result<Option<impl Fn(SectorId) -> f64 + 'a>, Self::FacadeError> {
+        // Why stage first: a late provider failure must leave no scaled
+        // payload to publish, and replay over the staged table must never
+        // call the provider.
+        let mut staged = HashMap::<SectorId, f64>::new();
+        for block_index in 0..structure.block_count() {
+            let block = structure
+                .block(block_index)
+                .map_err(Error::from)
+                .map_err(GenericTensorError::Facade)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            for &leg in legs {
+                let sector = uncoupled_sector_of_leg(key, codomain_rank, leg);
+                if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
+                    let value = provider.try_twist_scalar(sector).map_err(|error| {
+                        GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
+                    })?;
+                    entry.insert(value);
+                }
+            }
+        }
+        if staged.values().all(|&value| value == 1.0) {
+            return Ok(None);
+        }
+        Ok(Some(move |sector| staged[&sector]))
     }
 }
 
@@ -425,12 +487,25 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn flip(
-        tensor: &TensorMap<R, D>,
-        legs: &[usize],
-        inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.flip_multiplicity_free_with_inverse(legs, inverse)
+    fn root(
+        space: &BoundDynamicFusionMapSpace<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
+        Ok(space.derive_from_final_homspace(homspace)?)
+    }
+
+    fn pivotal_values<'a>(
+        provider: &'a R,
+        _structure: &tenet_core::BlockStructure,
+        _codomain_rank: usize,
+        _occurrences: &[(usize, bool)],
+    ) -> Result<impl Fn(SectorId) -> (f64, f64) + 'a, Error> {
+        Ok(move |sector| {
+            (
+                provider.frobenius_schur_phase_scalar(sector),
+                provider.twist_scalar(sector),
+            )
+        })
     }
 }
 
@@ -442,337 +517,49 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar,
 {
-    fn flip(
-        tensor: &TensorMap<R, D>,
-        legs: &[usize],
-        inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        flip_checked_generic(tensor, legs, inverse)
-    }
-}
-
-pub(super) fn flip_checked_generic<R, D>(
-    tensor: &TensorMap<R, D>,
-    legs: &[usize],
-    inverse: bool,
-) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar,
-{
-    let rank = tensor.rank();
-    let name = if inverse { "inverse flip" } else { "flip" };
-    if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
-        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
-            "{name} leg {leg} out of range for rank {rank}"
-        ))));
-    }
-    if legs.is_empty() {
-        return Ok(tensor.clone());
+    fn root(
+        space: &BoundDynamicFusionMapSpace<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        <Self as TypedTensorRootDispatch<R>>::build_root(Arc::clone(space.provider_arc()), homspace)
     }
 
-    let provider = tensor.logical_space().provider();
-    if CheckedGenericFusion::braiding_style(provider) == tenet_core::BraidingStyleKind::NoBraiding {
-        let leg = legs[0];
-        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
-            "{name} leg {leg} needs the twist and Frobenius-Schur coefficients but the fusion rule has no braiding"
-        ))));
-    }
-    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-        let logical_space = checked_generic_flip_destination(tensor, legs)?.0;
-        let parent = TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-        };
-        let axes = logical_adjoint_axes_to_parent(
-            view.parent.space.space().nout(),
-            view.parent.space.space().nin(),
-            legs,
-        );
-        let flipped_parent = flip_checked_generic_owned(&parent, &axes, !inverse)?;
-        let TypedTensorRepr::Owned(parent) = &flipped_parent.repr else {
-            unreachable!("checked-Generic parent flip stays owned")
-        };
-        return Ok(TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
-                Arc::clone(parent),
-                logical_space,
-            ))),
-        });
-    }
-    flip_checked_generic_owned(tensor, legs, inverse)
-}
-
-pub(super) fn flip_checked_generic_owned<R, D>(
-    tensor: &TensorMap<R, D>,
-    legs: &[usize],
-    inverse: bool,
-) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar,
-{
-    let nout = tensor.codomain_rank();
-    let (space, occurrences) = checked_generic_flip_destination(tensor, legs)?;
-
-    // Why stage first: any pivotal failure leaves the input and destination
-    // unpublished, while replay over this table cannot query the provider.
-    let provider = tensor.logical_space().provider();
-    let mut staged = HashMap::<SectorId, (f64, f64)>::new();
-    for block_index in 0..space.space().structure().block_count() {
-        let block = space
-            .space()
-            .structure()
-            .block(block_index)
-            .map_err(Error::from)
-            .map_err(GenericTensorError::Facade)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        for &(leg, _) in &occurrences {
-            let sector = uncoupled_sector_of_leg(key, nout, leg);
-            if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
-                let chi = provider
-                    .try_frobenius_schur_phase_scalar(sector)
-                    .map_err(|error| {
+    fn pivotal_values<'a>(
+        provider: &'a R,
+        structure: &tenet_core::BlockStructure,
+        codomain_rank: usize,
+        occurrences: &[(usize, bool)],
+    ) -> Result<impl Fn(SectorId) -> (f64, f64) + 'a, Self::FacadeError> {
+        // Why stage first: any pivotal failure leaves the input and
+        // destination unpublished, while replay over this table cannot query
+        // the provider.
+        let mut staged = HashMap::<SectorId, (f64, f64)>::new();
+        for block_index in 0..structure.block_count() {
+            let block = structure
+                .block(block_index)
+                .map_err(Error::from)
+                .map_err(GenericTensorError::Facade)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            for &(leg, _) in occurrences {
+                let sector = uncoupled_sector_of_leg(key, codomain_rank, leg);
+                if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
+                    let chi =
+                        provider
+                            .try_frobenius_schur_phase_scalar(sector)
+                            .map_err(|error| {
+                                GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
+                            })?;
+                    let theta = provider.try_twist_scalar(sector).map_err(|error| {
                         GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
                     })?;
-                let theta = provider.try_twist_scalar(sector).map_err(|error| {
-                    GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
-                })?;
-                entry.insert((chi, theta));
-            }
-        }
-    }
-    let block_factor = |key: &FusionTreePairKey| {
-        occurrences
-            .iter()
-            .map(|&(leg, dual)| {
-                let (chi, theta) = staged[&uncoupled_sector_of_leg(key, nout, leg)];
-                if leg < nout {
-                    if dual {
-                        if inverse {
-                            1.0
-                        } else {
-                            chi * theta
-                        }
-                    } else if inverse {
-                        chi * theta
-                    } else {
-                        1.0
-                    }
-                } else if dual {
-                    if inverse {
-                        theta
-                    } else {
-                        chi
-                    }
-                } else if inverse {
-                    chi
-                } else {
-                    theta
+                    entry.insert((chi, theta));
                 }
-            })
-            .product::<f64>()
-    };
-    let mut data = tensor
-        .owned_body()
-        .expect("owned checked-Generic flip input")
-        .materialized_dense_data()
-        .as_ref()
-        .to_vec();
-    scale_blocks_impl(space.space(), &mut data, &|key| match key {
-        BlockKey::FusionTree(key) => block_factor(key),
-        _ => 1.0,
-    })
-    .map_err(GenericTensorError::Facade)?;
-    Ok(TensorMap {
-        runtime: tensor.runtime.clone(),
-        repr: owned_repr(TypedTensorBody::dense(space, data)),
-    })
-}
-
-#[expect(
-    clippy::type_complexity,
-    reason = "the flip staging contract returns the admitted space with occurrence metadata"
-)]
-pub(super) fn checked_generic_flip_destination<R, D>(
-    tensor: &TensorMap<R, D>,
-    legs: &[usize],
-) -> Result<
-    (BoundDynamicFusionMapSpace<R>, Vec<(usize, bool)>),
-    GenericTensorError<<R as CheckedGenericFusion>::Error>,
->
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar,
-{
-    let (homspace, occurrences) =
-        flip_toggled_homspace(tensor.logical_space().space().homspace(), legs);
-    let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-        Arc::clone(tensor.logical_space().provider_arc()),
-        homspace,
-    )?;
-    check_flip_layout_identity(
-        tensor.logical_space().space().structure(),
-        space.space().structure(),
-    )
-    .map_err(GenericTensorError::Facade)?;
-    Ok((space, occurrences))
-}
-
-pub(super) fn twist_checked_generic<R, D>(
-    tensor: &TensorMap<R, D>,
-    legs: &[usize],
-    inverse: bool,
-) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar,
-{
-    let rank = tensor.rank();
-    let name = if inverse { "inverse twist" } else { "twist" };
-    if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
-        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
-            "{name} leg {leg} out of range for rank {rank}"
-        ))));
-    }
-    if legs.is_empty() {
-        return Ok(tensor.clone());
-    }
-
-    let provider = tensor.logical_space().provider();
-    let homspace = tensor.logical_space().space().homspace();
-    let braiding = CheckedGenericFusion::braiding_style(provider);
-    if braiding == tenet_core::BraidingStyleKind::NoBraiding {
-        let vacuum = CheckedGenericFusion::vacuum(provider);
-        let nout = homspace.codomain().len();
-        for &leg in legs {
-            let sectors = if leg < nout {
-                homspace.codomain().legs()[leg].sectors()
-            } else {
-                homspace.domain().legs()[leg - nout].sectors()
-            };
-            if sectors.iter().any(|&sector| sector != vacuum) {
-                return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
-                    "{name} leg {leg} carries non-unit sectors but the fusion rule has no braiding"
-                ))));
             }
         }
-        return Ok(tensor.clone());
+        Ok(move |sector| staged[&sector])
     }
-    if braiding.is_bosonic() {
-        return Ok(tensor.clone());
-    }
-    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-        let parent = TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-        };
-        let axes = logical_adjoint_axes_to_parent(
-            view.parent.space.space().nout(),
-            view.parent.space.space().nin(),
-            legs,
-        );
-        let twisted_parent = twist_checked_generic_owned(&parent, &axes, !inverse)?;
-        let TypedTensorRepr::Owned(parent) = &twisted_parent.repr else {
-            unreachable!("checked-Generic parent twist stays owned")
-        };
-        // Why not call `adjoint()`: the original view already owns the exact
-        // admitted logical space, and re-deriving it would query the provider
-        // after all fallible twist values had been staged.
-        return Ok(TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
-                Arc::clone(parent),
-                view.logical_space.clone(),
-            ))),
-        });
-    }
-
-    twist_checked_generic_owned(tensor, legs, inverse)
-}
-
-pub(super) fn twist_checked_generic_owned<R, D>(
-    tensor: &TensorMap<R, D>,
-    legs: &[usize],
-    inverse: bool,
-) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar,
-{
-    // Why stage first: a late provider failure must leave no scaled payload to
-    // publish, and replay over the staged table must never call the provider.
-    let provider = tensor.logical_space().provider();
-    let nout = tensor.codomain_rank();
-    let structure = tensor.logical_space().space().structure();
-    let mut staged = HashMap::<SectorId, f64>::new();
-    for block_index in 0..structure.block_count() {
-        let block = structure
-            .block(block_index)
-            .map_err(Error::from)
-            .map_err(GenericTensorError::Facade)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        for &leg in legs {
-            let sector = uncoupled_sector_of_leg(key, nout, leg);
-            if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
-                let value = provider.try_twist_scalar(sector).map_err(|error| {
-                    GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
-                })?;
-                entry.insert(value);
-            }
-        }
-    }
-    if staged.values().all(|&value| value == 1.0) {
-        return Ok(tensor.clone());
-    }
-
-    // Checked pivotal coefficients are exactly real here, so conjugation for
-    // the inverse operation leaves every staged value unchanged.
-    let _ = inverse;
-    let block_factor = |key: &FusionTreePairKey| {
-        legs.iter()
-            .map(|&leg| staged[&uncoupled_sector_of_leg(key, nout, leg)])
-            .product::<f64>()
-    };
-    let mut data = tensor
-        .owned_body()
-        .expect("owned checked-Generic twist input")
-        .materialized_dense_data()
-        .as_ref()
-        .to_vec();
-    scale_blocks_impl(
-        tensor.logical_space().space(),
-        &mut data,
-        &|key| match key {
-            BlockKey::FusionTree(key) => block_factor(key),
-            _ => 1.0,
-        },
-    )
-    .map_err(GenericTensorError::Facade)?;
-    Ok(TensorMap {
-        runtime: tensor.runtime.clone(),
-        repr: owned_repr(TypedTensorBody::dense(tensor.logical_space().clone(), data)),
-    })
 }
 
 impl<R, D> TypedTensorProductDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -787,32 +574,16 @@ where
     D: TensorScalar
         + tenet_tensors::RecouplingCoefficientAction<<R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
-    fn tensor_product(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let lhs_owned = lhs.materialized_tensor_uncached()?;
-        let rhs_owned = rhs.materialized_tensor_uncached()?;
-        let lhs_body = lhs_owned
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let rhs_body = rhs_owned
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let (space, data) = tensorproduct_owned_multiplicity_free(
-            BoundDynamicTensorRef::try_new(
-                &lhs_body.space,
-                lhs_body.materialized_dense_data().as_ref(),
-            )?,
-            BoundDynamicTensorRef::try_new(
-                &rhs_body.space,
-                rhs_body.materialized_dense_data().as_ref(),
-            )?,
-        )?;
-        Ok(TensorMap {
-            runtime: lhs.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+    fn product(
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+        Ok(tensorproduct_owned_multiplicity_free(
+            BoundDynamicTensorRef::try_new(lhs_space, lhs_data)?,
+            BoundDynamicTensorRef::try_new(rhs_space, rhs_data)?,
+        )?)
     }
 }
 
@@ -824,28 +595,15 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    fn tensor_product(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let lhs_owned = lhs.materialized_tensor_uncached()?;
-        let rhs_owned = rhs.materialized_tensor_uncached()?;
-        let lhs_body = lhs_owned
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let rhs_body = rhs_owned
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let (space, data) = tensorproduct_owned_checked_generic(
-            &lhs_body.space,
-            lhs_body.materialized_dense_data().as_ref(),
-            &rhs_body.space,
-            rhs_body.materialized_dense_data().as_ref(),
-        )?;
-        Ok(TensorMap {
-            runtime: lhs.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+    fn product(
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+        Ok(tensorproduct_owned_checked_generic(
+            lhs_space, lhs_data, rhs_space, rhs_data,
+        )?)
     }
 }
 
@@ -860,19 +618,33 @@ where
     D: TensorScalar
         + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
+    fn try_compact_contract(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        spec: &ContractSpec<'_>,
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        D::try_compact_contract(lhs, rhs, spec)
+    }
+
+    fn try_compact_compose(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        D::try_compact_compose(lhs, rhs)
+    }
+
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        reject_non_symmetric_contraction(lhs.logical_space().provider().braiding_style())?;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
         D::contract(lhs, rhs, spec)
     }
 
     fn compose(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
         D::compose(lhs, rhs)
     }
 }
@@ -885,88 +657,70 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
+    fn admit_operands(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<(), Self::FacadeError> {
+        if lhs.owned_body().is_none() || rhs.owned_body().is_none() {
+            return Err(Error::InvalidArgument(
+                "checked Generic contraction currently requires direct owned tensors".to_string(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        reject_non_symmetric_contraction(CheckedGenericFusion::braiding_style(
-            lhs.logical_space().provider(),
-        ))
-        .map_err(Error::from)?;
-        contract_checked_generic(lhs, rhs, spec)
-    }
-
-    fn compose(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        // The canonical axes need no braid, so composition bypasses
-        // `contract`'s braiding boundaries (TensorKit `mul!`).
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
         let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
         let mut lease = lhs.runtime.lease_context()?;
-        let (space, data) = tensorcompose_owned_checked_generic_in_context(
+        Ok(tensorcontract_owned_checked_generic_in_context(
             lease.context().generic_lane::<D>()?,
             &lhs_body.space,
             lhs_body.materialized_dense_data().as_ref(),
             &rhs_body.space,
             rhs_body.materialized_dense_data().as_ref(),
-        )?;
-        Ok(TensorMap {
-            runtime: lhs.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+            TensorContractSpec::new(
+                spec.lhs,
+                spec.rhs,
+                OutputAxisOrder::from_axes(&spec.output_axes()),
+            ),
+            spec.codomain.len(),
+        )?)
+    }
+
+    fn compose(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+        let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
+        let mut lease = lhs.runtime.lease_context()?;
+        Ok(tensorcompose_owned_checked_generic_in_context(
+            lease.context().generic_lane::<D>()?,
+            &lhs_body.space,
+            lhs_body.materialized_dense_data().as_ref(),
+            &rhs_body.space,
+            rhs_body.materialized_dense_data().as_ref(),
+        )?)
     }
 }
 
+/// The owned bodies [`TypedTensorContractDispatch::admit_operands`] admitted.
 #[allow(clippy::type_complexity)]
-pub(super) fn checked_generic_owned_bodies<'a, R, D>(
+fn checked_generic_owned_bodies<'a, R, D>(
     lhs: &'a TensorMap<R, D>,
     rhs: &'a TensorMap<R, D>,
 ) -> Result<(&'a TypedTensorBody<R, D>, &'a TypedTensorBody<R, D>), Error>
 where
-    R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
-        (&lhs.repr, &rhs.repr)
-    else {
-        return Err(Error::InvalidArgument(
-            "checked Generic contraction currently requires direct owned tensors".to_string(),
-        ));
-    };
-    Ok((lhs_body, rhs_body))
-}
-
-pub(super) fn contract_checked_generic<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    spec: &ContractSpec<'_>,
-) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
-{
-    let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
-    let mut lease = lhs.runtime.lease_context()?;
-    let (space, data) = tensorcontract_owned_checked_generic_in_context(
-        lease.context().generic_lane::<D>()?,
-        &lhs_body.space,
-        lhs_body.materialized_dense_data().as_ref(),
-        &rhs_body.space,
-        rhs_body.materialized_dense_data().as_ref(),
-        TensorContractSpec::new(
-            spec.lhs,
-            spec.rhs,
-            OutputAxisOrder::from_axes(&spec.output_axes()),
-        ),
-        spec.codomain.len(),
-    )?;
-    Ok(TensorMap {
-        runtime: lhs.runtime.clone(),
-        repr: owned_repr(TypedTensorBody::dense(space, data)),
-    })
+    match (lhs.owned_body(), rhs.owned_body()) {
+        (Some(lhs), Some(rhs)) => Ok((lhs, rhs)),
+        _ => Err(internal_layout_error(
+            "checked Generic operands admitted owned",
+        )),
+    }
 }

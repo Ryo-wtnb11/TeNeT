@@ -18,7 +18,9 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::runtime::{CoefficientCtx, Ctx};
+use crate::runtime::CoefficientCtx;
+#[cfg(test)]
+use crate::runtime::Ctx;
 use crate::typed::ScalarOps;
 
 /// Converts an internal coupled-layout invariant violation into the stable
@@ -642,51 +644,21 @@ where
     D: ScalarOps,
 {
     let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_owned_multiplicity_free_into_slice(
+    tensorcontract_oriented_multiplicity_free_into_slice(
         context,
         destination,
         &mut data,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        ContractDestinationInit::Zeroed,
-    )?;
-    Ok(data)
-}
-
-/// [`tensorcontract_owned_multiplicity_free_into`] writing a caller-owned
-/// `data` of `destination`'s required length, initialized per `init`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_owned_multiplicity_free_into_slice<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
-    destination: &BoundDynamicFusionMapSpace<R>,
-    data: &mut [D],
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-    init: ContractDestinationInit<D>,
-) -> Result<(), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
-{
-    #[cfg(test)]
-    observe_contract_seam_call();
-    context.tensorcontract_fusion_dyn_prelowered_into_with_init(
-        destination,
-        data,
         FusionOperand::direct(lhs.space().space()),
         lhs.data(),
         FusionOperand::direct(rhs.space().space()),
         rhs.data(),
-        TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
-        D::from_real(1.0),
-        init,
-    )
+        lhs_axes,
+        rhs_axes,
+        output_order,
+        OrientedContractionKind::Contract,
+        ContractDestinationInit::Zeroed,
+    )?;
+    Ok(data)
 }
 
 pub(crate) enum OrientedContractionKind {
@@ -809,7 +781,8 @@ where
 }
 
 /// [`tensorcontract_oriented_multiplicity_free_into`] writing a caller-owned
-/// `data` of `destination`'s required length, initialized per `init`.
+/// `data` of `destination`'s required length, initialized per `init`. Direct
+/// (owned) operands are the unconjugated case of the same execution.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_oriented_multiplicity_free_into_slice<R, D>(
     context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
@@ -826,9 +799,7 @@ pub(crate) fn tensorcontract_oriented_multiplicity_free_into_slice<R, D>(
     init: ContractDestinationInit<D>,
 ) -> Result<(), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols
-        + CheckedFusionAlgebra
-        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
 {
@@ -843,8 +814,10 @@ where
             D::from_real(1.0),
             init,
         ),
-        OrientedContractionKind::Contract => context
-            .tensorcontract_fusion_dyn_prelowered_into_with_init(
+        OrientedContractionKind::Contract => {
+            #[cfg(test)]
+            observe_contract_seam_call();
+            context.tensorcontract_fusion_dyn_prelowered_into_with_init(
                 destination,
                 data,
                 lhs,
@@ -860,7 +833,8 @@ where
                 ),
                 D::from_real(1.0),
                 init,
-            ),
+            )
+        }
     }
 }
 
