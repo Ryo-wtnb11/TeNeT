@@ -8,11 +8,29 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn trace_pairs(
+    fn try_compact_trace(
         tensor: &TensorMap<R, D>,
-        pairs: &[(usize, usize)],
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.trace_pairs_multiplicity_free(pairs)
+        space: &BoundDynamicFusionMapSpace<R>,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<Option<TensorMap<R, D>>, Error> {
+        compact_arms::full_trace_spectrum(tensor, space, axes, dst_nout)
+    }
+
+    fn trace<P: AsRef<[D]>>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        payload: impl FnOnce() -> P,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+        let stage = tenet_tensors::tensortrace_stage_multiplicity_free(space, axes, dst_nout)?;
+        Ok(tenet_tensors::tensortrace_multiplicity_free_in(
+            stage,
+            space,
+            payload,
+            axes,
+            D::from_real(1.0),
+        )?)
     }
 }
 
@@ -24,11 +42,20 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    fn trace_pairs(
-        tensor: &TensorMap<R, D>,
-        pairs: &[(usize, usize)],
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        trace_pairs_checked_generic(tensor, pairs)
+    fn trace<P: AsRef<[D]>>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        payload: impl FnOnce() -> P,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+        let stage = tenet_tensors::tensortrace_stage_checked_generic(space, axes, dst_nout)?;
+        Ok(tenet_tensors::tensortrace_checked_generic_in(
+            stage,
+            space,
+            payload,
+            axes,
+            D::from_real(1.0),
+        )?)
     }
 }
 
@@ -143,53 +170,6 @@ pub(super) fn trace_source<'t, R, D, S>(
     }))
 }
 
-pub(super) fn trace_pairs_checked_generic<R, D>(
-    tensor: &TensorMap<R, D>,
-    pairs: &[(usize, usize)],
-) -> Result<TensorMap<R, D>, TypedFacadeError<R>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>,
-    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    let braiding = CheckedGenericFusion::braiding_style(tensor.provider());
-    let Some(source) = trace_source(tensor, braiding, pairs)? else {
-        return Ok(tensor.clone());
-    };
-    let destination_codomain_rank = source.axes.destination_codomain_rank;
-    let source_space = &source.body.space;
-    let axes = source.spec();
-    let preflight = tenet_tensors::tensortrace_fusion_dyn_preflight_generic_checked(
-        source_space,
-        axes,
-        destination_codomain_rank,
-    )?;
-    // With no destination, the pair duality follows at once (TensorKit
-    // `trace_permute!`).
-    preflight
-        .require_dual_pairs()
-        .map_err(CheckedGenericPlanError::Operation)?;
-    let prepared = source_space
-        .prepare_final_homspace_generic_with_checked(
-            source_space.provider(),
-            preflight.into_selected_homspace(),
-        )
-        .map_err(CheckedGenericPlanError::from)?;
-    let (space, data) = tenet_tensors::tensortrace_fusion_dyn_staged_owned_generic_checked(
-        prepared,
-        source_space,
-        || source.body.materialized_dense_data(),
-        axes,
-        D::from_real(1.0),
-    )?;
-    Ok(TensorMap {
-        runtime: tensor.runtime.clone(),
-        repr: owned_repr(TypedTensorBody::dense(space, data)),
-    })
-}
-
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -205,12 +185,20 @@ where
     /// coefficients and fermionic twists are included. It can therefore be a
     /// supertrace and need not equal [`Self::tr`].
     ///
-    /// Dense input runs the sectorwise trace engine. A multiplicity-free
-    /// compact rank-`(1, 1)` factor traced over its only pair reduces directly
-    /// in `O(sum_c k_c)`; other compact cases materialize. Checked Generic
-    /// requires [`crate::sector::CheckedGenericPivotal`] and admits the output
-    /// with the source's exact provider `Arc`. Lazy adjoints are read through
-    /// their parent without materializing.
+    /// Checked Generic requires [`crate::sector::CheckedGenericPivotal`] and
+    /// admits the output with the source's exact provider `Arc`. Lazy
+    /// adjoints are read through their parent without materializing.
+    ///
+    /// # Complexity
+    ///
+    /// Dense storage runs the partial-trace engine over the whole payload. A
+    /// multiplicity-free compact spectrum factor traced over its only pair
+    /// reduces the stored spectrum in `O(Σ_c k_c)` without materializing
+    /// (#604), with a deliberately narrow guard: one pair on a rank-(1,1)
+    /// source, where the destination tree is empty and the coefficient
+    /// collapses to a per-sector scalar, `dim(c) · θ(c)` on a direct traced
+    /// codomain leg and `dim(c)` on a dual one. Other compact cases
+    /// materialize inside the runtime's Host pool.
     ///
     /// # Errors
     ///
@@ -236,7 +224,25 @@ where
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorTraceDispatch<R, D>>::trace_pairs(self, pairs)
+        let _host_pool = self.runtime.enter_host_pool();
+        let braiding = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider());
+        let Some(source) = trace_source(self, braiding, pairs)? else {
+            return Ok(self.clone());
+        };
+        let (space, axes) = (&source.body.space, source.spec());
+        let dst_nout = source.axes.destination_codomain_rank;
+        if let Some(compact) = <R::Mode as TypedTensorTraceDispatch<R, D>>::try_compact_trace(
+            self, space, axes, dst_nout,
+        )? {
+            return Ok(compact);
+        }
+        let (space, data) = <R::Mode as TypedTensorTraceDispatch<R, D>>::trace(
+            space,
+            || source.body.materialized_dense_data(),
+            axes,
+            dst_nout,
+        )?;
+        Ok(self.published(space, data))
     }
 }
 

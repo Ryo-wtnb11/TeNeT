@@ -1,7 +1,5 @@
 use super::*;
-use crate::tensortrace::{
-    tensortrace_fusion_dyn_staged_owned_generic_checked, TRACE_RAW_EXECUTION_HOOK,
-};
+use crate::tensortrace::{tensortrace_checked_generic_in, TRACE_RAW_EXECUTION_HOOK};
 use std::cell::Cell;
 use std::rc::Rc;
 use tenet_core::{clear_structure_caches, structure_cache_info, StructureCacheKind};
@@ -85,7 +83,7 @@ fn raw_execution_failure_does_not_publish() {
             message: "injected shared raw failure".into(),
         })
     })));
-    let error = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let error = tensortrace_checked_generic_in(
         dst,
         &src,
         || {
@@ -121,7 +119,7 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
     TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| {
         panic!("raw execution after pivotal failure")
     })));
-    let error = tensortrace_fusion_dyn_staged_owned_generic_checked::<_, f64, Vec<f64>>(
+    let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
         &src,
         || panic!("payload after pivotal failure"),
@@ -156,7 +154,7 @@ fn destination_error_precedes_pivotal_and_payload() {
         .unwrap();
     TRACE_TEST_FAIL_TWIST.set(true);
     TRACE_TEST_TWIST_CALLS.set(0);
-    let error = tensortrace_fusion_dyn_staged_owned_generic_checked::<_, f64, Vec<f64>>(
+    let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         wrong_dst,
         &src,
         || panic!("payload after destination failure"),
@@ -202,7 +200,7 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
         Ok(())
     })));
     let calls = Cell::new(0);
-    let (out, data) = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (out, data) = tensortrace_checked_generic_in(
         dst,
         &src,
         || {
@@ -235,7 +233,7 @@ fn admission_runs_before_payload_and_again_after_execution() {
     clear_structure_caches();
     let dst = stage(&src);
     TRACE_TEST_WRONG_STYLE.set(true);
-    let early = tensortrace_fusion_dyn_staged_owned_generic_checked::<_, f64, Vec<f64>>(
+    let early = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
         &src,
         || panic!("payload before admission"),
@@ -252,7 +250,7 @@ fn admission_runs_before_payload_and_again_after_execution() {
         seen.set(1);
         Ok(())
     })));
-    let late = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let late = tensortrace_checked_generic_in(
         dst,
         &src,
         || {
@@ -282,7 +280,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     }
     let src = source();
     clear_structure_caches();
-    let (winner, _) = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (winner, _) = tensortrace_checked_generic_in(
         stage(&src),
         &src,
         || vec![1.0; 16],
@@ -297,7 +295,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
             message: "warm failure".into(),
         })
     })));
-    let failed = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let failed = tensortrace_checked_generic_in(
         stage(&src),
         &src,
         || vec![1.0; 16],
@@ -306,7 +304,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     );
     assert!(failed.is_err());
     assert_eq!(owner(), before);
-    let (again, _) = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (again, _) = tensortrace_checked_generic_in(
         stage(&src),
         &src,
         || vec![1.0; 16],
@@ -322,7 +320,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let staged = stage(&src);
     let stale = staged.structure().content_key();
     clear_structure_caches();
-    let (out, data) = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (out, data) = tensortrace_checked_generic_in(
         staged,
         &src,
         || vec![1.0; 16],
@@ -339,7 +337,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     clear_structure_caches();
     let staged_miss = stage(&src);
     clear_structure_caches();
-    let (_, data) = tensortrace_fusion_dyn_staged_owned_generic_checked(
+    let (_, data) = tensortrace_checked_generic_in(
         staged_miss,
         &src,
         || vec![1.0; 16],

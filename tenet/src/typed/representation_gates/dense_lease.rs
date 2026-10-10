@@ -274,3 +274,18 @@ fn factorizations_lease_once_on_the_dense_route_in_both_modes() {
         }
     }
 }
+
+/// #2142: a checked Generic compact trace densifies inside the runtime's
+/// Host pool, as the multiplicity-free one does.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_trace_densifies_inside_the_host_pool() {
+    let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
+    let v = GradedSpace::try_new(Arc::clone(&su3), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let diagonal: TensorMap<_, f64> =
+        TensorMap::diagonal(&runtime, &v, spectrum_of(&v, |k| 1.0 + 0.5 * k as f64)).unwrap();
+    let probe = leases(|| diagonal.trace_pairs(&[(0, 1)]));
+    assert!(probe.ok, "{probe:?}");
+    assert_eq!((probe.pooled, probe.unpooled), (1, 0), "{probe:?}");
+}

@@ -1,4 +1,4 @@
-//! The compact-diagonal arms of contraction, composition, transform and
+//! The compact-diagonal arms of contraction, composition, trace, transform and
 //! twist (TensorKit's `DiagonalTensorMap` methods). Each answers `None` when
 //! its operands or destination do not fit, and the dense route runs.
 //!
@@ -429,4 +429,74 @@ where
         }
     }
     Ok(None)
+}
+
+/// The full trace of a rank-(1,1) compact diagonal over its only pair, or
+/// `None` for any other payload or geometry (#604).
+///
+/// This is a reduction of the stored spectrum, so there is nothing to
+/// materialize. It is the *categorical* trace, not `tr()`'s — the engine's
+/// `trace_channel_factor` carries the quantum dimension of the traced
+/// channel and, exactly where the traced leg is *not* dual, its fermionic
+/// twist, which is what makes this the supertrace for a fermionic rule and
+/// the coefficient `dim(c) · θ(c)` rather than `tr()`'s unconditional
+/// `dim(c)`. The guard is this narrow because with one pair and rank two the
+/// destination is the empty tree, so the traced channel is a single uncoupled
+/// sector and the coefficient collapses to a per-sector scalar; any wider
+/// geometry leaves an open destination tree whose recoupling is not a
+/// per-sector scaling. Today the geometric conditions are implied by the
+/// Group 4 contract (`TypedData::Diagonal` lives on bond spaces only), so
+/// they are defensive, not a reachable branch, and the destination is staged
+/// once. A lazy dense adjoint has no compact spectrum and therefore goes
+/// through the parent-oriented trace seam; a compact adjoint remains an owned
+/// compact tensor. The coefficient is pinned against the engine route by the
+/// `compact_full_trace_*` oracle sweeps in `tests/typed_facade.rs`.
+pub(super) fn full_trace_spectrum<R, D>(
+    tensor: &TensorMap<R, D>,
+    space: &BoundDynamicFusionMapSpace<R>,
+    axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+) -> Result<Option<TensorMap<R, D>>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    let Some(spectrum) = tensor.spectrum() else {
+        return Ok(None);
+    };
+    if tensor.rank() != 2 || tensor.codomain_rank() != 1 || axes.trace_lhs_axes().len() != 1 {
+        return Ok(None);
+    }
+    let destination = tenet_tensors::tensortrace_stage_multiplicity_free(space, axes, dst_nout)?;
+    let traced_leg_is_dual: bool =
+        tensor.logical_space().space().homspace().codomain().legs()[0].is_dual();
+    let provider: &R = tensor.logical_space().provider();
+    // Accumulated in `Complex64` and narrowed once through the #568
+    // `UserScalar` surface, with the same per-sector reduction order as
+    // compact `tr`. The typed spectrum already stores `SectorSpectrum<D>`,
+    // and the coefficient is the provider's real scalar, so the result is a
+    // plain `D`.
+    let mut total: num_complex::Complex64 = num_complex::Complex64::new(0.0, 0.0);
+    for entry in spectrum {
+        let dim = multiplicity_free_dim(provider, entry.sector)?;
+        let coefficient: f64 = if traced_leg_is_dual {
+            dim
+        } else {
+            dim * provider.twist_scalar(entry.sector)
+        };
+        let mut partial = D::Wide::from_real(0.0);
+        for &value in &entry.values {
+            partial = partial + value.widen();
+        }
+        total += partial.widen_complex() * coefficient;
+    }
+    // A fully traced rank-(1,1) destination is one scalar.
+    if destination.space().required_len()? != 1 {
+        return Err(internal_layout_error(
+            "a fully traced rank-one destination is not a single scalar",
+        ));
+    }
+    Ok(Some(
+        tensor.published(destination, vec![D::from_complex64(total)]),
+    ))
 }
