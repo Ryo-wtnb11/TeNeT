@@ -69,7 +69,8 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
     // is not diagonal *storage* even though its values are diagonal.
     let typed_dense = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain())
         .unwrap()
-        .scale(3.0);
+        .scale(3.0)
+        .unwrap();
 
     for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
         let diagonal_dense = typed.axpby(alpha, &typed_dense, beta).unwrap();
@@ -327,10 +328,12 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
             let right_leg = GradedSpace::try_new(Arc::new($rule), $sectors).unwrap();
             let left = TensorMap::<_, f64>::isomorphism(&runtime, [&left_leg], [&left_leg])
                 .unwrap()
-                .scale(2.0);
+                .scale(2.0)
+                .unwrap();
             let right = TensorMap::<_, f64>::isomorphism(&runtime, [&right_leg], [&right_leg])
                 .unwrap()
-                .scale(3.0);
+                .scale(3.0)
+                .unwrap();
             let left_d = left.svd_compact(&[0], &[1]).unwrap().s;
             let right_d = right.svd_compact(&[0], &[1]).unwrap().s;
             assert!(!std::ptr::eq(left.provider(), right.provider()));
@@ -1119,7 +1122,7 @@ fn compact_is_posdef_matches_the_forced_dense_route() {
 
     let positive = z2_spectrum_fixture(&runtime, false);
     let semidefinite = z2_spectrum_fixture(&runtime, true);
-    let negative = positive.scale(-1.0);
+    let negative = positive.scale(-1.0).unwrap();
     let indefinite = positive.axpby(1.0, &semidefinite, -3.0).unwrap();
 
     for (name, tensor) in [
@@ -1188,7 +1191,8 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
         .svd_compact(&[0, 1], &[2])
         .unwrap()
         .s
-        .scale(Complex64::new(1.0, 1.0));
+        .scale(Complex64::new(1.0, 1.0))
+        .unwrap();
     assert!(!is_hermitian!(skewed, 1e-10));
     for tol in [0.0, 1e-14, 1e-8, 1e-3] {
         assert!(
@@ -1209,7 +1213,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
             is_posdef!(oracle, tol),
             "gram at tol {tol}"
         );
-        let flipped = d.scale(Complex64::new(-1.0, 0.0));
+        let flipped = d.scale(Complex64::new(-1.0, 0.0)).unwrap();
         assert_eq!(
             is_posdef_compact!(flipped, tol, |v: Complex64| v.re),
             is_posdef!(forced_dense(&flipped), tol),
@@ -1402,7 +1406,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
     .unwrap();
     let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
     let rotated: TensorMap<tenet::sector::FermionParityFusionRule, Complex64> =
-        typed_s.scale(Complex64::new(0.8, -0.6));
+        typed_s.scale(Complex64::new(0.8, -0.6)).unwrap();
     assert_compact_trace_matches_forced_dense("fz2 rotated c64", &rotated, widen_complex);
     assert_compact_trace_matches_forced_dense(
         "fz2 rotated transposed c64",

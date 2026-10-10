@@ -25,7 +25,7 @@ fn assert_overwrite_matches<R, D>(
     D: TensorScalar + core::fmt::Debug + crate::test_numerics::numerics::Numeric,
 {
     let source_before = source.dense_data().unwrap().to_vec();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     poison_destination(&mut destination);
     let provider = Arc::as_ptr(destination.logical_space().provider_arc());
     let body = Arc::as_ptr(owned(&destination));
@@ -37,7 +37,7 @@ fn assert_overwrite_matches<R, D>(
     // The overwrite folds `alpha` into the recoupling while the oracle
     // scales afterwards; a recoupled entry sums at most one term per
     // source block.
-    let scaled = expected.scale(alpha);
+    let scaled = expected.scale(alpha).unwrap();
     crate::test_numerics::numerics::assert_slices_close(
         "overwrite against the scaled owned route",
         destination.dense_data().unwrap(),
@@ -86,7 +86,7 @@ fn assert_contract_overwrite_matches<R, D>(
         .unwrap_or_else(|error| panic!("{label} returning oracle failed: {error:?}"));
     let lhs_before = lhs.dense_data().unwrap().to_vec();
     let rhs_before = rhs.dense_data().unwrap().to_vec();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     poison_destination(&mut destination);
     let provider = Arc::as_ptr(destination.logical_space().provider_arc());
     let body = Arc::as_ptr(owned(&destination));
@@ -108,7 +108,7 @@ fn assert_contract_overwrite_matches<R, D>(
     crate::test_numerics::numerics::assert_slices_close(
         label,
         destination.dense_data().unwrap(),
-        expected.scale(alpha).dense_data().unwrap(),
+        expected.scale(alpha).unwrap().dense_data().unwrap(),
         terms,
     );
     assert_eq!(lhs.dense_data().unwrap(), lhs_before);
@@ -147,7 +147,7 @@ fn typed_tree_overwrite_matches_owned_provider_and_scalar_matrix() {
     assert_overwrite_matches(&u1, u1_permuted, -1.5, |destination| {
         u1.permute_into(&[1], &[2, 0], destination, -1.5, 0.0)
     });
-    let u1_identity = u1.zeros_like();
+    let u1_identity = u1.zeros_like().unwrap();
     assert_overwrite_matches(&u1, u1_identity, 0.0, |destination| {
         u1.permute_into(&[0, 1], &[2], destination, 0.0, 0.0)
     });
@@ -177,7 +177,7 @@ fn typed_tree_overwrite_matches_owned_provider_and_scalar_matrix() {
         .unwrap();
     assert_eq!(
         independent_destination.dense_data().unwrap(),
-        u1.scale(2.0).dense_data().unwrap()
+        u1.scale(2.0).unwrap().dense_data().unwrap()
     );
     assert_eq!(
         Arc::as_ptr(independent_destination.logical_space().provider_arc()),
@@ -310,7 +310,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
         assert_eq!(f64_bits(destination), before);
     };
 
-    let mut wrong_layout = source.zeros_like();
+    let mut wrong_layout = source.zeros_like().unwrap();
     poison_destination(&mut wrong_layout);
     let before = f64_bits(&wrong_layout);
     assert!(source
@@ -319,7 +319,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     assert_unchanged(&wrong_layout, &before);
 
     for (codomain_axes, domain_axes) in [(&[1, 1][..], &[2][..]), (&[1][..], &[2, 3][..])] {
-        let mut destination = expected.zeros_like();
+        let mut destination = expected.zeros_like().unwrap();
         poison_destination(&mut destination);
         let before = f64_bits(&destination);
         assert!(source
@@ -328,7 +328,11 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
         assert_unchanged(&destination, &before);
     }
 
-    let mut nonplanar = source.transpose(&[2], &[1, 0]).unwrap().zeros_like();
+    let mut nonplanar = source
+        .transpose(&[2], &[1, 0])
+        .unwrap()
+        .zeros_like()
+        .unwrap();
     poison_destination(&mut nonplanar);
     let before = f64_bits(&nonplanar);
     assert!(source
@@ -337,7 +341,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     assert_unchanged(&nonplanar, &before);
 
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let mut foreign = expected.zeros_like();
+    let mut foreign = expected.zeros_like().unwrap();
     foreign.runtime = other_runtime;
     poison_destination(&mut foreign);
     let before = f64_bits(&foreign);
@@ -349,7 +353,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     );
     assert_unchanged(&foreign, &before);
 
-    let mut shared_body = expected.zeros_like();
+    let mut shared_body = expected.zeros_like().unwrap();
     poison_destination(&mut shared_body);
     let before = f64_bits(&shared_body);
     let shared_body_handle = shared_body.clone();
@@ -359,7 +363,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     assert_unchanged(&shared_body, &before);
     drop(shared_body_handle);
 
-    let mut shared_payload = expected.zeros_like();
+    let mut shared_payload = expected.zeros_like().unwrap();
     poison_destination(&mut shared_payload);
     let before = f64_bits(&shared_payload);
     let payload_handle = shared_payload
@@ -382,7 +386,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
         .is_err());
     assert_unchanged(&alias, &before);
 
-    let mut bad_len = expected.zeros_like();
+    let mut bad_len = expected.zeros_like().unwrap();
     poison_destination(&mut bad_len);
     let before = {
         let TypedTensorRepr::Owned(body) = &mut bad_len.repr else {
@@ -409,7 +413,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     assert_eq!(f64_bits(&lazy_destination), before);
 
     let lazy_source = source.adjoint().unwrap();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     poison_destination(&mut destination);
     let before = f64_bits(&destination);
     assert!(lazy_source
@@ -422,7 +426,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
     })
     .unwrap();
     let compact = square.svd_compact(&[0], &[1]).unwrap().s;
-    let mut compact_destination = compact.zeros_like();
+    let mut compact_destination = compact.zeros_like().unwrap();
     let before = compact_destination
         .materialize()
         .unwrap()
@@ -497,7 +501,7 @@ fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
         |_, _| 1.0,
     )
     .unwrap();
-    let mut high_rank_destination = high_rank.zeros_like();
+    let mut high_rank_destination = high_rank.zeros_like().unwrap();
     poison_destination(&mut high_rank_destination);
     let before = f64_bits(&high_rank_destination);
     assert!(high_rank
@@ -518,12 +522,12 @@ fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
     .unwrap();
     let expected = source.permute(&[1], &[2, 0]).unwrap();
     crate::cache::clear();
-    let mut first = expected.zeros_like();
+    let mut first = expected.zeros_like().unwrap();
     source
         .permute_into(&[1], &[2, 0], &mut first, 1.0, 0.0)
         .unwrap();
     let cold = crate::test_cache::completed();
-    let mut second = expected.zeros_like();
+    let mut second = expected.zeros_like().unwrap();
     source
         .permute_into(&[1], &[2, 0], &mut second, 1.0, 0.0)
         .unwrap();
@@ -552,7 +556,7 @@ fn typed_tree_overwrite_shared_runtime_is_concurrent_and_deterministic() {
     })
     .unwrap();
     let expected = source.permute(&[1], &[2, 0]).unwrap();
-    let mut warm = expected.zeros_like();
+    let mut warm = expected.zeros_like().unwrap();
     source
         .permute_into(&[1], &[2, 0], &mut warm, 1.0, 0.0)
         .unwrap();
@@ -561,7 +565,7 @@ fn typed_tree_overwrite_shared_runtime_is_concurrent_and_deterministic() {
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 scope.spawn(|| {
-                    let mut destination = expected.zeros_like();
+                    let mut destination = expected.zeros_like().unwrap();
                     source
                         .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
                         .unwrap();
@@ -737,7 +741,8 @@ fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
             },
         )
         .unwrap()
-        .zeros_like();
+        .zeros_like()
+        .unwrap();
     poison_destination(&mut destination);
 
     assert!(!Arc::ptr_eq(
@@ -802,7 +807,7 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
             },
         )
         .unwrap();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     poison_destination(&mut destination);
     lazy_lhs
         .contract_into(&lazy_rhs, &RANK_TWO_COMPOSE, &mut destination, 1.0, 0.0)
@@ -830,7 +835,7 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
             },
         )
         .unwrap();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     poison_destination(&mut destination);
     u.contract_into(&s, &RANK_TWO_COMPOSE, &mut destination, 1.0, 0.0)
         .unwrap();
@@ -868,7 +873,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         )
         .unwrap();
     let destination = || {
-        let mut destination = expected.zeros_like();
+        let mut destination = expected.zeros_like().unwrap();
         poison_destination(&mut destination);
         destination
     };
@@ -956,7 +961,8 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let mut wrong_layout = lhs
         .insert_unit(0, Side::Domain, Duality::Plain)
         .unwrap()
-        .zeros_like();
+        .zeros_like()
+        .unwrap();
     poison_destination(&mut wrong_layout);
     let before = f64_destination_state(&wrong_layout);
     assert!(lhs
@@ -965,8 +971,8 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     assert_eq!(f64_destination_state(&wrong_layout), before);
 
     for malformed in ["lhs", "rhs", "destination"] {
-        let mut bad_lhs = lhs.scale(1.0);
-        let mut bad_rhs = rhs.scale(1.0);
+        let mut bad_lhs = lhs.scale(1.0).unwrap();
+        let mut bad_rhs = rhs.scale(1.0).unwrap();
         let mut rejected = destination();
         match malformed {
             "lhs" => pop_dense_element(&mut bad_lhs),
@@ -1063,7 +1069,8 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
             },
         )
         .unwrap()
-        .zeros_like();
+        .zeros_like()
+        .unwrap();
     poison_destination(&mut rejected);
     let before = f64_destination_state(&rejected);
     assert_eq!(
@@ -1086,7 +1093,8 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
             },
         )
         .unwrap()
-        .zeros_like();
+        .zeros_like()
+        .unwrap();
     poison_destination(&mut z3_destination);
     let before = f64_destination_state(&z3_destination);
     assert_eq!(
@@ -1157,7 +1165,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
         )
         .unwrap();
     crate::cache::clear();
-    let mut first = expected.zeros_like();
+    let mut first = expected.zeros_like().unwrap();
     poison_destination(&mut first);
     source
         .contract_into(
@@ -1174,7 +1182,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
         )
         .unwrap();
     let cold = crate::test_cache::completed();
-    let mut second = expected.zeros_like();
+    let mut second = expected.zeros_like().unwrap();
     poison_destination(&mut second);
     source
         .contract_into(

@@ -314,7 +314,9 @@ macro_rules! ledger {
             run_op(config, &prefix, "restrict_leg", || {
                 black_box(&a).restrict_leg(&[(0, &selection)]).unwrap()
             });
-            run_op(config, &prefix, "scale", || black_box(&a).scale(one + one));
+            run_op(config, &prefix, "scale", || {
+                black_box(&a).scale(one + one).unwrap()
+            });
             run_op(config, &prefix, "add", || {
                 black_box(&a).axpby(one, &a2, one).unwrap()
             });

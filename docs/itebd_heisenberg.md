@@ -83,7 +83,7 @@ G(dt)=\exp(-dt\,h).
 $$
 
 [`run`](../tenet-network/examples/itebd_heisenberg.rs) constructs this gate
-with `h.scale(-dt).exp(&[0, 1], &[2, 3])`. [`State::step`](../tenet-network/examples/itebd_heisenberg.rs)
+with `h.scale(-dt)?.exp(&[0, 1], &[2, 3])`. [`State::step`](../tenet-network/examples/itebd_heisenberg.rs)
 first updates the A-B bond and then the B-A bond. Repeating these two updates
 projects the initial state toward low-energy states while preserving the
 two-site unit cell.

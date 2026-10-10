@@ -288,7 +288,7 @@ where
         );
         // Addition pairs storage positionally, so it admits only one layout.
         match tensor.axpby(1.0, &good, 1.0) {
-            Ok(sum) => assert_same_operator(&sum, &good.scale(2.0), &what("add")),
+            Ok(sum) => assert_same_operator(&sum, &good.scale(2.0).unwrap(), &what("add")),
             Err(error) => assert!(
                 format!("{error:?}").contains("block layouts"),
                 "{stacking:?} add: {error:?}"

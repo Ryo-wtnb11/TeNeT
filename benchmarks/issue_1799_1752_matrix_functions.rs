@@ -89,9 +89,9 @@ macro_rules! cases {
         let hermitian = general
             .compose(&general.adjoint().unwrap())
             .unwrap()
-            .scale(<$dtype>::from(1.0e-3));
+            .scale(<$dtype>::from(1.0e-3)).unwrap();
         let adjoint = general.adjoint().unwrap();
-        let small = general.scale(<$dtype>::from(1.0e-3));
+        let small = general.scale(<$dtype>::from(1.0e-3)).unwrap();
         let ops: [(&str, &dyn Fn()); 8] = [
             ("pinv", &|| drop(black_box(general.pinv(&[0, 1], &[2, 3], 1e-12).unwrap()))),
             ("pinv_adjoint", &|| drop(black_box(adjoint.pinv(&[0, 1], &[2, 3], 1e-12).unwrap()))),

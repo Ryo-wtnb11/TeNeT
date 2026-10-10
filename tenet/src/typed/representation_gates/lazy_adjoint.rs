@@ -618,7 +618,7 @@ fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
 #[test]
 fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
     let lhs = u1_lazy_fixture();
-    let rhs = lhs.scale(2.0);
+    let rhs = lhs.scale(2.0).unwrap();
     let eager_lhs = eager_adjoint_oracle(&lhs);
     let eager_rhs = eager_adjoint_oracle(&rhs);
     let lazy_lhs = lhs.adjoint().unwrap();
@@ -647,7 +647,7 @@ fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
     }
 
     let deligne_lhs = u1_matrix_fixture([(0, 2)], [(0, 2)]);
-    let deligne_rhs = deligne_lhs.scale(3.0);
+    let deligne_rhs = deligne_lhs.scale(3.0).unwrap();
     let eager_deligne_lhs = eager_adjoint_oracle(&deligne_lhs);
     let eager_deligne_rhs = eager_adjoint_oracle(&deligne_rhs);
     let lazy_deligne_lhs = deligne_lhs.adjoint().unwrap();
@@ -665,7 +665,9 @@ fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
 #[test]
 fn absorb_uses_operation_local_logical_payloads_without_warming_lazy_inputs() {
     let destination_parent = genuinely_complex(&u1_lazy_fixture());
-    let source_parent = destination_parent.scale(num_complex::Complex64::new(2.0, -1.0));
+    let source_parent = destination_parent
+        .scale(num_complex::Complex64::new(2.0, -1.0))
+        .unwrap();
     let eager_destination = eager_adjoint_oracle(&destination_parent);
     let eager_source = eager_adjoint_oracle(&source_parent);
     let expected = eager_destination.absorb(&eager_source).unwrap();
@@ -736,10 +738,12 @@ fn nonidentity_adjoint_transforms_stay_parent_native_for_unique_simple_and_both_
     let su2 = su2_lazy_fixture();
     let u1_c64 = u1
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     let su2_c64 = su2
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_parent_native_transform_suite(&u1, &eager_adjoint_oracle(&u1));
     assert_parent_native_transform_suite(&u1_c64, &eager_adjoint_oracle(&u1_c64));
     assert_parent_native_transform_suite(&su2, &eager_adjoint_oracle(&su2));
@@ -772,7 +776,8 @@ fn nonidentity_adjoint_transforms_stay_parent_native_for_checked_generic_and_bot
             .unwrap();
         let source_c64 = source
             .convert::<Complex64>()
-            .scale(num_complex::Complex64::new(1.0, 2.0));
+            .scale(num_complex::Complex64::new(1.0, 2.0))
+            .unwrap();
         // Oracle (i): TensorKit `copy(t')`, which no transform route reads.
         let eager = source
             .adjoint()
@@ -826,8 +831,8 @@ where
             (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
         }));
 
-    let scaled = lazy.scale(alpha);
-    let expected_scaled = eager.scale(alpha);
+    let scaled = lazy.scale(alpha).unwrap();
+    let expected_scaled = eager.scale(alpha).unwrap();
     let TypedTensorRepr::Adjoint(_) = &scaled.repr else {
         panic!("scaling a lazy adjoint must remain parent-backed");
     };
@@ -860,7 +865,9 @@ where
     assert!((lazy.norm(f64::INFINITY).unwrap() - eager.norm(f64::INFINITY).unwrap()).abs() < 1e-12);
     assert!((lazy.norm(1.5).unwrap() - eager.norm(1.5).unwrap()).abs() < 1e-12);
 
-    let normalized = lazy.scale(D::from_real(1.0 / lazy.norm(2.0).unwrap()));
+    let normalized = lazy
+        .scale(D::from_real(1.0 / lazy.norm(2.0).unwrap()))
+        .unwrap();
     let TypedTensorRepr::Adjoint(_) = &normalized.repr else {
         panic!("normalizing a lazy adjoint must remain parent-backed");
     };
@@ -873,10 +880,12 @@ fn adjoint_elementwise_and_reductions_stay_parent_native() {
     let su2 = su2_lazy_fixture();
     let u1_c64 = u1
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     let su2_c64 = su2
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_parent_native_elementwise(&u1, 2.0, -0.5);
     assert_parent_native_elementwise(&su2, 2.0, -0.5);
     assert_parent_native_elementwise(
@@ -974,10 +983,12 @@ fn adjoint_trace_pairs_stays_parent_native() {
     );
     let u1_c64 = u1
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     let su2_c64 = su2
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_parent_native_trace_pairs(&u1);
     assert_parent_native_trace_pairs(&u1_c64);
     assert_parent_native_trace_pairs(&su2);
@@ -1019,10 +1030,12 @@ fn adjoint_positive_trace_conjugates_the_parent_without_materializing() {
     .unwrap();
     let u1_c64 = u1
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     let su2_c64 = su2
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_parent_native_tr(&u1);
     assert_parent_native_tr(&u1_c64);
     assert_parent_native_tr(&su2);
@@ -1132,10 +1145,12 @@ fn adjoint_contract_and_compose_stay_parent_native() {
     .unwrap();
     let u1_c64 = u1
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     let su2_c64 = su2
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_parent_native_contract_and_compose(&u1);
     assert_parent_native_contract_and_compose(&u1_c64);
     assert_parent_native_contract_and_compose(&su2);
@@ -1244,7 +1259,8 @@ fn checked_generic_su3_adjoint_contract_and_compose_read_the_parent() {
     assert_checked_adjoint_contract_and_compose(
         &source
             .convert::<Complex64>()
-            .scale(num_complex::Complex64::new(1.0, 2.0)),
+            .scale(num_complex::Complex64::new(1.0, 2.0))
+            .unwrap(),
     );
 }
 
@@ -1322,7 +1338,8 @@ fn rank_three_su2_adjoint_contract_and_compose_use_oriented_recoupling() {
     let source = su2_lazy_fixture();
     let complex = source
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_rank_three_su2_contract_and_compose(&source);
     assert_rank_three_su2_contract_and_compose(&complex);
 }
@@ -1407,7 +1424,8 @@ fn fermionic_lazy_contract_keeps_the_supertrace_distinct_from_compose() {
     .unwrap();
     let complex = source
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 2.0));
+        .scale(num_complex::Complex64::new(1.0, 2.0))
+        .unwrap();
     assert_fermionic_contract_and_compose_semantics(&source);
     assert_fermionic_contract_and_compose_semantics(&complex);
 }

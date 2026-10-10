@@ -605,11 +605,11 @@ where
             (D::entry(-0.625, 0.25), D::entry(0.75, 0.125)),
         ] {
             let what = format!("{symmetry} {} [{}] beta {beta:?}", case.name, D::NAME);
-            let mut expected = result.scale(seed);
+            let mut expected = result.scale(seed).unwrap();
             temporary
                 .permute_into(&codomain, &domain, &mut expected, alpha, beta)
                 .unwrap();
-            let mut actual = result.scale(seed);
+            let mut actual = result.scale(seed).unwrap();
             case.lhs
                 .contract_into(&case.rhs, &case.spec(), &mut actual, alpha, beta)
                 .unwrap();
@@ -619,7 +619,7 @@ where
             );
         }
 
-        let mut destination = result.scale(D::entry(1.0, 0.0));
+        let mut destination = result.scale(D::entry(1.0, 0.0)).unwrap();
         let into = |destination: &mut TensorMap<R, D>| {
             case.lhs
                 .contract_into(

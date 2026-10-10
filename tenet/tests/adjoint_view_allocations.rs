@@ -331,7 +331,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
 
     let warm = parent.adjoint().unwrap();
     let warm_other = other_parent.adjoint().unwrap();
-    black_box(warm.scale(alpha));
+    black_box(warm.scale(alpha).unwrap());
     black_box(warm.axpby(alpha, &owned, beta).unwrap());
     black_box(warm.axpby(alpha, &warm_other, beta).unwrap());
 
@@ -341,7 +341,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let other_pair_lazy = other_parent.adjoint().unwrap();
     for (_, bytes) in [
         measure(|| {
-            black_box(scale_lazy.scale(alpha));
+            black_box(scale_lazy.scale(alpha).unwrap());
         }),
         measure(|| {
             black_box(mixed_lazy.axpby(alpha, &owned, beta).unwrap());

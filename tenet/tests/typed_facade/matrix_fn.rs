@@ -90,7 +90,7 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     // Compact: a spectrum scaled to exactly zero. Why not the tail of a
     // rank-deficient SVD: those singular values come back tiny but nonzero, and
     // the arm under test compares against exact zero, not a tolerance.
-    let spectrum = typed.svd_compact(&[0], &[1]).unwrap().s.scale(0.0);
+    let spectrum = typed.svd_compact(&[0], &[1]).unwrap().s.scale(0.0).unwrap();
     let singular = |result: Result<_, tenet::typed::Error>| {
         matches!(
             result,
@@ -103,7 +103,7 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     assert!(singular(spectrum.inv(&[0], &[1])));
 
     // Dense: an all-zero endomorphism.
-    let zeros = typed.scale(0.0);
+    let zeros = typed.scale(0.0).unwrap();
     assert!(singular(zeros.inv(&[0], &[1])));
 }
 
@@ -438,7 +438,7 @@ fn exp_of_the_identity_is_e_times_the_identity() {
     let identity =
         TensorMap::<_, f64>::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
 
-    let expected = identity.scale(std::f64::consts::E);
+    let expected = identity.scale(std::f64::consts::E).unwrap();
     let error = identity
         .exp(&[0], &[1])
         .unwrap()
@@ -464,7 +464,7 @@ fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
     let typed_exp = typed.exp(&[0], &[1]).unwrap();
 
     // exp(A) exp(-A) = id, evaluated through the typed composition.
-    let inverse = typed.scale(-1.0).exp(&[0], &[1]).unwrap();
+    let inverse = typed.scale(-1.0).unwrap().exp(&[0], &[1]).unwrap();
     let identity =
         TensorMap::<_, f64>::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
     let residual = typed_exp
@@ -489,7 +489,12 @@ fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
     // Scaled down: the fixture's largest singular value is in the thousands and
     // `exp` of it overflows to infinity, which no comparison can separate from
     // a wrong infinity.
-    let typed_s = typed.svd_compact(&[0], &[1]).unwrap().s.scale(1e-3);
+    let typed_s = typed
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s
+        .scale(1e-3)
+        .unwrap();
 
     let typed_exp = typed_s.exp(&[0], &[1]).unwrap();
     // Every stored value is `exp` of the source's: the elementwise claim, read
@@ -586,7 +591,8 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
         .eig_full(&[0], &[1])
         .unwrap()
         .d
-        .scale(Complex64::new(1.0, 0.0));
+        .scale(Complex64::new(1.0, 0.0))
+        .unwrap();
     let image = spectrum.exp(&[0], &[1]).unwrap();
     for (index, (source, value)) in spectrum
         .materialize()
@@ -795,7 +801,10 @@ fn map_diagonal_keeps_the_result_compact() {
         assert_eq!(bits_f64(&root.values), bits_f64(&expected));
     }
 
-    let complex = s.convert::<Complex64>().scale(Complex64::new(0.0, 1.0));
+    let complex = s
+        .convert::<Complex64>()
+        .scale(Complex64::new(0.0, 1.0))
+        .unwrap();
     let adjoint = complex.adjoint().unwrap();
     let mapped = adjoint.map_diagonal(|value| value * value).unwrap();
     assert!(tenet::expert::diagonal_spectrum(&mapped).unwrap().is_some());

@@ -272,7 +272,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
         .map(|value| value.to_bits())
         .collect();
     let provider = dense.provider() as *const _;
-    let zero = dense.zeros_like();
+    let zero = dense.zeros_like().unwrap();
     assert!(zero
         .dense_data()
         .unwrap()
@@ -306,7 +306,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
             })
             .collect(),
     );
-    let complex_zero = complex.zeros_like();
+    let complex_zero = complex.zeros_like().unwrap();
     assert!(complex_zero
         .dense_data()
         .unwrap()
@@ -327,7 +327,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
             })
             .collect(),
     );
-    let compact_zero = compact.zeros_like();
+    let compact_zero = compact.zeros_like().unwrap();
     assert!(matches!(
         owned(&compact_zero).data.as_ref(),
         TypedData::Diagonal(_)
@@ -341,7 +341,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let lazy = dense.adjoint().unwrap();
-    let lazy_zero = lazy.zeros_like();
+    let lazy_zero = lazy.zeros_like().unwrap();
     assert!(matches!(lazy_zero.repr, TypedTensorRepr::Adjoint(_)));
     assert!(std::ptr::eq(lazy_zero.provider(), provider));
 
@@ -352,7 +352,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
         })
         .unwrap();
     assert!(empty.dense_data().unwrap().is_empty());
-    assert!(empty.zeros_like().dense_data().unwrap().is_empty());
+    assert!(empty.zeros_like().unwrap().dense_data().unwrap().is_empty());
 }
 
 fn su2_lazy_fixture() -> TensorMap<SU2FusionRule, f64> {
@@ -631,7 +631,7 @@ fn a_written_payload_leaves_the_shared_one_untouched() {
     let twin = tensor.clone();
     let before: Vec<f64> = tensor.dense_data().unwrap().to_vec();
 
-    let scaled = twin.scale(2.0);
+    let scaled = twin.scale(2.0).unwrap();
 
     assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
     assert_eq!(twin.dense_data().unwrap(), before.as_slice());

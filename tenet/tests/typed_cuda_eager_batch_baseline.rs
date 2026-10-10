@@ -40,8 +40,16 @@ fn eager_c1_c2_per_member_baseline() {
             let inputs: Vec<_> = (0..count)
                 .map(|i| {
                     (
-                        case.lhs.scale(1.0 + i as f64 / 8.0).to_cuda().unwrap(),
-                        case.rhs.scale(1.0 - i as f64 / 32.0).to_cuda().unwrap(),
+                        case.lhs
+                            .scale(1.0 + i as f64 / 8.0)
+                            .unwrap()
+                            .to_cuda()
+                            .unwrap(),
+                        case.rhs
+                            .scale(1.0 - i as f64 / 32.0)
+                            .unwrap()
+                            .to_cuda()
+                            .unwrap(),
                     )
                 })
                 .collect();

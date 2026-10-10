@@ -125,7 +125,8 @@ fn assert_sun_checked_generic_eigh<D>(
             let shifted = d
                 .axpby(D::from_real(1.0), &identity, D::from_real(-scalar))
                 .unwrap()
-                .scale(D::from_real(1.0 / (lambda_plus - scalar)));
+                .scale(D::from_real(1.0 / (lambda_plus - scalar)))
+                .unwrap();
             selector = selector.compose(&shifted).unwrap();
         }
     }
@@ -258,7 +259,8 @@ where
                     .compose(
                         &d.axpby(Complex64::new(1.0, 0.0), &identity, -value)
                             .unwrap()
-                            .scale(Complex64::new(1.0, 0.0) / (lambda_plus - value)),
+                            .scale(Complex64::new(1.0, 0.0) / (lambda_plus - value))
+                            .unwrap(),
                     )
                     .unwrap();
             }
@@ -918,7 +920,10 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
     }
     assert_checked_generic_eig_reconstruction(&real.convert::<Complex64>(), &real_d, &real_v);
 
-    let complex = real.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
+    let complex = real
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     let Eig {
         d: complex_d,
         v: complex_v,

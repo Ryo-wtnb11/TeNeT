@@ -446,7 +446,7 @@ fn assert_reductions_and_factorizations_hold<R>(
         "{what}: add is not symmetric in its coefficients"
     );
 
-    let typed_scaled = typed.0.scale(-2.5);
+    let typed_scaled = typed.0.scale(-2.5).unwrap();
     for (&actual, &source) in typed_scaled
         .dense_data()
         .unwrap()

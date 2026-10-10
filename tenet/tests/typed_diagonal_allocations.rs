@@ -252,7 +252,7 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
     let ceiling = dense_payload_bytes();
 
     for (name, bytes) in [
-        ("scale", warmed_bytes(|| d.scale(0.5))),
+        ("scale", warmed_bytes(|| d.scale(0.5).unwrap())),
         ("adjoint", warmed_bytes(|| d.adjoint().unwrap())),
         ("add", warmed_bytes(|| d.axpby(0.75, &d, -0.5).unwrap())),
         ("compose", warmed_bytes(|| d.compose(&d).unwrap())),
@@ -548,7 +548,7 @@ fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
     let ceiling = dense_payload_bytes();
 
     for (name, bytes) in [
-        ("zeros_like", warmed_bytes(|| d.zeros_like())),
+        ("zeros_like", warmed_bytes(|| d.zeros_like().unwrap())),
         ("to_c64", warmed_bytes(|| d.convert::<Complex64>())),
         ("re", warmed_bytes(|| complex_d.re())),
         ("im", warmed_bytes(|| complex_d.im())),

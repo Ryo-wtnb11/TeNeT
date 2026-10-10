@@ -54,7 +54,10 @@ fn solve_roles_equal_explicit_permutation_and_reconstruct_rhs() {
     }
 
     let ac = a.convert::<Complex64>();
-    let bc = b.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let bc = b
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.5))
+        .unwrap();
     let actual = ac.solve(a_rows, a_cols, &bc, b_rows, b_cols).unwrap();
     let pa = ac.permute(a_rows, a_cols).unwrap();
     let pb = bc.permute(b_rows, b_cols).unwrap();
@@ -115,7 +118,7 @@ fn compact_divisor_keeps_the_identity_path() {
         }],
     )
     .unwrap();
-    let rhs = divisor.scale(2.0);
+    let rhs = divisor.scale(2.0).unwrap();
     let solution = divisor.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
     assert!(solution.map_diagonal(|x| x).is_ok());
     assert_eq!(

@@ -405,7 +405,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
-    case.host().scale(D::entry(f64::NAN, f64::NAN))
+    case.host().scale(D::entry(f64::NAN, f64::NAN)).unwrap()
 }
 
 /// Destinations with a block no GEMM writes (`v` carries charge 2 that `w`

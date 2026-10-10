@@ -514,7 +514,7 @@ mod copy_c_scratch_tests {
         assert!(!unreached.is_empty(), "the fixture must miss a sector");
         let run =
             |seed: f64, alpha: f64, beta: f64, operands: (&TensorMap<_, _>, &TensorMap<_, _>)| {
-                let mut destination = result.scale(0.0);
+                let mut destination = result.scale(0.0).unwrap();
                 let TypedTensorRepr::Owned(body) = &mut destination.repr else {
                     unreachable!("a scaled dense tensor is owned")
                 };
@@ -544,7 +544,7 @@ mod copy_c_scratch_tests {
         for &index in &unreached {
             assert!(infinite.dense_data().unwrap()[index].is_nan(), "{index}");
         }
-        let (nan_a, nan_b) = (a.scale(f64::NAN), b.scale(f64::NAN));
+        let (nan_a, nan_b) = (a.scale(f64::NAN).unwrap(), b.scale(f64::NAN).unwrap());
         let silent = run(0.5, 0.0, 2.0, (&nan_a, &nan_b));
         assert!(silent
             .dense_data()
@@ -575,7 +575,7 @@ mod copy_c_scratch_tests {
             })
             .collect::<Vec<_>>();
         let d = TensorMap::diagonal(&runtime, &c, spectra).unwrap();
-        let mut destination = t.contract(&d, &MOVED).unwrap().scale(1.0);
+        let mut destination = t.contract(&d, &MOVED).unwrap().scale(1.0).unwrap();
         mark_scratch(&runtime);
         crate::typed::DIAGONAL_MATERIALIZATIONS.set(0);
         t.contract_into(&d, &MOVED, &mut destination, 1.0, 0.0)

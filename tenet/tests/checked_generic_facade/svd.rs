@@ -86,7 +86,10 @@ fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
         .zip(real.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
-    let complex = real.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let complex = real
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.5))
+        .unwrap();
     let Svd { u, s, vh } = complex.svd_compact(&[0], &[1]).unwrap();
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert_eq!(s.codomain(), s.domain());

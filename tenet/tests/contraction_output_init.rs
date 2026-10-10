@@ -131,7 +131,7 @@ fn u1_case<D: Bits>(seed: u64) {
             },
         )
         .unwrap();
-    let mut expected = output.zeros_like();
+    let mut expected = output.zeros_like().unwrap();
     lhs.contract_into(
         &rhs,
         &ContractSpec {
@@ -167,7 +167,7 @@ fn u1_case<D: Bits>(seed: u64) {
             },
         )
         .unwrap();
-    let mut expected = output.zeros_like();
+    let mut expected = output.zeros_like().unwrap();
     lazy.contract_into(
         &rhs,
         &ContractSpec {
@@ -219,7 +219,7 @@ fn su2_case<D: Bits>(seed: u64) {
             },
         )
         .unwrap();
-    let mut expected = output.zeros_like();
+    let mut expected = output.zeros_like().unwrap();
     lhs.contract_into(
         &rhs,
         &ContractSpec {
@@ -242,7 +242,7 @@ fn su2_case<D: Bits>(seed: u64) {
         TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], seed + 2).unwrap();
     let lazy = parent.adjoint().unwrap();
     let output = lazy.compose(&rhs).unwrap();
-    let mut expected = output.zeros_like();
+    let mut expected = output.zeros_like().unwrap();
     lazy.contract_into(
         &rhs,
         &ContractSpec {
@@ -288,5 +288,8 @@ fn empty_support_yields_a_zero_payload_of_the_full_destination_length() {
         .unwrap()
         .iter()
         .all(|v| v.to_bits() == 0));
-    assert_eq!(check_owned!(output, output.zeros_like(), lhs, rhs, 1), 2);
+    assert_eq!(
+        check_owned!(output, output.zeros_like().unwrap(), lhs, rhs, 1),
+        2
+    );
 }

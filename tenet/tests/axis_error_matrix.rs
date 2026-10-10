@@ -200,7 +200,7 @@ macro_rules! multiplicity_free {
         let host = TensorMap::<_, $d>::rand_with_seed(rt, [&v, &vd], [&v, &vd], 3).unwrap();
         let t = lift(&host);
         eager_matrix!(t, |error: Error| error);
-        into_matrix!(t, || lift(&host.zeros_like()), <$d>::from(1.0));
+        into_matrix!(t, || lift(&host.zeros_like().unwrap()), <$d>::from(1.0));
     }};
 }
 

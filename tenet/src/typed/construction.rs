@@ -354,19 +354,16 @@ where
     /// `zerovector`). Dense and compact payloads are freshly initialized to
     /// exact positive zero, independently of non-finite source values. A lazy
     /// adjoint zeros its canonical parent and stays a lazy adjoint.
-    pub fn zeros_like(&self) -> Self {
+    pub fn zeros_like(&self) -> Result<Self, TypedFacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent
-                .zeros_like()
-                .adjoint()
-                .expect("zeroing a pre-admitted adjoint must preserve its layout");
+            return parent.zeros_like()?.adjoint();
         }
         if let Some(spectrum) = self.spectrum() {
-            return self.with_spectrum(
+            return Ok(self.with_spectrum(
                 spectrum
                     .iter()
                     .map(|entry| tenet_matrixalgebra::SectorSpectrum {
@@ -374,15 +371,15 @@ where
                         values: vec![D::from_real(0.0); entry.values.len()],
                     })
                     .collect(),
-            );
+            ));
         }
-        self.with_data(vec![
+        Ok(self.with_data(vec![
             D::from_real(0.0);
             self.owned_body()
                 .expect("owned zero input")
                 .materialized_dense_data()
                 .as_ref()
                 .len()
-        ])
+        ]))
     }
 }

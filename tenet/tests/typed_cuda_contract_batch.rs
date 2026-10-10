@@ -76,8 +76,12 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
                 name: base.name,
                 lhs: base
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                rhs: base.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap(),
+                rhs: base
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap(),
                 lhs_axes: base.lhs_axes.clone(),
                 rhs_axes: base.rhs_axes.clone(),
                 output_axes: base.output_axes.clone(),
@@ -479,8 +483,12 @@ fn check_changed_input_reuse<R: DeviceRule, D: DevicePayload>(
             name: member.name,
             lhs: member
                 .lhs
-                .scale(D::entry(-0.5 - i as f64 / 64.0, i as f64 / 32.0)),
-            rhs: member.rhs.scale(D::entry(1.25 + i as f64 / 16.0, 0.0)),
+                .scale(D::entry(-0.5 - i as f64 / 64.0, i as f64 / 32.0))
+                .unwrap(),
+            rhs: member
+                .rhs
+                .scale(D::entry(1.25 + i as f64 / 16.0, 0.0))
+                .unwrap(),
             lhs_axes: member.lhs_axes.clone(),
             rhs_axes: member.rhs_axes.clone(),
             output_axes: member.output_axes.clone(),
@@ -599,8 +607,12 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
             .map(|i| {
                 let lhs = case
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0));
-                let rhs = case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0));
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap();
+                let rhs = case
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap();
                 (lhs, rhs)
             })
             .collect();
@@ -1119,8 +1131,12 @@ fn copy_c_nonzero_single_public_admission() {
                         name: case.name,
                         lhs: case
                             .lhs
-                            .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                        rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                            .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                            .unwrap(),
+                        rhs: case
+                            .rhs
+                            .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                            .unwrap(),
                         lhs_axes: case.lhs_axes.clone(),
                         rhs_axes: case.rhs_axes.clone(),
                         output_axes: case.output_axes.clone(),
@@ -1340,8 +1356,12 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
                 name: case.name,
                 lhs: case
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap(),
+                rhs: case
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap(),
                 lhs_axes: case.lhs_axes.clone(),
                 rhs_axes: case.rhs_axes.clone(),
                 output_axes: case.output_axes.clone(),
@@ -1502,13 +1522,17 @@ fn check_high_water<R: DeviceRule, D: DevicePayload>(
             let members: Vec<_> = (0..count)
                 .map(|i| Case {
                     name: case.name,
-                    lhs: case.lhs.scale(D::entry(
-                        -0.75 - call / 8.0 + i as f64 / 64.0,
-                        (call + 1.0) / 16.0 - i as f64 / 128.0,
-                    )),
+                    lhs: case
+                        .lhs
+                        .scale(D::entry(
+                            -0.75 - call / 8.0 + i as f64 / 64.0,
+                            (call + 1.0) / 16.0 - i as f64 / 128.0,
+                        ))
+                        .unwrap(),
                     rhs: case
                         .rhs
-                        .scale(D::entry(1.5 + call / 4.0 + i as f64 / 32.0, 0.0)),
+                        .scale(D::entry(1.5 + call / 4.0 + i as f64 / 32.0, 0.0))
+                        .unwrap(),
                     lhs_axes: case.lhs_axes.clone(),
                     rhs_axes: case.rhs_axes.clone(),
                     output_axes: case.output_axes.clone(),
@@ -1660,10 +1684,10 @@ fn dynamic_tree_release_measurement() {
     fn run<R: DeviceRule>(case: &Case<R, f64>) {
         for count in [1, 2, 17] {
             let left: Vec<_> = (0..count)
-                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0).unwrap())
                 .collect();
             let right: Vec<_> = (0..count)
-                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0).unwrap())
                 .collect();
             let lhs = StackedTensorMap::pack(&left).unwrap().to_cuda().unwrap();
             let rhs = StackedTensorMap::pack(&right).unwrap().to_cuda().unwrap();
@@ -1795,10 +1819,10 @@ fn direct_core_release_measurement() {
         }
         for count in [1, 2, 17] {
             let left: Vec<_> = (0..count)
-                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0).unwrap())
                 .collect();
             let right: Vec<_> = (0..count)
-                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0).unwrap())
                 .collect();
             let ((host_lhs, host_rhs), pack) = observe(|| {
                 (
@@ -1912,10 +1936,10 @@ fn signed_core_release_measurement() {
         };
         for count in [1, 2, 17] {
             let left: Vec<_> = (0..count)
-                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0).unwrap())
                 .collect();
             let right: Vec<_> = (0..count)
-                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0).unwrap())
                 .collect();
             let ((host_lhs, host_rhs), pack) = observe(|| {
                 (

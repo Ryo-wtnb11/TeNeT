@@ -311,7 +311,8 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
 
     let complex = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, -0.25));
+        .scale(Complex64::new(1.0, -0.25))
+        .unwrap();
     let restored_complex = TensorMap::<GenericToy, Complex64>::from_bytes_with(
         &runtime,
         &complex.to_bytes_with(&codec).unwrap(),
@@ -820,7 +821,10 @@ fn compact_and_lazy_representations_survive_roundtrip() {
             .collect::<Vec<_>>()
     );
 
-    let dense_complex = dense.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let dense_complex = dense
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.5))
+        .unwrap();
     let lazy_complex = dense_complex.adjoint().unwrap();
     let restored_lazy_complex = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
         &runtime,

@@ -811,7 +811,7 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
             .unwrap()
             .dense_data()
             .unwrap(),
-        antihermitian.scale(-1.0).dense_data().unwrap(),
+        antihermitian.scale(-1.0).unwrap().dense_data().unwrap(),
     );
     assert_data_close_f64(
         project_hermitian!(hermitian).unwrap().dense_data().unwrap(),
@@ -863,11 +863,12 @@ fn isometry_and_posdef_see_their_positive_cases() {
     // any provider, and the cheapest tensor that is.
     let typed_positive = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain())
         .unwrap()
-        .scale(2.0);
+        .scale(2.0)
+        .unwrap();
     assert!(is_hermitian!(typed_positive, tol));
     assert!(is_posdef!(typed_positive, tol));
     // Hermitian but not positive definite: the same tensor negated.
-    let negated = typed_positive.scale(-1.0);
+    let negated = typed_positive.scale(-1.0).unwrap();
     assert!(is_hermitian!(negated, tol));
     assert!(!is_posdef!(negated, tol));
     // Positive *semi*definite is `false`, not `true`: TensorKit's `isposdef` is

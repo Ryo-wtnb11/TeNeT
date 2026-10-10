@@ -152,7 +152,7 @@ macro_rules! check_dense {
         y.axpby_into(&mut assigned, b, a).unwrap();
         assert_eq!(bits(assigned.dense_data().unwrap()), bits(&base));
         let base: Vec<$d> = x.dense_data().unwrap().iter().map(|&u| u * a).collect();
-        assert_eq!(bits(x.scale(a).dense_data().unwrap()), bits(&base));
+        assert_eq!(bits(x.scale(a).unwrap().dense_data().unwrap()), bits(&base));
         for factor in [0.0, 2.0] {
             let what = format!("{} factor = {factor}", $label);
             let want: Vec<$d> = x
@@ -164,7 +164,7 @@ macro_rules! check_dense {
             let f = real::<$d>(factor);
             assert_same(
                 &format!("{what} scale"),
-                x.scale(f).dense_data().unwrap(),
+                x.scale(f).unwrap().dense_data().unwrap(),
                 &want,
             );
             let mut assigned = x.materialize().unwrap();
@@ -288,7 +288,12 @@ fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
     }
     assert_same(
         "spectrum scale 0",
-        x.scale(0.0).materialize().unwrap().dense_data().unwrap(),
+        x.scale(0.0)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &vec![0.0; x.materialize().unwrap().dense_data().unwrap().len()],
     );
 }

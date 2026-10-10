@@ -35,7 +35,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     let rhs_device = rhs.to_cuda().unwrap();
 
     for factor in [2.5, -1.75] {
-        let expected = lhs.scale(factor);
+        let expected = lhs.scale(factor).unwrap();
         let actual = lhs_device.scale(factor).unwrap().to_host().unwrap();
         assert_eq!(
             actual.materialize().unwrap().dense_data().unwrap(),
@@ -131,7 +131,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     };
 
     for zero_factor in [0.0, -0.0] {
-        let expected_scale_zero = nonfinite.scale(zero_factor);
+        let expected_scale_zero = nonfinite.scale(zero_factor).unwrap();
         let actual_scale_zero = nonfinite_device
             .scale(zero_factor)
             .unwrap()
@@ -241,6 +241,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         lhs.adjoint()
             .unwrap()
             .scale(alpha)
+            .unwrap()
             .materialize()
             .unwrap()
             .dense_data()
@@ -422,7 +423,7 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
         numerics::assert_slices_close(
             "scaled",
             scaled.to_host().unwrap().dense_data().unwrap(),
-            a.scale(i).dense_data().unwrap(),
+            a.scale(i).unwrap().dense_data().unwrap(),
             ELEMENTWISE_TERMS,
         );
         assert!((scaled.inner(&b_device).unwrap() - (-i) * inner).norm() <= tolerance);
@@ -472,7 +473,12 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .unwrap()
             .dense_data()
             .unwrap(),
-        a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
+        a.scale(alpha)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         ELEMENTWISE_TERMS,
     );
     numerics::assert_slices_close(
@@ -539,6 +545,7 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             a.adjoint()
                 .unwrap()
                 .scale(factor)
+                .unwrap()
                 .materialize()
                 .unwrap()
                 .dense_data()

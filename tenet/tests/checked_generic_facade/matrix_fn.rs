@@ -26,7 +26,10 @@ fn checked_generic_compose_and_inv_powers_match_explicit_real_and_complex_oracle
         [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
     })
     .unwrap();
-    let complex = real.convert::<Complex64>().scale(Complex64::new(1.0, 1.0));
+    let complex = real
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 1.0))
+        .unwrap();
     let real_oracles: &[(i32, &[f64])] = &[
         (1, &[2.0, 3.0, 1.0, 4.0]),
         (2, &[7.0, 18.0, 6.0, 19.0]),
@@ -211,7 +214,7 @@ where
     assert_eq!(inverse.domain(), source.codomain());
     // Hand oracle: `source` is `2·1` on its tree diagonal, so both products
     // with the inverse are `1` there, i.e. `source / 2`.
-    let expected = source.scale(D::from_real(0.5));
+    let expected = source.scale(D::from_real(0.5)).unwrap();
     let terms = endomorphism_terms(source.dense_data().unwrap().len());
     for identity in [
         source.compose(&inverse).unwrap(),
@@ -326,7 +329,10 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
     assert_eq!(moved.dense_data().unwrap(), composed.dense_data().unwrap());
 
     let complex_divisor = divisor.convert::<Complex64>();
-    let complex_rhs = rhs.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
+    let complex_rhs = rhs
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     let complex_solution = complex_divisor
         .solve(&[0, 1], &[2, 3], &complex_rhs, &[0, 1], &[2, 3])
         .unwrap();
@@ -479,7 +485,8 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     );
     let complex = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 0.25));
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     reset_provider_queries(&provider);
     let complex_exp = complex.exp(&[0], &[1]).unwrap();
     assert_no_provider_queries(&provider);
@@ -606,7 +613,7 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
             source.subblock(index).unwrap()
         );
     }
-    let real_inverse = source.scale(-1.0).exp(&[0, 1], &[2, 3]).unwrap();
+    let real_inverse = source.scale(-1.0).unwrap().exp(&[0, 1], &[2, 3]).unwrap();
     let real_identity: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
             f64::from(trees.codomain_vertices() == trees.domain_vertices())
@@ -625,7 +632,8 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     }
     let input = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 0.2));
+        .scale(Complex64::new(1.0, 0.2))
+        .unwrap();
     let output = input.exp(&[0, 1], &[2, 3]).unwrap();
     assert!(std::ptr::eq(output.provider(), provider.as_ref()));
     assert!(tenet::typed::__network::runtime_identity(output.runtime()).matches(source.runtime()));
@@ -644,6 +652,7 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     }
     let inverse = input
         .scale(Complex64::new(-1.0, 0.0))
+        .unwrap()
         .exp(&[0, 1], &[2, 3])
         .unwrap();
     let identity: TensorMap<_, Complex64> =
@@ -737,13 +746,13 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
     numerics::assert_slices_close(
         "source ∘ inverse",
         source.compose(&inverse).unwrap().dense_data().unwrap(),
-        source.scale(0.5).dense_data().unwrap(),
+        source.scale(0.5).unwrap().dense_data().unwrap(),
         terms,
     );
     numerics::assert_slices_close(
         "inverse ∘ source",
         inverse.compose(&source).unwrap().dense_data().unwrap(),
-        source.scale(0.5).dense_data().unwrap(),
+        source.scale(0.5).unwrap().dense_data().unwrap(),
         terms,
     );
 
@@ -835,7 +844,10 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
         .all(|(actual, expected)| (*actual - *expected).abs() < 1e-11));
 
     let complex_divisor = divisor.convert::<Complex64>();
-    let complex_rhs = rhs.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
+    let complex_rhs = rhs
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     let complex_solution = complex_divisor
         .solve(&[0], &[1, 2], &complex_rhs, &[0], &[1])
         .unwrap();

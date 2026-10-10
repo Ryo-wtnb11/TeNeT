@@ -300,9 +300,9 @@ where
     let mut out = Vec::new();
     for exponent in [0, -1000, 1000, -1060] {
         let s = 2f64.powi(exponent);
-        out.push(h.scale(s));
-        out.push(rejected.scale(s));
-        out.push(admitted.scale(s));
+        out.push(h.scale(s).unwrap());
+        out.push(rejected.scale(s).unwrap());
+        out.push(admitted.scale(s).unwrap());
     }
     out
 }
@@ -337,7 +337,7 @@ fn every_non_hermitian_or_non_finite_member_is_named() {
     let x = members::<_, f64>(&runtime, &[&leg, &leg], &[&leg, &leg], 1, 4).remove(0);
     inputs[1] = x.clone();
     inputs[4] = x;
-    inputs[5] = inputs[5].scale(f64::NAN);
+    inputs[5] = inputs[5].scale(f64::NAN).unwrap();
     let stack = StackedTensorMap::pack(&inputs).unwrap();
     let plan = EighFullPlan::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
     let mut ws = plan.workspace().unwrap();
@@ -359,7 +359,7 @@ fn a_non_finite_eigenvalue_rejects_its_members() {
     let huge = f64::MAX / 1.5;
     let mut inputs = single_leg(&runtime, &leg, 4, |_, _, _| 1.0);
     for member in [0, 2] {
-        inputs[member] = inputs[member].scale(huge);
+        inputs[member] = inputs[member].scale(huge).unwrap();
     }
     let expected: Vec<_> = inputs
         .iter()
@@ -476,7 +476,7 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
         1.0 + (i + j + member) as f64 / 4.0 + f64::from(u8::from(i == j))
     });
     let mut overflowing = good.clone();
-    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5);
+    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5).unwrap();
     let mut skewed = good.clone();
     skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
     let stack = |inputs: &[TensorMap<_, f64>]| StackedTensorMap::pack(inputs).unwrap();

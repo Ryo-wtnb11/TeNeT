@@ -210,11 +210,17 @@ where
     assert_bit_exact(
         lazy_back
             .scale(one)
+            .unwrap()
             .materialize()
             .unwrap()
             .dense_data()
             .unwrap(),
-        lazy.scale(one).materialize().unwrap().dense_data().unwrap(),
+        lazy.scale(one)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         "lazy adjoint round trip",
     );
 }
@@ -270,7 +276,12 @@ where
     let scaled = device_a.scale(alpha).unwrap().to_host().unwrap();
     assert_matches_host(
         scaled.materialize().unwrap().dense_data().unwrap(),
-        a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
+        a.scale(alpha)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         tolerance,
         "scale",
     );
@@ -334,6 +345,7 @@ where
         a.adjoint()
             .unwrap()
             .scale(alpha)
+            .unwrap()
             .materialize()
             .unwrap()
             .dense_data()
@@ -424,7 +436,7 @@ where
         numerics::assert_close(
             &format!("inner conjugate linearity [{}]", D::NAME),
             scaled_lhs.inner(&device_b).unwrap(),
-            a.scale(phase).inner(&b).unwrap(),
+            a.scale(phase).unwrap().inner(&b).unwrap(),
             terms,
         );
     }
@@ -802,7 +814,7 @@ fn a_zero_scale_into_clears_a_nan_poisoned_destination() {
                 .unwrap();
         let device = host.to_cuda().unwrap();
         let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
-        let poisoned = host_permuted.scale(D::entry(f64::NAN, 0.0));
+        let poisoned = host_permuted.scale(D::entry(f64::NAN, 0.0)).unwrap();
         assert!(
             !poisoned.dense_data().unwrap().is_empty()
                 && poisoned
@@ -1176,37 +1188,37 @@ where
         D::entry(0.0, 0.0),
         D::entry(-0.0, -0.0),
     ] {
-        let mut destination = host_permuted.scale(poison).to_cuda().unwrap();
+        let mut destination = host_permuted.scale(poison).unwrap().to_cuda().unwrap();
         device
             .permute_into(&[1, 2], &[0], &mut destination, alpha, D::from_real(0.0))
             .unwrap();
         assert_matches_host(
             destination.to_host().unwrap().dense_data().unwrap(),
-            host_permuted.scale(alpha).dense_data().unwrap(),
+            host_permuted.scale(alpha).unwrap().dense_data().unwrap(),
             tolerance,
             "permute_into",
         );
 
         let host_bent = host.repartition(1).unwrap();
-        let mut bent = host_bent.scale(poison).to_cuda().unwrap();
+        let mut bent = host_bent.scale(poison).unwrap().to_cuda().unwrap();
         device
             .repartition_into(&mut bent, alpha, D::from_real(0.0))
             .unwrap();
         assert_matches_host(
             bent.to_host().unwrap().dense_data().unwrap(),
-            host_bent.scale(alpha).dense_data().unwrap(),
+            host_bent.scale(alpha).unwrap().dense_data().unwrap(),
             tolerance,
             "repartition_into",
         );
 
         let host_cyclic = host.transpose(&[2], &[1, 0]).unwrap();
-        let mut cyclic = host_cyclic.scale(poison).to_cuda().unwrap();
+        let mut cyclic = host_cyclic.scale(poison).unwrap().to_cuda().unwrap();
         device
             .transpose_into(&[2], &[1, 0], &mut cyclic, alpha, D::from_real(0.0))
             .unwrap();
         assert_matches_host(
             cyclic.to_host().unwrap().dense_data().unwrap(),
-            host_cyclic.scale(alpha).dense_data().unwrap(),
+            host_cyclic.scale(alpha).unwrap().dense_data().unwrap(),
             tolerance,
             "transpose_into",
         );

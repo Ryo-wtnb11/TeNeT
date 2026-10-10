@@ -1001,7 +1001,7 @@ mod device {
                     let (host_first, host_rows) = bench(
                         config,
                         "cold",
-                        || Ok::<_, Never>(source.scale(factor)),
+                        || Ok::<_, Never>(source.scale(factor).unwrap()),
                         || {},
                     )
                     .expect("Host scale arm");

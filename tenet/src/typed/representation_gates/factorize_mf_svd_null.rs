@@ -134,7 +134,10 @@ fn dense_multisector_full_svd_publishes_compact_s_for_real_and_complex() {
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-12));
     assert!(input.svd_full(&[1], &[0]).unwrap().s.dense_data().is_err());
 
-    let complex = input.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let complex = input
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.5))
+        .unwrap();
     let Svd { u, s, vh } = complex.svd_full(&[0], &[1]).unwrap();
     assert!(s.dense_data().is_err());
     assert_eq!(s.diagview().unwrap().len(), 2);

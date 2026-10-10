@@ -360,7 +360,7 @@ fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
             numerics::assert_nonzero_slices_close(
                 &name,
                 destination.to_host().unwrap().dense_data().unwrap(),
-                host.scale(alpha).dense_data().unwrap(),
+                host.scale(alpha).unwrap().dense_data().unwrap(),
                 case.terms(),
             );
         }
@@ -667,7 +667,7 @@ fn check_splits<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
                 host.dense_data().unwrap(),
                 case.terms(),
             );
-            let mut destination = host.scale(D::entry(7.5, 0.0)).to_cuda().unwrap();
+            let mut destination = host.scale(D::entry(7.5, 0.0)).unwrap().to_cuda().unwrap();
             lhs.contract_into(
                 &rhs,
                 &spec,
@@ -927,7 +927,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     let (host_lhs, host_rhs) = (&case.lhs, &case.rhs);
     let lhs = host_lhs.to_cuda().unwrap();
     let rhs = host_rhs.to_cuda().unwrap();
-    let poison = || case.host().scale(7.5);
+    let poison = || case.host().scale(7.5).unwrap();
     let poison_data = poison().dense_data().unwrap().to_vec();
     let _ = lhs.contract(&rhs, &case.spec()).unwrap();
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
@@ -937,7 +937,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     // Host-shared rejections, each against a fresh poisoned destination:
     // malformed axes, an output order that is not a permutation, a pairing
     // of two equal (not dual) legs, and a destination of another space.
-    let foreign = || u1_reordered::<f64>(&runtime).host().scale(7.5);
+    let foreign = || u1_reordered::<f64>(&runtime).host().scale(7.5).unwrap();
     let cases = malformed_rank_five_specs()
         .into_iter()
         .map(|spec| (spec, poison()))

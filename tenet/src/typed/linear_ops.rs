@@ -232,13 +232,12 @@ where
 
     /// Returns `factor * self` in host storage.
     ///
-    /// The operation is infallible because `factor` already has the payload
-    /// type `D`. Compact diagonal storage stays compact. A dense lazy adjoint
-    /// remains lazy by scaling its parent with the conjugated factor, so no
-    /// receiver materialization is cached.
-    pub fn scale(&self, factor: D) -> Self {
+    /// Compact diagonal storage stays compact. A dense lazy adjoint remains
+    /// lazy by scaling its parent with the conjugated factor, so no receiver
+    /// materialization is cached.
+    pub fn scale(&self, factor: D) -> Result<Self, TypedFacadeError<R>> {
         if let Some(spectrum) = self.spectrum() {
-            return self.with_spectrum(
+            return Ok(self.with_spectrum(
                 spectrum
                     .iter()
                     .map(|entry| tenet_matrixalgebra::SectorSpectrum {
@@ -250,19 +249,16 @@ where
                             .collect(),
                     })
                     .collect(),
-            );
+            ));
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent
-                .scale(FactorScalar::adjoint(factor))
-                .adjoint()
-                .expect("scaling a pre-admitted adjoint must preserve its layout");
+            return parent.scale(FactorScalar::adjoint(factor))?.adjoint();
         }
-        self.with_data(
+        Ok(self.with_data(
             self.owned_body()
                 .expect("owned scale input")
                 .materialized_dense_data()
@@ -270,7 +266,7 @@ where
                 .iter()
                 .map(|&value| scale_value(value, factor))
                 .collect(),
-        )
+        ))
     }
 
     /// `self = factor * self` in place, VectorInterface `scale!(t, α)`, on
@@ -297,7 +293,7 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let mut t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
-    /// let expected = t.scale(2.0);
+    /// let expected = t.scale(2.0)?;
     /// t.scale_assign(2.0)?;
     /// assert_eq!(t.dense_data()?, expected.dense_data()?);
     ///
