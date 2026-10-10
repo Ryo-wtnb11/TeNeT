@@ -1,10 +1,11 @@
 use super::*;
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTwistDispatch<R, D>,
     D: TensorScalar,
+    S: TwistExec<R, D>,
 {
     /// TensorKit `twist(t, inds; inv)` (and its in-place `twist!`): multiplies
     /// each fusion-tree block by the product over `legs` (flat leg indices,
@@ -19,6 +20,36 @@ where
     /// parent with the inverse operation. A compact diagonal stays compact in
     /// both modes (TensorKit `DiagonalTensorMap`): its spectrum is scaled by
     /// `θ(c)^|legs|` per sector without materializing the dense blocks.
+    ///
+    /// Reference: TensorKit `twist!`
+    /// (`src/tensors/indexmanipulations.jl:62-77` @`cfaa073`), which tests
+    /// `has_shared_twist` and then `scale!(t[f₁,f₂], θ)` per fusion-tree
+    /// block. QSpace has no ribbon-twist path at all — a concrete absence, not
+    /// an unexamined one — so the block-scaling decomposition follows
+    /// TensorKit and only the storage kernel is Rust/device specific.
+    ///
+    /// # CUDA storage
+    ///
+    /// θ is built on the Host from the block structure alone, before the
+    /// device lease, and reaches the kernel as the contraction descriptor's
+    /// own scale: for every provider the device admits (`Scalar = f64`) a
+    /// ribbon twist is a real sign, never zero, so the descriptor cannot let
+    /// CUDA skip a source read: NaN and real infinities propagate as on Host.
+    /// An infinite *complex* entry instead becomes NaN in both components,
+    /// because the device always multiplies where Host copies a factor-1 block
+    /// (the #1301 deviation, disclosed by `cuda_region_axpby`); `f64` and every
+    /// finite payload are exact. No θ table is uploaded. A warm call therefore transfers only the #740 output
+    /// initialisation — one H2D of the output bytes — downloads nothing,
+    /// allocates exactly one device buffer and submits one strided move per
+    /// non-empty block. Residual: a whole-buffer bitwise device copy followed
+    /// by in-place per-block scaling would submit fewer kernels, but Tenferro
+    /// (0.5.0 and 0.6.0) has no in-place strided scale (`cuda_region_axpby` cannot alias
+    /// its source and destination), so it is not expressible today.
+    ///
+    /// Flat elements that belong to no block — only reachable under a padded
+    /// expert layout — are zero here, where Host copies the source bytes
+    /// through; device structural results have carried that convention since
+    /// the transform leaf.
     ///
     /// # Errors
     ///
@@ -65,29 +96,18 @@ where
             return Ok(self.clone());
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
             let axes = logical_adjoint_axes_to_parent(
                 view.parent.space.space().nout(),
                 view.parent.space.space().nin(),
                 legs,
             );
-            let twisted_parent = parent.twist_owned(&axes, !inverse)?;
-            let TypedTensorRepr::Owned(parent) = &twisted_parent.repr else {
-                return Err(internal_layout_error("a parent twist stays owned").into());
-            };
             // Why not call `adjoint()`: the original view already owns the
             // exact admitted logical space, and re-deriving it would query
             // the provider after all fallible twist values had been staged.
-            return Ok(Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
-                    Arc::clone(parent),
-                    view.logical_space.clone(),
-                ))),
-            });
+            return Ok(self
+                .parent_of(view)
+                .twist_owned(&axes, !inverse)?
+                .lazy_adjoint_on(&view.logical_space)?);
         }
         self.twist_owned(legs, inverse)
     }
@@ -106,25 +126,72 @@ where
         else {
             return Ok(self.clone());
         };
-        if let Some(compact) = compact_arms::twist_spectrum(self, legs, inverse, &theta) {
-            return Ok(compact);
+        if let Some(compact) =
+            S::as_host(self).and_then(|t| compact_arms::twist_spectrum(t, legs, inverse, &theta))
+        {
+            return Ok(S::from_host(compact)?);
         }
-        let mut data = self
+        let name = if inverse { "inverse twist" } else { "twist" };
+        Ok(S::scale_blocks(
+            self,
+            &twist_block_factor(&theta, nout, legs, inverse),
+            name,
+        )?)
+    }
+}
+
+/// The one per-block twist coefficient every storage applies: the product of
+/// θ over `legs` of the block's uncoupled sectors (conjugated for the
+/// inverse), and one for a block without a fusion tree. `theta` is the mode's
+/// staged [`TypedTensorTwistDispatch::twist_values`], so evaluating this
+/// never fails on the provider.
+pub(super) fn twist_block_factor<'a>(
+    theta: &'a impl Fn(SectorId) -> f64,
+    nout: usize,
+    legs: &'a [usize],
+    inverse: bool,
+) -> impl Fn(&BlockKey) -> f64 + 'a {
+    move |key| match key {
+        BlockKey::FusionTree(key) => twist_factor_with_inverse(
+            legs.iter()
+                .map(|&leg| theta(uncoupled_sector_of_leg(key, nout, leg)))
+                .product(),
+            inverse,
+        ),
+        _ => 1.0,
+    }
+}
+
+/// The twist kernel for one storage (#1756): [`TensorMap::twist`] owns
+/// admission, the representation arms and the θ authority, and calls this
+/// once, last, with the per-block factor.
+#[doc(hidden)]
+pub trait TwistExec<R, D>: TypedStorage<R, D> {
+    /// A fresh owned dense payload on owned `t`'s space with every block
+    /// scaled by `factor_of(block key)`; `operation` names the call in a
+    /// capability error.
+    fn scale_blocks(
+        t: &TensorMap<R, D, Self>,
+        factor_of: &dyn Fn(&BlockKey) -> f64,
+        operation: &'static str,
+    ) -> Result<TensorMap<R, D, Self>, Error>;
+}
+
+impl<R, D: TensorScalar> TwistExec<R, D> for Vec<D> {
+    fn scale_blocks(
+        t: &TensorMap<R, D>,
+        factor_of: &dyn Fn(&BlockKey) -> f64,
+        _: &'static str,
+    ) -> Result<TensorMap<R, D>, Error> {
+        let space = t.logical_space();
+        let mut data = t
             .owned_body()
             .ok_or_else(|| internal_layout_error("twist input is owned"))?
             .materialized_dense_data()
             .as_ref()
             .to_vec();
-        scale_blocks_impl(space.space(), &mut data, &|key| match key {
-            BlockKey::FusionTree(key) => twist_factor_with_inverse(
-                legs.iter()
-                    .map(|&leg| theta(uncoupled_sector_of_leg(key, nout, leg)))
-                    .product(),
-                inverse,
-            ),
-            _ => 1.0,
-        })?;
-        Ok(self.published(space.clone(), data))
+        scale_blocks_impl(space.space(), &mut data, factor_of)?;
+        Ok(t.published(space.clone(), data))
     }
 }
 

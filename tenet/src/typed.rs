@@ -330,8 +330,6 @@ pub(crate) use block_layout::{
     PlanarRequestKind,
 };
 use block_layout::{fuse_sector_content, uncoupled_sector_of_leg};
-#[cfg(feature = "cuda")]
-pub(crate) use block_layout::{reject_unbraided_nonunit_legs, twist_block_factor};
 pub use block_layout::{Direction, Duality, Side};
 #[cfg(feature = "cuda")]
 mod cuda_factor;
@@ -448,6 +446,8 @@ use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
 use transform_ops::{
     lazy_adjoint_of_transformed_parent, map_spectrum_dtype, with_transform_into_source,
 };
+#[doc(hidden)]
+pub use twist_flip::TwistExec;
 
 /// In-module gates on the typed facade's private state.
 ///
