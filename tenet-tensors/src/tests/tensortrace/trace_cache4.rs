@@ -458,7 +458,7 @@ fn trace_groups_resolve_through_cache4_per_group() {
 }
 
 /// What: a transform and a trace of the same permutation on the same source
-/// group are separate cache-4 entries (scope `TraceColumns`); neither reads
+/// group are separate cache-4 entries (scope `TraceTerms`); neither reads
 /// the other's value, and each still hits its own entry afterwards.
 #[test]
 fn trace_and_transform_of_one_permutation_do_not_share_entries() {
@@ -522,6 +522,36 @@ fn trace_and_transform_of_one_permutation_do_not_share_entries() {
             .collect::<Vec<_>>()
     };
     assert_eq!(bits(&before), bits(&after));
+}
+
+/// What (#2149): the open codomain rank is keyed. A one-pair trace and a
+/// pair-free trace share the `(p…, q…)` permutation `[1, 0] ← [3, 2]` but
+/// split it differently, so the pair-free one misses after the one-pair one
+/// is resident, and its terms equal its own compile on an empty cache.
+#[test]
+fn trace_entries_key_the_open_codomain_rank() {
+    // Exact hit/miss counts: alone in a child process, so no sibling test
+    // publishes or clears these shared SU(2) groups meanwhile.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_2072_ISOLATED",
+        "tests::tensortrace::trace_cache4::trace_entries_key_the_open_codomain_rank",
+    ) {
+        return;
+    }
+    let one_pair = TensorTraceAxisSpec::new(&[1, 3], &[0], &[2]);
+    let pair_free = TensorTraceAxisSpec::new(&[1, 0, 3, 2], &[], &[]);
+    let traced = MfTrace::new(Arc::new(SU2FusionRule), su2_hom(), one_pair, 1);
+    let permuted = MfTrace::new(Arc::new(SU2FusionRule), su2_hom(), pair_free, 2);
+    let groups = permuted.groups();
+    clear_structure_caches();
+    let alone = term_bits(&permuted.compile(pair_free));
+    assert!(!alone.is_empty());
+    clear_structure_caches();
+    traced.compile(one_pair);
+    take_trace_column_activity();
+    let after = permuted.compile(pair_free);
+    assert_eq!(take_trace_column_activity(), activity(0, groups, groups));
+    assert_eq!(term_bits(&after), alone);
 }
 
 fn su2_leg_with(degeneracy: usize) -> SectorLeg {

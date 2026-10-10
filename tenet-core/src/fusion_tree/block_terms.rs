@@ -173,7 +173,8 @@ impl<K, S> OrderedBlockLinearMap<K, S> {
 
 /// One block transform's structurally present entries per source column
 /// (TensorKit's `U[dst, src]` of `fsbraid`, sparse, column-major): the trace
-/// lowering's permutation input, and the value cache 4 retains for it.
+/// lowering's permutation input, and, over the lowered (open) destinations,
+/// the trace value cache 4 retains.
 ///
 /// `column(n)` lists source `n`'s present `(destination index, coefficient)`
 /// pairs. A present zero is an entry; a structurally absent coefficient is
@@ -190,7 +191,9 @@ pub struct BlockSourceColumns<K, S> {
 
 #[doc(hidden)]
 impl<K, S> BlockSourceColumns<K, S> {
-    pub(crate) fn new(
+    /// `column_start` holds `source_count + 1` ascending offsets into
+    /// `entries`, starting at 0; every entry's row indexes `destinations`.
+    pub fn new(
         destinations: Box<[K]>,
         column_start: Box<[usize]>,
         entries: Box<[(usize, S)]>,

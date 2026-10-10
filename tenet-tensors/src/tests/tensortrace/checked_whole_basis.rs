@@ -489,12 +489,15 @@ fn group_admission_validates_each_member_once_in_block_order() {
     assert_ne!(calls[after..after + per_member[0].len()], per_member[0][..]);
 }
 
-/// What: a cold checked compile makes exactly the provider queries, in the
-/// same order, and produces the same term sequence as a04e59c2 (before
-/// #2072): routing through cache 4 changes nothing on a miss. #2150 lowered
-/// the ledger from 2031 to 1519 queries (the term bits are unchanged): each
-/// lowering split now admits its input once instead of admitting the input
-/// and both outputs twice each. The ledger is exact; term values go through `portable` (racah SU(3) coefficients round
+/// What: a cold checked compile makes exactly the provider queries and
+/// produces the same term sequence as a04e59c2 (before #2072): routing
+/// through cache 4 changes nothing on a miss. #2150 lowered the ledger from
+/// 2031 to 1519 queries (the term bits are unchanged): each lowering split
+/// now admits its input once instead of admitting the input and both
+/// outputs twice each. #2149 lowers a group whole right after composing it,
+/// so the same multiset of queries (`sorted`, pinned before and after) comes
+/// in group order rather than source-block order (`ledger`). The ledger is
+/// exact; term values go through `portable` (racah SU(3) coefficients round
 /// their last bits differently on Linux and macOS).
 #[test]
 fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
@@ -503,6 +506,11 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
     let structure = compile(&fixture).unwrap();
     let calls = fixture.provider.calls.borrow();
     let ledger = super::trace_cache4::fingerprint(format!("{:?}", *calls).bytes().map(u64::from));
+    let multiset = super::trace_cache4::fingerprint(
+        format!("{:?}", sorted(calls.clone()))
+            .bytes()
+            .map(u64::from),
+    );
     let terms = super::trace_cache4::fingerprint(structure.terms().iter().flat_map(|term| {
         [
             term.dst_block() as u64,
@@ -511,8 +519,13 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
         ]
     }));
     assert_eq!(
-        (calls.len(), ledger, terms),
-        (1519, 2_263_130_248_293_582_478, 14_775_106_432_576_145_088)
+        (calls.len(), multiset, ledger, terms),
+        (
+            1519,
+            18_127_165_706_457_959_630,
+            5_669_293_502_179_296_014,
+            14_775_106_432_576_145_088
+        )
     );
 }
 
@@ -567,13 +580,13 @@ fn sorted(mut calls: Vec<Call>) -> Vec<Call> {
     calls
 }
 
-/// What (#2072): a warm checked compile hits every fusion group and makes
-/// none of the groups' admission or recoupling queries. Its ledger is the
-/// cold ledger less, as a multiset, exactly what composing each group alone
-/// asks (member validation, then F/R): the preflight and lowering queries
-/// remain, no F or R is asked, and the term bits equal the cold ones.
+/// What (#2072, #2149): a warm checked compile hits every fusion group and
+/// asks the provider exactly the preflight's queries, in order: no group
+/// admission or recoupling (#2072) and no lowering split or channel factor
+/// (#2149). The cold compile asks the same preflight first, and the term
+/// bits are equal.
 #[test]
-fn warm_compile_skips_exactly_group_admission_and_recoupling() {
+fn warm_compile_asks_only_the_preflight() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -581,6 +594,11 @@ fn warm_compile_skips_exactly_group_admission_and_recoupling() {
     let provider = &*fixture.provider;
     let structure = fixture.src.space().structure();
     let groups = structure.fusion_tree_group_slice().len();
+    // Not `reset`: a renewed identity would reject the bound source.
+    provider.calls.take();
+    crate::tensortrace_fusion_dyn_preflight_generic_checked(&fixture.src, axes(), 1).unwrap();
+    let preflight = provider.calls.take();
+    assert!(!preflight.is_empty());
     provider.reset(Vec::new());
     trace_activity();
     let cold = publishing_compile(&fixture).unwrap();
@@ -604,26 +622,11 @@ fn warm_compile_skips_exactly_group_admission_and_recoupling() {
             .collect::<Vec<_>>()
     };
     assert_eq!(bits(&cold), bits(&warm));
-    assert!(!warm_calls
+    assert_eq!(warm_calls, preflight);
+    assert_eq!(cold_calls[..preflight.len()], preflight[..]);
+    assert!(cold_calls[preflight.len()..]
         .iter()
-        .any(|call| matches!(call, Call::F(_) | Call::R(_))));
-    let mut skipped = Vec::new();
-    for group in structure.fusion_tree_group_slice() {
-        tenet_core::generic_permute_tree_pair_block_indexed_checked(
-            provider,
-            structure,
-            group.block_indices(),
-            tenet_core::FusionTreePairOrientation::Direct,
-            &[1, 0],
-            &[3, 2],
-        )
-        .unwrap();
-        skipped.extend(provider.calls.take());
-    }
-    assert!(skipped.iter().any(|call| matches!(call, Call::F(_))));
-    let mut expected = warm_calls;
-    expected.extend(skipped);
-    assert_eq!(sorted(cold_calls), sorted(expected));
+        .any(|call| matches!(call, Call::Twist(_))));
 }
 
 /// What (#2072): a failing call publishes no group, whether it fails in a

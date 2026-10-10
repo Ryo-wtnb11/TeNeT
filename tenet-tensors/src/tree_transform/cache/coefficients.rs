@@ -16,13 +16,17 @@
 //! or another HomSpace sharing a source group) therefore makes no F/R
 //! provider call.
 //!
-//! Trace (#2072) keeps its group's permutation here too, under its own scope
-//! [`TreeTransformScope::TraceColumns`] and value form
+//! Trace (#2072) keeps its group here too, under its own scope
+//! [`TreeTransformScope::TraceTerms`] and value form
 //! ([`BlockSourceColumns`]: present entries only, so a present zero stays
 //! distinct from an absent one, which the dense transform spec merges). The
 //! trace of TensorKit `_trace_permute!` permutes a `FusionTreeBlock` through
-//! the same cached `fsbraid`; Unique trace stays uncached, as TensorKit's
-//! `NoCache`, since a trace hit saves no work over one phase per source.
+//! the same cached `fsbraid`, then splits every row on every call; TeNeT
+//! stores the rows already lowered (split, `g₁ == g₂`, channel factor,
+//! #2149), since its Arc-backed, provider-admitted split costs allocations
+//! and queries per row where TensorKit's isbits split costs none. Unique
+//! trace stays uncached, as TensorKit's `NoCache`, since a trace hit saves
+//! no work over one phase per source.
 //!
 //! Deliberate deviation: Unique fusion is cached as well. TensorKit leaves it
 //! `NoCache` (one tree, one phase per group), but a Unique rebuild allocates
@@ -270,11 +274,13 @@ impl PendingCoefficientGroups {
     pub(crate) fn publish(self, epoch: usize) {
         for (key, entry, bytes) in self.groups {
             #[cfg(test)]
-            bump(if key.context.scope == TreeTransformScope::TraceColumns {
-                &TRACE_PUBLICATIONS
-            } else {
-                &GROUP_PUBLICATIONS
-            });
+            bump(
+                if matches!(key.context.scope, TreeTransformScope::TraceTerms { .. }) {
+                    &TRACE_PUBLICATIONS
+                } else {
+                    &GROUP_PUBLICATIONS
+                },
+            );
             let _ = coefficient_groups().publish(&key, entry, bytes, epoch);
         }
     }
@@ -502,37 +508,41 @@ where
     }
 }
 
-/// One trace group's permutation columns.
-pub(crate) type TraceColumns<T> = BlockSourceColumns<FusionTreePairKey, T>;
+/// One trace group's lowered terms: per source column, the
+/// `(open destination tree pair, coefficient)` rows that survive the trace
+/// selection, in permutation row order.
+pub(crate) type TraceTerms<T> = BlockSourceColumns<FusionTreePairKey, T>;
 
-/// Trace-column reuse of one trace compile (scope
-/// [`TreeTransformScope::TraceColumns`]). A hit stands for the build's
-/// member admission as well: the build validated every member with a
-/// provider of the same identity and mode before composing, and only a
-/// whole successful call publishes.
-pub(crate) struct TraceColumnReuse<T> {
+/// Trace-term reuse of one trace compile (scope
+/// [`TreeTransformScope::TraceTerms`]). A hit stands for the build's member
+/// admission, composition and lowering as well: the build validated every
+/// member with a provider of the same identity and mode before composing,
+/// and only a whole successful call publishes.
+pub(crate) struct TraceTermReuse<T> {
     context: ReuseContext,
     built: PendingCoefficientGroups,
     backings: rustc_hash::FxHashSet<usize>,
     coefficient: PhantomData<fn() -> T>,
 }
 
-impl<T> TraceColumnReuse<T>
+impl<T> TraceTermReuse<T>
 where
     T: 'static + Send + Sync,
 {
-    /// `operation` is the trace's `(p…, q…)` permutation.
+    /// `operation` is the trace's `(p…, q…)` permutation; the lowering
+    /// splits each permuted codomain tree at `open_codomain_rank`.
     pub(crate) fn new(
         rule: RuleIdentity,
         mode: TransformerMode,
         operation: TreeTransformOperation,
         orientation: FusionTreePairOrientation,
+        open_codomain_rank: usize,
     ) -> Self {
         Self {
             context: ReuseContext::new::<T>(
                 rule,
                 mode,
-                TreeTransformScope::TraceColumns,
+                TreeTransformScope::TraceTerms { open_codomain_rank },
                 operation,
                 orientation,
             ),
@@ -542,14 +552,14 @@ where
         }
     }
 
-    /// The resident columns of one group (storage keys, storage order), or
+    /// The resident terms of one group (storage keys, storage order), or
     /// the hash to stage its build under.
-    pub(crate) fn lookup(&self, group: SourceGroup<'_>) -> Result<Arc<TraceColumns<T>>, u64> {
+    pub(crate) fn lookup(&self, group: SourceGroup<'_>) -> Result<Arc<TraceTerms<T>>, u64> {
         match self.context.get(group) {
             Ok(entry) => {
                 #[cfg(test)]
                 bump(&TRACE_HITS);
-                Ok(entry.downcast::<TraceColumns<T>>().unwrap_or_else(|_| {
+                Ok(entry.downcast::<TraceTerms<T>>().unwrap_or_else(|_| {
                     unreachable!("the key's TypeId and scope fix the entry type")
                 }))
             }
@@ -566,8 +576,8 @@ where
         &mut self,
         hash: u64,
         group: SourceGroup<'_>,
-        columns: TraceColumns<T>,
-    ) -> Arc<TraceColumns<T>> {
+        columns: TraceTerms<T>,
+    ) -> Arc<TraceTerms<T>> {
         let key = self.context.key(hash, group);
         let columns = Arc::new(columns);
         self.backings.clear();
@@ -630,11 +640,11 @@ fn charged_entry_bytes<T>(
 /// What one trace entry's value retains: its `Arc`, the inline value and
 /// its three exact-length slices, plus the destinations' key backings.
 fn charged_trace_bytes<T>(
-    columns: &TraceColumns<T>,
+    columns: &TraceTerms<T>,
     backings: &mut rustc_hash::FxHashSet<usize>,
 ) -> usize {
     let mut bytes = ARC_CONTROL_BYTES
-        .saturating_add(core::mem::size_of::<TraceColumns<T>>())
+        .saturating_add(core::mem::size_of::<TraceTerms<T>>())
         .saturating_add(
             columns
                 .destinations()
