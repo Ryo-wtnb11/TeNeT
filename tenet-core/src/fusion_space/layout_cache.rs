@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::RwLock;
+
+use crate::block_structure::may_publish_since;
 use crate::cache::{StructureCache, StructureCacheKind};
 
 /// Semantic identity of one multiplicity-free fusion-tree layout: the rule
@@ -212,10 +215,20 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
 /// TensorKit's `degeneracystructure`). A weak link let it die between calls,
 /// so every warm call through a derived space rebuilt the wrapper and
 /// recompiled its regions. The memo is charged here when it materializes.
+///
+/// `permuted` is the destination memo (#2154): TensorKit derives a permuted
+/// HomSpace as `select(W, p)` with a flag-flip `dual` (`homspace.jl:239-243`,
+/// `gradedspace.jl:112` @cfaa073), free of provider queries. TeNeT stores
+/// dualized sectors explicitly, so a derivation asks the provider's `dual`;
+/// this keeps its answer, a pure function of this entry's key and the axes.
 pub(crate) struct DegeneracyStructureEntry {
     key: CompleteHomSpaceStructureCacheKey,
     homspace: HomSpaceId,
     structure: Arc<BlockStructure>,
+    /// Canonical destinations of this Generic HomSpace, keyed by
+    /// `[nout, codomain axes.., domain axes..]`. Published only after a
+    /// committed transform; charged to this entry.
+    permuted: RwLock<FxHashMap<Box<[usize]>, HomSpaceId>>,
 }
 
 impl DegeneracyStructureEntry {
@@ -224,6 +237,63 @@ impl DegeneracyStructureEntry {
             key: key.clone(),
             homspace: HomSpaceId::from_content(Arc::clone(&key.homspace)),
             structure,
+            permuted: RwLock::default(),
+        }
+    }
+
+    /// The memoized destination of `source` under `rule` and `axes`, when
+    /// this entry is the Generic entry of exactly that pair.
+    pub(crate) fn permuted(
+        &self,
+        rule: &RuleIdentity,
+        source: &FusionTreeHomSpace,
+        axes: &[usize],
+    ) -> Option<HomSpaceId> {
+        if self.key.mode != CompleteFusionMode::Generic
+            || &self.key.rule != rule
+            || self.key.homspace != source.content
+        {
+            return None;
+        }
+        self.permuted
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(axes)
+            .cloned()
+    }
+
+    /// Inserts one derived destination unless present, and charges it while
+    /// this entry is resident; an entry no longer resident keeps nothing.
+    /// The charge inherits [`StructureCache::add_charge`]'s contract: the
+    /// cache may sit above its budget until its next insert evicts.
+    fn publish_permuted(self: &Arc<Self>, axes: &[usize], destination: HomSpaceId) {
+        let bytes = {
+            let mut map = self
+                .permuted
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if map.contains_key(axes) {
+                return;
+            }
+            let table = permuted_table_bytes(map.capacity());
+            // The boxed key, and the destination content with its `Arc`
+            // header: double-counted when its own entry retains it too.
+            let item = std::mem::size_of_val(axes)
+                .saturating_add(2 * std::mem::size_of::<usize>())
+                .saturating_add(destination.content.charged_retained_bytes());
+            map.insert(Box::from(axes), destination);
+            permuted_table_bytes(map.capacity())
+                .saturating_sub(table)
+                .saturating_add(item)
+        };
+        if degeneracy_structure_cache().add_charge(&self.key, self, bytes as u64) {
+            #[cfg(test)]
+            PERMUTED_MEMO_PUBLICATIONS.set(PERMUTED_MEMO_PUBLICATIONS.get() + 1);
+        } else {
+            self.permuted
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(axes);
         }
     }
 
@@ -266,6 +336,59 @@ pub(crate) fn complete_hom_space_structure_cached(
     key: &CompleteHomSpaceStructureCacheKey,
 ) -> Option<Arc<DegeneracyStructureEntry>> {
     degeneracy_structure_cache().get(key)
+}
+
+/// Upper bound of the memo table's retained bytes at `capacity` items:
+/// hashbrown keeps at most `2·capacity` buckets (load factor 7/8, or one
+/// spare below eight buckets), each a slot plus one control byte, and one
+/// trailing control group of at most 16 bytes.
+fn permuted_table_bytes(capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    let slot = std::mem::size_of::<(Box<[usize]>, HomSpaceId)>() + 1;
+    capacity.saturating_mul(2 * slot).saturating_add(16)
+}
+
+/// What staging learned about the destination memo of one permutation.
+#[doc(hidden)]
+pub enum Permuted {
+    /// The memo answered: no derivation ran.
+    Memo,
+    /// The destination was derived; publish it after the caller's commit.
+    Derived(PermutedMemoTicket),
+}
+
+/// Publishes one derived destination into its source's entry after the
+/// caller's fallible commit (#2063).
+#[doc(hidden)]
+pub struct PermutedMemoTicket {
+    pub(super) entry: Option<Arc<DegeneracyStructureEntry>>,
+    pub(super) axes: SmallVec<[usize; 9]>,
+    pub(super) epoch: usize,
+}
+
+impl PermutedMemoTicket {
+    /// Inserts `committed`, the destination HomSpace the commit returned,
+    /// iff the source had a resident entry, `committed_structure` is
+    /// canonical and no reset ran since staging began.
+    pub fn publish(self, committed: &FusionTreeHomSpace, committed_structure: &BlockStructure) {
+        let Some(entry) = self.entry else {
+            return;
+        };
+        if committed_structure.is_canonical() && may_publish_since(self.epoch) {
+            entry.publish_permuted(&self.axes, committed.id());
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// This thread's destination-memo hits and charged publications.
+    pub(crate) static PERMUTED_MEMO_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static PERMUTED_MEMO_PUBLICATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

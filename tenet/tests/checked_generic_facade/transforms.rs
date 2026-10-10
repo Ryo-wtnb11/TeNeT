@@ -357,8 +357,11 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     let braided = source.braid(&[1, 0, 2], &[], &[0, 1, 2]).unwrap();
     assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
 
+    // A permutation this source has not taken: a warm one answers from its
+    // destination memo and completed transformer without the provider
+    // (#2154), so only a cold call reaches the failing algebra.
     provider.fail_algebra.store(true, Ordering::Relaxed);
-    let error = source.permute(&[1, 0, 2], &[]).unwrap_err();
+    let error = source.permute(&[2, 1, 0], &[]).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(

@@ -17,6 +17,7 @@ pub use hom_space::*;
 pub use hom_space_id::*;
 pub use layout::*;
 pub(crate) use layout_cache::*;
+pub use layout_cache::{Permuted, PermutedMemoTicket};
 pub use oriented::*;
 pub use product_space::*;
 pub use tensor_map_space::*;

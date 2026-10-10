@@ -5,7 +5,9 @@ pub(crate) struct BlockStructureRegionState {
     coupled_region_cache: OnceLock<CoupledRegionCache>,
     /// The degeneracy-cache entry that owns this wrapper, charged for each
     /// region memo as it materializes. Unset for wrappers no cache owns.
-    owner: std::sync::Mutex<Weak<crate::fusion_space::DegeneracyStructureEntry>>,
+    /// Set once: admission links only a freshly built wrapper, so a warm
+    /// reader takes no lock.
+    owner: OnceLock<Weak<crate::fusion_space::DegeneracyStructureEntry>>,
 }
 
 pub struct BlockStructure {
@@ -698,13 +700,7 @@ impl BlockStructure {
         // Charged after the slot is set, outside its initialization: the
         // charge takes a cache shard lock.
         if let Some(bytes) = materialized {
-            let owner = self
-                .regions
-                .owner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .upgrade();
-            if let Some(owner) = owner {
+            if let Some(owner) = self.complete_entry() {
                 owner.charge_regions(bytes as u64);
             }
         }
@@ -716,11 +712,15 @@ impl BlockStructure {
         &self,
         owner: &Arc<crate::fusion_space::DegeneracyStructureEntry>,
     ) {
-        *self
-            .regions
-            .owner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(owner);
+        let _ = self.regions.owner.set(Arc::downgrade(owner));
+    }
+
+    /// The live cache entry this wrapper was admitted under, if any: one
+    /// atomic load and a `Weak` upgrade. Reached without a cache lookup.
+    pub(crate) fn complete_entry(
+        &self,
+    ) -> Option<Arc<crate::fusion_space::DegeneracyStructureEntry>> {
+        self.regions.owner.get()?.upgrade()
     }
 
     /// Heap bytes of the region memos materialized so far.

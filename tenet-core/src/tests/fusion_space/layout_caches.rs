@@ -883,3 +883,131 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
     assert!(degeneracy_cache_info().rejections() > 0);
     set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
 }
+
+/// What (#2154): a committed checked permutation memoizes its destination
+/// in the source's complete entry, charged once to that entry; the next
+/// staging of the same axes takes the memo without deriving, while an
+/// unpublished, reset-straddling or non-resident staging derives.
+#[test]
+fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
+    if test_support::run_isolated_or_return(
+        "TENET_PERMUTED_MEMO_ISOLATED",
+        "tests::fusion_space::layout_caches::a_committed_permutation_memoizes_its_destination_in_the_source_entry",
+    ) {
+        return;
+    }
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    clear_structure_caches();
+    let rule = InfallibleGeneric::new(&SU2FusionRule);
+    let admit = || {
+        let (hom, structure) =
+            FusionTreeHomSpace::from_sectors([(su2(1), 2), (su2(1), 1)], [(su2(2), 3)])
+                .prepare_complete_coupled_subblock_structure_generic_checked_after(
+                    &rule,
+                    |_| Ok(()),
+                )
+                .unwrap()
+                .commit_with_complete_homspace();
+        (hom.unwrap(), structure)
+    };
+    let stage = |(hom, source): &(FusionTreeHomSpace, Arc<BlockStructure>),
+                 codomain: &[usize],
+                 domain: &[usize]| {
+        let derived = std::cell::Cell::new(false);
+        let (prepared, destination, permuted) = hom
+            .prepare_complete_permuted_generic_checked::<_, CheckedGenericStructureError<Infallible>>(
+                source,
+                &rule,
+                codomain,
+                domain,
+                |_| Ok(()),
+                || {
+                    derived.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        (prepared, destination, permuted, derived.get())
+    };
+    let commit = |prepared: PreparedBlockStructure| {
+        let (hom, structure) = prepared.commit_with_complete_homspace();
+        (hom.unwrap(), structure)
+    };
+    let source = admit();
+    let swap = |source| stage(source, &[1, 0], &[2]);
+
+    // Unpublished stagings derive; the first publication charges the entry,
+    // a second one of the same key charges nothing.
+    let (prepared, _, Permuted::Derived(first), true) = swap(&source) else {
+        panic!("a cold staging derives");
+    };
+    let (raced, _, Permuted::Derived(second), true) = swap(&source) else {
+        panic!("an unpublished memo is not read");
+    };
+    let (destination, structure) = commit(prepared);
+    drop(commit(raced));
+    let before = degeneracy_cache_info();
+    let publications = PERMUTED_MEMO_PUBLICATIONS.get();
+    first.publish(&destination, &structure);
+    let charged = degeneracy_cache_info().charged_bytes() - before.charged_bytes();
+    assert_eq!(degeneracy_cache_info().entries(), before.entries());
+    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    // At least the key words, one table slot and the destination content.
+    let floor = 3 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<(Box<[usize]>, HomSpaceId)>()
+        + destination.charged_retained_bytes()
+        - std::mem::size_of::<FusionTreeHomSpace>();
+    assert!(charged >= floor as u64, "{charged} < {floor}");
+    second.publish(&destination, &structure);
+    assert_eq!(
+        degeneracy_cache_info().charged_bytes() - before.charged_bytes(),
+        charged
+    );
+    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+
+    // The memo answers the same axes with the canonical destination.
+    let hits = PERMUTED_MEMO_HITS.get();
+    let (prepared, memoized, Permuted::Memo, false) = swap(&source) else {
+        panic!("a published memo answers without deriving");
+    };
+    assert_eq!(PERMUTED_MEMO_HITS.get(), hits + 1);
+    assert_eq!(memoized, destination);
+    assert!(Arc::ptr_eq(&prepared.shared_structure(), &structure));
+    // Another split of the same concatenation is another key.
+    let (_, _, Permuted::Derived(_), true) = stage(&source, &[1], &[0, 2]) else {
+        panic!("a different split derives");
+    };
+
+    // A ticket staged before a reset publishes nothing, and the source's
+    // cleared entry no longer answers.
+    let (prepared, _, Permuted::Derived(stale), true) = stage(&source, &[0], &[2, 1]) else {
+        panic!("a cold staging derives");
+    };
+    let (destination, structure) = commit(prepared);
+    clear_structure_caches();
+    stale.publish(&destination, &structure);
+    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    assert_eq!(degeneracy_cache_info().charged_bytes(), 0);
+    let (_, _, Permuted::Derived(_), true) = swap(&source) else {
+        panic!("a reset drops every memo");
+    };
+
+    // A source no entry retains never hits, even after a publication.
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    let transient = admit();
+    assert!(!transient.1.is_canonical());
+    for _ in 0..2 {
+        let (prepared, _, Permuted::Derived(ticket), true) = swap(&transient) else {
+            panic!("a non-resident source derives");
+        };
+        let (destination, structure) = commit(prepared);
+        ticket.publish(&destination, &structure);
+    }
+    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    set_structure_cache_byte_budget(
+        StructureCacheKind::DegeneracyStructure,
+        DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET,
+    );
+}

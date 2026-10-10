@@ -33,7 +33,8 @@ use tenet_core::{
     BlockKey, BlockStructure, BraidingStyleKind, CheckedFusionAlgebra, CheckedGenericAdmissionMode,
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, CoreError,
     FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, RuleIdentity, SectorId,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, Permuted, PermutedMemoTicket,
+    RuleIdentity, SectorId,
 };
 use tenet_operations::TreeTransformStructure;
 
@@ -944,14 +945,22 @@ where
     /// composed coefficients and completed transformers, published only
     /// after its commits (#2063).
     type StructureCache = CheckedContractTxn;
-    /// The admitted rule identity and the plan preflight of the logical
-    /// source.
+    /// The admitted rule identity and, unless the destination memo answered
+    /// (#2154), the plan preflight of the logical source.
     type SourceProof<'a>
-        = (RuleIdentity, CheckedGenericTreePairPreflight<'a, 'a, R>)
+        = (
+        RuleIdentity,
+        Option<CheckedGenericTreePairPreflight<'a, 'a, R>>,
+    )
     where
         R: 'a;
-    /// The staged destination and the call's transaction.
-    type TransformStage = (PreparedCheckedGenericDynamicSpace, CheckedContractTxn);
+    /// The staged destination, the call's transaction and, for a derived
+    /// destination, its memo publication.
+    type TransformStage = (
+        PreparedCheckedGenericDynamicSpace,
+        CheckedContractTxn,
+        Option<PermutedMemoTicket>,
+    );
     type ContractTxn = CheckedContractTxn;
     /// The binding whose provider admission stages derived spaces, with the
     /// entry's twist answer.
@@ -1026,10 +1035,15 @@ where
         }
         // Admission precedes any composed-coefficient lookup. Why the
         // cold call's uncommitted intermediates reuse coefficients: their keys
-        // hold sectors and trees, never content ids.
+        // hold sectors and trees, never content ids. Why a memo-staged call
+        // may defer its preflight to here: its staging made no provider query
+        // after admission, so a preflight error keeps its event prefix, and a
+        // hit above proves this preflight passed, since only this branch
+        // publishes `CheckedGeneric` tree-pair keys, which hold the full
+        // operation and the source content.
         let preflight;
-        let source_proof = match proof {
-            Some((_, source_proof)) => source_proof,
+        let source_proof = match proof.and_then(|(_, source_proof)| source_proof.as_ref()) {
+            Some(source_proof) => source_proof,
             None => {
                 preflight = validate_checked_generic_tree_pair_plan_preflight(
                     rule,
@@ -1085,9 +1099,10 @@ where
         Ok(built)
     }
 
-    /// The identity, style and storage-relation checks, then the plan
-    /// preflight of the logical source, inside the staged destination's
-    /// producer, so preflight errors precede destination errors and the
+    /// The identity, style and storage-relation checks; then the
+    /// destination memo of the source's cache entry, or else the plan
+    /// preflight of the logical source followed by the destination's
+    /// derivation, so preflight errors precede destination errors and the
     /// structure build reuses the proof.
     fn stage_transform<'a>(
         logical: &'a BoundDynamicFusionMapSpace<R>,
@@ -1111,84 +1126,80 @@ where
         // transformer and composed coefficients unpublished.
         let txn = CheckedContractTxn::new();
         let identity = std::cell::OnceCell::new();
-        let destination = std::cell::OnceCell::new();
         let source_proof = std::cell::OnceCell::new();
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
-        let structure =
-            FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
-                _,
-                CheckedGenericPlanError<R::Error>,
-                _,
-            >(provider, |provider_identity| {
-                let actual =
-                    source.validate_transformed_generic_checked_identity(provider_identity)?;
-                if provider.fusion_style() != FusionStyleKind::Generic {
-                    return Err(CoreError::UnsupportedFusionStyle {
-                        expected: FusionStyleKind::Generic,
-                        actual: provider.fusion_style(),
-                    }
-                    .into());
-                }
-                if let Some(parent) = adjoint_of {
-                    if !Arc::ptr_eq(logical.provider_arc(), parent.provider_arc()) {
-                        return Err(OperationError::StructureMismatch {
-                            tensor: "checked adjoint provider",
+        let (structure, destination, permuted) = source
+            .homspace()
+            .prepare_complete_permuted_generic_checked::<_, CheckedGenericPlanError<R::Error>>(
+                source.structure(),
+                provider,
+                codomain_axes,
+                domain_axes,
+                |provider_identity| {
+                    let actual =
+                        source.validate_transformed_generic_checked_identity(provider_identity)?;
+                    if provider.fusion_style() != FusionStyleKind::Generic {
+                        return Err(CoreError::UnsupportedFusionStyle {
+                            expected: FusionStyleKind::Generic,
+                            actual: provider.fusion_style(),
                         }
                         .into());
                     }
-                    if storage_source
-                        .validate_transformed_generic_checked_identity(provider_identity)?
-                        != actual
-                    {
-                        return Err(OperationError::StructureMismatch {
-                            tensor: "checked adjoint identity",
+                    if let Some(parent) = adjoint_of {
+                        if !Arc::ptr_eq(logical.provider_arc(), parent.provider_arc()) {
+                            return Err(OperationError::StructureMismatch {
+                                tensor: "checked adjoint provider",
+                            }
+                            .into());
                         }
-                        .into());
+                        if storage_source
+                            .validate_transformed_generic_checked_identity(provider_identity)?
+                            != actual
+                        {
+                            return Err(OperationError::StructureMismatch {
+                                tensor: "checked adjoint identity",
+                            }
+                            .into());
+                        }
+                        validate_checked_operand_relation(
+                            source,
+                            FusionOperand::adjoint(storage_source),
+                        )?;
                     }
-                    validate_checked_operand_relation(
-                        source,
-                        FusionOperand::adjoint(storage_source),
+                    identity.set(actual).expect("checked admission runs once");
+                    Ok(())
+                },
+                || {
+                    let proof = validate_checked_generic_tree_pair_plan_preflight(
+                        provider,
+                        operation,
+                        source.structure(),
                     )?;
-                }
-                let proof = validate_checked_generic_tree_pair_plan_preflight(
-                    provider,
-                    operation,
-                    source.structure(),
-                )?;
-                let homspace = source.homspace().try_permute_generic_checked(
-                    provider,
-                    codomain_axes,
-                    domain_axes,
-                )?;
-                identity.set(actual).expect("checked producer runs once");
-                if source_proof.set(proof).is_err() {
-                    unreachable!("checked producer runs once");
-                }
-                destination
-                    .set(homspace.clone())
-                    .expect("checked producer runs once");
-                Ok(homspace)
-            })?;
+                    if source_proof.set(proof).is_err() {
+                        unreachable!("checked preflight runs once");
+                    }
+                    Ok(())
+                },
+            )?;
         let identity = identity
             .into_inner()
-            .expect("successful checked producer records identity");
+            .expect("successful checked staging records identity");
         let prepared = PreparedCheckedGenericDynamicSpace::from_complete_parts(
             codomain_axes.len(),
             domain_axes.len(),
-            destination
-                .into_inner()
-                .expect("successful checked producer records destination"),
+            destination,
             structure,
             identity.clone(),
         );
-        let source_proof = source_proof
-            .into_inner()
-            .expect("successful checked producer records source proof");
+        let ticket = match permuted {
+            Permuted::Memo => None,
+            Permuted::Derived(ticket) => Some(ticket),
+        };
         Ok(StagedTransform {
             preview: prepared.shared_structure(),
             nout: codomain_axes.len(),
-            stage: (prepared, txn),
-            proof: (identity, source_proof),
+            stage: (prepared, txn, ticket),
+            proof: (identity, source_proof.into_inner()),
         })
     }
 
@@ -1210,11 +1221,15 @@ where
     /// committed, and only a resident (canonical) destination is keyed.
     fn commit_transform(
         logical: &BoundDynamicFusionMapSpace<R>,
-        (prepared, txn): Self::TransformStage,
+        (prepared, txn, ticket): Self::TransformStage,
         preview: Arc<BlockStructure>,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error> {
         let destination = logical.commit_final_homspace_generic_bound_checked(prepared)?;
-        txn.commit_transform((preview, Arc::clone(destination.space().structure())));
+        let committed = destination.space();
+        txn.commit_transform((preview, Arc::clone(committed.structure())));
+        if let Some(ticket) = ticket {
+            ticket.publish(committed.homspace(), committed.structure());
+        }
         Ok(destination)
     }
 

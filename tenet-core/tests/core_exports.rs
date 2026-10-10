@@ -268,6 +268,8 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "OrientedFusionTreeHomSpace",
         "PackedProductCodec",
         "PackedSectorLayout",
+        "Permuted",
+        "PermutedMemoTicket",
         "PhysicalBasisError",
         "PhysicalFusionBasis",
         "Placement",
