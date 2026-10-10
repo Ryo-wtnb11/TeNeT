@@ -42,10 +42,10 @@ pub use truncation::{
 #[doc(hidden)]
 pub mod seam {
     pub use crate::factorize::{
-        admit_compact_diagonal, ascending_eigh_order, compact_factor_routes,
-        coupled_sector_block_dimensions_generic_checked, decide_bond_truncation,
-        decide_bond_truncation_generic_checked, diagonal_bond_data, eig_full_dyn,
-        eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
+        admit_compact_diagonal, ascending_eigh_order, axpby_axis_by_spectrum_into,
+        compact_factor_routes, coupled_sector_block_dimensions_generic_checked,
+        decide_bond_truncation, decide_bond_truncation_generic_checked, diagonal_bond_data,
+        eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
         eigh_full_from_source, eigh_sector_into, eigh_vals_dyn, eigh_vals_from_source,
         in_linalg_scope, left_null_from_source, left_polar_adjoint_from_parent,
         left_polar_from_source, left_polar_of_diagonal, lq_compact_adjoint_from_parent,

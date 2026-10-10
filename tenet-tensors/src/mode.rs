@@ -539,6 +539,13 @@ pub(crate) trait ContractStaging<R>: PlanningAlgebra<R> {
         Self::Error,
     >;
 
+    /// TensorKit `spacecheck_contract` for an existing destination: whether
+    /// `dst` is, by value, the destination `stage` holds. Provider-free.
+    fn contract_destination_matches(
+        stage: &Self::ContractStage,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool;
+
     /// The provider and destination space the plan targets.
     fn contract_destination<'s>(
         stage: &'s Self::ContractStage,
@@ -1013,6 +1020,13 @@ where
         })
     }
 
+    fn contract_destination_matches(
+        stage: &BoundDynamicFusionMapSpace<R>,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        stage.space() == dst
+    }
+
     fn contract_destination<'s>(
         stage: &'s BoundDynamicFusionMapSpace<R>,
         _lhs: &'s BoundDynamicFusionMapSpace<R>,
@@ -1401,10 +1415,11 @@ where
         }
     }
 
-    /// True by construction: the checked destination is derived from these
-    /// operands by the same call. Why not a leg comparison: it reads duals
-    /// through the provider after the destination is staged (#2046); a
-    /// caller-supplied checked destination (#1870) needs a query-free one.
+    /// True by construction: the planned destination is the one this call
+    /// staged from these operands; a caller's existing destination is
+    /// compared with it by value before planning (#1870). Why not a leg
+    /// comparison: it reads duals through the provider after the destination
+    /// is staged (#2046).
     fn destination_matches(
         _rule: &R,
         _lhs: OrientedFusionTreeHomSpace<'_>,

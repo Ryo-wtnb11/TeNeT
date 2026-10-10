@@ -702,6 +702,17 @@ where
         D::contract(lhs, rhs, spec)
     }
 
+    fn contract_into(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        spec: &ContractSpec<'_>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        D::contract_into(lhs, rhs, spec, destination, alpha, beta)
+    }
+
     fn compose(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
@@ -736,6 +747,34 @@ where
                 (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
                 spec.codomain.len(),
             )?)
+    }
+
+    fn contract_into(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        spec: &ContractSpec<'_>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Self::FacadeError> {
+        let output_axes = spec.output_axes();
+        let mut lease = lhs.runtime.lease_context()?;
+        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+        let destination_space = destination.logical_space().space().clone();
+        lease
+            .context()
+            .generic_lane::<D>()?
+            .tensorcontract_into_checked_generic_in(
+                (lhs.logical_space(), lhs_operand, &lhs_data),
+                (rhs.logical_space(), rhs_operand, &rhs_data),
+                (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
+                spec.codomain.len(),
+                &destination_space,
+                || destination_slice(destination).map_err(Self::FacadeError::from),
+                alpha,
+                beta,
+            )
     }
 
     fn compose(

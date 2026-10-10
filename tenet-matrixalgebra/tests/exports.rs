@@ -218,7 +218,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              require_finite_eigh_input \
              rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
              right_polar_adjoint_from_parent right_polar_from_source \
-             right_polar_of_diagonal scale_axis_by_spectrum_mapped spectrum_bond \
+             right_polar_of_diagonal scale_axis_by_spectrum_mapped axpby_axis_by_spectrum_into spectrum_bond \
              svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \

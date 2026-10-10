@@ -680,7 +680,7 @@ const COMPOSE_CASES: [BondCase; 3] = [
     ("compose D * t", false, 'd', 'b', None),
 ];
 
-const CONTRACT_CASES: [BondCase; 8] = [
+const CONTRACT_CASES: [BondCase; 10] = [
     (
         "contract D . D",
         true,
@@ -736,6 +736,22 @@ const CONTRACT_CASES: [BondCase; 8] = [
         'd',
         'b',
         Some(spec(&[1], &[0], &[0, 1], &[2])),
+    ),
+    // Reordered `D . D` is the product spectrum and one permute (#1870 B1):
+    // a swap stays compact (TensorKit `diagonal.jl:291`), a bend is dense.
+    (
+        "contract D . D swapped",
+        true,
+        'd',
+        'e',
+        Some(spec(&[1], &[0], &[1], &[0])),
+    ),
+    (
+        "contract D . D bent to the domain",
+        false,
+        'd',
+        'e',
+        Some(spec(&[1], &[0], &[], &[1, 0])),
     ),
 ];
 
@@ -898,10 +914,9 @@ fn compact_compose_and_contract_agree_across_modes() {
 fn fermionic_compact_compose_and_contract_agree_across_modes() {
     // What: the fermionic row. Composition is admitted in both modes and
     // agrees. Checked Generic fermionic contraction is unsupported on the
-    // dense route (U15), so where the compact arm answers, its value is
-    // checked against the multiplicity-free mode (whose dense route
-    // `bond_rows` already checked); the one pattern no arm answers (`D . D`
-    // bent) stays rejected in checked mode whatever the storage.
+    // dense route (U15), so the compact arms' values, every listed pattern
+    // included, are checked against the multiplicity-free mode (whose dense
+    // route `bond_rows` already checked).
     let cases: Vec<BondCase> = COMPOSE_CASES.into_iter().chain(CONTRACT_CASES).collect();
     for complex in [false, true] {
         let conv = move |x: f64| {
@@ -923,21 +938,9 @@ fn fermionic_compact_compose_and_contract_agree_across_modes() {
             ),
             &cases,
         );
-        let rejected: Vec<_> = cases
-            .iter()
-            .zip(&checked)
-            .filter(|(_, row)| row.is_none())
-            .map(|((what, ..), _)| *what)
-            .collect();
-        assert_eq!(rejected, ["contract D . D bent"]);
-        let answered = |rows: &[Option<Vec<Complex64>>]| -> Vec<Option<Vec<Complex64>>> {
-            rows.iter()
-                .zip(&checked)
-                .filter(|(_, row)| row.is_some())
-                .map(|(row, _)| row.clone())
-                .collect()
-        };
-        assert_rows_close(&answered(&mf), &answered(&checked));
+        // Every pattern is an arm now, reordered `D . D` included (#1870
+        // B1: it used to take the dense route and stay rejected here).
+        assert_rows_close(&mf, &checked);
     }
 }
 
@@ -1298,15 +1301,8 @@ fn fermionic_dual_open_leg_compact_compose_and_contract_agree_across_modes() {
         &fixture(z2_leg(CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0))),
         &cases,
     );
-    let answered = |rows: &[Option<Vec<Complex64>>]| -> Vec<Option<Vec<Complex64>>> {
-        rows.iter()
-            .zip(&checked)
-            .filter(|(_, row)| row.is_some())
-            .map(|(row, _)| row.clone())
-            .collect()
-    };
-    assert_eq!(checked.iter().filter(|row| row.is_none()).count(), 1);
-    assert_rows_close(&answered(&mf), &answered(&checked));
+    // No row is rejected: reordered `D . D` is an arm too (#1870 B1).
+    assert_rows_close(&mf, &checked);
 }
 
 // ---- Leaf C: rank-(1,1) swap and braid ----
@@ -2608,4 +2604,329 @@ fn checked_compact_and_lazy_transform_into_failure_is_typed_and_nonpublishing() 
     );
     fails_then_publishes!("lazy permute", lazy.provider(), lazy_destination, |d| lazy
         .permute_into(&[1, 0], &[2], d, 1.0, 0.5));
+}
+
+// ---- #1870 leaf B1: contraction `_into` ----
+
+/// A zero destination on the legs of `case`'s contraction of `fixture`,
+/// built on those legs directly: the shape is read from a throwaway rule, as
+/// deriving it through the eager contraction would warm the caches a cold
+/// count reads.
+fn contract_destination(
+    fixture: &BondFixture<CheckedZ2, f64>,
+    case: BondCase,
+) -> TensorMap<CheckedZ2, f64> {
+    let (_, _, lhs, rhs, spec) = case;
+    let scratch = bond_fixture(
+        &z2_leg(CheckedZ2::new(BraidingStyleKind::Bosonic, 1.0).with_salt(0xff)),
+        parity,
+        |x: f64| x,
+    );
+    let shape = pick(&scratch, lhs)
+        .contract(pick(&scratch, rhs), &spec.unwrap())
+        .unwrap();
+    let leg = &fixture.d.codomain()[0];
+    let on = |legs: Vec<GradedSpace<CheckedZ2>>| {
+        legs.iter()
+            .map(|l| {
+                if l.is_dual() {
+                    leg.try_dual().unwrap()
+                } else {
+                    leg.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    TensorMap::from_subblock_fn(
+        fixture.d.runtime(),
+        &on(shape.codomain()),
+        &on(shape.domain()),
+        |_, _| 0.0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn checked_contract_into_queries_the_provider_like_eager() {
+    // What: the dense `contract_into` runs eager's staging and planning, and
+    // the compact one eager's arm (the braiding gate, plus one permute
+    // staging when reordered), so cold and warm provider queries equal
+    // eager's on every pattern both take alike.
+    let ledger = |salt: u8, case: usize, into: bool| {
+        let rule = CheckedZ2::new(BraidingStyleKind::Bosonic, 1.0).with_salt(salt);
+        let fixture = bond_fixture(&z2_leg(rule), parity, |x: f64| x);
+        let (what, _, lhs, rhs, spec) = DENSE_AND_ARM_CASES[case];
+        let mut destination = contract_destination(&fixture, DENSE_AND_ARM_CASES[case]);
+        let (lhs, rhs, spec) = (pick(&fixture, lhs), pick(&fixture, rhs), spec.unwrap());
+        let provider = fixture.d.provider();
+        let counts = (0..2)
+            .map(|_| {
+                provider.queries.store(0, Ordering::Relaxed);
+                if into {
+                    lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5)
+                        .unwrap_or_else(|error| panic!("{what}: {error}"));
+                } else {
+                    drop(black_box(lhs.contract(rhs, &spec).unwrap()));
+                }
+                provider.queries.load(Ordering::Relaxed)
+            })
+            .collect::<Vec<_>>();
+        (what, counts)
+    };
+    let mut cold_queries = Vec::new();
+    for case in 0..DENSE_AND_ARM_CASES.len() {
+        let salt = 0xd0 + 2 * case as u8;
+        let (what, eager) = ledger(salt, case, false);
+        let (_, into) = ledger(salt + 1, case, true);
+        assert_eq!(into, eager, "{what}");
+        cold_queries.push(eager[0]);
+    }
+    // The ledger is not vacuous: the reordered rows stage on the provider.
+    assert!(
+        cold_queries.iter().any(|&queries| queries > 0),
+        "{cold_queries:?}"
+    );
+}
+
+/// The dense `a · b` and every compact arm pattern: eager and `_into` take
+/// each alike.
+const DENSE_AND_ARM_CASES: [BondCase; 12] = [
+    (
+        "contract a . b",
+        false,
+        'a',
+        'b',
+        Some(spec(&[2], &[0], &[0, 1], &[2, 3])),
+    ),
+    (
+        "contract a . b reordered",
+        false,
+        'a',
+        'b',
+        Some(spec(&[2], &[0], &[0, 2], &[1, 3])),
+    ),
+    CONTRACT_CASES[0],
+    CONTRACT_CASES[2],
+    CONTRACT_CASES[3],
+    CONTRACT_CASES[4],
+    CONTRACT_CASES[5],
+    CONTRACT_CASES[6],
+    CONTRACT_CASES[7],
+    CONTRACT_CASES[1],
+    CONTRACT_CASES[8],
+    CONTRACT_CASES[9],
+];
+
+#[test]
+fn checked_contract_into_failure_is_typed_and_nonpublishing() {
+    // What: a provider failing in the staging of a dense `contract_into`, or
+    // in the permute staging of a reordered compact arm, is the typed plan
+    // error, leaves the destination bit for bit and publishes nothing; so
+    // does a shared destination rejected after staging. The succeeding call
+    // after them publishes (#2063).
+    const ISOLATED: &str = "TENET_CONTRACT_INTO_PUBLICATION_ISOLATED";
+    const NAME: &str = "checked_contract_into_failure_is_typed_and_nonpublishing";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated publication test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+
+    use tenet::typed::{CheckedGenericPlanError, Error, GenericTensorError};
+    use tenet_core::{structure_cache_info, StructureCacheKind};
+    tenet_core::clear_structure_caches();
+    let published = || {
+        [
+            StructureCacheKind::DegeneracyStructure,
+            StructureCacheKind::CompletedTreeTransformer,
+            StructureCacheKind::TreeTransformCoefficients,
+        ]
+        .map(|kind| {
+            let info = structure_cache_info(kind);
+            (info.admissions(), info.entries(), info.charged_bytes())
+        })
+    };
+    let bits = |t: &TensorMap<CheckedZ2, f64>| {
+        t.dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    };
+    for (salt, case) in [(0xe0u8, DENSE_AND_ARM_CASES[1]), (0xe1, CONTRACT_CASES[4])] {
+        let (what, _, lhs, rhs, spec) = case;
+        let rule = CheckedZ2::new(BraidingStyleKind::Bosonic, 1.0).with_salt(salt);
+        let fixture = bond_fixture(&z2_leg(rule), parity, |x: f64| x);
+        let mut destination = contract_destination(&fixture, case);
+        let (lhs, rhs, spec) = (pick(&fixture, lhs), pick(&fixture, rhs), spec.unwrap());
+        let provider = fixture.d.provider();
+        let (before, original) = (published(), bits(&destination));
+
+        provider.fail_queries.store(true, Ordering::Relaxed);
+        let result = lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5);
+        provider.fail_queries.store(false, Ordering::Relaxed);
+        assert!(
+            matches!(
+                result,
+                Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+                    InvalidSector
+                )))
+            ),
+            "{what}: {result:?}"
+        );
+        assert_eq!(bits(&destination), original, "{what}: provider failure");
+        assert_eq!(published(), before, "{what}: the failure published");
+
+        let shared = destination.clone();
+        let result = lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5);
+        assert!(
+            matches!(
+                result,
+                Err(GenericTensorError::Facade(Error::DestinationShared))
+            ),
+            "{what}: {result:?}"
+        );
+        drop(shared);
+        assert_eq!(bits(&destination), original, "{what}: shared");
+        assert_eq!(published(), before, "{what}: the shared call published");
+
+        lhs.contract_into(rhs, &spec, &mut destination, 1.0, 0.5)
+            .unwrap();
+        assert_ne!(published(), before, "{what}: the success published nothing");
+    }
+}
+
+#[test]
+fn checked_contract_into_reports_the_same_error_cold_and_warm() {
+    // What: staging (where the checked dense route refuses a fermionic rule)
+    // runs before the destination match, and no contraction staging step is
+    // deferred to planning on a memo hit, so a call reports eager's staging
+    // error cold and warm, on the result's space and on a wrong one alike.
+    let rule = CheckedZ2::new(BraidingStyleKind::Fermionic, -1.0).with_salt(0xf0);
+    let fixture = bond_fixture(&z2_leg(rule), parity, |x: f64| x);
+    let case = DENSE_AND_ARM_CASES[1];
+    let (_, _, lhs, rhs, spec) = case;
+    let (lhs, rhs, spec) = (pick(&fixture, lhs), pick(&fixture, rhs), spec.unwrap());
+    let eager = lhs.contract(rhs, &spec).unwrap_err().to_string();
+    let mut right = contract_destination(&fixture, case);
+    let mut wrong = TensorMap::from_subblock_fn(
+        fixture.a.runtime(),
+        &fixture.a.codomain(),
+        &fixture.a.domain(),
+        |_, _| 0.0,
+    )
+    .unwrap();
+    for pass in ["cold", "warm"] {
+        for destination in [&mut right, &mut wrong] {
+            let error = lhs
+                .contract_into(rhs, &spec, destination, 1.0, 0.5)
+                .unwrap_err();
+            assert_eq!(error.to_string(), eager, "{pass}");
+        }
+        drop(black_box(lhs.contract(rhs, &spec)));
+    }
+}
+
+/// `contract_into` of every compact arm case equals `α·eager + β·dst₀`
+/// (tolerance oracle) for β ∈ {0 (NaN-seeded), 0.5, 1}.
+fn contract_into_rows<R, D>(fixture: &BondFixture<R, D>, alpha: D)
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorContractDispatch<R, D> + TypedTensorConstructionDispatch<R, D>,
+    <R::Mode as TypedTensorModeDispatch<R>>::FacadeError: std::fmt::Debug,
+    D: TensorScalar + std::fmt::Debug,
+    Complex64: From<D>,
+{
+    for (what, _, lhs, rhs, spec) in CONTRACT_CASES {
+        let (lhs, rhs, spec) = (pick(fixture, lhs), pick(fixture, rhs), spec.unwrap());
+        let eager = lhs.contract(rhs, &spec).unwrap().materialize().unwrap();
+        for beta in [0.0, 0.5, 1.0] {
+            let mut next = 0.0;
+            let mut destination = TensorMap::from_subblock_fn(
+                fixture.d.runtime(),
+                &eager.codomain(),
+                &eager.domain(),
+                |_, _| {
+                    next += 0.375;
+                    D::from_real(if beta == 0.0 { f64::NAN } else { next })
+                },
+            )
+            .unwrap();
+            let before: Vec<Complex64> = destination
+                .dense_data()
+                .unwrap()
+                .iter()
+                .map(|&x| Complex64::from(x))
+                .collect();
+            lhs.contract_into(rhs, &spec, &mut destination, alpha, D::from_real(beta))
+                .unwrap();
+            let alpha = Complex64::from(alpha);
+            for ((&got, &e), &b) in destination
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(eager.dense_data().unwrap())
+                .zip(&before)
+            {
+                let want = alpha * Complex64::from(e)
+                    + if beta == 0.0 {
+                        Complex64::new(0.0, 0.0)
+                    } else {
+                        b * beta
+                    };
+                assert!(
+                    close(Complex64::from(got), want),
+                    "{what} beta {beta}: {got:?} vs {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_contract_into_is_alpha_eager_plus_beta_destination_in_every_mode() {
+    // What: eager and `_into` take one route on every arm pattern, reordered
+    // `D . D` included, so `_into` is eager's value with `α`/`β` in the
+    // multiplicity-free and checked modes, bosonic and fermionic.
+    use tenet::sector::Z2FusionRule;
+    let complex = |x: f64| Complex64::new(x, 0.5 * x - 0.25);
+    let alpha = Complex64::new(1.5, -0.5);
+    contract_into_rows(
+        &bond_fixture(&z2_leg(Z2FusionRule), parity, |x: f64| x),
+        1.5,
+    );
+    contract_into_rows(&bond_fixture(&z2_leg(Z2FusionRule), parity, complex), alpha);
+    contract_into_rows(
+        &bond_fixture(&z2_leg(FermionParityFusionRule), parity, |x: f64| x),
+        1.5,
+    );
+    contract_into_rows(
+        &bond_fixture(&z2_leg(FermionParityFusionRule), parity, complex),
+        alpha,
+    );
+    for braiding in [BraidingStyleKind::Bosonic, BraidingStyleKind::Fermionic] {
+        let rule = || {
+            CheckedZ2::new(
+                braiding,
+                if braiding == BraidingStyleKind::Bosonic {
+                    1.0
+                } else {
+                    -1.0
+                },
+            )
+        };
+        contract_into_rows(&bond_fixture(&z2_leg(rule()), parity, |x: f64| x), 1.5);
+        contract_into_rows(&bond_fixture(&z2_leg(rule()), parity, complex), alpha);
+    }
 }

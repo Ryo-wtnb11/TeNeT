@@ -213,6 +213,15 @@ pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
 
+    fn contract_into(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        spec: &ContractSpec<'_>,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
+    ) -> Result<(), Error>;
+
     fn compose(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
@@ -295,6 +304,21 @@ where
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+
+    /// `destination = alpha · contract(lhs, rhs) + beta · destination` on
+    /// the dense route (a lazy adjoint read through its parent's payload, a
+    /// compact operand densified) for a `destination` that passed
+    /// [`destination_precheck`]: one lease, [`Self::contract`]'s staging, the
+    /// staged space against the destination's, [`destination_slice`], the
+    /// write, then the same commit.
+    fn contract_into(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        spec: &ContractSpec<'_>,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Self::FacadeError>;
 
     /// Composes two operands, a lazy adjoint read through its parent's
     /// payload, into a fresh destination payload.

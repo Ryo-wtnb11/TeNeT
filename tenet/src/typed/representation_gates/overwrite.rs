@@ -843,8 +843,9 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
         destination.dense_data().unwrap(),
         expected.dense_data().unwrap()
     );
-    // Positive control: the compact operand is densified operation-locally.
-    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
+    // #1870 B1: the compact operand scales `u`'s leg into the destination,
+    // as eager's arm does, and is never densified.
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]

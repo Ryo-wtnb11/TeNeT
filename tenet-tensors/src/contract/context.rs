@@ -870,7 +870,7 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
-            return self.tensorcontract_fusion_dyn_prelowered_into_core(
+            return self.tensorcontract_prelowered_into(
                 dst_space,
                 dst_data,
                 FusionOperand::direct(lhs_space.space()),
@@ -883,7 +883,7 @@ where
             );
         }
         let lowered = lower_legacy_axes(lhs_space.space(), rhs_space.space(), axes)?;
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
+        self.tensorcontract_prelowered_into(
             dst_space,
             dst_data,
             legacy_operand(lhs_space.space(), axes.lhs_conjugate()),
@@ -939,69 +939,13 @@ where
         .map(drop)
     }
 
-    /// Executes TeNeT's validated prelowered operand seam.
-    ///
-    /// Logical spaces are the categorical authority; storage spaces and slices
-    /// are the physical authority. Why not make this a normal entrypoint:
-    /// arbitrary callers cannot establish the lazy-adjoint coherence contract.
-    #[doc(hidden)]
+    /// The prelowered operand seam: logical spaces are the categorical
+    /// authority, storage operands and slices the physical one. Why not a
+    /// public entrypoint: arbitrary callers cannot establish the lazy-adjoint
+    /// coherence contract; the typed facade enters through
+    /// `tensorcontract_into_*_in` (#1870).
     #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_with_init(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-        )
-    }
-
-    /// [`Self::tensorcontract_fusion_dyn_prelowered_into`] with the
-    /// destination initialisation made explicit.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into_with_init<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        init: ContractDestinationInit<D>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
-            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, init,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn tensorcontract_fusion_dyn_prelowered_into_core<R>(
+    pub(crate) fn tensorcontract_prelowered_into<R>(
         &mut self,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         dst_data: &mut [D],
@@ -1199,6 +1143,54 @@ where
         )
     }
 
+    /// `dst = alpha · contract(lhs, rhs) + beta · dst` for multiplicity-free
+    /// operands (as in [`Self::tensorcontract_multiplicity_free_in`]) and an
+    /// existing destination: the owned entry's staging and commit around a
+    /// write into the caller's buffer. `dst_space` is compared with the
+    /// staged destination before `dst_data` is asked for the buffer.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub fn tensorcontract_into_multiplicity_free_in<'d, R, E>(
+        &mut self,
+        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (lhs_axes, rhs_axes, output_order): (&[usize], &[usize], OutputAxisOrder<'_>),
+        codomain_rank: usize,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), E>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        E: From<OperationError>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + 'd,
+    {
+        self.tensorcontract_into_in::<MultiplicityFreeAdmissionMode, R, E>(
+            (lhs_authority, lhs, lhs_data),
+            (rhs_authority, rhs, rhs_data),
+            ContractRequest::Contract {
+                axes: TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                ),
+                codomain_rank,
+            },
+            dst_space,
+            dst_data,
+            alpha,
+            beta,
+        )
+    }
+
     /// The owned multiplicity-free composition `lhs ∘ rhs` (TensorKit
     /// `mul!`) into a fresh payload; operands as in
     /// [`Self::tensorcontract_multiplicity_free_in`].
@@ -1251,7 +1243,104 @@ where
             (rhs_authority, rhs, rhs_data.len()),
             request,
         )?;
-        let (rule, space) = M::contract_destination(&stage, lhs_authority);
+        let mut data = crate::zeroed_payload(len);
+        let resolution = self.replay_staged_contraction::<M, R>(
+            (&stage, authority, &mut txn),
+            lhs_authority,
+            request,
+            &mut data,
+            (lhs, lhs_data),
+            (rhs, rhs_data),
+            D::one(),
+            ContractDestinationInit::Zeroed,
+        )?;
+        let destination = M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
+        Ok((destination, data))
+    }
+
+    /// [`Self::tensorcontract_in`] writing into an existing destination: the
+    /// same staging, then the space check against `dst_space` before
+    /// `dst_data` runs the caller's remaining checks, then `alpha · op +
+    /// beta · dst` and the same commit. Any error before the write leaves the
+    /// destination untouched; the commit follows the write, so a failed call
+    /// publishes nothing (#2063).
+    ///
+    /// Why the match sits before planning in both modes: no contraction
+    /// staging step is deferred to planning on a memo hit, so the reported
+    /// error does not depend on cache history.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub(super) fn tensorcontract_into_in<'d, M, R, E>(
+        &mut self,
+        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        request: ContractRequest<'_>,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), E>
+    where
+        M: ContractStaging<R, Scalar = C>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + 'd,
+        E: From<M::Error> + From<OperationError>,
+    {
+        let StagedContraction {
+            stage,
+            authority,
+            mut txn,
+            ..
+        } = M::stage_contraction(
+            (lhs_authority, lhs, lhs_data.len()),
+            (rhs_authority, rhs, rhs_data.len()),
+            request,
+        )?;
+        if !M::contract_destination_matches(&stage, dst_space) {
+            // Why `E` directly: a destination mismatch is the caller's
+            // argument error in every mode, never a checked plan failure.
+            return Err(E::from(OperationError::SpaceMismatch {
+                message:
+                    "destination fusion space or block layout does not match the contraction result",
+            }));
+        }
+        let dst = dst_data()?;
+        let resolution = self.replay_staged_contraction::<M, R>(
+            (&stage, authority, &mut txn),
+            lhs_authority,
+            request,
+            dst,
+            (lhs, lhs_data),
+            (rhs, rhs_data),
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+        )?;
+        M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
+        Ok(())
+    }
+
+    /// Plans `request` against the staged destination and replays it into
+    /// `dst`: the step between staging and commit that the owned and the
+    /// existing-destination entries share.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn replay_staged_contraction<M, R>(
+        &mut self,
+        (stage, authority, txn): (
+            &M::ContractStage,
+            M::SpaceAuthority<'_>,
+            &mut M::ContractTxn,
+        ),
+        lhs_authority: &BoundDynamicFusionMapSpace<R>,
+        request: ContractRequest<'_>,
+        dst: &mut [D],
+        lhs: (FusionOperand<'_>, &[D]),
+        rhs: (FusionOperand<'_>, &[D]),
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<StorageContractResolution<C>, M::Error>
+    where
+        M: ContractStaging<R, Scalar = C>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let (rule, space) = M::contract_destination(stage, lhs_authority);
         let output_axes;
         let planned = match request {
             ContractRequest::Contract { axes, .. } => {
@@ -1264,23 +1353,20 @@ where
             }
             ContractRequest::Compose => PlannedContraction::Compose,
         };
-        let mut data = crate::zeroed_payload(len);
-        let resolution = self.tensorcontract_planned_raw_into::<M, R>(
-            &mut txn,
+        self.tensorcontract_planned_raw_into::<M, R>(
+            txn,
             PlanTarget {
                 rule,
                 space,
                 authority,
             },
-            &mut data,
-            (lhs, lhs_data),
-            (rhs, rhs_data),
+            dst,
+            lhs,
+            rhs,
             planned,
-            D::one(),
-            ContractDestinationInit::Zeroed,
-        )?;
-        let destination = M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
-        Ok((destination, data))
+            alpha,
+            init,
+        )
     }
 
     /// The contraction planner: TensorKit `contract!`

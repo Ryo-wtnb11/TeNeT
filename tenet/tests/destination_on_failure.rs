@@ -953,6 +953,126 @@ fn checked_transform_into_leaves_a_rejected_destination_bit_identical() {
     );
 }
 
+/// Checked Generic `contract_into` rejects every malformed destination class
+/// in the multiplicity-free order (runtime, rule, destination kind, alias
+/// including a lazy operand's parent, the contraction's own errors, space
+/// before sharing), the same `Error` in [`GenericTensorError::Facade`].
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_contract_into_leaves_a_rejected_destination_bit_identical() {
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::{ContractSpec, GenericTensorError};
+
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let other_rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2 = Arc::new(SUNFusionRule::new(2).unwrap());
+    let v = GradedSpace::try_new(Arc::clone(&su2), [(vec![0], 2), (vec![1], 1)]).unwrap();
+    let w = v.try_dual().unwrap();
+    let t = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &w], [&v], 1).unwrap();
+    let r = TensorMap::<_, f64>::rand_with_seed(&rt, [&v], [&w], 2).unwrap();
+    let undual = TensorMap::<_, f64>::rand_with_seed(&rt, [&w], [&w], 4).unwrap();
+    let spec = ContractSpec {
+        lhs: &[2],
+        rhs: &[0],
+        codomain: &[0, 2],
+        domain: &[1],
+    };
+    let contracted = t.contract(&r, &spec).unwrap();
+    let fresh = |rt: &Runtime| sentinel!(rt, contracted);
+    let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
+    let su3_leg = GradedSpace::try_new(su3, [(vec![0, 0], 2), (vec![1, 0], 1)]).unwrap();
+    let foreign_rule = sentinel!(
+        &rt,
+        TensorMap::<_, f64>::rand_with_seed(&rt, [&su3_leg, &su3_leg], [&su3_leg], 3).unwrap()
+    );
+    let wrong = sentinel!(&rt, t);
+    let into = |d: &mut TensorMap<SUNFusionRule, f64>| t.contract_into(&r, &spec, d, 1.0, 0.5);
+
+    t.contract_into(&r, &spec, &mut fresh(&rt), 1.0, 0.5)
+        .unwrap();
+    rejects!(
+        host_snap,
+        "checked contract_into runtime",
+        fresh(&other_rt),
+        GenericTensorError::Facade(Error::RuntimeMismatch),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into rule",
+        foreign_rule,
+        GenericTensorError::Facade(Error::RuleMismatch),
+        into
+    );
+    rejects!(
+        |d: &TensorMap<SUNFusionRule, f64>| host_snap(&d.materialize().unwrap()).0,
+        "checked contract_into lazy destination",
+        contracted.adjoint().unwrap(),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into alias",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let lhs = d.clone();
+            lhs.contract_into(&r, &spec, d, 1.0, 0.5)
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into alias of a lazy operand's parent",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let lazy = d.adjoint().unwrap();
+            t.contract_into(&lazy, &spec, d, 1.0, 0.5)
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into legs not dual",
+        fresh(&rt),
+        _,
+        |d: &mut TensorMap<SUNFusionRule, f64>| t.contract_into(&undual, &spec, d, 1.0, 0.5)
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into space",
+        wrong.clone(),
+        GenericTensorError::Facade(Error::Operation(operation))
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into space before shared",
+        wrong,
+        GenericTensorError::Facade(Error::Operation(operation))
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let clone = d.clone();
+            let result = into(d);
+            drop(clone);
+            result
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked contract_into shared",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::DestinationShared),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let clone = d.clone();
+            let result = into(d);
+            drop(clone);
+            result
+        }
+    );
+}
+
 /// `scale_assign` takes the destination rule: in place on the receiver's own
 /// storage, `DestinationShared` (receiver untouched) when it is shared.
 #[test]

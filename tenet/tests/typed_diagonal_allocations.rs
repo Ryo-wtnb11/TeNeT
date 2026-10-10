@@ -690,36 +690,26 @@ fn contract_keeps_the_compact_storage_outcomes() {
         "ordered s * s densified its result"
     );
 
-    // `s · s` with `[1, 0]` moves the surviving bond across the
-    // codomain/domain split, which the rustdoc documents as the dense-route
-    // decline: the result carries a dense payload.
+    // `s · s` with `[1] ← [0]` is the product spectrum and one swap (#1870
+    // B1; it used to decline to the dense route): the swap keeps it
+    // compact, as TensorKit's `DiagonalTensorMap` result (`diagonal.jl:291`),
+    // and the whole contraction costs less than one dense payload.
     let e = spectrum(0x5eed_0062);
-    black_box(
-        e.contract(
-            &e,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[1],
-                domain: &[0],
-            },
-        )
-        .unwrap(),
-    );
-    let swapped = e
-        .contract(
-            &e,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[1],
-                domain: &[0],
-            },
-        )
-        .unwrap();
+    let swapped_spec = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[1],
+        domain: &[0],
+    };
+    let bytes = warmed_bytes(|| e.contract(&e, &swapped_spec).unwrap());
     assert!(
-        swapped.dense_data().is_ok(),
-        "ordered s * s with the bond-crossing order kept a compact payload the documented decline should have refused"
+        bytes < dense_payload_bytes(),
+        "swapped s * s allocated at least one dense payload: {bytes} bytes"
+    );
+    let swapped = e.contract(&e, &swapped_spec).unwrap();
+    assert!(
+        swapped.dense_data().is_err(),
+        "swapped s * s densified its result"
     );
 
     // `t · s` under a non-identity order is still the scaling arm; the

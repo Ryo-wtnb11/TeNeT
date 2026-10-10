@@ -396,6 +396,13 @@ where
         })
     }
 
+    fn contract_destination_matches(
+        (destination, _): &Self::ContractStage,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        destination.matches(dst)
+    }
+
     fn contract_destination<'s>(
         (_, preview): &'s Self::ContractStage,
         lhs: &'s BoundDynamicFusionMapSpace<P>,
@@ -478,6 +485,52 @@ where
                 ),
                 codomain_rank,
             },
+        )
+    }
+
+    /// `dst = alpha · contract(lhs, rhs) + beta · dst` for checked Generic
+    /// operands (as in [`Self::tensorcontract_checked_generic_in`]) and an
+    /// existing destination: the same staging, the staged destination
+    /// compared with `dst_space` before `dst_data` is asked for the buffer,
+    /// the write, then the same commit and publication (#2063).
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub fn tensorcontract_into_checked_generic_in<'d, P, E>(
+        &mut self,
+        (lhs_space, lhs, lhs_data): (&BoundDynamicFusionMapSpace<P>, FusionOperand<'_>, &[D]),
+        (rhs_space, rhs, rhs_data): (&BoundDynamicFusionMapSpace<P>, FusionOperand<'_>, &[D]),
+        (lhs_axes, rhs_axes, output_order): (&[usize], &[usize], OutputAxisOrder<'_>),
+        codomain_rank: usize,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), E>
+    where
+        P: CheckedGenericRigidSymbols<Scalar = f64>,
+        E: From<CheckedGenericPlanError<P::Error>> + From<OperationError>,
+        D: 'd,
+    {
+        self.tensorcontract_into_in::<CheckedGenericAdmissionMode, P, E>(
+            (lhs_space, lhs, lhs_data),
+            (rhs_space, rhs, rhs_data),
+            ContractRequest::Contract {
+                axes: TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                ),
+                codomain_rank,
+            },
+            dst_space,
+            dst_data,
+            alpha,
+            beta,
         )
     }
 
