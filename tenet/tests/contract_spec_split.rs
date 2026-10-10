@@ -91,7 +91,7 @@ where
                 expected.dense_data().unwrap(),
                 terms,
             );
-            let mut destination = expected.scale(D::entry(7.5, 0.0));
+            let mut destination = expected.scale(D::entry(7.5, 0.0)).unwrap();
             lhs.contract_into(
                 rhs,
                 &spec,
@@ -112,7 +112,7 @@ where
     }
 
     // The default-split destination under a spec that moves the split.
-    let mut mismatched = contracted.scale(D::entry(7.5, 0.0));
+    let mut mismatched = contracted.scale(D::entry(7.5, 0.0)).unwrap();
     let before = mismatched.dense_data().unwrap().to_vec();
     let moved = ContractSpec {
         codomain: &identity[..lhs_open + 1],

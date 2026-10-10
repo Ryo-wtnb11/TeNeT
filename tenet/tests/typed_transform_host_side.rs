@@ -295,7 +295,11 @@ fn host_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
 
-    let mut poisoned = source.permute(&[2, 0], &[1, 3]).unwrap().scale(f64::NAN);
+    let mut poisoned = source
+        .permute(&[2, 0], &[1, 3])
+        .unwrap()
+        .scale(f64::NAN)
+        .unwrap();
     assert!(poisoned
         .dense_data()
         .unwrap()
@@ -322,19 +326,19 @@ fn host_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
     );
 
     // No identity short circuit: `alpha * self` is written.
-    let mut identity = source.scale(f64::NAN);
+    let mut identity = source.scale(f64::NAN).unwrap();
     source
         .permute_into(&[0, 1], &[2, 3], &mut identity, -2.5, 0.0)
         .unwrap();
     assert_eq!(
         identity.dense_data().unwrap(),
-        source.scale(-2.5).dense_data().unwrap()
+        source.scale(-2.5).unwrap().dense_data().unwrap()
     );
-    let mut same_split = source.scale(f64::NAN);
+    let mut same_split = source.scale(f64::NAN).unwrap();
     source.repartition_into(&mut same_split, 2.0, 0.0).unwrap();
     assert_eq!(
         same_split.dense_data().unwrap(),
-        source.scale(2.0).dense_data().unwrap()
+        source.scale(2.0).unwrap().dense_data().unwrap()
     );
 
     // `alpha == 0`, `-0.0` included, writes VectorInterface's

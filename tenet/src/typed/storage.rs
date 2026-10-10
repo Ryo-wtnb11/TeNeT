@@ -16,15 +16,29 @@ impl<D> sealed::Sealed for Vec<D> {}
 /// outside them has no device method at all.
 #[doc(hidden)]
 pub trait TypedStorage<R, D>: TensorStorage<D> + sealed::Sealed + Sized + 'static {
+    /// The storage noun in shared error messages ("host", "CUDA").
+    const NOUN: &'static str;
+
     /// The compact-representation bridge: `Some(t)` on Host, `None` on CUDA.
     ///
     /// Only compact arms may branch on it; CUDA tensors never hold compact
     /// data, since `to_cuda` densifies and every device kernel outputs dense.
     fn as_host(t: &TensorMap<R, D, Self>) -> Option<&TensorMap<R, D>>;
+
+    /// The inverse of [`Self::as_host`] for a compact arm's result. Reached
+    /// only after `as_host` returned `Some`, so the CUDA impl's error is
+    /// unreachable.
+    fn from_host(t: TensorMap<R, D>) -> Result<TensorMap<R, D, Self>, Error>;
 }
 
 impl<R, D: 'static> TypedStorage<R, D> for Vec<D> {
+    const NOUN: &'static str = "host";
+
     fn as_host(t: &TensorMap<R, D, Self>) -> Option<&TensorMap<R, D>> {
         Some(t)
+    }
+
+    fn from_host(t: TensorMap<R, D>) -> Result<TensorMap<R, D, Self>, Error> {
+        Ok(t)
     }
 }

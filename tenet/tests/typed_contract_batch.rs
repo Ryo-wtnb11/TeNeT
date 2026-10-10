@@ -55,8 +55,11 @@ where
         let members: Vec<_> = (0..count)
             .map(|i| {
                 let scale = D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0);
-                let lhs = case.lhs.scale(scale);
-                let rhs = case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0));
+                let lhs = case.lhs.scale(scale).unwrap();
+                let rhs = case
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap();
                 Case {
                     name: case.name,
                     lhs,
@@ -604,8 +607,12 @@ fn check_twisted_members<R, D>(
                 name: case.name,
                 lhs: case
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap(),
+                rhs: case
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap(),
                 lhs_axes: case.lhs_axes.clone(),
                 rhs_axes: case.rhs_axes.clone(),
                 output_axes: case.output_axes.clone(),
@@ -728,8 +735,12 @@ fn check_fermionic_unit_batch<R, D>(
                 name: case.name,
                 lhs: case
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap(),
+                rhs: case
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap(),
                 lhs_axes: case.lhs_axes.clone(),
                 rhs_axes: case.rhs_axes.clone(),
                 output_axes: case.output_axes.clone(),
@@ -1009,8 +1020,12 @@ fn check_mixed_signed_members<R, D>(
                 name: base.name,
                 lhs: base
                     .lhs
-                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
-                rhs: base.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0))
+                    .unwrap(),
+                rhs: base
+                    .rhs
+                    .scale(D::entry(1.0 - i as f64 / 32.0, 0.0))
+                    .unwrap(),
                 lhs_axes: base.lhs_axes.clone(),
                 rhs_axes: base.rhs_axes.clone(),
                 output_axes: base.output_axes.clone(),
@@ -1221,8 +1236,12 @@ where
             name: case.name,
             lhs: case
                 .lhs
-                .scale(D::entry(lhs_scale - i as f64 / 64.0, (i + 1) as f64 / 32.0)),
-            rhs: case.rhs.scale(D::entry(1.25 + i as f64 / 16.0, 0.0)),
+                .scale(D::entry(lhs_scale - i as f64 / 64.0, (i + 1) as f64 / 32.0))
+                .unwrap(),
+            rhs: case
+                .rhs
+                .scale(D::entry(1.25 + i as f64 / 16.0, 0.0))
+                .unwrap(),
             lhs_axes: case.lhs_axes.clone(),
             rhs_axes: case.rhs_axes.clone(),
             output_axes: case.output_axes.clone(),

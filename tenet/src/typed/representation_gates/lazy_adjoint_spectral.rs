@@ -676,7 +676,7 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
         }
     })
     .unwrap();
-    let singular = source.scale(0.0);
+    let singular = source.scale(0.0).unwrap();
     let before = singular.dense_data().unwrap().to_vec();
     let body = Arc::clone(owned(&singular));
     let data = Arc::clone(&body.data);
@@ -754,7 +754,8 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     let complex_divisor = divisor.convert::<Complex64>();
     let complex_rhs = rhs
         .convert::<Complex64>()
-        .scale(num_complex::Complex64::new(1.0, 0.25));
+        .scale(num_complex::Complex64::new(1.0, 0.25))
+        .unwrap();
     let complex_solution = complex_divisor
         .solve(&[0], &[1], &complex_rhs, &[0], &[1])
         .unwrap();
@@ -804,7 +805,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
             if matches!(*error, tenet_tensors::OperationError::SpaceMismatch { .. })
     ));
 
-    let singular_dense = divisor.scale(0.0).adjoint().unwrap();
+    let singular_dense = divisor.scale(0.0).unwrap().adjoint().unwrap();
     assert!(matches!(
         singular_dense.solve(&[0], &[1], &lazy_rhs, &[0], &[1]),
         Err(Error::Operation(_))
@@ -1004,7 +1005,7 @@ fn checked_generic_left_solve_preserves_injected_backend_provenance() {
     let lhs: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
             .unwrap();
-    let rhs = lhs.scale(2.0);
+    let rhs = lhs.scale(2.0).unwrap();
     let before_lhs = lhs.dense_data().unwrap().to_vec();
     let before_rhs = rhs.dense_data().unwrap().to_vec();
     assert!(matches!(

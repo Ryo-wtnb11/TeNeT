@@ -42,8 +42,8 @@ macro_rules! base_suite {
                 let wide_scale = <$wide as Parts>::parts(0.5, -0.25);
                 assert_payloads_agree(
                     "scale",
-                    a.scale(scale).dense_data().unwrap(),
-                    wa.scale(wide_scale).dense_data().unwrap(),
+                    a.scale(scale).unwrap().dense_data().unwrap(),
+                    wa.scale(wide_scale).unwrap().dense_data().unwrap(),
                     1,
                 );
                 assert_payloads_agree(
@@ -56,8 +56,8 @@ macro_rules! base_suite {
                 );
                 assert_payloads_agree(
                     "zeros_like",
-                    a.zeros_like().dense_data().unwrap(),
-                    wa.zeros_like().dense_data().unwrap(),
+                    a.zeros_like().unwrap().dense_data().unwrap(),
+                    wa.zeros_like().unwrap().dense_data().unwrap(),
                     1,
                 );
 

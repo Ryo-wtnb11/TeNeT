@@ -294,7 +294,7 @@ macro_rules! factor_conformance {
         let exponential = h.exp(&[0], &[1]).unwrap();
         assert_provider!(provider; exponential);
         assert_close!(
-            &h.scale(-1.0)
+            &h.scale(-1.0).unwrap()
                 .exp(&[0], &[1])
                 .unwrap()
                 .compose(&exponential)

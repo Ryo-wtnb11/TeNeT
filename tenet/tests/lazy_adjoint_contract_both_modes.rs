@@ -308,8 +308,8 @@ fn su2_adjoint_transforms_stay_lazy_and_agree_across_modes_c64() {
     let phase = Complex64::new(1.0, 2.0);
     let (mf, checked) = su2_sources();
     let (mf, checked) = (
-        mf.convert::<Complex64>().scale(phase),
-        checked.convert::<Complex64>().scale(phase),
+        mf.convert::<Complex64>().scale(phase).unwrap(),
+        checked.convert::<Complex64>().scale(phase).unwrap(),
     );
     let mf = transform_rows!(mf, |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin));
     let checked = transform_rows!(checked, |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin));
@@ -333,7 +333,8 @@ fn su3_adjoint_transforms_with_outer_multiplicity_stay_lazy() {
     let f64_rows = transform_rows!(source, key);
     let c64 = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 2.0));
+        .scale(Complex64::new(1.0, 2.0))
+        .unwrap();
     let c64_rows = transform_rows!(c64, key);
     assert_eq!(f64_rows.len(), c64_rows.len());
     assert!(f64_rows.iter().all(|(_, entries)| !entries.is_empty()));
@@ -352,8 +353,8 @@ fn su2_adjoint_operands_contract_and_agree_across_modes_c64() {
     let phase = Complex64::new(1.0, 2.0);
     let (mf, checked) = su2_sources();
     let (mf, checked) = (
-        mf.convert::<Complex64>().scale(phase),
-        checked.convert::<Complex64>().scale(phase),
+        mf.convert::<Complex64>().scale(phase).unwrap(),
+        checked.convert::<Complex64>().scale(phase).unwrap(),
     );
     let mf = contract_rows!(mf, |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin));
     let checked = contract_rows!(checked, |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin));
@@ -377,7 +378,8 @@ fn su3_adjoint_operands_with_outer_multiplicity_contract() {
     let f64_rows = contract_rows!(source, key);
     let c64 = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 2.0));
+        .scale(Complex64::new(1.0, 2.0))
+        .unwrap();
     let c64_rows = contract_rows!(c64, key);
     assert_eq!(f64_rows.len(), c64_rows.len());
 }
@@ -400,7 +402,8 @@ fn su3_adjoint_transforms_with_a_dual_leg_stay_lazy() {
     let f64_rows = transform_rows!(source, key);
     let c64 = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 2.0));
+        .scale(Complex64::new(1.0, 2.0))
+        .unwrap();
     let c64_rows = transform_rows!(c64, key);
     assert_eq!(f64_rows.len(), c64_rows.len());
     assert!(f64_rows.iter().all(|(_, entries)| !entries.is_empty()));

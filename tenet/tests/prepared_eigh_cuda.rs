@@ -352,7 +352,11 @@ fn mixed_scale_admission_verdicts_equal_device_eager_per_member() {
     let mut inputs = Vec::new();
     for exponent in [0, -1000, 1000, -1060] {
         let s = 2f64.powi(exponent);
-        inputs.extend([h.scale(s), skewed.scale(s), admitted.scale(s)]);
+        inputs.extend([
+            h.scale(s).unwrap(),
+            skewed.scale(s).unwrap(),
+            admitted.scale(s).unwrap(),
+        ]);
     }
     let expected: Vec<_> = inputs
         .iter()
@@ -396,7 +400,7 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let (leg, _) = u1_legs();
     let mut inputs = single_leg(&runtime, &leg, 5, |_, _, _| 1.0);
-    inputs[1] = inputs[1].scale(f64::NAN);
+    inputs[1] = inputs[1].scale(f64::NAN).unwrap();
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
     let plan = EighFullPlan::new(
         &stack,
@@ -414,8 +418,8 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
     // Finite, admitted, but `2M` overflows in the solver.
     let huge = f64::MAX / 1.5;
     let mut inputs = single_leg(&runtime, &leg, 5, |_, _, _| 1.0);
-    inputs[0] = inputs[0].scale(huge);
-    inputs[3] = inputs[3].scale(huge);
+    inputs[0] = inputs[0].scale(huge).unwrap();
+    inputs[3] = inputs[3].scale(huge).unwrap();
     let eager: Vec<bool> = inputs
         .iter()
         .map(|input| {
@@ -507,7 +511,7 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
         1.0 + (i + j + member) as f64 / 4.0 + f64::from(u8::from(i == j))
     });
     let mut overflowing = good.clone();
-    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5);
+    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5).unwrap();
     let mut skewed = good.clone();
     skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
     let stack =

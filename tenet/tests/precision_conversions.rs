@@ -250,7 +250,7 @@ macro_rules! assert_all_conversions {
         );
 
         // A genuinely complex payload: both components move independently.
-        let complex = c32.scale(Complex32::new(0.75, -1.5));
+        let complex = c32.scale(Complex32::new(0.75, -1.5)).unwrap();
         let complex_values = complex
             .materialize()
             .unwrap()
@@ -296,11 +296,13 @@ macro_rules! assert_adjoint_conversions {
         let lazyc32 = owned
             .convert::<Complex32>()
             .scale(Complex32::new(0.75, -1.5))
+            .unwrap()
             .adjoint()
             .unwrap();
         let lazyc64 = owned
             .convert::<Complex64>()
             .scale(Complex64::new(0.75, -1.5))
+            .unwrap()
             .adjoint()
             .unwrap();
 
@@ -488,7 +490,8 @@ fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
     // A complex lazy adjoint conjugates: the converted view must too.
     let complex = source
         .convert::<Complex32>()
-        .scale(Complex32::new(0.5, 2.0));
+        .scale(Complex32::new(0.5, 2.0))
+        .unwrap();
     let lazy = complex.adjoint().unwrap();
     let expected: Vec<Complex64> = lazy
         .materialize()
@@ -632,6 +635,7 @@ fn narrowing_rounds_like_as_f32_per_element() {
     let complex = source
         .convert::<Complex64>()
         .scale(Complex64::new(0.0, 1.0))
+        .unwrap()
         .axpby(
             Complex64::new(1.0, 0.0),
             &source.convert::<Complex64>(),
@@ -812,7 +816,7 @@ fn converted_lazy_adjoints_are_owned() {
     let tensor: TensorMap<U1FusionRule, f32> = filled!([&leg, &leg], [&leg]);
     let source = tensor.adjoint().unwrap().convert::<f64>();
     let expected = source.permute(&[2], &[0, 1]).unwrap();
-    let mut destination = expected.zeros_like();
+    let mut destination = expected.zeros_like().unwrap();
     source
         .permute_into(&[2], &[0, 1], &mut destination, 1.0, 0.0)
         .unwrap();
@@ -900,9 +904,10 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     // The stored spectrum of the complex conversions is conj(convert(value)),
     // bitwise.
     let factor = Complex32::new(0.75, -1.5);
-    let stored = tenet::expert::diagonal_spectrum(&source.convert::<Complex32>().scale(factor))
-        .unwrap()
-        .unwrap();
+    let stored =
+        tenet::expert::diagonal_spectrum(&source.convert::<Complex32>().scale(factor).unwrap())
+            .unwrap()
+            .unwrap();
     let got = tenet::expert::diagonal_spectrum(&c32_to_c64)
         .unwrap()
         .unwrap();
@@ -918,7 +923,8 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     let stored = tenet::expert::diagonal_spectrum(
         &source
             .convert::<Complex64>()
-            .scale(Complex64::new(0.75, -1.5)),
+            .scale(Complex64::new(0.75, -1.5))
+            .unwrap(),
     )
     .unwrap()
     .unwrap();

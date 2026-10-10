@@ -78,7 +78,7 @@ fn bond_update(
         .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
         .unwrap();
     let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
-    let l_new = s.scale(1.0 / s.norm(2.0).unwrap());
+    let l_new = s.scale(1.0 / s.norm(2.0).unwrap()).unwrap();
     let l_out_inv = l_out.pinv(&[0], &[1], 1e-12).unwrap();
     let g1_new = net(
         &[op(&["l"], &["x"]), op(&["x", "pa"], &["m"])],
@@ -145,7 +145,7 @@ fn run_itebd(chi: usize, schedule: &[(f64, usize)]) -> f64 {
     let mut lb = TensorMap::from_subblock_fn(&rt, [&vb], [&vb], |_, _| 1.0).unwrap();
 
     for &(dt, steps) in schedule {
-        let gate = h.scale(-dt).exp(&[0, 1], &[2, 3]).unwrap();
+        let gate = h.scale(-dt).unwrap().exp(&[0, 1], &[2, 3]).unwrap();
         for _ in 0..steps {
             (ga, la, gb) = bond_update(&gate, &lb, &ga, &la, &gb, &trunc);
             (gb, lb, ga) = bond_update(&gate, &la, &gb, &lb, &ga, &trunc);

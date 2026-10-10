@@ -913,7 +913,7 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
-    let zeros: TensorMap<tenet::sector::Z2FusionRule, f64> = typed.zeros_like();
+    let zeros: TensorMap<tenet::sector::Z2FusionRule, f64> = typed.zeros_like().unwrap();
     assert_same_legs(&zeros.codomain(), &typed.codomain());
     assert_same_legs(&zeros.domain(), &typed.domain());
     assert_eq!(
@@ -929,7 +929,7 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     // A compact spectrum factor stays on its bond space with a zero spectrum.
     let s: TensorMap<tenet::sector::Z2FusionRule, f64> =
         typed.svd_compact(&[0, 1], &[2]).unwrap().s;
-    let s_zeros: TensorMap<tenet::sector::Z2FusionRule, f64> = s.zeros_like();
+    let s_zeros: TensorMap<tenet::sector::Z2FusionRule, f64> = s.zeros_like().unwrap();
     assert_same_legs(&s_zeros.codomain(), &s.codomain());
     assert!(s_zeros
         .materialize()
@@ -1007,7 +1007,7 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
         real_typed.convert::<Complex64>().im();
     assert_eq!(
         vanished.dense_data().unwrap(),
-        real_typed.zeros_like().dense_data().unwrap()
+        real_typed.zeros_like().unwrap().dense_data().unwrap()
     );
 }
 

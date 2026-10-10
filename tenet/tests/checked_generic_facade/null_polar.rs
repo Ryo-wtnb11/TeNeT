@@ -830,10 +830,8 @@ fn assert_sun_checked_generic_null_spaces<D>(
     assert!(right.dense_data().unwrap().is_empty());
     assert_eq!(left.domain()[0].degeneracy(&label).unwrap(), 2 * 2 * 2 - 2);
 
-    let left_adjoint = left.adjoint().unwrap();
-    let left_adjoint = left_adjoint
-        .axpby(D::from_real(1.0), &left_adjoint, D::from_real(0.0))
-        .unwrap();
+    // `axpby` of two lazy adjoints stays lazy (A10); materialize instead.
+    let left_adjoint = left.adjoint().unwrap().materialize().unwrap();
     for value in left_adjoint.compose(&source).unwrap().dense_data().unwrap() {
         assert!(close(*value, D::from_real(0.0)) < 1e-9);
     }

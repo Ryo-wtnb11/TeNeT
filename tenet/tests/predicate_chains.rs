@@ -183,7 +183,7 @@ macro_rules! pin_family {
                 ChainCoefficient::real(1.0),
             )
             .unwrap();
-        let negative = positive.scale(ChainCoefficient::real(-1.0));
+        let negative = positive.scale(ChainCoefficient::real(-1.0)).unwrap();
         // A polar factor, not a QR `q`: a 2x2 Householder `q` is a symmetric
         // reflector, which would also be Hermitian.
         let LeftPolar { w: unitary, .. } = x.left_polar(&[0], &[1]).unwrap();
@@ -361,7 +361,7 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
         .unwrap()
         .axpby(1.0, &identity_like(&x), 1.0)
         .unwrap();
-    let negative = positive.scale(-1.0);
+    let negative = positive.scale(-1.0).unwrap();
     let Qr { q: unitary, .. } = x.qr_compact(&[0, 1], &[2, 3]).unwrap();
     let tall: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&rt, [&leg, &leg], [&leg], |_, ij: &[usize]| fill(ij)).unwrap();

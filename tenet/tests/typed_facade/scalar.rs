@@ -51,7 +51,7 @@ fn scale_multiplies_every_real_and_complex_entry() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
-    let scaled = typed.scale(-2.5);
+    let scaled = typed.scale(-2.5).unwrap();
     for (&actual, &source) in scaled
         .dense_data()
         .unwrap()
@@ -63,7 +63,7 @@ fn scale_multiplies_every_real_and_complex_entry() {
 
     let typed_c = z2_complex_tensor(&runtime);
     let factor = Complex64::new(0.25, 3.0);
-    let scaled = typed_c.scale(factor);
+    let scaled = typed_c.scale(factor).unwrap();
     for (&actual, &source) in scaled
         .dense_data()
         .unwrap()
@@ -84,7 +84,7 @@ fn scaling_by_the_inverse_norm_divides_by_the_dimension_weighted_norm() {
     // can see it.
     let typed = su2_tensor(&runtime);
     let norm = typed.norm(2.0).unwrap();
-    let unit = typed.scale(1.0 / norm);
+    let unit = typed.scale(1.0 / norm).unwrap();
     for (&actual, &source) in unit
         .dense_data()
         .unwrap()
@@ -134,7 +134,11 @@ fn inner_conjugates_its_first_argument() {
     // imaginary part is a function of its real one, so the plain permuted
     // partner happens to give a real inner product and could not see a phase.
     let imaginary = Complex64::new(0.0, 1.0);
-    let other = typed.permute(&[1, 0], &[2]).unwrap().scale(imaginary);
+    let other = typed
+        .permute(&[1, 0], &[2])
+        .unwrap()
+        .scale(imaginary)
+        .unwrap();
     let value = typed.inner(&other).unwrap();
     assert_eq!(value, other.inner(&typed).unwrap().conj());
     assert_ne!(value, other.inner(&typed).unwrap());

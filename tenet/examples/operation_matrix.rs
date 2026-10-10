@@ -2712,7 +2712,7 @@ macro_rules! run_provider {
                         "repartition" => source.repartition(1)?,
                         _ => unreachable!("fixed tree-operation table"),
                     };
-                    let mut destination = expected.zeros_like();
+                    let mut destination = expected.zeros_like().unwrap();
                     bench(
                         &runtime,
                         $symmetry,
@@ -2794,7 +2794,7 @@ macro_rules! run_provider {
                     "cold",
                     "warm",
                     $min_time,
-                    || Ok::<_, Error>(left.scale(0.5)),
+                    || Ok::<_, Error>(left.scale(0.5).unwrap()),
                 )?;
                 let error = (scaled.norm(2.0)? - 0.5 * left.norm(2.0)?).abs();
                 assert!(error <= 256.0 * f64::EPSILON * left.norm(2.0)?.max(1.0));
@@ -2952,7 +2952,7 @@ macro_rules! run_provider {
                     assert_same_tensor!(cold, expected, lhs);
                 } else {
                     let expected = lhs.contract(&rhs, &spec)?;
-                    let mut destination = expected.zeros_like();
+                    let mut destination = expected.zeros_like().unwrap();
                     bench(
                         &runtime,
                         $symmetry,
@@ -3099,7 +3099,7 @@ fn run_checked_sun(
                     min_time,
                     || {
                         Ok::<_, tenet::typed::GenericTensorError<tenet::sector::SUNFusionRuleError>>(
-                            lhs.scale(0.5),
+                            lhs.scale(0.5).unwrap(),
                         )
                     },
                 )?;
@@ -3111,7 +3111,7 @@ fn run_checked_sun(
                 {
                     assert_eq!(actual, 0.5 * input);
                 }
-                assert_same_tensor!(scaled, lhs.scale(0.5), lhs);
+                assert_same_tensor!(scaled, lhs.scale(0.5).unwrap(), lhs);
             }
             1 => {
                 let added = bench(

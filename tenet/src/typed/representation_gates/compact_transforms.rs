@@ -637,7 +637,7 @@ fn compact_arms_never_densify_their_spectrum_operand() {
         .s;
     DIAGONAL_MATERIALIZATIONS.set(0);
 
-    let _ = d.scale(0.5);
+    let _ = d.scale(0.5).unwrap();
     let _ = d.adjoint().unwrap();
     let _ = d.axpby(0.75, &d, -0.5).unwrap();
     let _ = d.axpby(0.75, &tensor, -0.5).unwrap();
@@ -701,7 +701,7 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     let _ = d.permute(&[1], &[0]).unwrap();
     let _ = d.transpose(&[1], &[0]).unwrap();
     let _ = d.repartition(1).unwrap();
-    let _ = d.zeros_like();
+    let _ = d.zeros_like().unwrap();
     let _ = d.convert::<Complex64>();
     let _ = complex_d.re();
     let _ = complex_d.im();

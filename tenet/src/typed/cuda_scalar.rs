@@ -134,202 +134,6 @@ where
         Ok(output)
     }
 
-    /// Fresh device result `factor * self` for owned storage; a lazy adjoint
-    /// redirects algebraically through its canonical parent. A zero factor
-    /// gives exact zeros whatever `self` holds, as on the Host (TensorKit's
-    /// `scale(x, 0)`); signed-zero bits are backend-local.
-    pub fn scale(&self, factor: D) -> Result<Self, Error> {
-        let required_len = self.logical_space().space().required_len()?;
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            // `alpha * A^H == (conj(alpha) * A)^H`, matching the adjoint arm
-            // of the Host `scale_multiplicity_free`.
-            return parent.scale(FactorScalar::adjoint(factor))?.adjoint();
-        }
-        let source = self.direct_cuda_storage("scale")?;
-        let output = self.cuda_axpby_owned(required_len, (source, factor), None)?;
-        Ok(self.with_owned_cuda_storage(output))
-    }
-
-    /// Fresh device result `x.axpby(alpha, &y, beta) == alpha * x + beta * y`,
-    /// named and ordered like the Host [`TensorMap::axpby`]. A zero coefficient
-    /// drops its operand, NaN and Inf included, as on the Host (TensorKit's
-    /// `add`); signed-zero bits are backend-local.
-    ///
-    /// ```compile_fail
-    /// use tenet::sector::U1FusionRule;
-    /// use tenet::typed::{CudaStorage, TensorMap};
-    ///
-    /// fn removed(x: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
-    ///     let _ = x.add(x, 1.0, 2.0);
-    /// }
-    /// ```
-    pub fn axpby<'a>(
-        &self,
-        alpha: D,
-        y: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
-        beta: D,
-    ) -> Result<Self, Error> {
-        let y = y.into().operand()?;
-        let y = &*y;
-        let required_len = self.logical_space().space().required_len()?;
-        if !self.runtime.same_runtime(&y.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        if self.logical_space().space() != y.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            }));
-        }
-        match (&self.repr, &y.repr) {
-            (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
-                let lhs = Self {
-                    runtime: self.runtime.clone(),
-                    repr: TypedTensorRepr::Owned(Arc::clone(&lhs.parent)),
-                };
-                let rhs = Self {
-                    runtime: y.runtime.clone(),
-                    repr: TypedTensorRepr::Owned(Arc::clone(&rhs.parent)),
-                };
-                // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`,
-                // so the folded coefficients are conjugated before the parents
-                // are combined.
-                return lhs
-                    .axpby(
-                        FactorScalar::adjoint(alpha),
-                        &rhs,
-                        FactorScalar::adjoint(beta),
-                    )?
-                    .adjoint();
-            }
-            (TypedTensorRepr::Adjoint(_), TypedTensorRepr::Owned(_))
-            | (TypedTensorRepr::Owned(_), TypedTensorRepr::Adjoint(_)) => {
-                return Err(Error::UnsupportedOnDevice(
-                    "axpby does not support mixed owned/lazy CUDA operands".to_string(),
-                ));
-            }
-            (TypedTensorRepr::Owned(_), TypedTensorRepr::Owned(_)) => {}
-        }
-        let lhs = self.direct_cuda_storage("axpby")?;
-        let rhs = y.direct_cuda_storage("axpby")?;
-        let output = self.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
-        Ok(self.with_owned_cuda_storage(output))
-    }
-
-    /// `destination = alpha * self + beta * destination` on the device: the
-    /// Host [`TensorMap::axpby_into`], BLAS `axpby`.
-    ///
-    /// One `dot_general` over the whole payload with `alpha` as its descriptor
-    /// scale and `beta` in its epilogue: `beta = 0` never reads the
-    /// destination, and a zero `alpha` does not read `self` (the destination
-    /// becomes `beta * destination` through a zero-source move). Nothing is
-    /// uploaded or allocated on a warm context.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::RuntimeMismatch`]; `SpaceMismatch` for different
-    /// spaces or block layouts; [`Error::InvalidArgument`] for a destination that is not owned dense CUDA
-    /// storage, or one that aliases `self`; [`Error::UnsupportedOnDevice`] for
-    /// a lazy-adjoint or compact `self`, as for the returning
-    /// [`Self::axpby`] with mixed operands; [`Error::DestinationShared`];
-    /// [`Error::PlacementMismatch`].
-    ///
-    /// # Failure
-    ///
-    /// A validation or capability error leaves `destination` bit-identical:
-    /// every check completes before the first write. On failure after
-    /// validation (a backend or other execution error) the destination's
-    /// contents are unspecified, while its space and block structure stay
-    /// intact.
-    pub fn axpby_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
-        if !self.runtime.same_runtime(&destination.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        if self.logical_space().space() != destination.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            }));
-        }
-        let source = self.direct_cuda_storage("axpby_into")?;
-        let destination_storage = unique_dense_destination(
-            destination,
-            &self.storage_body().data,
-            self.logical_space().space(),
-            "CUDA",
-        )?;
-        let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
-        if source.placement() != device || destination_storage.placement() != device {
-            return Err(Error::PlacementMismatch);
-        }
-        let len = TensorStorage::len(source);
-        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
-            return Err(internal_layout_error(
-                "ordinary CUDA destination checked above",
-            ));
-        };
-        let destination_data = Arc::get_mut(destination_body)
-            .and_then(|body| Arc::get_mut(&mut body.data))
-            .ok_or_else(|| internal_layout_error("unique CUDA destination checked above"))?;
-        let TypedData::Dense(destination_data) = destination_data else {
-            return Err(internal_layout_error(
-                "dense CUDA destination checked above",
-            ));
-        };
-        if len == 0 {
-            return Ok(());
-        }
-        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
-        let region = tenet_dense::CudaRegion::packed(&[len], 0).map_err(dense_err)?;
-        let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
-        if alpha.is_zero() {
-            return tenet_dense::cuda_region_scale::<D>(
-                cuda,
-                &mut destination_data.0,
-                &region,
-                beta,
-            )
-            .map_err(dense_err);
-        }
-        let beta = if beta.is_zero() {
-            tenet_dense::CudaRegionBeta::Overwrite
-        } else if beta == D::from_real(1.0) {
-            tenet_dense::CudaRegionBeta::Accumulate
-        } else {
-            tenet_dense::CudaRegionBeta::Scale(beta)
-        };
-        tenet_dense::cuda_region_axpby::<D>(
-            cuda,
-            &source.0,
-            &region,
-            false,
-            alpha,
-            tenet_dense::CudaRegionCoefficient::One,
-            beta,
-            &mut destination_data.0,
-            &region,
-        )
-        .map_err(dense_err)
-    }
-
-    /// Exact positive-zero device tensor, independent of source values.
-    pub fn zeros_like(&self) -> Result<Self, Error> {
-        let required_len = self.logical_space().space().required_len()?;
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent.zeros_like()?.adjoint();
-        }
-        let source = self.direct_cuda_storage("zeros_like")?;
-        let output = self.cuda_zeros_owned(required_len, source)?;
-        Ok(self.with_owned_cuda_storage(output))
-    }
-
     /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage,
     /// **conjugate-linear in `lhs`** like the Host `coupled_region_inner`,
     /// returned in the wide `f64` lane before any narrowing to `D`.
@@ -516,5 +320,107 @@ where
         let lhs = x.direct_cuda_storage("inner")?;
         let rhs = y.direct_cuda_storage("inner")?;
         x.weighted_inner_cuda(lhs, rhs).map(D::from_complex64)
+    }
+}
+
+impl<R, D> ElementwiseExec<R, D> for CudaStorage<D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    fn zeros(t: &TensorMap<R, D, Self>) -> Result<TensorMap<R, D, Self>, Error> {
+        let required_len = t.logical_space().space().required_len()?;
+        let source = t.direct_cuda_storage("zeros_like")?;
+        let output = t.cuda_zeros_owned(required_len, source)?;
+        Ok(t.with_owned_cuda_storage(output))
+    }
+
+    fn combine(
+        x: &TensorMap<R, D, Self>,
+        alpha: D,
+        y: Option<(&TensorMap<R, D, Self>, D)>,
+    ) -> Result<TensorMap<R, D, Self>, Error> {
+        let required_len = x.logical_space().space().required_len()?;
+        let Some((y, beta)) = y else {
+            let source = x.direct_cuda_storage("scale")?;
+            let output = x.cuda_axpby_owned(required_len, (source, alpha), None)?;
+            return Ok(x.with_owned_cuda_storage(output));
+        };
+        if matches!(&x.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&y.repr, TypedTensorRepr::Adjoint(_))
+        {
+            return Err(Error::UnsupportedOnDevice(
+                "axpby does not support mixed owned/lazy CUDA operands".to_string(),
+            ));
+        }
+        let lhs = x.direct_cuda_storage("axpby")?;
+        let rhs = y.direct_cuda_storage("axpby")?;
+        let output = x.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
+        Ok(x.with_owned_cuda_storage(output))
+    }
+
+    /// `beta = 0` never reads the destination, and a zero `alpha` does not
+    /// read `x` (the destination becomes `beta * destination` through a
+    /// zero-source move).
+    fn axpby_into(
+        x: &TensorMap<R, D, Self>,
+        destination: &mut TensorMap<R, D, Self>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        let source = x.direct_cuda_storage("axpby_into")?;
+        let device = Placement::Cuda(x.runtime.cuda_device_ordinal_checked()?);
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            return Err(internal_layout_error(
+                "ordinary CUDA destination checked above",
+            ));
+        };
+        let destination_data = Arc::get_mut(destination_body)
+            .and_then(|body| Arc::get_mut(&mut body.data))
+            .ok_or_else(|| internal_layout_error("unique CUDA destination checked above"))?;
+        let TypedData::Dense(destination_data) = destination_data else {
+            return Err(internal_layout_error(
+                "dense CUDA destination checked above",
+            ));
+        };
+        if source.placement() != device || destination_data.placement() != device {
+            return Err(Error::PlacementMismatch);
+        }
+        let len = TensorStorage::len(source);
+        if len == 0 {
+            return Ok(());
+        }
+        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
+        let region = tenet_dense::CudaRegion::packed(&[len], 0).map_err(dense_err)?;
+        let mut lease = x.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        if alpha.is_zero() {
+            return tenet_dense::cuda_region_scale::<D>(
+                cuda,
+                &mut destination_data.0,
+                &region,
+                beta,
+            )
+            .map_err(dense_err);
+        }
+        let beta = if beta.is_zero() {
+            tenet_dense::CudaRegionBeta::Overwrite
+        } else if beta == D::from_real(1.0) {
+            tenet_dense::CudaRegionBeta::Accumulate
+        } else {
+            tenet_dense::CudaRegionBeta::Scale(beta)
+        };
+        tenet_dense::cuda_region_axpby::<D>(
+            cuda,
+            &source.0,
+            &region,
+            false,
+            alpha,
+            tenet_dense::CudaRegionCoefficient::One,
+            beta,
+            &mut destination_data.0,
+            &region,
+        )
+        .map_err(dense_err)
     }
 }

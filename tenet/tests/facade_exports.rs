@@ -297,6 +297,7 @@ const TYPED: &[&str] = &[
     "Duality",
     "Eig",
     "Eigh",
+    "ElementwiseExec",
     "EighFullPlan",
     "EighFullWorkspace",
     "EighStackOutput",

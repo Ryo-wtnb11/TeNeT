@@ -203,8 +203,8 @@ where
     /// so the *path* forms `TensorMap::permute`, `TensorMap::braid`,
     /// `TensorMap::transpose` and
     /// `TensorMap::repartition` become ambiguous (`E0034`) where they were not
-    /// before — the same non-additivity the device `adjoint`, `norm` and
-    /// `scale` already have. Method-call syntax (`tensor.permute(..)`), a
+    /// before — the same non-additivity the device `adjoint` already has.
+    /// Method-call syntax (`tensor.permute(..)`), a
     /// closure (`|t| t.permute(..)`) or a fully qualified
     /// `TensorMap::<R, D>::permute` all keep working.
     ///

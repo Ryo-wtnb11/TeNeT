@@ -86,7 +86,7 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
 
     // Out-of-range payloads take the rescaling passes, which add none either.
     for scale in [1e200, 1e-200] {
-        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        let extreme = lhs.scale(Complex64::new(scale, 0.0)).unwrap();
         black_box(extreme.norm(2.0).unwrap());
         let (value, allocations) = measured(|| extreme.norm(2.0).unwrap());
         assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
@@ -291,7 +291,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     // bounds the terms of the sum).
     let norm = lhs.norm(2.0).unwrap();
     for scale in [1e200, 1e-200] {
-        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        let extreme = lhs.scale(Complex64::new(scale, 0.0)).unwrap();
         let lazy = extreme.adjoint().unwrap();
         black_box((extreme.norm(2.0).unwrap(), lazy.norm(2.0).unwrap()));
         for (row, tensor) in [("owned", &extreme), ("lazy", &lazy)] {

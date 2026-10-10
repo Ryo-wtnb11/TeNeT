@@ -195,8 +195,8 @@ macro_rules! mf_suite {
         );
         assert_same_tensor!(view, owned, format!("{what}: contract"));
 
-        let mut destination = owned.zeros_like();
-        let mut expected = owned.zeros_like();
+        let mut destination = owned.zeros_like().unwrap();
+        let mut expected = owned.zeros_like().unwrap();
         let (result, entries) = probe(|| {
             a.contract_into(
                 b.adjoint_view(),

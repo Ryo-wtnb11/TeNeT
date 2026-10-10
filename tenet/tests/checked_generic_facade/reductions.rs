@@ -184,7 +184,7 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
         .unwrap();
     let added = source.axpby(2.0, &source, -1.0).unwrap();
     assert_eq!(added.dense_data().unwrap(), source.dense_data().unwrap());
-    let scaled = source.scale(3.0);
+    let scaled = source.scale(3.0).unwrap();
     assert!(scaled
         .dense_data()
         .unwrap()
@@ -201,7 +201,7 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
         )
         .unwrap();
     assert_eq!(added.dense_data().unwrap(), complex.dense_data().unwrap());
-    let scaled = complex.scale(Complex64::new(0.5, -1.0));
+    let scaled = complex.scale(Complex64::new(0.5, -1.0)).unwrap();
     assert!(scaled
         .dense_data()
         .unwrap()
@@ -450,7 +450,7 @@ fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             .iter()
             .map(|&a| scale(a, factor))
             .collect();
-        same(x.scale(factor).dense_data().unwrap(), &want);
+        same(x.scale(factor).unwrap().dense_data().unwrap(), &want);
         let mut assigned = x.materialize().unwrap();
         assigned.scale_assign(factor).unwrap();
         same(assigned.dense_data().unwrap(), &want);

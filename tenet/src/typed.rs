@@ -297,8 +297,10 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
+#[doc(hidden)]
+pub use linear_ops::ElementwiseExec;
 use linear_ops::{
-    destination_precheck, destination_slice, host_axpby_into, require_destination_space,
+    axpby_into_checked, destination_precheck, destination_slice, require_destination_space,
     unique_dense_destination,
 };
 pub(crate) use scalar::ScalarOps;

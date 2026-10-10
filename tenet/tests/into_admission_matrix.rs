@@ -327,7 +327,8 @@ macro_rules! both_lanes {
             // `1 + 2i` makes a lost or doubled conjugation visible.
             let source = source!($runtime, $v, $w, $key)
                 .convert::<Complex64>()
-                .scale(Complex64::new(1.0, 2.0));
+                .scale(Complex64::new(1.0, 2.0))
+                .unwrap();
             transform_cells!($runtime, source, $key, Complex64)
         };
         (f64_rows, c64_rows)

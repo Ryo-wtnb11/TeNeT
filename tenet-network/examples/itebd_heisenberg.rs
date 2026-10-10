@@ -105,7 +105,7 @@ fn bond_update(
     let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
     let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
     let vh = vh.restrict_leg(&[(0, &found.selection)])?;
-    let l_new = s.scale(1.0 / s.norm(2.0)?);
+    let l_new = s.scale(1.0 / s.norm(2.0)?)?;
     // Divide the outer λ back out: diagonal inverse via pinv.
     let l_out_inv = l_out.pinv(&[0], &[1], PINV_RCOND)?;
     let g1_new = Network::new(
@@ -222,7 +222,7 @@ pub fn run(chi: usize, schedule: &[(f64, usize)], verbose: bool) -> Result<f64, 
     let mut state = State::init(&rt, &p)?;
     let mut energy = f64::NAN;
     for &(dt, steps) in schedule {
-        let gate = h.scale(-dt).exp(&[0, 1], &[2, 3])?;
+        let gate = h.scale(-dt)?.exp(&[0, 1], &[2, 3])?;
         let start = Instant::now();
         let mut max_err = 0.0f64;
         for _ in 0..steps {

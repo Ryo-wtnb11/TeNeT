@@ -349,7 +349,7 @@ fn eager<R: DeviceRule, D: DevicePayload>(
             let what = format!("{name} into alpha={alpha_label} beta={beta_label}");
             // A deep copy: a clone shares the payload, which `contract_into`
             // rejects as a shared destination.
-            let mut expected = start.scale(D::entry(1.0, 0.0));
+            let mut expected = start.scale(D::entry(1.0, 0.0)).unwrap();
             case.lhs
                 .contract_into(&case.rhs, &spec, &mut expected, alpha, beta)
                 .unwrap();
@@ -415,13 +415,17 @@ fn rescaled<R: DeviceRule, D: DevicePayload>(
     let (call, member) = (call as f64, member as f64);
     Case {
         name: case.name,
-        lhs: case.lhs.scale(D::entry(
-            -0.75 - call / 8.0 + member / 64.0,
-            (call + 1.0) / 16.0 - member / 128.0,
-        )),
+        lhs: case
+            .lhs
+            .scale(D::entry(
+                -0.75 - call / 8.0 + member / 64.0,
+                (call + 1.0) / 16.0 - member / 128.0,
+            ))
+            .unwrap(),
         rhs: case
             .rhs
-            .scale(D::entry(1.5 + call / 4.0 + member / 32.0, 0.0)),
+            .scale(D::entry(1.5 + call / 4.0 + member / 32.0, 0.0))
+            .unwrap(),
         lhs_axes: case.lhs_axes.clone(),
         rhs_axes: case.rhs_axes.clone(),
         output_axes: case.output_axes.clone(),

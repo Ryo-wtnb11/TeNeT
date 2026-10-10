@@ -538,7 +538,8 @@ fn within_sector_ties_at_the_cut_keep_genuine_singular_pairs() {
     let leg = u1_leg(&[(0, 3), (1, 3)]);
     let source: TensorMap<_, f64> = TensorMap::isomorphism(&host_runtime(), [&leg], [&leg])
         .unwrap()
-        .scale(2.5);
+        .scale(2.5)
+        .unwrap();
     assert_every_value_is_the_same_bit_pattern!(source.svd_compact(&[0], &[1]).unwrap().s);
     for rank in [1usize, 2, 3, 4, 5] {
         assert_svd_composition!(

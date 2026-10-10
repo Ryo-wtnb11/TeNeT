@@ -872,7 +872,7 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
 
     let Svd { s: compact, .. } = dense.svd_compact(&[0], &[1]).unwrap();
     let compact_plan = identity.plan(&[&compact], &GreedyDenseOptimizer).unwrap();
-    let scaled = compact.scale(2.0);
+    let scaled = compact.scale(2.0).unwrap();
     assert_same(
         &compact_plan.execute(&[&compact], &mut workspace).unwrap(),
         &compact,

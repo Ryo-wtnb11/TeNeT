@@ -970,7 +970,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
-    let poisoned = model.scale(D::nan());
+    let poisoned = model.scale(D::nan()).unwrap();
     assert!(
         poisoned
             .dense_data()
@@ -1431,7 +1431,7 @@ fn device_into_has_no_identity_short_circuit() {
         .permute_into(&[0, 1], &[2, 3], d, -2.5, 0.0));
     assert_payload_close(
         written.dense_data().unwrap(),
-        host.scale(-2.5).dense_data().unwrap(),
+        host.scale(-2.5).unwrap().dense_data().unwrap(),
         "identity permute_into writes alpha * self",
     );
 
@@ -1442,7 +1442,7 @@ fn device_into_has_no_identity_short_circuit() {
             .repartition_into(d, 2.0, 0.0));
     assert_payload_close(
         written.dense_data().unwrap(),
-        host.scale(2.0).dense_data().unwrap(),
+        host.scale(2.0).unwrap().dense_data().unwrap(),
         "same-split repartition_into writes alpha * self",
     );
 
@@ -1458,7 +1458,7 @@ fn device_into_has_no_identity_short_circuit() {
     );
     assert_payload_close(
         written.dense_data().unwrap(),
-        scalar.scale(-0.5).dense_data().unwrap(),
+        scalar.scale(-0.5).unwrap().dense_data().unwrap(),
         "rank-0 transpose_into writes alpha * self",
     );
 }

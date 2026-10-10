@@ -113,10 +113,10 @@ mod tests {
         let mut first_submissions = None;
         for (call, count) in [2, 1, 2].into_iter().enumerate() {
             let lhs: Vec<_> = (0..count)
-                .map(|i| a.scale(1.0 + (call * 2 + i) as f64 / 8.0))
+                .map(|i| a.scale(1.0 + (call * 2 + i) as f64 / 8.0).unwrap())
                 .collect();
             let rhs: Vec<_> = (0..count)
-                .map(|i| b.scale(1.0 - (call + i) as f64 / 16.0))
+                .map(|i| b.scale(1.0 - (call + i) as f64 / 16.0).unwrap())
                 .collect();
             let expected: Vec<_> = lhs
                 .iter()
@@ -130,7 +130,10 @@ mod tests {
             let submitted = after.gemm_calls - before.gemm_calls;
             let first = *first_submissions.get_or_insert(submitted);
             assert_eq!(submitted, first, "call {call}: no temporary refill");
-            let poisoned: Vec<_> = expected.iter().map(|e| e.scale(f64::NAN)).collect();
+            let poisoned: Vec<_> = expected
+                .iter()
+                .map(|e| e.scale(f64::NAN).unwrap())
+                .collect();
             let mut dst = pack(&poisoned);
             let before = tenet_dense::cuda_transfer_stats();
             plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)

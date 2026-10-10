@@ -89,7 +89,8 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
 
     let complex = source
         .convert::<Complex64>()
-        .scale(Complex64::new(1.0, 0.25));
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     let complex_pseudo = complex.pinv(&[0], &[1], 1e-12).unwrap();
     assert_moore_penrose!(
         &complex,
@@ -106,7 +107,10 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
     assert_moore_penrose!(&tall, &tall_pseudo, |actual: f64, expected: f64| (actual
         - expected)
         .abs());
-    let complex_tall = tall.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
+    let complex_tall = tall
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 0.25))
+        .unwrap();
     let complex_tall_pseudo = complex_tall.pinv(&[0], &[1], 1e-12).unwrap();
     assert_moore_penrose!(
         &complex_tall,

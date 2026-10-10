@@ -331,7 +331,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
 
     let warm = parent.adjoint().unwrap();
     let warm_other = other_parent.adjoint().unwrap();
-    black_box(warm.scale(alpha));
+    black_box(warm.scale(alpha).unwrap());
     black_box(warm.axpby(alpha, &owned, beta).unwrap());
     black_box(warm.axpby(alpha, &warm_other, beta).unwrap());
 
@@ -341,7 +341,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let other_pair_lazy = other_parent.adjoint().unwrap();
     for (_, bytes) in [
         measure(|| {
-            black_box(scale_lazy.scale(alpha));
+            black_box(scale_lazy.scale(alpha).unwrap());
         }),
         measure(|| {
             black_box(mixed_lazy.axpby(alpha, &owned, beta).unwrap());
@@ -427,9 +427,11 @@ fn lazy_add_allocation_count_is_pinned_across_block_counts() {
         .0;
         counts.push((mixed, pair));
     }
-    // Payload `Vec`, `Arc<TypedData>` and `Arc<TypedTensorBody>`: three,
-    // measured identical on the per-element kernel before #1399.
-    assert_eq!(counts, vec![(3, 3); 4]);
+    // Mixed: payload `Vec`, `Arc<TypedData>` and `Arc<TypedTensorBody>`,
+    // three, measured identical on the per-element kernel before #1399. Two
+    // lazy operands give a lazy adjoint of the parents' sum (A10): those
+    // three plus its `Arc<TypedAdjointView>` header.
+    assert_eq!(counts, vec![(3, 4); 4]);
 }
 
 #[test]
@@ -470,14 +472,16 @@ fn block_stride_buffers_spill_only_past_rank_sixteen() {
         .0;
         counts.push((rank, parent.subblock_count() > 1, mixed, pair, materialize));
     }
-    // Output only: 3 calls. At rank 18 `add` spills its four layout buffers
-    // (extents and three operands' strides) and materialization its three.
+    // Output only: 3 calls. At rank 18 the mixed `add` spills its four layout
+    // buffers (extents and three operands' strides) and materialization its
+    // three. Two lazy operands combine their parents element-wise with no
+    // layout (A10): the output plus the lazy view header, 4 at every rank.
     assert_eq!(
         counts,
         vec![
-            (10, false, 3, 3, 3),
-            (10, true, 3, 3, 3),
-            (18, false, 7, 7, 6)
+            (10, false, 3, 4, 3),
+            (10, true, 3, 4, 3),
+            (18, false, 7, 4, 6)
         ]
     );
 }

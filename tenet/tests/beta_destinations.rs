@@ -222,7 +222,11 @@ macro_rules! suite {
                 codomain: &[2, 0],
                 domain: &[1],
             };
-            let before = t2.contract(&rhs, &spec).unwrap().scale(D::real(0.5));
+            let before = t2
+                .contract(&rhs, &spec)
+                .unwrap()
+                .scale(D::real(0.5))
+                .unwrap();
             check_into!(
                 &what("contract_into"),
                 t.contract(&rhs, &spec).unwrap(),
@@ -232,7 +236,11 @@ macro_rules! suite {
                 |d: &mut TensorMap<_, D>| t.contract_into(&rhs, &spec, d, alpha, beta),
                 32
             );
-            let before = lazy.contract(&rhs, &spec).unwrap().scale(D::real(0.5));
+            let before = lazy
+                .contract(&rhs, &spec)
+                .unwrap()
+                .scale(D::real(0.5))
+                .unwrap();
             check_into!(
                 &what("lazy contract_into"),
                 lazy.contract(&rhs, &spec).unwrap(),
@@ -301,15 +309,15 @@ macro_rules! suite {
 
         // alpha = 0 never reads the source: a NaN source leaves exactly
         // `beta * dst` (VectorInterface's `scale(x, 0) = zero(x)`).
-        let nan_source = t.scale(D::real(f64::NAN));
-        let nan_lhs = lhs.scale(D::real(f64::NAN));
+        let nan_source = t.scale(D::real(f64::NAN)).unwrap();
+        let nan_lhs = lhs.scale(D::real(f64::NAN)).unwrap();
         for beta in [D::beta(), D::real(0.0), D::real(1.0)] {
             let zero = D::real(0.0);
             let what = |op: &str| format!("{} NaN-source {op} beta={beta:?}", $label);
             let before = t2.permute(&[2, 0], &[1, 3]).unwrap();
             check_into!(
                 &what("permute_into"),
-                before.scale(zero),
+                before.scale(zero).unwrap(),
                 before,
                 zero,
                 beta,
@@ -319,7 +327,7 @@ macro_rules! suite {
             let before = t2.trace_pairs(&[(0, 2)]).unwrap();
             check_into!(
                 &what("trace_pairs_into"),
-                before.scale(zero),
+                before.scale(zero).unwrap(),
                 before,
                 zero,
                 beta,
@@ -328,7 +336,7 @@ macro_rules! suite {
             );
             check_into!(
                 &what("axpby_into"),
-                t2.scale(zero),
+                t2.scale(zero).unwrap(),
                 t2,
                 zero,
                 beta,
@@ -337,7 +345,7 @@ macro_rules! suite {
             );
             check_into!(
                 &what("contract_into"),
-                prior.scale(zero),
+                prior.scale(zero).unwrap(),
                 prior,
                 zero,
                 beta,
@@ -349,7 +357,7 @@ macro_rules! suite {
         // beta = 0 never reads the destination: a NaN destination comes back
         // exactly as the eager result, unreached blocks as +0.
         for alpha in [D::real(1.0), D::alpha()] {
-            let mut destination = prior.scale(D::real(f64::NAN));
+            let mut destination = prior.scale(D::real(f64::NAN)).unwrap();
             lhs.contract_into(&rhs, &spec, &mut destination, alpha, D::real(0.0))
                 .unwrap();
             let got = destination.dense_data().unwrap();
@@ -361,7 +369,7 @@ macro_rules! suite {
             numerics::assert_slices_close(
                 &format!("{} NaN contract_into", $label),
                 got,
-                eager.scale(alpha).dense_data().unwrap(),
+                eager.scale(alpha).unwrap().dense_data().unwrap(),
                 8,
             );
             for &index in &unreached {
@@ -376,7 +384,8 @@ macro_rules! suite {
             let mut destination = source
                 .permute(&[2, 0], &[1, 3])
                 .unwrap()
-                .scale(D::real(f64::NAN));
+                .scale(D::real(f64::NAN))
+                .unwrap();
             source
                 .permute_into(&[2, 0], &[1, 3], &mut destination, alpha, D::real(0.0))
                 .unwrap();
@@ -388,7 +397,8 @@ macro_rules! suite {
             let mut destination = source
                 .trace_pairs(&[(0, 2)])
                 .unwrap()
-                .scale(D::real(f64::NAN));
+                .scale(D::real(f64::NAN))
+                .unwrap();
             source
                 .trace_pairs_into(&[(0, 2)], &mut destination, alpha, D::real(0.0))
                 .unwrap();
@@ -397,7 +407,7 @@ macro_rules! suite {
                 .unwrap()
                 .iter()
                 .any(|value| value.is_nan()));
-            let mut destination = source.scale(D::real(f64::NAN));
+            let mut destination = source.scale(D::real(f64::NAN)).unwrap();
             t.axpby_into(&mut destination, alpha, D::real(0.0)).unwrap();
             assert!(!destination
                 .dense_data()
@@ -613,14 +623,20 @@ macro_rules! device_suite {
             );
             same!(
                 &what("contract_into"),
-                t2.contract(&rhs, &spec).unwrap().scale(D::real(0.5)),
+                t2.contract(&rhs, &spec)
+                    .unwrap()
+                    .scale(D::real(0.5))
+                    .unwrap(),
                 |d: &mut TensorMap<_, D>| t.contract_into(&rhs, &spec, d, alpha, beta),
                 |d: &mut TensorMap<_, D, _>| dt.contract_into(&drhs, &spec, d, alpha, beta),
                 32
             );
             same!(
                 &what("lazy contract_into"),
-                lazy.contract(&rhs, &spec).unwrap().scale(D::real(0.5)),
+                lazy.contract(&rhs, &spec)
+                    .unwrap()
+                    .scale(D::real(0.5))
+                    .unwrap(),
                 |d: &mut TensorMap<_, D>| lazy.contract_into(&rhs, &spec, d, alpha, beta),
                 |d: &mut TensorMap<_, D, _>| dlazy.contract_into(&drhs, &spec, d, alpha, beta),
                 32
@@ -635,7 +651,7 @@ macro_rules! device_suite {
             if beta == D::real(0.0) {
                 same!(
                     &what("NaN partial contract_into"),
-                    prior_partial.scale(nan),
+                    prior_partial.scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| lhs.contract_into(&prhs, &partial, d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dlhs
                         .contract_into(&dprhs, &partial, d, alpha, beta),
@@ -643,21 +659,24 @@ macro_rules! device_suite {
                 );
                 same!(
                     &what("NaN permute_into"),
-                    t2.permute(&[2, 0], &[1, 3]).unwrap().scale(nan),
+                    t2.permute(&[2, 0], &[1, 3]).unwrap().scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| t.permute_into(&[2, 0], &[1, 3], d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dt.permute_into(&[2, 0], &[1, 3], d, alpha, beta),
                     8
                 );
                 same!(
                     &what("NaN lazy contract_into"),
-                    lazy.contract(&rhs, &spec).unwrap().scale(nan),
+                    lazy.contract(&rhs, &spec).unwrap().scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| lazy.contract_into(&rhs, &spec, d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dlazy.contract_into(&drhs, &spec, d, alpha, beta),
                     32
                 );
                 same!(
                     &what("NaN braid_into"),
-                    t2.braid(&[1, 0], &[3, 2], &levels).unwrap().scale(nan),
+                    t2.braid(&[1, 0], &[3, 2], &levels)
+                        .unwrap()
+                        .scale(nan)
+                        .unwrap(),
                     |d: &mut TensorMap<_, D>| t.braid_into(
                         &[1, 0],
                         &[3, 2],
@@ -678,7 +697,7 @@ macro_rules! device_suite {
                 );
                 same!(
                     &what("NaN transpose_into"),
-                    t2.transpose(&[1, 3], &[0, 2]).unwrap().scale(nan),
+                    t2.transpose(&[1, 3], &[0, 2]).unwrap().scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| t.transpose_into(&[1, 3], &[0, 2], d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dt.transpose_into(
                         &[1, 3],
@@ -691,21 +710,21 @@ macro_rules! device_suite {
                 );
                 same!(
                     &what("NaN repartition_into"),
-                    t2.repartition(1).unwrap().scale(nan),
+                    t2.repartition(1).unwrap().scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| t.repartition_into(d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dt.repartition_into(d, alpha, beta),
                     8
                 );
                 same!(
                     &what("NaN trace_pairs_into"),
-                    t2.trace_pairs(&[(0, 2)]).unwrap().scale(nan),
+                    t2.trace_pairs(&[(0, 2)]).unwrap().scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| t.trace_pairs_into(&[(0, 2)], d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dt.trace_pairs_into(&[(0, 2)], d, alpha, beta),
                     16
                 );
                 same!(
                     &what("NaN axpby_into"),
-                    t2.scale(nan),
+                    t2.scale(nan).unwrap(),
                     |d: &mut TensorMap<_, D>| t.axpby_into(d, alpha, beta),
                     |d: &mut TensorMap<_, D, _>| dt.axpby_into(d, alpha, beta),
                     2
@@ -717,8 +736,8 @@ macro_rules! device_suite {
         {
             let zero = D::real(0.0);
             let beta = D::beta();
-            let (nan_t, dnan_t) = (t.scale(nan), dt.scale(nan).unwrap());
-            let (nan_rhs, dnan_rhs) = (rhs.scale(nan), drhs.scale(nan).unwrap());
+            let (nan_t, dnan_t) = (t.scale(nan).unwrap(), dt.scale(nan).unwrap());
+            let (nan_rhs, dnan_rhs) = (rhs.scale(nan).unwrap(), drhs.scale(nan).unwrap());
             let what = |op: &str| format!("{} device NaN-source {op}", $label);
             same!(
                 &what("permute_into"),
