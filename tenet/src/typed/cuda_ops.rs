@@ -168,40 +168,7 @@ where
         Ok(compact_factor_routes(self.logical_space())?)
     }
 
-    /// Streamed compact SVD of owned dense CUDA storage.
-    ///
-    /// Each nonempty coupled-sector route is decomposed and assembled before
-    /// its raw device factors are dropped. The returned `s` is deliberately
-    /// a dense CUDA tensor because CUDA diagonal storage is not part of the
-    /// typed storage contract; each route's singular values are copied into
-    /// its diagonal on the device (element stride `k + 1`).
-    ///
-    /// Transfers, exactly: host to device, one zero upload per factor
-    /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
-    /// elements, since a host zero buffer is the only device allocation
-    /// path until #740) plus one upload of `max_c rows_c` `i64` gauge weights
-    /// when any route is nonempty. Device to host, no tensor payload:
-    /// the singular values never cross to the host, so the call ends
-    /// without a spectrum download. The backend still reads O(1)
-    /// solver-status metadata per route, a host barrier each.
-    ///
-    /// `u` and `vh` carry the Host gauge: in every column of each sector's
-    /// `u`, the first largest-magnitude entry is real and non-negative, and
-    /// the matching `vh` row takes the inverse phase. The fix-up runs on the
-    /// device without a download (see [`tenet_dense::cuda_svd_gauge_phases`]):
-    /// 13 Tenferro ops per route for the phases, then per side either a
-    /// `k x k` diagonal selector that the non-aligned assembly GEMM
-    /// multiplies by anyway (1 op) or a scaling of the aligned factor before
-    /// its copy (2 ops), plus one `conj` for a complex left side. They are
-    /// counted in [`crate::expert::CudaTransferStats::gauge_ops`].
-    ///
-    /// `rows` and `cols` are the leg roles, as for the Host operation: it
-    /// acts on the matrix view `self.permute(rows, cols)` (one device
-    /// permute), and the current split borrows `self` without a transform.
-    pub fn svd_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Svd<Self>, Error> {
-        self.with_cuda_leg_roles(rows, cols, Self::svd_compact_matrix)
-    }
-
+    /// The device kernel of [`TensorMap::svd_compact`] on the current split.
     fn svd_compact_matrix(&self) -> Result<Svd<Self>, Error> {
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
@@ -747,22 +714,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    /// Streamed compact QR of owned dense CUDA storage.
-    ///
-    /// Each nonempty coupled sector is gauge-fixed on device by the backend's
-    /// positive-diagonal QR: `R_jj` is real and non-negative, and a zero
-    /// diagonal entry keeps phase 1. Nothing of either factor crosses to the
-    /// host. A route whose factor region reproduces the source's tree layout
-    /// is assembled by one whole-factor device copy; any other route keeps the
-    /// per-tree identity-selector GEMM.
-    ///
-    /// `rows` and `cols` are the leg roles, as for the Host operation: it
-    /// acts on the matrix view `self.permute(rows, cols)` (one device
-    /// permute), and the current split borrows `self` without a transform.
-    pub fn qr_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, Error> {
-        self.with_cuda_leg_roles(rows, cols, Self::qr_compact_matrix)
-    }
-
+    /// The device kernel of [`TensorMap::qr_compact`] on the current split.
     fn qr_compact_matrix(&self) -> Result<Qr<Self>, Error> {
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
@@ -859,5 +811,28 @@ where
                 repr: owned_repr(TypedTensorBody::dense(right_space, right_data)),
             },
         })
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D> FactorExec<R, D> for CudaStorage<D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaFactorizationPayload,
+{
+    fn permute(
+        t: &TensorMap<R, D, Self>,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<TensorMap<R, D, Self>, Error> {
+        t.permute(rows, cols)
+    }
+
+    fn qr_compact(t: &TensorMap<R, D, Self>) -> Result<Qr<TensorMap<R, D, Self>>, Error> {
+        t.qr_compact_matrix()
+    }
+
+    fn svd_compact(t: &TensorMap<R, D, Self>) -> Result<Svd<TensorMap<R, D, Self>>, Error> {
+        t.svd_compact_matrix()
     }
 }
