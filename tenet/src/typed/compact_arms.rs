@@ -2,8 +2,9 @@
 //! twist (TensorKit's `DiagonalTensorMap` methods). Each answers `None` when
 //! its operands or destination do not fit, and the dense route runs.
 //!
-//! Only the multiplicity-free real-coefficient hooks reach them until #1866
-//! calls them from the shared bodies.
+//! The twist arm is called from the shared body in both modes; the others are
+//! reached only through the multiplicity-free real-coefficient hooks until
+//! #1866 calls them from the shared bodies.
 
 use super::*;
 
@@ -332,7 +333,8 @@ where
 /// `twist` of a compact diagonal, or `None` for any other payload. A bond
 /// space's two legs both carry the block's coupled sector, so the per-block
 /// factor collapses to `θ(sector)^|legs|`; the space is unchanged, so the
-/// payload stays compact.
+/// payload stays compact. `theta` is the mode's staged `twist_values`; the
+/// caller has already returned a shared clone when every value is one.
 pub(super) fn twist_spectrum<R, D>(
     tensor: &TensorMap<R, D>,
     legs: &[usize],
@@ -347,12 +349,6 @@ where
         let factor = legs.iter().map(|_| theta(sector)).product();
         twist_factor_with_inverse(factor, inverse)
     };
-    if spectrum
-        .iter()
-        .all(|entry| sector_factor(entry.sector) == 1.0)
-    {
-        return Some(tensor.clone());
-    }
     let scaled = spectrum
         .iter()
         .map(|entry| {
