@@ -272,27 +272,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn try_compact_contract(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
-        spec: &ContractSpec<'_>,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        lhs.try_contract_diagonal(
-            rhs,
-            spec.lhs,
-            spec.rhs,
-            &spec.output_axes(),
-            spec.codomain.len(),
-        )
-    }
-
-    fn try_compact_compose(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        lhs.compose_compact(rhs)
-    }
-
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,

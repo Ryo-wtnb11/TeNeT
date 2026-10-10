@@ -155,6 +155,48 @@ impl<R> BoundDynamicFusionMapSpace<R> {
             .expect("every bound space carries a Complete admission")
     }
 
+    /// Erases only the provider allocation after preserving the checked layout proof.
+    ///
+    /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
+    /// complete-tree-grid proof established by the bound constructor.
+    pub fn validated_layout(&self) -> ValidatedDynamicFusionLayout {
+        let mut space = self.space.clone();
+        // Why a fresh slot rather than charging the memo: a clone shares the
+        // filled `Arc<AdjointMemo>`, whose block structure can still fill after
+        // the layout was charged, so the charge would go stale. The parked
+        // layout never adjoints itself and a rebound space refills on demand.
+        space.adjoint = OnceLock::new();
+        ValidatedDynamicFusionLayout(space)
+    }
+
+    /// Rebinds a validated cached layout to this space's exact provider allocation.
+    ///
+    /// Why not retain the provider that first populated a process-global cache:
+    /// semantically equal callers may carry distinct provider allocations.
+    pub fn rebind_validated(
+        &self,
+        layout: &ValidatedDynamicFusionLayout,
+    ) -> Result<Self, OperationError> {
+        let expected = self.held_rule_identity();
+        let actual = layout.0.admission.rule_identity().ok_or_else(|| {
+            OperationError::from_core_preserving_context(CoreError::MissingFusionRuleIdentity)
+        })?;
+        if expected != actual {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                },
+            ));
+        }
+        validate_complete_admission(&layout.0)?;
+        Ok(Self {
+            space: layout.0.clone(),
+            provider: Arc::clone(&self.provider),
+            layout_build: self.layout_build,
+        })
+    }
+
     #[inline]
     /// Read-only access to the validated dynamic layout for expert planning
     /// and diagnostics. The provider remains attached to this binding.
@@ -1146,47 +1188,5 @@ where
             prepared,
         )?;
         Self::from_derived_like(self, space)
-    }
-
-    /// Erases only the provider allocation after preserving the checked layout proof.
-    ///
-    /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
-    /// complete-tree-grid proof established by the bound constructor.
-    pub fn validated_layout(&self) -> ValidatedDynamicFusionLayout {
-        let mut space = self.space.clone();
-        // Why a fresh slot rather than charging the memo: a clone shares the
-        // filled `Arc<AdjointMemo>`, whose block structure can still fill after
-        // the layout was charged, so the charge would go stale. The parked
-        // layout never adjoints itself and a rebound space refills on demand.
-        space.adjoint = OnceLock::new();
-        ValidatedDynamicFusionLayout(space)
-    }
-
-    /// Rebinds a validated cached layout to this space's exact provider allocation.
-    ///
-    /// Why not retain the provider that first populated a process-global cache:
-    /// semantically equal callers may carry distinct provider allocations.
-    pub fn rebind_validated(
-        &self,
-        layout: &ValidatedDynamicFusionLayout,
-    ) -> Result<Self, OperationError> {
-        let expected = self.provider.rule_identity();
-        let actual = layout.0.admission.rule_identity().ok_or_else(|| {
-            OperationError::from_core_preserving_context(CoreError::MissingFusionRuleIdentity)
-        })?;
-        if &expected != actual {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::FusionRuleMismatch {
-                    expected,
-                    actual: actual.clone(),
-                },
-            ));
-        }
-        validate_complete_admission(&layout.0)?;
-        Ok(Self {
-            space: layout.0.clone(),
-            provider: Arc::clone(&self.provider),
-            layout_build: self.layout_build,
-        })
     }
 }

@@ -157,21 +157,6 @@ where
 pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
     TensorScalar
 {
-    fn try_compact_contract(
-        _lhs: &TensorMap<R, Self>,
-        _rhs: &TensorMap<R, Self>,
-        _spec: &ContractSpec<'_>,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        Ok(None)
-    }
-
-    fn try_compact_compose(
-        _lhs: &TensorMap<R, Self>,
-        _rhs: &TensorMap<R, Self>,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        Ok(None)
-    }
-
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
@@ -243,31 +228,16 @@ where
 }
 
 /// Contraction execution selected by a provider-owned mode.
+///
+/// Why a transform supertrait: the shared bodies call the mode-free compact
+/// arms, whose reordered `t · D` / `D · t` result is laid out by one
+/// [`TensorMap::permute`]-style tree transform.
 #[doc(hidden)]
-pub trait TypedTensorContractDispatch<R, D>: TypedTensorModeDispatch<R>
+pub trait TypedTensorContractDispatch<R, D>: TypedTensorTransformDispatch<R, D>
 where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// A compact-diagonal contraction, or `None` to take the dense route.
-    /// Deleted by #1866.
-    fn try_compact_contract(
-        _lhs: &TensorMap<R, D>,
-        _rhs: &TensorMap<R, D>,
-        _spec: &ContractSpec<'_>,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
-        Ok(None)
-    }
-
-    /// A compact-diagonal composition, or `None` to take the dense route.
-    /// Deleted by #1866.
-    fn try_compact_compose(
-        _lhs: &TensorMap<R, D>,
-        _rhs: &TensorMap<R, D>,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
-        Ok(None)
-    }
-
     /// Contracts two operands, a lazy adjoint read through its parent's
     /// payload, into a fresh destination payload.
     fn contract(

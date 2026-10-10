@@ -2,9 +2,9 @@
 //! twist (TensorKit's `DiagonalTensorMap` methods). Each answers `None` when
 //! its operands or destination do not fit, and the dense route runs.
 //!
-//! The twist arm is called from the shared body in both modes; the others are
-//! reached only through the multiplicity-free real-coefficient hooks until
-//! #1866 calls them from the shared bodies.
+//! The twist, compose and contract arms are called from the shared bodies in
+//! both modes; the transform arm is reached only through the multiplicity-free
+//! real-coefficient hook until #1866 calls it from the shared body.
 
 use super::*;
 
@@ -140,12 +140,7 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
         codomain_rank: usize,
-    ) -> Result<Option<Self>, TypedFacadeError<R>>
-    where
-        // Why not mode-free yet: the `D · t` arm rebinds its result to the
-        // left provider through the multiplicity-free layout (#1866).
-        R: tenet_core::FusionRule,
-    {
+    ) -> Result<Option<Self>, TypedFacadeError<R>> {
         if lhs_axes.len() != 1 || rhs_axes.len() != 1 || !self.same_rule(other) {
             return Ok(None);
         }
@@ -323,10 +318,12 @@ where
 
     /// Whether two operands' providers are the same rule. The compact paths
     /// below skip the expert layer, which is where a mismatch would otherwise
-    /// be caught, so they have to ask themselves.
+    /// be caught, so they have to ask themselves. Why the admitted identity
+    /// rather than the provider's: it *is* the provider's (#2046), and reading
+    /// it makes no provider call.
     fn same_rule(&self, other: &Self) -> bool {
-        TypedSectorAdmission::typed_rule_identity(self.provider())
-            == TypedSectorAdmission::typed_rule_identity(other.provider())
+        self.logical_space().space().admission().rule_identity()
+            == other.logical_space().space().admission().rule_identity()
     }
 }
 

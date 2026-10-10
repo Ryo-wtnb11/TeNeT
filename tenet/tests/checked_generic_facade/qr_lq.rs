@@ -113,9 +113,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
                 assert_eq!(&actual.values, expected);
             }
             let rebuilt = phase.compose(magnitude).unwrap();
+            assert!(rebuilt.dense_data().is_err(), "D * D stays compact");
             numerics::assert_slices_close(
                 "checked compact diagonal QR/LQ reconstruction",
-                rebuilt.dense_data().unwrap(),
+                rebuilt.materialize().unwrap().dense_data().unwrap(),
                 input.materialize().unwrap().dense_data().unwrap(),
                 3,
             );
@@ -150,7 +151,12 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     let Qr { q, r } = narrow.qr_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
         "checked compact Complex32 QR reconstruction",
-        q.compose(&r).unwrap().dense_data().unwrap(),
+        q.compose(&r)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         narrow.materialize().unwrap().dense_data().unwrap(),
         3,
     );
@@ -183,7 +189,12 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     let Lq { l, q } = real.lq_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
         "checked compact f64 LQ reconstruction",
-        l.compose(&q).unwrap().dense_data().unwrap(),
+        l.compose(&q)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         real.materialize().unwrap().dense_data().unwrap(),
         3,
     );
@@ -202,7 +213,12 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     let Qr { q, r } = narrow_real.qr_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
         "checked compact f32 QR reconstruction",
-        q.compose(&r).unwrap().dense_data().unwrap(),
+        q.compose(&r)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         narrow_real.materialize().unwrap().dense_data().unwrap(),
         3,
     );

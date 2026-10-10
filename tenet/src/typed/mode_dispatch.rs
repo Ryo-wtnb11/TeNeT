@@ -608,23 +608,9 @@ where
     <R as MultiplicityFreeFusionSymbols>::Scalar:
         CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: TensorScalar
-        + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
+        + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>
+        + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
-    fn try_compact_contract(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-        spec: &ContractSpec<'_>,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
-        D::try_compact_contract(lhs, rhs, spec)
-    }
-
-    fn try_compact_compose(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
-        D::try_compact_compose(lhs, rhs)
-    }
-
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
