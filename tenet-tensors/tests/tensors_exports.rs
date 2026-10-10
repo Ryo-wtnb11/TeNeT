@@ -341,8 +341,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "TensorTraceStructure",
         "TensorTraceStructureTerm",
         // tree_context
-        "tree_transform_dyn_owned_checked_generic_input_in_context",
-        "CheckedTreeTransformInput",
         "CoefficientAlgebra",
         "TreeTransformExecutionContext",
         // tree_transform

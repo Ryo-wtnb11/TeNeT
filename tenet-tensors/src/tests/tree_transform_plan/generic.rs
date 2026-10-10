@@ -1225,18 +1225,25 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
         )];
         operations.extend((0..=3).map(|target| (repartition(2, target), repartition(target, 2))));
         for (forward, backward) in operations {
-            let (moved, moved_data) = crate::tree_transform_dyn_owned_checked_generic(
-                forward,
-                &source,
-                &source_data,
-                1.0,
-            )
-            .unwrap();
+            let (moved, moved_data) =
+                crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+                    .tree_transform_owned_checked_generic_in(
+                        &source,
+                        None,
+                        &source_data,
+                        &forward,
+                        1.0,
+                    )
+                    .unwrap();
             assert!(Arc::ptr_eq(moved.provider_arc(), &provider));
             assert_eq!(moved_data.len(), moved.space().required_len().unwrap());
-            let (round_trip, round_trip_data) =
-                crate::tree_transform_dyn_owned_checked_generic(backward, &moved, &moved_data, 1.0)
-                    .unwrap();
+            let (round_trip, round_trip_data) = crate::TreeTransformExecutionContext::<
+                f64,
+                RuleIdentity,
+                f64,
+            >::default()
+            .tree_transform_owned_checked_generic_in(&moved, None, &moved_data, &backward, 1.0)
+            .unwrap();
             assert_eq!(round_trip.space(), source.space());
             assert_eq!(snapshot(provider.as_ref(), &round_trip), source_snapshot);
             assert!(Arc::ptr_eq(round_trip.provider_arc(), &provider));
@@ -1427,14 +1434,15 @@ fn measure_checked_generic_transform_case(
     crate::tree_transform::take_completed_transformer_activity();
     let (cold_space, cold_data) =
         measured_provider_phase(provider.as_ref(), case, "runtime_cold_seed", || {
-            crate::tree_transform_dyn_owned_checked_generic_in_context(
-                &mut context,
-                operation.clone(),
-                &source,
-                &source_data,
-                1.0,
-            )
-            .unwrap()
+            context
+                .tree_transform_owned_checked_generic_in(
+                    &source,
+                    None,
+                    &source_data,
+                    &operation,
+                    1.0,
+                )
+                .unwrap()
         });
     let cold_info = crate::tree_transform::take_completed_transformer_activity();
     let mut samples_ns = Vec::with_capacity(7);
@@ -1443,14 +1451,9 @@ fn measure_checked_generic_transform_case(
     for _ in 0..7 {
         provider.reset_calls();
         let started = std::time::Instant::now();
-        let output = crate::tree_transform_dyn_owned_checked_generic_in_context(
-            &mut context,
-            operation.clone(),
-            &source,
-            &source_data,
-            1.0,
-        )
-        .unwrap();
+        let output = context
+            .tree_transform_owned_checked_generic_in(&source, None, &source_data, &operation, 1.0)
+            .unwrap();
         samples_ns.push(started.elapsed().as_nanos());
         let calls = provider.calls.get();
         assert!(warm_calls.is_none_or(|expected| expected == calls));

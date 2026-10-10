@@ -199,11 +199,10 @@ use tenet_operations::scale_value;
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
     expand_physical_host, project_physical_host, tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context,
-    tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
-    BoundDynamicTensorRef, CheckedTreeTransformInput, DynamicFusionMapSpace, OutputAxisOrder,
-    OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
-    TreeTransformOperationKind, ValidatedDynamicFusionLayout,
+    tensorcontract_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
+    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    ValidatedDynamicFusionLayout,
 };
 
 use crate::sector::{

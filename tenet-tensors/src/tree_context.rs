@@ -45,19 +45,18 @@ enum CheckedTreeTransformInputKind<'a, P, D> {
 }
 
 /// Borrowed direct or lazy-adjoint request for the checked transform owner.
-#[doc(hidden)]
-pub struct CheckedTreeTransformInput<'a, P, D> {
+pub(crate) struct CheckedTreeTransformInput<'a, P, D> {
     kind: CheckedTreeTransformInputKind<'a, P, D>,
 }
 
 impl<'a, P, D> CheckedTreeTransformInput<'a, P, D> {
-    pub fn direct(space: &'a BoundDynamicFusionMapSpace<P>, data: &'a [D]) -> Self {
+    pub(crate) fn direct(space: &'a BoundDynamicFusionMapSpace<P>, data: &'a [D]) -> Self {
         Self {
             kind: CheckedTreeTransformInputKind::Direct { space, data },
         }
     }
 
-    pub fn adjoint(
+    pub(crate) fn adjoint(
         logical_space: &'a BoundDynamicFusionMapSpace<P>,
         parent_space: &'a BoundDynamicFusionMapSpace<P>,
         parent_data: &'a [D],
@@ -72,78 +71,9 @@ impl<'a, P, D> CheckedTreeTransformInput<'a, P, D> {
     }
 }
 
-#[cfg(test)]
-/// Applies one checked Generic permute, braid, or transpose and returns its owned output.
-///
-/// Provider queries and replay compilation finish against an uninterned
-/// destination preview. The destination structure becomes visible only after
-/// those fallible stages succeed.
-#[doc(hidden)]
-#[allow(clippy::type_complexity)]
-pub fn tree_transform_dyn_owned_checked_generic<P, D>(
-    operation: TreeTransformOperation,
-    src_space: &BoundDynamicFusionMapSpace<P>,
-    src_data: &[D],
-    alpha: D,
-) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols,
-    P::Scalar: CategoricalScalar + Copy + Zero + Sync + 'static,
-    D: crate::DenseRecouplingScalar
-        + RecouplingCoefficientAction<P::Scalar>
-        + crate::ConjugateValue,
-{
-    let mut context = TreeTransformExecutionContext::<D, RuleIdentity, P::Scalar>::default();
-    tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        operation,
-        src_space,
-        src_data,
-        alpha,
-    )
-}
-
-#[cfg(test)]
-/// Runtime-context variant of [`tree_transform_dyn_owned_checked_generic`].
-///
-/// A completed structure is published only after replay and destination commit.
-#[doc(hidden)]
-#[allow(clippy::type_complexity)]
-pub fn tree_transform_dyn_owned_checked_generic_in_context<P, D, B>(
-    context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
-    operation: TreeTransformOperation,
-    src_space: &BoundDynamicFusionMapSpace<P>,
-    src_data: &[D],
-    alpha: D,
-) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols,
-    P::Scalar: CategoricalScalar
-        + Copy
-        + Clone
-        + Add<Output = P::Scalar>
-        + Mul<Output = P::Scalar>
-        + Zero
-        + Send
-        + Sync
-        + 'static,
-    D: crate::DenseRecouplingScalar
-        + RecouplingCoefficientAction<P::Scalar>
-        + crate::ConjugateValue,
-    B: TreeTransformBackend<D, P::Scalar>,
-{
-    tree_transform_dyn_owned_checked_generic_input_in_context(
-        context,
-        operation,
-        CheckedTreeTransformInput::direct(src_space, src_data),
-        alpha,
-    )
-}
-
 /// Common checked owner for direct and lazy-adjoint borrowed input.
-#[doc(hidden)]
 #[allow(clippy::type_complexity)]
-pub fn tree_transform_dyn_owned_checked_generic_input_in_context<P, D, B>(
+pub(crate) fn tree_transform_dyn_owned_checked_generic_input_in_context<P, D, B>(
     context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
     operation: TreeTransformOperation,
     input: CheckedTreeTransformInput<'_, P, D>,
@@ -522,6 +452,109 @@ where
                 src_data,
                 alpha,
             )
+    }
+}
+
+impl<D, C>
+    TreeTransformExecutionContext<
+        D,
+        RuleIdentity,
+        C,
+        DenseTreeTransformOperations<DefaultDenseExecutor>,
+    >
+where
+    D: crate::DenseRecouplingScalar + RecouplingCoefficientAction<C> + crate::ConjugateValue,
+    C: 'static + Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero + Send + Sync,
+{
+    /// The owned multiplicity-free permute, braid, transpose or repartition
+    /// `alpha · operation(src)` of a direct source, into a fresh payload.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn tree_transform_owned_multiplicity_free_in<R>(
+        &mut self,
+        src: &BoundDynamicFusionMapSpace<R>,
+        src_data: &[D],
+        operation: &TreeTransformOperation,
+        alpha: D,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        let destination = src.transformed_multiplicity_free(operation)?;
+        let dst_space = destination.space();
+        if let Some(data) = self.try_tree_transform_dyn_overwrite_owned(
+            src.provider(),
+            operation,
+            dst_space.structure(),
+            src.space().structure(),
+            dst_space.nout(),
+            src_data,
+            alpha,
+        )? {
+            return Ok((destination, data));
+        }
+        let mut data = vec![D::zero(); dst_space.required_len()?];
+        self.tree_transform_dyn_into(
+            src.provider(),
+            operation.clone(),
+            dst_space.structure(),
+            src.space().structure(),
+            &mut data,
+            src_data,
+            alpha,
+            D::zero(),
+        )?;
+        Ok((destination, data))
+    }
+}
+
+impl<D>
+    TreeTransformExecutionContext<
+        D,
+        RuleIdentity,
+        f64,
+        DenseTreeTransformOperations<DefaultDenseExecutor>,
+    >
+where
+    D: crate::DenseRecouplingScalar + RecouplingCoefficientAction<f64> + crate::ConjugateValue,
+{
+    /// The owned checked Generic permute, braid, transpose or repartition
+    /// `alpha · operation(logical)`, into a fresh payload. `adjoint_of` is
+    /// `None` for a direct source stored as `logical`, or the parent whose
+    /// storage `src_data` is when `logical` is that parent's lazy adjoint.
+    ///
+    /// Provider queries and replay compilation finish against an uninterned
+    /// destination preview; the destination structure, composed coefficients
+    /// and completed transformer become visible only after those fallible
+    /// stages succeed.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn tree_transform_owned_checked_generic_in<R>(
+        &mut self,
+        logical: &BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
+        src_data: &[D],
+        operation: &TreeTransformOperation,
+        alpha: D,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), CheckedGenericPlanError<R::Error>>
+    where
+        R: CheckedGenericRigidSymbols<Scalar = f64>,
+    {
+        let input = match adjoint_of {
+            None => CheckedTreeTransformInput::direct(logical, src_data),
+            Some(parent) => CheckedTreeTransformInput::adjoint(logical, parent, src_data),
+        };
+        tree_transform_dyn_owned_checked_generic_input_in_context(
+            self,
+            operation.clone(),
+            input,
+            alpha,
+        )
     }
 }
 

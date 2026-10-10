@@ -380,24 +380,29 @@ where
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
         let payload;
-        let input = match &tensor.repr {
+        let (logical, adjoint_of, data) = match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
                 payload = body.materialized_dense_data();
-                CheckedTreeTransformInput::direct(&body.space, &payload)
+                (&body.space, None, payload.as_ref())
             }
-            TypedTensorRepr::Adjoint(view) => CheckedTreeTransformInput::adjoint(
+            TypedTensorRepr::Adjoint(view) => (
                 &view.logical_space,
-                &view.parent.space,
+                Some(&view.parent.space),
                 view.parent_data(),
             ),
         };
         let mut lease = tensor.runtime.lease_context()?;
-        Ok(tree_transform_dyn_owned_checked_generic_input_in_context(
-            lease.context().generic_lane::<D>()?.tree_context_mut(),
-            operation,
-            input,
-            D::from_real(1.0),
-        )?)
+        Ok(lease
+            .context()
+            .generic_lane::<D>()?
+            .tree_context_mut()
+            .tree_transform_owned_checked_generic_in(
+                logical,
+                adjoint_of,
+                data,
+                &operation,
+                D::from_real(1.0),
+            )?)
     }
 }
 

@@ -1425,9 +1425,9 @@ mod tests {
 
     use super::{
         scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
-        tensorproduct_owned_checked_generic, tree_transform_owned_multiplicity_free,
-        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
-        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        tensorproduct_owned_checked_generic, try_braid_rank_one_diagonal_data,
+        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
+        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -2118,11 +2118,11 @@ mod tests {
             )
             .unwrap();
 
-        let input: tenet_matrixalgebra::seam::BoundDynamicTensorRef<'_, ExternalZ2<0>, f64> =
-            BoundDynamicTensorRef::try_new(&source, &source_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
-        let (actual_destination, actual_data) =
-            tree_transform_owned_multiplicity_free(&mut context, input, operation).unwrap();
+        let (actual_destination, actual_data) = context
+            .tree_context_mut()
+            .tree_transform_owned_multiplicity_free_in(&source, &source_data, &operation, 1.0)
+            .unwrap();
 
         assert_eq!(actual_destination.space(), expected_destination.space());
         assert_eq!(actual_data, expected_data);

@@ -310,14 +310,9 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
     for _attempt in 0..2 {
         provider.r_calls.borrow_mut().clear();
         provider.f_calls.set(0);
-        let error = crate::tree_transform_dyn_owned_checked_generic_in_context(
-            &mut context,
-            operation.clone(),
-            &source,
-            &data,
-            1.0,
-        )
-        .unwrap_err();
+        let error = context
+            .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+            .unwrap_err();
         assert_eq!(format!("{error:?}"), format!("{standalone:?}"));
         assert_eq!(*provider.r_calls.borrow(), standalone_r);
         assert_eq!(provider.f_calls.get(), 0);
