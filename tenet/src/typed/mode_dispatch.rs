@@ -415,20 +415,6 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn try_compact_twist(
-        tensor: &TensorMap<R, D>,
-        legs: &[usize],
-        inverse: bool,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
-        let provider = tensor.logical_space().provider();
-        Ok(compact_arms::twist_spectrum(
-            tensor,
-            legs,
-            inverse,
-            |sector| provider.twist_scalar(sector),
-        ))
-    }
-
     fn twist_values<'a>(
         provider: &'a R,
         structure: &tenet_core::BlockStructure,

@@ -16,9 +16,9 @@ where
     /// clone, matching TensorKit's `copy = false` behavior. Otherwise the
     /// operation publishes one fresh scaled payload on the exact admitted
     /// space and provider allocation. A lazy adjoint redirects through its
-    /// parent with the inverse operation. Multiplicity-free compact spectra
-    /// retain their existing representation-preserving path; a checked-Generic
-    /// compact factor is densified into an operation-local buffer first.
+    /// parent with the inverse operation. A compact diagonal stays compact in
+    /// both modes (TensorKit `DiagonalTensorMap`): its spectrum is scaled by
+    /// `θ(c)^|legs|` per sector without materializing the dense blocks.
     ///
     /// # Errors
     ///
@@ -92,16 +92,9 @@ where
         self.twist_owned(legs, inverse)
     }
 
-    /// The twist of an owned tensor on its own space: a compact arm, else one
-    /// scaled copy of the dense payload unless every twist value is one.
+    /// The twist of an owned tensor on its own space: unless every twist value
+    /// is one, one scaled copy of the compact spectrum or the dense payload.
     fn twist_owned(&self, legs: &[usize], inverse: bool) -> Result<Self, TypedFacadeError<R>> {
-        if self.spectrum().is_some() {
-            if let Some(compact) =
-                <R::Mode as TypedTensorTwistDispatch<R, D>>::try_compact_twist(self, legs, inverse)?
-            {
-                return Ok(compact);
-            }
-        }
         let nout = self.codomain_rank();
         let space = self.logical_space();
         let Some(theta) = <R::Mode as TypedTensorTwistDispatch<R, D>>::twist_values(
@@ -113,6 +106,9 @@ where
         else {
             return Ok(self.clone());
         };
+        if let Some(compact) = compact_arms::twist_spectrum(self, legs, inverse, &theta) {
+            return Ok(compact);
+        }
         let mut data = self
             .owned_body()
             .ok_or_else(|| internal_layout_error("twist input is owned"))?

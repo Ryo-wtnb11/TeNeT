@@ -191,16 +191,6 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// The twist of a compact diagonal kept compact, or `None` to take the
-    /// dense route. Deleted by #1866.
-    fn try_compact_twist(
-        _tensor: &TensorMap<R, D>,
-        _legs: &[usize],
-        _inverse: bool,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
-        Ok(None)
-    }
-
     /// θ of every sector that `legs` carry in `structure`'s fusion-tree
     /// blocks, or `None` when every one of them is one. Every fallible
     /// provider query happens here, so scaling by the returned values never
