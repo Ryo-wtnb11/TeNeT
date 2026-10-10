@@ -718,8 +718,15 @@ fn owned_checked_trace_preflights_once() {
         assert_eq!(compile_calls[..preflight.len()], preflight[..]);
         let stage = crate::tensortrace_stage_checked_generic(&fixture.src, axes(), 1).unwrap();
         assert_eq!(provider.calls.take(), preflight);
-        crate::tensortrace_checked_generic_in(stage, &fixture.src, || &data[..], axes(), 1.0)
-            .unwrap();
+        crate::tensortrace_checked_generic_in(
+            stage,
+            &fixture.src,
+            |_| None,
+            || &data[..],
+            axes(),
+            1.0,
+        )
+        .unwrap();
         assert_eq!(provider.calls.take(), compile_calls[preflight.len()..]);
     };
     compile(&fixture).unwrap();

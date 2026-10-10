@@ -81,6 +81,7 @@ fn raw_execution_failure_does_not_publish() {
     let error = tensortrace_checked_generic_in(
         dst,
         &src,
+        |_| None,
         || {
             payloads.set(payloads.get() + 1);
             vec![1.0; 16]
@@ -117,6 +118,7 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
     let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
         &src,
+        |_| None,
         || panic!("payload after pivotal failure"),
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -159,6 +161,7 @@ fn destination_error_precedes_pivotal_and_payload() {
     let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         wrong_dst,
         &src,
+        |_| None,
         || panic!("payload after destination failure"),
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -205,6 +208,7 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
     let (out, data) = tensortrace_checked_generic_in(
         dst,
         &src,
+        |_| panic!("read asked for a non-scalar destination"),
         || {
             calls.set(calls.get() + 1);
             &payload[..]
@@ -238,6 +242,7 @@ fn admission_runs_before_payload_and_again_after_execution() {
     let early = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
         &src,
+        |_| None,
         || panic!("payload before admission"),
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -255,6 +260,7 @@ fn admission_runs_before_payload_and_again_after_execution() {
     let late = tensortrace_checked_generic_in(
         dst,
         &src,
+        |_| None,
         || {
             TRACE_TEST_WRONG_STYLE.set(true);
             vec![1.0; 16]
@@ -285,6 +291,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let (winner, _) = tensortrace_checked_generic_in(
         stage(&src),
         &src,
+        |_| None,
         || vec![1.0; 16],
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -300,6 +307,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let failed = tensortrace_checked_generic_in(
         stage(&src),
         &src,
+        |_| None,
         || vec![1.0; 16],
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -309,6 +317,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let (again, _) = tensortrace_checked_generic_in(
         stage(&src),
         &src,
+        |_| None,
         || vec![1.0; 16],
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -325,6 +334,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let (out, data) = tensortrace_checked_generic_in(
         staged,
         &src,
+        |_| None,
         || vec![1.0; 16],
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -342,6 +352,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     let (_, data) = tensortrace_checked_generic_in(
         staged_miss,
         &src,
+        |_| None,
         || vec![1.0; 16],
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
         1.0,
@@ -350,4 +361,63 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     assert_eq!(data, vec![2.0; 4]);
     // A miss staged before reset succeeds uncached under the new epoch.
     assert_unpublished();
+}
+
+fn bond_source() -> BoundDynamicFusionMapSpace<CheckedTraceToy> {
+    let leg = || SectorLeg::new([(SectorId::new(0), 2)], false);
+    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(CheckedTraceToy::new(tenet_core::BraidingStyleKind::Bosonic)),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        ),
+    )
+    .unwrap()
+}
+
+#[test]
+fn read_answers_a_scalar_destination_in_the_same_transaction() {
+    // What (#1866): a scalar destination may be answered from the compiled
+    // terms. The answer is scaled by `alpha`, neither the payload nor the
+    // execution runs, and the destination still commits. A conjugated source
+    // is not offered to `read`.
+    if !isolated("read_answers_a_scalar_destination_in_the_same_transaction") {
+        return;
+    }
+    let src = bond_source();
+    clear_structure_caches();
+    let axes = TensorTraceAxisSpec::new(&[], &[0], &[1]);
+    let dst = crate::tensortrace_stage_checked_generic(&src, axes, 0).unwrap();
+    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| panic!("executed after a read"))));
+    let terms = Cell::new(0);
+    let (out, data) = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
+        dst,
+        &src,
+        |structure| {
+            terms.set(structure.terms().len());
+            Some(3.0)
+        },
+        || panic!("payload read after a read"),
+        axes,
+        2.0,
+    )
+    .unwrap();
+    assert!(TRACE_RAW_EXECUTION_HOOK.take().is_some());
+    assert_eq!(terms.get(), 1);
+    assert_eq!(data, vec![6.0]);
+    assert_eq!(out.space().nout() + out.space().nin(), 0);
+    assert_eq!(owner().1, 1, "the scalar destination commits");
+
+    let conjugated = TensorTraceAxisSpec::new_with_conjugation(&[], &[0], &[1], true);
+    let dst = crate::tensortrace_stage_checked_generic(&src, conjugated, 0).unwrap();
+    let (_, data) = tensortrace_checked_generic_in(
+        dst,
+        &src,
+        |_| panic!("read asked for a conjugated source"),
+        || vec![1.0, 0.0, 0.0, 1.0],
+        conjugated,
+        2.0,
+    )
+    .unwrap();
+    assert_eq!(data, vec![4.0]);
 }

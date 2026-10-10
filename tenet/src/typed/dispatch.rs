@@ -284,21 +284,13 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// A compact-diagonal full trace kept off the engine, or `None` to take
-    /// the dense route. Deleted by #1866.
-    fn try_compact_trace(
-        _tensor: &TensorMap<R, D>,
-        _space: &BoundDynamicFusionMapSpace<R>,
-        _axes: tenet_tensors::TensorTraceAxisSpec<'_>,
-        _dst_nout: usize,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
-        Ok(None)
-    }
-
     /// Stages the destination of an admitted trace source and runs the one
-    /// owned trace into it; `payload` is read only after the compile.
+    /// owned trace into it; `payload` is read only after the compile, and
+    /// not at all when `read` answers a scalar destination from the compiled
+    /// terms (a compact spectrum).
     fn trace<P: AsRef<[D]>>(
         space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
         payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,

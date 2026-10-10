@@ -717,9 +717,9 @@ fn compact_arms_never_densify_their_spectrum_operand() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_compact_arms_never_densify_their_spectrum_operand() {
-    // What (#1866): checked Generic takes the same compose, contract and
-    // rank-(1,1) transform arms, so a compact operand is read as a spectrum
-    // there too.
+    // What (#1866): checked Generic takes the same compose, contract,
+    // rank-(1,1) transform and full trace arms, so a compact operand is read
+    // as a spectrum there too.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 1], 3)]).unwrap();
@@ -753,6 +753,9 @@ fn checked_compact_arms_never_densify_their_spectrum_operand() {
     assert!(swapped.spectrum().is_some());
     let _ = d.transpose(&[1], &[0]).unwrap();
     let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
+    // The full trace reads the spectrum from the compiled trace terms.
+    let _ = d.trace_pairs(&[(0, 1)]).unwrap();
+    let _ = d.trace_pairs(&[(1, 0)]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
@@ -1170,7 +1173,10 @@ fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_trace_defers_compact_materialization_until_admission() {
+fn checked_compact_trace_reads_the_spectrum_after_admission() {
+    // What (#1866): an inadmissible pair is rejected without touching the
+    // spectrum, and the admitted full trace reads it from the compiled terms
+    // without materializing (it densified after admission before).
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
@@ -1197,7 +1203,7 @@ fn checked_trace_defers_compact_materialization_until_admission() {
     assert!(diagonal.trace_pairs(&[(0, 0)]).is_err());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let result = diagonal.trace_pairs(&[(0, 1)]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     // SU(3) fundamental quantum dimension is 3; vacuum dimension is 1.
     assert!((result.dense_data().unwrap()[0] - Complex64::new(19.0, 4.0)).norm() < 1e-12);
     assert!(matches!(

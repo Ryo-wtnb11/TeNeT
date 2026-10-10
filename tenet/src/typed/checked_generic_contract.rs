@@ -8,17 +8,9 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn try_compact_trace(
-        tensor: &TensorMap<R, D>,
-        space: &BoundDynamicFusionMapSpace<R>,
-        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
-        dst_nout: usize,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
-        compact_arms::full_trace_spectrum(tensor, space, axes, dst_nout)
-    }
-
     fn trace<P: AsRef<[D]>>(
         space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
         payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
@@ -27,6 +19,7 @@ where
         Ok(tenet_tensors::tensortrace_multiplicity_free_in(
             stage,
             space,
+            read,
             payload,
             axes,
             D::from_real(1.0),
@@ -44,6 +37,7 @@ where
 {
     fn trace<P: AsRef<[D]>>(
         space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
         payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
@@ -52,6 +46,7 @@ where
         Ok(tenet_tensors::tensortrace_checked_generic_in(
             stage,
             space,
+            read,
             payload,
             axes,
             D::from_real(1.0),
@@ -192,13 +187,13 @@ where
     /// # Complexity
     ///
     /// Dense storage runs the partial-trace engine over the whole payload. A
-    /// multiplicity-free compact spectrum factor traced over its only pair
-    /// reduces the stored spectrum in `O(Σ_c k_c)` without materializing
-    /// (#604), with a deliberately narrow guard: one pair on a rank-(1,1)
-    /// source, where the destination tree is empty and the coefficient
-    /// collapses to a per-sector scalar, `dim(c) · θ(c)` on a direct traced
-    /// codomain leg and `dim(c)` on a dual one. Other compact cases
-    /// materialize inside the runtime's Host pool.
+    /// compact spectrum traced over its only pair reduces the stored spectrum
+    /// in `O(Σ_c k_c)` without materializing, in both admission modes (#604,
+    /// #1866): the destination is the empty tree, so each source block
+    /// contributes its compiled trace coefficient times its spectrum sum —
+    /// the coefficients the dense route replays, equal to it within dtype
+    /// tolerance. Other compact cases materialize inside the runtime's Host
+    /// pool.
     ///
     /// # Errors
     ///
@@ -231,13 +226,13 @@ where
         };
         let (space, axes) = (&source.body.space, source.spec());
         let dst_nout = source.axes.destination_codomain_rank;
-        if let Some(compact) = <R::Mode as TypedTensorTraceDispatch<R, D>>::try_compact_trace(
-            self, space, axes, dst_nout,
-        )? {
-            return Ok(compact);
-        }
+        let read = |structure: &tenet_tensors::TensorTraceFusionStructure<f64>| {
+            let spectrum = self.spectrum()?;
+            compact_arms::full_trace_terms(structure, space.space().structure(), spectrum)
+        };
         let (space, data) = <R::Mode as TypedTensorTraceDispatch<R, D>>::trace(
             space,
+            read,
             || source.body.materialized_dense_data(),
             axes,
             dst_nout,
