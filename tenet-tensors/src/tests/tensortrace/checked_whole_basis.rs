@@ -491,8 +491,10 @@ fn group_admission_validates_each_member_once_in_block_order() {
 
 /// What: a cold checked compile makes exactly the provider queries, in the
 /// same order, and produces the same term sequence as a04e59c2 (before
-/// #2072): routing through cache 4 changes nothing on a miss. The ledger is
-/// exact; term values go through `portable` (racah SU(3) coefficients round
+/// #2072): routing through cache 4 changes nothing on a miss. #2150 lowered
+/// the ledger from 2031 to 1519 queries (the term bits are unchanged): each
+/// lowering split now admits its input once instead of admitting the input
+/// and both outputs twice each. The ledger is exact; term values go through `portable` (racah SU(3) coefficients round
 /// their last bits differently on Linux and macOS).
 #[test]
 fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
@@ -510,8 +512,37 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
     }));
     assert_eq!(
         (calls.len(), ledger, terms),
-        (2031, 12_939_473_490_702_431_790, 14_775_106_432_576_145_088)
+        (1519, 2_263_130_248_293_582_478, 14_775_106_432_576_145_088)
     );
+}
+
+/// What (#2150): a checked split asks the provider exactly one admission of
+/// its input tree, in order (the codomain half of admitting the pair
+/// `(tree, tree)`), at every split position; its outputs are structural
+/// sub-trees of that admitted tree and are not re-admitted.
+#[test]
+fn checked_split_admits_only_its_input_once() {
+    let fixture = fixture();
+    let provider = &*fixture.provider;
+    let structure = fixture.src.space().structure();
+    for block in 0..structure.block_count() {
+        let key = source_key(structure, block);
+        for tree in [key.codomain_tree(), key.domain_tree()] {
+            provider.reset(Vec::new());
+            tenet_core::validate_generic_fusion_tree_pair_checked(
+                provider,
+                &FusionTreePairKey::pair(tree.clone(), tree.clone()),
+            )
+            .unwrap();
+            let pair = provider.calls.take();
+            let input = &pair[..pair.len() / 2];
+            assert!(!input.is_empty());
+            for front_rank in 0..=tree.uncoupled().len() {
+                tenet_core::split_fusion_tree_generic_checked(provider, tree, front_rank).unwrap();
+                assert_eq!(provider.calls.take(), input, "{block} {front_rank}");
+            }
+        }
+    }
 }
 
 /// The compile-only checked trace that publishes on success

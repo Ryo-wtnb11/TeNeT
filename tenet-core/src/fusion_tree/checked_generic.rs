@@ -390,6 +390,21 @@ pub fn validate_generic_fusion_tree_pair_checked<C>(
 where
     C: CheckedGenericFusion,
 {
+    validate_generic_fusion_tree_checked(rule, tree_pair.codomain_tree())?;
+    validate_generic_fusion_tree_trusted_style(rule, tree_pair.domain_tree())?;
+    validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
+    Ok(())
+}
+
+/// Admit one Generic fusion tree through the provider: the single-tree half
+/// of [`validate_generic_fusion_tree_pair_checked`].
+pub(super) fn validate_generic_fusion_tree_checked<C>(
+    rule: &C,
+    tree: &FusionTreeKey,
+) -> Result<(), CheckedGenericStructureError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
     if !rule.fusion_style().has_multiplicity() {
         return Err(CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Generic,
@@ -397,24 +412,30 @@ where
         }
         .into());
     }
-    for tree in [tree_pair.codomain_tree(), tree_pair.domain_tree()] {
-        validate_fusion_tree_key_shape(tree)?;
-        validate_fusion_tree_checked_after_shape(
-            tree,
-            rule.vacuum(),
-            |left, right| {
-                rule.try_fusion_channels(left, right)
-                    .map(drop)
-                    .map_err(CheckedGenericStructureError::Provider)
-            },
-            |left, right, coupled| {
-                rule.try_nsymbol(left, right, coupled)
-                    .map_err(CheckedGenericStructureError::Provider)
-            },
-        )?;
-    }
-    validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
-    Ok(())
+    validate_generic_fusion_tree_trusted_style(rule, tree)
+}
+
+fn validate_generic_fusion_tree_trusted_style<C>(
+    rule: &C,
+    tree: &FusionTreeKey,
+) -> Result<(), CheckedGenericStructureError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
+    validate_fusion_tree_key_shape(tree)?;
+    validate_fusion_tree_checked_after_shape(
+        tree,
+        rule.vacuum(),
+        |left, right| {
+            rule.try_fusion_channels(left, right)
+                .map(drop)
+                .map_err(CheckedGenericStructureError::Provider)
+        },
+        |left, right, coupled| {
+            rule.try_nsymbol(left, right, coupled)
+                .map_err(CheckedGenericStructureError::Provider)
+        },
+    )
 }
 
 pub(super) fn map_checked_generic_structure_error<E>(
