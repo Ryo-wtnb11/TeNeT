@@ -30,7 +30,7 @@ pub use tenet_core::RuleIdentity;
 
 pub use adjoint::{
     adjoint, adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn,
-    AdjointScalar,
+    AdjointBlockMap, AdjointBlockSource, AdjointScalar,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;

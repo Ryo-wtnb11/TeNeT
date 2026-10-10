@@ -1,8 +1,9 @@
 use super::*;
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     D: TensorScalar,
+    S: MaterializeExec<R, D>,
 {
     /// An owned dense copy with this tensor's space, values, provider,
     /// runtime and placement (TensorKit `copy`, or `TensorMap(d)` for a
@@ -43,26 +44,136 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
+    /// # CUDA storage
+    ///
+    /// The result is a fresh allocation on the same device, never sharing
+    /// storage with `self`, and equal to the Host result: finite values,
+    /// infinities and signed zeros bit for bit. A NaN stays NaN, but its
+    /// payload and sign bits may be canonicalized (by the real strided copy,
+    /// and by Tenferro's `conj`, which is a float negate).
+    ///
+    /// Every step moves bits rather than computing them, because a device
+    /// copy that scales by a complex `1` does not: cuTENSOR's permutation and
+    /// `cuda_region_axpby` both multiply by `(1, 0)`, which turns
+    /// `(0, -inf)` into `(NaN, -inf)` and loses `-0`. The lazy adjoint's
+    /// block map is the Host one; the device only lowers it.
+    /// - Owned: one Tenferro gather of the whole allocation, which allocates
+    ///   the output.
+    /// - Real lazy adjoint: the same gather of the parent as the output
+    ///   allocation, then one strided copy per block (the transpose; a real
+    ///   `1` scale is exact).
+    /// - Complex lazy adjoint: one element gather of the parent through an
+    ///   `O(required_len)` coordinate table that encodes the transpose, then
+    ///   one elementwise conjugation of the whole buffer.
+    ///
+    /// Nothing is downloaded. Owned and real adjoint: one payload-sized
+    /// device allocation and one 8-byte index upload; the adjoint adds one
+    /// copy per block. Complex adjoint: a host coordinate table of
+    /// `required_len` entries, built in one pass and uploaded
+    /// (`8 * rank(buffer) * required_len` bytes, with a buffer rank of 1 or
+    /// 2), and a second payload-sized allocation for the conjugation, live
+    /// together with the gathered buffer. The transfer counters also charge
+    /// each index upload as a device allocation. Blocks without a fusion-tree
+    /// key read as zero and are zeroed with `cuda_region_zero`.
+    ///
     /// # Errors
     ///
     /// [`Error::Operation`] only if an engine-internal layout invariant is
-    /// broken.
+    /// broken. On CUDA also [`Error::PlacementMismatch`] for a payload on
+    /// another device, and CUDA backend errors.
     pub fn materialize(&self) -> Result<Self, Error> {
-        let body = match &self.repr {
-            TypedTensorRepr::Owned(body) => body,
-            TypedTensorRepr::Adjoint(view) => return self.materialize_adjoint(view),
+        fn dense<D, S>(data: &TypedData<D, S>) -> Result<&S, Error> {
+            match data {
+                TypedData::Dense(storage) => Ok(storage),
+                TypedData::Diagonal(_) => Err(internal_layout_error(
+                    "a compact diagonal takes the compact arm",
+                )),
+            }
+        }
+        let (source, map) = match &self.repr {
+            TypedTensorRepr::Owned(body) => {
+                if let Some((host, spectrum)) =
+                    S::as_host(self).and_then(|t| Some((t, t.spectrum()?)))
+                {
+                    let data = tenet_matrixalgebra::seam::diagonal_bond_data(
+                        host.logical_space().space(),
+                        spectrum,
+                        &|value| value,
+                    )?;
+                    return S::from_host(host.with_data(data));
+                }
+                (dense(body.data.as_ref())?, None)
+            }
+            TypedTensorRepr::Adjoint(view) => {
+                if view.borrowed {
+                    // Backstop: every refusing operation checks first, by
+                    // name, with `refuse_borrowed_view`.
+                    return Err(borrowed_view_unsupported("the operation"));
+                }
+                #[cfg(test)]
+                observe_adjoint_materialization();
+                (
+                    dense(view.parent.data.as_ref())?,
+                    Some(tenet_tensors::AdjointBlockMap::new(
+                        view.parent.space.space(),
+                        view.logical_space.space(),
+                    )),
+                )
+            }
         };
-        let data = match body.data.as_ref() {
-            TypedData::Dense(data) => data.clone(),
-            TypedData::Diagonal(spectrum) => tenet_matrixalgebra::seam::diagonal_bond_data(
-                body.space.space(),
-                spectrum,
-                &|value| value,
-            )?,
-        };
-        Ok(self.with_data(data))
+        let storage = S::materialize(self, source, map.as_ref())?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                self.logical_space().clone(),
+                storage,
+            )),
+        })
     }
+}
 
+/// The materialize kernel for one storage (#1756): [`TensorMap::materialize`]
+/// owns the representation arms and the adjoint block map, and calls this
+/// once, last.
+#[doc(hidden)]
+pub trait MaterializeExec<R, D>: TypedStorage<R, D> {
+    /// A fresh payload for `t`'s logical space: a copy of owned dense
+    /// `source` without a `map`, else lazy adjoint `t`'s parent `source`
+    /// written block by block as `map` names.
+    fn materialize(
+        t: &TensorMap<R, D, Self>,
+        source: &Self,
+        map: Option<&tenet_tensors::AdjointBlockMap<'_>>,
+    ) -> Result<Self, Error>;
+}
+
+impl<R, D: TensorScalar> MaterializeExec<R, D> for Vec<D> {
+    fn materialize(
+        t: &TensorMap<R, D>,
+        source: &Self,
+        map: Option<&tenet_tensors::AdjointBlockMap<'_>>,
+    ) -> Result<Self, Error> {
+        let Some(map) = map else {
+            return Ok(source.clone());
+        };
+        let _host_pool = t.runtime.enter_host_pool();
+        #[cfg(test)]
+        observe_materialization_pool();
+        #[cfg(test)]
+        UNCACHED_ADJOINT_MATERIALIZATIONS
+            .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
+        Ok(tenet_tensors::materialize_adjoint_data_dyn(
+            map.parent_space(),
+            map.adjoint_space(),
+            source,
+        )?)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    D: TensorScalar,
+{
     /// The payload a space-only rewrite (unit-leg insert/remove) may install
     /// in its new body: a dense payload is shared at pointer cost; a lazy
     /// adjoint or a compact spectrum goes through [`Self::materialize`] into
@@ -92,35 +203,10 @@ where
     /// logical payload, released with the operation. Prefer an oriented
     /// kernel or algebraic redirect when one implements the same semantics.
     pub(super) fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
-        let TypedTensorRepr::Adjoint(view) = &self.repr else {
-            return Ok(self.clone());
-        };
-        self.materialize_adjoint(view)
-    }
-
-    fn materialize_adjoint(&self, view: &TypedAdjointView<R, D>) -> Result<Self, Error> {
-        if view.borrowed {
-            // Backstop: every refusing operation checks first, by name, with
-            // `refuse_borrowed_view`.
-            return Err(borrowed_view_unsupported("the operation"));
+        match &self.repr {
+            TypedTensorRepr::Adjoint(_) => self.materialize(),
+            TypedTensorRepr::Owned(_) => Ok(self.clone()),
         }
-        #[cfg(test)]
-        observe_adjoint_materialization();
-        let _host_pool = self.runtime.enter_host_pool();
-        #[cfg(test)]
-        observe_materialization_pool();
-        #[cfg(test)]
-        UNCACHED_ADJOINT_MATERIALIZATIONS
-            .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
-        let data = tenet_tensors::materialize_adjoint_data_dyn(
-            view.parent.space.space(),
-            view.logical_space.space(),
-            view.parent_data(),
-        )?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(view.logical_space.clone(), data)),
-        })
     }
 }
 

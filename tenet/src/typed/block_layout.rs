@@ -1137,39 +1137,6 @@ pub(super) fn logical_adjoint_axis_to_parent(
     }
 }
 
-/// Calls `visit(destination, source)` for every element of one block, first
-/// axis fastest; a `None` source (a block that reads as zero) visits `0`.
-#[cfg(feature = "cuda")]
-pub(super) fn for_each_block_element(
-    shape: &[usize],
-    strides: &[usize],
-    offset: usize,
-    source: &Option<(Vec<usize>, usize)>,
-    mut visit: impl FnMut(usize, usize),
-) {
-    let mut position = vec![0usize; shape.len()];
-    let at = |position: &[usize], strides: &[usize], base: usize| {
-        base + position
-            .iter()
-            .zip(strides)
-            .map(|(i, stride)| i * stride)
-            .sum::<usize>()
-    };
-    for _ in 0..shape.iter().product::<usize>() {
-        let src = source
-            .as_ref()
-            .map_or(0, |(strides, base)| at(&position, strides, *base));
-        visit(at(&position, strides, offset), src);
-        for (axis, extent) in shape.iter().enumerate() {
-            position[axis] += 1;
-            if position[axis] < *extent {
-                break;
-            }
-            position[axis] = 0;
-        }
-    }
-}
-
 pub(crate) fn logical_adjoint_axes_to_parent(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,

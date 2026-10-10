@@ -166,6 +166,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "adjoint_bound_space_dyn",
         "adjoint_bound_space_dyn_generic_checked",
         "materialize_adjoint_data_dyn",
+        "AdjointBlockMap",
+        "AdjointBlockSource",
         "AdjointScalar",
         // backend_trace
         "TensorTraceOperationsBackend",
