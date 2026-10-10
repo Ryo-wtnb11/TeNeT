@@ -5,11 +5,20 @@ mod checked_generic;
 pub use checked_generic::{
     tensorcompose_owned_checked_generic_in_context, tensorcontract_owned_checked_generic_in_context,
 };
+pub(crate) use checked_generic::{
+    CheckedAuthority, CheckedContractTxn, CHECKED_CONTRACTION_REQUIRES_BOSONIC,
+    CHECKED_REQUIRES_DIRECT_OPERANDS,
+};
 mod context;
+pub(crate) use context::{compile_prelowered_dynamic_tree, PlanTarget};
 mod dynamic;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use dynamic::cuda::CudaContractScratch;
+pub(crate) use dynamic::{
+    compile_contract_twist, compile_core_dst, compile_transformed_source,
+    DynamicFusionCoreDstEntry, DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
+};
 #[cfg(test)]
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,
@@ -45,6 +54,7 @@ pub(crate) use fusion_block::{
     validate_fusion_contract_rule, ValidatedCoreContract,
 };
 mod resolution;
+pub(crate) use resolution::{compile_derived_core_plan, contract_axes_require_twist};
 #[cfg(feature = "cuda")]
 mod route_cuda;
 mod route_host;
@@ -99,6 +109,10 @@ pub(crate) use fusion::{
 pub use fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
     tensorcontract_fusion_block_specs, FusionContractPlan,
+};
+pub(crate) use fusion::{
+    prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
+    select_complete_tensorcontract_fusion_plan,
 };
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;

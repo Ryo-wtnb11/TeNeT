@@ -2,111 +2,180 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, CoreError, FusionTreeHomSpace,
-    RuleIdentity, StructurallyValidatedFusionTreeSubset,
+    BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols,
+    CoreError, FusionTreeHomSpace, RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
-#[cfg(test)]
-use tenet_operations::DenseTreeTransformOperations;
 use tenet_operations::{ContractDestinationInit, TensorContractSpec, TreeTransformBackend};
 
-use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use crate::{
     zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
     RecouplingCoefficientAction, ZeroBytes,
 };
 
-use super::context::{plan_compose_in, PlanTarget, TensorContractFusionExecutionContext};
+use super::backend::TensorContractBackend;
+use super::context::{
+    plan_compose_in, plan_contract_in, PlanTarget, TensorContractFusionExecutionContext,
+};
 use super::dynamic_space::{
-    BoundDynamicFusionMapSpace, FusionOperand, PreparedCheckedGenericDynamicSpace,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    PreparedCheckedGenericDynamicSpace,
 };
-use super::fusion::{
-    compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
-    select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate,
-    FusionContractOrientation,
-};
-use super::fusion_block::{
-    compile_checked_generic_core_plan, BackendRank2Gemm, FusionBlockContractWorkspace, Rank2Gemm,
-};
-use super::resolution::HostEagerExecutor;
-use super::route_host::Stage;
+use super::resolution::{HostEagerExecutor, StorageContractResolution};
 use super::structure::TensorContractAxisPlan;
 
 type CheckedContractResult<P, D> = Result<
     (BoundDynamicFusionMapSpace<P>, Vec<D>),
     CheckedGenericPlanError<<P as tenet_core::CheckedGenericFusion>::Error>,
 >;
-// Why not box the transformed arm: this value is operation-local and boxing
-// would add a heap allocation to every nonidentity source transform.
-#[allow(clippy::large_enum_variant)]
-enum CheckedStagedOperand<'a> {
-    Borrowed(&'a super::DynamicFusionMapSpace),
-    Transformed {
+
+/// The U15 boundary of general checked contraction.
+pub(crate) const CHECKED_CONTRACTION_REQUIRES_BOSONIC: OperationError =
+    OperationError::UnsupportedTensorContractScope {
+        message: "checked Generic contraction requires Bosonic braiding",
+    };
+
+/// Checked operands are eager and direct; lazy checked adjoints are #1865.
+pub(crate) const CHECKED_REQUIRES_DIRECT_OPERANDS: OperationError =
+    OperationError::UnsupportedTensorContractScope {
+        message: "checked Generic contraction currently requires eager direct operands",
+    };
+
+/// What the checked planner derives spaces under (its
+/// `PlanningAlgebra::SpaceAuthority`): the left binding, whose provider
+/// admission stages every derived space, and the entry's answer to whether
+/// a contraction twist exists.
+///
+/// Why the answer travels here rather than being read where the planner
+/// asks: a provider read inside the planner would follow the destination's
+/// staging (#2046).
+pub(crate) struct CheckedAuthority<'a, P> {
+    pub(crate) binding: &'a BoundDynamicFusionMapSpace<P>,
+    twist_free: bool,
+}
+
+// Why manual: a derive would bound `P: Copy`.
+impl<P> Clone for CheckedAuthority<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<P> Copy for CheckedAuthority<'_, P> {}
+
+impl<'a, P> CheckedAuthority<'a, P>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    /// Canonical composition (TensorKit `mul!`) crosses no legs, so it never
+    /// asks the twist question and the authority holds no answer: asked, it
+    /// fails closed.
+    pub(crate) fn composition(binding: &'a BoundDynamicFusionMapSpace<P>) -> Self {
+        Self {
+            binding,
+            twist_free: false,
+        }
+    }
+
+    /// General contraction may braid and twist; the checked engine
+    /// implements neither TensorKit `blas_contract!`'s fermionic supertrace
+    /// branch nor non-symmetric braiding, so it admits Bosonic braiding only
+    /// (U15), read once from the left provider.
+    pub(crate) fn contraction(
+        binding: &'a BoundDynamicFusionMapSpace<P>,
+    ) -> Result<Self, CheckedGenericPlanError<P::Error>> {
+        if binding.provider().braiding_style() != BraidingStyleKind::Bosonic {
+            return Err(CHECKED_CONTRACTION_REQUIRES_BOSONIC.into());
+        }
+        Ok(Self {
+            binding,
+            twist_free: true,
+        })
+    }
+
+    /// Whether the entry established that no contraction twist exists.
+    pub(crate) fn twist_free(self) -> bool {
+        self.twist_free
+    }
+}
+
+impl<'a, P> PlanTarget<'a, P, CheckedAuthority<'a, P>> {
+    /// The checked destination `space` (a staged preview) planned under
+    /// `authority`, whose binding's provider is the rule.
+    pub(crate) fn checked(
+        authority: CheckedAuthority<'a, P>,
+        space: &'a DynamicFusionMapSpace,
+    ) -> Self {
+        Self {
+            rule: authority.binding.provider(),
+            space,
+            authority,
+        }
+    }
+}
+
+/// One checked contraction's transaction (#2063): its staged intermediate
+/// spaces and its staged coefficients and transformers. Nothing staged is
+/// published before [`Self::commit`]; dropping it publishes nothing.
+pub(crate) struct CheckedContractTxn {
+    coefficients: CheckedPendingCoefficients,
+    // Why inline three: a contraction stages at most its two sources and its
+    // core destination, or one copyC temporary.
+    staged: smallvec::SmallVec<[(PreparedCheckedGenericDynamicSpace, Arc<BlockStructure>); 3]>,
+}
+
+impl CheckedContractTxn {
+    /// Captures the reset epoch: create it before the call's first build.
+    pub(crate) fn new() -> Self {
+        Self {
+            coefficients: CheckedPendingCoefficients::new(),
+            staged: smallvec::SmallVec::new(),
+        }
+    }
+
+    pub(crate) fn coefficients(&mut self) -> &mut CheckedPendingCoefficients {
+        &mut self.coefficients
+    }
+
+    /// Stages one derived space and returns the preview the planner reads.
+    pub(crate) fn stage(
+        &mut self,
         prepared: PreparedCheckedGenericDynamicSpace,
-        replay: tenet_operations::TreeTransformStructure<f64>,
-        structure: Arc<tenet_core::BlockStructure>,
-    },
-}
-
-impl CheckedStagedOperand<'_> {
-    fn homspace(&self) -> &FusionTreeHomSpace {
-        match self {
-            Self::Borrowed(space) => space.homspace(),
-            Self::Transformed { prepared, .. } => prepared.homspace(),
-        }
+    ) -> DynamicFusionMapSpace {
+        let preview = prepared.preview();
+        self.staged
+            .push((prepared, Arc::clone(preview.structure())));
+        preview
     }
 
-    fn nout(&self) -> usize {
-        match self {
-            Self::Borrowed(space) => space.nout(),
-            Self::Transformed { prepared, .. } => prepared.nout(),
-        }
-    }
-
-    fn structure(&self) -> &Arc<tenet_core::BlockStructure> {
-        match self {
-            Self::Borrowed(space) => space.structure(),
-            Self::Transformed { structure, .. } => structure,
-        }
-    }
-
-    /// `(preview, committed)`; a borrowed operand is already committed.
-    fn commit(
+    /// Publishes after the fallible destination commit (`destination`:
+    /// its preview and committed structures): commits only the staged
+    /// intermediates `resolution` replays over, in staging order, then
+    /// flushes coefficients and transformers keyed by committed ids. A
+    /// stage the planner declined is dropped unpublished.
+    pub(crate) fn commit(
         self,
-    ) -> (
-        Arc<tenet_core::BlockStructure>,
-        Arc<tenet_core::BlockStructure>,
+        destination: (Arc<BlockStructure>, Arc<BlockStructure>),
+        resolution: &StorageContractResolution<f64>,
     ) {
-        match self {
-            Self::Borrowed(space) => (Arc::clone(space.structure()), Arc::clone(space.structure())),
-            Self::Transformed {
-                prepared,
-                structure,
-                ..
-            } => (structure, prepared.commit_structure()),
+        let used = resolution.derived_structures();
+        let mut committed: smallvec::SmallVec<[_; 4]> = smallvec::smallvec![destination];
+        for (prepared, preview) in self.staged {
+            if used
+                .iter()
+                .any(|structure| Arc::ptr_eq(structure, &preview))
+            {
+                committed.push((preview, prepared.commit_structure()));
+            }
         }
+        self.coefficients.flush_committed(&committed);
     }
-}
-
-#[cfg(test)]
-fn same_axes(lhs: &[usize], rhs: &[usize]) -> bool {
-    let mut lhs = lhs.to_vec();
-    let mut rhs = rhs.to_vec();
-    lhs.sort_unstable();
-    rhs.sort_unstable();
-    lhs == rhs
 }
 
 fn validate_source_structure<E>(
-    space: &super::DynamicFusionMapSpace,
+    space: &DynamicFusionMapSpace,
 ) -> Result<(), CheckedGenericPlanError<E>> {
     StructurallyValidatedFusionTreeSubset::try_new(space.homspace(), space.structure())?;
     Ok(())
-}
-
-struct CheckedContractLocal {
-    output_rank: usize,
-    axis_plan: TensorContractAxisPlan,
 }
 
 fn validate_contract_local<P, D>(
@@ -116,15 +185,12 @@ fn validate_contract_local<P, D>(
     rhs_data: &[D],
     axes: TensorContractSpec<'_>,
     dst_nout: usize,
-) -> Result<CheckedContractLocal, CheckedGenericPlanError<P::Error>>
+) -> Result<TensorContractAxisPlan, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
 {
     if axes.lhs_conjugate() || axes.rhs_conjugate() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "checked Generic contraction currently requires eager direct operands",
-        }
-        .into());
+        return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
     }
     let output_rank = lhs_space
         .space()
@@ -162,153 +228,21 @@ where
         }
         validate_source_structure::<P::Error>(space.space())?;
     }
-    Ok(CheckedContractLocal {
-        output_rank,
-        axis_plan,
-    })
+    Ok(axis_plan)
 }
 
-fn staged_transform<'a, P>(
-    coefficients: &mut CheckedPendingCoefficients,
-    authority: &BoundDynamicFusionMapSpace<P>,
-    provider: &P,
-    source: &'a BoundDynamicFusionMapSpace<P>,
-    operation: &crate::TreeTransformOperation,
-) -> Result<CheckedStagedOperand<'a>, CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-{
-    if operation.is_identity_for(source.space().nout(), source.space().nin()) {
-        return Ok(CheckedStagedOperand::Borrowed(source.space()));
-    }
-    let prepared = authority.prepare_final_homspace_generic_from_checked(provider, || {
-        source
-            .space()
-            .homspace()
-            .try_permute_generic_checked(
-                provider,
-                operation.codomain_permutation(),
-                operation.domain_permutation(),
-            )
-            .map_err(CheckedGenericPlanError::from)
-    })?;
-    let destination = prepared.shared_structure();
-    let replay = <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
-        coefficients,
-        provider,
-        operation,
-        &destination,
-        TreeStructureSource::Stored {
-            structure: source.space().structure(),
-            storage_conjugate: false,
-        },
-    )?;
-    Ok(CheckedStagedOperand::Transformed {
-        prepared,
-        replay,
-        structure: destination,
-    })
-}
-
-fn execute_transform<D, B>(
-    backend: &mut B,
-    workspace: &mut B::Workspace,
-    replay: &tenet_operations::TreeTransformStructure<f64>,
-    destination: &Arc<tenet_core::BlockStructure>,
-    source: &Arc<tenet_core::BlockStructure>,
-    destination_data: &mut [D],
-    source_data: &[D],
-) -> Result<(), OperationError>
-where
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    B: TreeTransformBackend<D, f64>,
-{
-    backend.tree_transform_structure_into_raw(
-        workspace,
-        replay,
-        destination,
-        source,
-        destination_data,
-        source_data,
-        D::one(),
-        D::zero(),
-    )
-}
-
-fn execute_staged_transform<D, B>(
-    backend: &mut B,
-    workspace: &mut B::Workspace,
-    staged: &CheckedStagedOperand<'_>,
-    source: &Arc<tenet_core::BlockStructure>,
-    source_data: &[D],
-) -> Result<Option<Vec<D>>, OperationError>
-where
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Copy + Zero + ZeroBytes,
-    B: TreeTransformBackend<D, f64>,
-{
-    let CheckedStagedOperand::Transformed {
-        prepared,
-        replay,
-        structure,
-    } = staged
-    else {
-        return Ok(None);
-    };
-    let mut data = zeroed_payload(prepared.required_len());
-    execute_transform(
-        backend,
-        workspace,
-        replay,
-        structure,
-        source,
-        &mut data,
-        source_data,
-    )?;
-    Ok(Some(data))
-}
-
-#[cfg(test)]
-/// Contracts two direct checked Generic tensors using the shared stable
-/// candidate policy. The result retains the left provider allocation.
-#[doc(hidden)]
-pub fn tensorcontract_owned_checked_generic<P, D>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-    axes: TensorContractSpec<'_>,
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-{
-    let mut transform_backend = DenseTreeTransformOperations::default();
-    let mut transform_workspaces = Default::default();
-    let mut contract_backend = DenseTreeTransformOperations::default();
-    let mut contract_workspace = Default::default();
-    let mut fusion_workspace = FusionBlockContractWorkspace::default();
-    tensorcontract_owned_checked_generic_with_resources(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        None,
-        &mut transform_backend,
-        &mut transform_workspaces,
-        &mut BackendRank2Gemm::<_, _, f64>::new(&mut contract_backend, &mut contract_workspace),
-        &mut fusion_workspace,
-    )
-}
-
-/// Runtime-context variant of [`tensorcontract_owned_checked_generic`], with
-/// the result split after its first `codomain_rank` output axes
-/// (TensorOperations `pAB`).
+/// Contracts two direct checked Generic tensors, the result split after its
+/// first `codomain_rank` output axes (TensorOperations `pAB`) and owned by
+/// the left provider allocation.
+///
+/// It plans through the shared [`plan_contract`] ladder in the checked mode
+/// (the canonical core, TensorKit's `copyC`, the `DynamicTree` artifact)
+/// and replays on the Host route executor. The destination and every
+/// intermediate are staged and planned over as previews; only after the
+/// replay succeeds is the destination committed, then the intermediates the
+/// route used, then the staged transformers (#2063).
+///
+/// [`plan_contract`]: TensorContractFusionExecutionContext::plan_contract
 #[doc(hidden)]
 pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
@@ -328,39 +262,23 @@ where
         + Zero
         + ZeroBytes,
 {
-    let (
-        transform_backend,
-        transform_workspaces,
-        contract_backend,
-        contract_workspace,
-        fusion_workspace,
-    ) = context.checked_generic_resources_mut();
-    tensorcontract_owned_checked_generic_with_resources(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
+    tensorcontract_checked_generic(
+        context,
+        (lhs_space, lhs_data),
+        (rhs_space, rhs_data),
         axes,
-        Some(codomain_rank),
-        transform_backend,
-        transform_workspaces,
-        &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
-        fusion_workspace,
+        codomain_rank,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tensorcontract_owned_checked_generic_with_resources<P, D, G, B>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
+/// [`tensorcontract_owned_checked_generic_in_context`] over any context
+/// backends (a test injects failing ones).
+fn tensorcontract_checked_generic<P, D, BT, BC>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>,
+    (lhs_space, lhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
+    (rhs_space, rhs_data): (&BoundDynamicFusionMapSpace<P>, &[D]),
     axes: TensorContractSpec<'_>,
-    codomain_rank: Option<usize>,
-    transform_backend: &mut B,
-    transform_workspaces: &mut [B::Workspace; 3],
-    core_gemm: &mut G,
-    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+    codomain_rank: usize,
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
@@ -370,31 +288,19 @@ where
         + Copy
         + Zero
         + ZeroBytes,
-    G: Rank2Gemm<D>,
-    B: TreeTransformBackend<D, f64>,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
 {
-    let dst_nout = match codomain_rank {
-        Some(rank) => rank,
-        None => lhs_space
-            .space()
-            .rank()
-            .checked_sub(axes.lhs_contracting_axes().len())
-            .ok_or(OperationError::ElementCountOverflow)?,
-    };
-    let CheckedContractLocal {
-        output_rank,
-        axis_plan,
-    } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, dst_nout)?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    // General-axis contraction may braid, twist and insert the fermionic
-    // supertrace sign; the checked Generic core is Bosonic only. Canonical
-    // composition crosses no legs and skips this boundary.
-    <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::core_alpha(
-        provider,
-        FusionOperand::direct(rhs_space.space()).oriented_homspace(),
-        axes.rhs_contracting_axes(),
-        [],
+    let axis_plan = validate_contract_local(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        codomain_rank,
     )?;
+    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
+    let authority = CheckedAuthority::contraction(lhs_space)?;
     let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
         FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
             provider,
@@ -403,39 +309,48 @@ where
             axes.lhs_contracting_axes(),
             axes.rhs_contracting_axes(),
             &axis_plan.output_axes,
-            dst_nout,
+            codomain_rank,
         )
         .map_err(CheckedGenericPlanError::from)
     })?;
-    let (candidate, orientation) = select_complete_bosonic_contract_candidate(
-        dst_nout,
-        output_rank,
-        destination.required_len(),
-        lhs_space.space().nout(),
-        lhs_space.space().rank(),
-        lhs_space.space().required_len()?,
-        rhs_space.space().nout(),
-        rhs_space.space().rank(),
-        rhs_space.space().required_len()?,
-        axes,
+    let preview = destination.preview();
+    let mut txn = CheckedContractTxn::new();
+    let resolution = plan_contract_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
+        &mut txn,
+        PlanTarget::checked(authority, &preview),
+        FusionOperand::direct(lhs_space.space()),
+        FusionOperand::direct(rhs_space.space()),
+        (
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &axis_plan.output_axes,
+        ),
+        None,
     )?;
-    execute_preselected_checked_generic_contract(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        dst_nout,
-        &candidate,
-        orientation,
-        provider,
-        output_rank,
-        destination,
-        transform_backend,
-        transform_workspaces,
-        core_gemm,
-        fusion_workspace,
-    )
+    #[cfg(test)]
+    context.record_contract_route(&resolution);
+    let mut data = zeroed_payload(destination.required_len());
+    context.execute_contract_route_host(
+        &resolution,
+        preview.structure(),
+        &mut data,
+        (lhs_space.space().structure(), lhs_data),
+        (rhs_space.space().structure(), rhs_data),
+        D::one(),
+        ContractDestinationInit::Zeroed,
+    )?;
+    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
+    // Only after the fallible destination commit: a failed call commits no
+    // intermediate and publishes nothing. These commits cannot fail; a lost
+    // or refused admission leaves its preview unpublishable.
+    txn.commit(
+        (
+            Arc::clone(preview.structure()),
+            Arc::clone(destination.space().structure()),
+        ),
+        &resolution,
+    );
+    Ok((destination, data))
 }
 
 /// Canonical composition (TensorKit `mul!`) of two direct checked Generic
@@ -468,7 +383,7 @@ where
     let lhs_axes = (lhs_nout..lhs_space.space().rank()).collect::<Vec<_>>();
     let rhs_axes = (0..rhs_space.space().nout()).collect::<Vec<_>>();
     let axes = TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes);
-    let CheckedContractLocal { axis_plan, .. } =
+    let axis_plan =
         validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
     let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
     let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
@@ -485,11 +400,7 @@ where
     })?;
     let preview = destination.preview();
     let resolution = plan_compose_in::<HostEagerExecutor, CheckedGenericAdmissionMode, P>(
-        PlanTarget {
-            rule: provider,
-            space: &preview,
-            authority: lhs_space,
-        },
+        PlanTarget::checked(CheckedAuthority::composition(lhs_space), &preview),
         FusionOperand::direct(lhs_space.space()),
         FusionOperand::direct(rhs_space.space()),
     )?;
@@ -510,345 +421,6 @@ where
 }
 
 #[cfg(test)]
-/// Runs exactly one caller-selected checked Generic contraction candidate.
-///
-/// Every destination remains a read-only staged structure until replay and
-/// backend execution succeed. The sole publication is the final commit under
-/// the left operand's provider allocation.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_owned_checked_generic_preselected<P, D>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-    axes: TensorContractSpec<'_>,
-    dst_nout: usize,
-    candidate: &ContractAxisOrderCandidate,
-    orientation: FusionContractOrientation,
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-{
-    let mut backend = DenseTreeTransformOperations::default();
-    let mut workspace = Default::default();
-    let mut transform_backend = DenseTreeTransformOperations::default();
-    let mut transform_workspaces = Default::default();
-    let mut fusion_workspace = FusionBlockContractWorkspace::default();
-    tensorcontract_owned_checked_generic_preselected_with_core_gemm(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        dst_nout,
-        candidate,
-        orientation,
-        &mut transform_backend,
-        &mut transform_workspaces,
-        &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
-        &mut fusion_workspace,
-    )
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G, B>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-    axes: TensorContractSpec<'_>,
-    dst_nout: usize,
-    candidate: &ContractAxisOrderCandidate,
-    orientation: FusionContractOrientation,
-    transform_backend: &mut B,
-    transform_workspaces: &mut [B::Workspace; 3],
-    core_gemm: &mut G,
-    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-    G: Rank2Gemm<D>,
-    B: TreeTransformBackend<D, f64>,
-{
-    if !same_axes(axes.lhs_contracting_axes(), candidate.lhs())
-        || !same_axes(axes.rhs_contracting_axes(), candidate.rhs())
-    {
-        return Err(OperationError::InvalidArgument {
-            message: "preselected candidate must preserve contracted axis sets",
-        }
-        .into());
-    }
-    let candidate_axes =
-        TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-    let CheckedContractLocal {
-        output_rank,
-        axis_plan,
-    } = validate_contract_local(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        candidate_axes,
-        dst_nout,
-    )?;
-    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    // General-axis contraction may braid, twist and insert the fermionic
-    // supertrace sign; the checked Generic core is Bosonic only. Canonical
-    // composition crosses no legs and skips this boundary.
-    <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::core_alpha(
-        provider,
-        FusionOperand::direct(rhs_space.space()).oriented_homspace(),
-        candidate.rhs(),
-        [],
-    )?;
-    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-            provider,
-            lhs_space.space().homspace(),
-            rhs_space.space().homspace(),
-            candidate.lhs(),
-            candidate.rhs(),
-            &axis_plan.output_axes,
-            dst_nout,
-        )
-        .map_err(CheckedGenericPlanError::from)
-    })?;
-    execute_preselected_checked_generic_contract(
-        lhs_space,
-        lhs_data,
-        rhs_space,
-        rhs_data,
-        axes,
-        dst_nout,
-        candidate,
-        orientation,
-        provider,
-        output_rank,
-        destination,
-        transform_backend,
-        transform_workspaces,
-        core_gemm,
-        fusion_workspace,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_preselected_checked_generic_contract<P, D, G, B>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_data: &[D],
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_data: &[D],
-    axes: TensorContractSpec<'_>,
-    dst_nout: usize,
-    candidate: &ContractAxisOrderCandidate,
-    orientation: FusionContractOrientation,
-    provider: &P,
-    output_rank: usize,
-    destination: PreparedCheckedGenericDynamicSpace,
-    transform_backend: &mut B,
-    transform_workspaces: &mut [B::Workspace; 3],
-    core_gemm: &mut G,
-    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
-) -> CheckedContractResult<P, D>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar
-        + RecouplingCoefficientAction<f64>
-        + ConjugateValue
-        + Copy
-        + Zero
-        + ZeroBytes,
-    G: Rank2Gemm<D>,
-    B: TreeTransformBackend<D, f64>,
-{
-    let candidate_axes =
-        TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-    let plan = orient_fusion_contract_plan(
-        compile_tensorcontract_fusion_plan_from_ranks(
-            dst_nout,
-            output_rank,
-            lhs_space.space().rank(),
-            rhs_space.space().rank(),
-            candidate_axes,
-            false,
-            false,
-        )?,
-        orientation,
-    );
-
-    // Call-owned: the staged and output transforms' composed coefficients
-    // publish only after this call's commit.
-    let mut coefficients = CheckedPendingCoefficients::new();
-    let lhs_prepared = staged_transform(
-        &mut coefficients,
-        lhs_space,
-        provider,
-        lhs_space,
-        plan.lhs_transform(),
-    )?;
-    let rhs_prepared = staged_transform(
-        &mut coefficients,
-        lhs_space,
-        provider,
-        rhs_space,
-        plan.rhs_transform(),
-    )?;
-
-    let (core_left, core_right, core_left_structure, core_right_structure) = match orientation {
-        FusionContractOrientation::LhsRhs => (
-            &lhs_prepared,
-            &rhs_prepared,
-            lhs_prepared.structure(),
-            rhs_prepared.structure(),
-        ),
-        FusionContractOrientation::RhsLhs => (
-            &rhs_prepared,
-            &lhs_prepared,
-            rhs_prepared.structure(),
-            lhs_prepared.structure(),
-        ),
-    };
-    let core_axes = plan.core_axes().as_spec();
-    let core_axis_plan = TensorContractAxisPlan::compile(
-        core_left.homspace().rank(),
-        core_right.homspace().rank(),
-        output_rank,
-        core_axes,
-    )?;
-    let core_destination =
-        lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
-            FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-                provider,
-                core_left.homspace(),
-                core_right.homspace(),
-                core_axes.lhs_contracting_axes(),
-                core_axes.rhs_contracting_axes(),
-                &core_axis_plan.output_axes,
-                plan.core_dst_open_lhs_rank(),
-            )
-            .map_err(CheckedGenericPlanError::from)
-        })?;
-    let core_structure = core_destination.shared_structure();
-    let core_plan = compile_checked_generic_core_plan(
-        &core_structure,
-        core_destination.nout(),
-        core_left_structure,
-        core_left.nout(),
-        core_right_structure,
-        core_right.nout(),
-        core_axes,
-    )?;
-
-    let destination_structure = destination.shared_structure();
-    let output_replay = if plan.output_transform_is_identity() {
-        None
-    } else {
-        Some(
-            <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
-                &mut coefficients,
-                provider,
-                plan.output_transform(),
-                &destination_structure,
-                TreeStructureSource::Stored {
-                    structure: &core_structure,
-                    storage_conjugate: false,
-                },
-            )?,
-        )
-    };
-
-    let lhs_transformed = execute_staged_transform(
-        transform_backend,
-        &mut transform_workspaces[Stage::Lhs as usize],
-        &lhs_prepared,
-        lhs_space.space().structure(),
-        lhs_data,
-    )?;
-    let rhs_transformed = execute_staged_transform(
-        transform_backend,
-        &mut transform_workspaces[Stage::Rhs as usize],
-        &rhs_prepared,
-        rhs_space.space().structure(),
-        rhs_data,
-    )?;
-
-    let lhs_core_data = lhs_transformed.as_deref().unwrap_or(lhs_data);
-    let rhs_core_data = rhs_transformed.as_deref().unwrap_or(rhs_data);
-
-    let (core_lhs_data, core_rhs_data) = match orientation {
-        FusionContractOrientation::LhsRhs => (lhs_core_data, rhs_core_data),
-        FusionContractOrientation::RhsLhs => (rhs_core_data, lhs_core_data),
-    };
-    let mut kernels = crate::StridedHostKernelAdapter::default();
-    let mut data = zeroed_payload(destination.required_len());
-    if let Some(output_replay) = output_replay {
-        let mut core_data = zeroed_payload(core_destination.required_len());
-        core_plan.execute_raw_zeroed(
-            &mut kernels,
-            core_gemm,
-            fusion_workspace,
-            &core_structure,
-            &mut core_data,
-            core_left_structure,
-            core_lhs_data,
-            core_right_structure,
-            core_rhs_data,
-            D::one(),
-        )?;
-        execute_transform(
-            transform_backend,
-            &mut transform_workspaces[Stage::Output as usize],
-            &output_replay,
-            &destination_structure,
-            &core_structure,
-            &mut data,
-            &core_data,
-        )?;
-    } else {
-        core_plan.execute_raw_zeroed(
-            &mut kernels,
-            core_gemm,
-            fusion_workspace,
-            &core_structure,
-            &mut data,
-            core_left_structure,
-            core_lhs_data,
-            core_right_structure,
-            core_rhs_data,
-            D::one(),
-        )?;
-    }
-    let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
-    // Only after the fallible destination commit: a failed call commits no
-    // intermediate and publishes nothing. These commits cannot fail; a lost
-    // or refused admission leaves its preview unpublishable.
-    let committed = [
-        (
-            destination_structure,
-            Arc::clone(destination.space().structure()),
-        ),
-        lhs_prepared.commit(),
-        rhs_prepared.commit(),
-        (core_structure, core_destination.commit_structure()),
-    ];
-    coefficients.flush_committed(&committed);
-    Ok((destination, data))
-}
-
-#[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
 
@@ -860,7 +432,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::contract::fusion::contracted_axis_order_candidates;
+    use crate::contract::backend::TensorContractBackend;
+    use crate::contract::structure::TensorContractStructure;
+    use crate::DenseTreeTransformOperations;
+    use tenet_core::{HostReadableStorage, HostWritableStorage, TensorMap};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Query {
@@ -902,6 +477,7 @@ mod tests {
         events: RefCell<Vec<Event>>,
         fail: Cell<Option<Query>>,
         malformed: Cell<Option<Query>>,
+        braiding: Cell<BraidingStyleKind>,
     }
 
     impl CheckedGenericSpy {
@@ -912,6 +488,7 @@ mod tests {
                 events: RefCell::new(Vec::new()),
                 fail: Cell::new(None),
                 malformed: Cell::new(None),
+                braiding: Cell::new(BraidingStyleKind::Bosonic),
             }
         }
 
@@ -962,7 +539,7 @@ mod tests {
 
         fn braiding_style(&self) -> BraidingStyleKind {
             self.events.borrow_mut().push(Event::Braiding);
-            BraidingStyleKind::Bosonic
+            self.braiding.get()
         }
 
         fn vacuum(&self) -> SectorId {
@@ -1096,25 +673,185 @@ mod tests {
         }
     }
 
-    struct FailingGemm;
+    /// The default contract backend, failing its `fail_at`-th rank-2 GEMM
+    /// job (counted from 0) when set. Batches run serially through the
+    /// trait default, so every job is counted.
+    #[derive(Default)]
+    struct FailingBackend {
+        inner: DenseTreeTransformOperations,
+        jobs: usize,
+        fail_at: Option<usize>,
+    }
 
-    impl Rank2Gemm<f64> for FailingGemm {
-        #[allow(clippy::too_many_arguments)]
-        fn matmul_rank2(
+    impl TensorContractBackend<f64, f64> for FailingBackend {
+        type Workspace =
+            <DenseTreeTransformOperations as TensorContractBackend<f64, f64>>::Workspace;
+
+        fn tensorcontract_structure_into<
+            const DST_NOUT: usize,
+            const DST_NIN: usize,
+            const LHS_NOUT: usize,
+            const LHS_NIN: usize,
+            const RHS_NOUT: usize,
+            const RHS_NIN: usize,
+            SDst,
+            SLhs,
+            SRhs,
+            DDst,
+            DLhs,
+            DRhs,
+        >(
             &mut self,
-            _dst: &mut [f64],
-            _lhs: &[f64],
-            _rhs: &[f64],
-            _rows: usize,
-            _contracted: usize,
-            _cols: usize,
+            _workspace: &mut Self::Workspace,
+            _structure: &TensorContractStructure<f64>,
+            _dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
+            _lhs: &TensorMap<f64, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+            _rhs: &TensorMap<f64, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError>
+        where
+            DDst: HostWritableStorage<f64>,
+            DLhs: HostReadableStorage<f64>,
+            DRhs: HostReadableStorage<f64>,
+        {
+            unreachable!("the route executor runs rank-2 GEMM jobs only")
+        }
+
+        fn tensorcontract_structure_into_raw(
+            &mut self,
+            _workspace: &mut Self::Workspace,
+            _structure: &TensorContractStructure<f64>,
+            _dst_structure: &Arc<BlockStructure>,
+            _lhs_structure: &Arc<BlockStructure>,
+            _rhs_structure: &Arc<BlockStructure>,
+            _dst_data: &mut [f64],
+            _lhs_data: &[f64],
+            _rhs_data: &[f64],
             _alpha: f64,
             _beta: f64,
         ) -> Result<(), OperationError> {
-            Err(OperationError::StridedKernel {
-                message: "injected checked Generic core failure".into(),
-            })
+            unreachable!("the route executor runs rank-2 GEMM jobs only")
         }
+
+        fn matmul_rank2_into_raw(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            dst_data: &mut [f64],
+            lhs_data: &[f64],
+            rhs_data: &[f64],
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+        ) -> Result<(), OperationError> {
+            self.matmul_rank2_axpby_into_raw(
+                workspace, dst_data, lhs_data, rhs_data, rows, contracted, cols, 1.0, 0.0,
+            )
+        }
+
+        fn matmul_rank2_axpby_into_raw(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            dst_data: &mut [f64],
+            lhs_data: &[f64],
+            rhs_data: &[f64],
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            let job = self.jobs;
+            self.jobs += 1;
+            if self.fail_at == Some(job) {
+                return Err(OperationError::StridedKernel {
+                    message: "injected checked Generic core failure".into(),
+                });
+            }
+            TensorContractBackend::<f64, f64>::matmul_rank2_axpby_into_raw(
+                &mut self.inner,
+                workspace,
+                dst_data,
+                lhs_data,
+                rhs_data,
+                rows,
+                contracted,
+                cols,
+                alpha,
+                beta,
+            )
+        }
+    }
+
+    type FailingContext = TensorContractFusionExecutionContext<
+        f64,
+        RuleIdentity,
+        DenseTreeTransformOperations,
+        FailingBackend,
+    >;
+
+    fn failing_context(fail_at: Option<usize>) -> FailingContext {
+        let mut context = FailingContext::new(
+            DenseTreeTransformOperations::default(),
+            FailingBackend::default(),
+        );
+        context.contract_backend_mut().fail_at = fail_at;
+        context
+    }
+
+    type SpySpace = BoundDynamicFusionMapSpace<CheckedGenericSpy>;
+
+    /// One public checked contraction on a fresh default context.
+    fn contract(
+        (lhs, lhs_data): (&SpySpace, &[f64]),
+        (rhs, rhs_data): (&SpySpace, &[f64]),
+        axes: TensorContractSpec<'_>,
+        codomain_rank: usize,
+    ) -> CheckedContractResult<CheckedGenericSpy, f64> {
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        tensorcontract_owned_checked_generic_in_context(
+            &mut context,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            codomain_rank,
+        )
+    }
+
+    /// The route the last call of `context` planned.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Route {
+        Core,
+        CopyC,
+        DynamicTree,
+    }
+
+    fn last_route<BC>(
+        context: &TensorContractFusionExecutionContext<
+            f64,
+            RuleIdentity,
+            DenseTreeTransformOperations,
+            BC,
+        >,
+    ) -> Route
+    where
+        BC: TensorContractBackend<f64, f64>,
+    {
+        if context.last_resolution_is_core() {
+            Route::Core
+        } else if context.last_resolution_orientation().is_some() {
+            Route::DynamicTree
+        } else {
+            Route::CopyC
+        }
+    }
+
+    fn ramp(len: usize, scale: f64, offset: f64) -> Vec<f64> {
+        (0..len)
+            .map(|index| index as f64 * scale + offset)
+            .collect()
     }
 
     fn homspace(_rule: &GenericMultiplicityRule, nout: usize, nin: usize) -> FusionTreeHomSpace {
@@ -1234,129 +971,723 @@ mod tests {
         }
     }
 
+    const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_ISOLATED";
+
+    /// Reruns test `name` alone in a child process, whose cache assertions
+    /// then see no concurrent clear; true inside that child.
+    fn isolated(name: &str) -> bool {
+        if std::env::var_os(ISOLATED).is_some() {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("contract::checked_generic::tests::{name}"),
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated {name} failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    use Event::{Braiding, Identity, Style};
+
+    /// What: a canonical contraction plans the shared Core rung (zero-copy
+    /// candidate, identity output). Its provider events are the pair
+    /// admission, the U15 braiding read, the destination stage and the
+    /// commit guard's style (#2046): planning and replay query nothing, and
+    /// no second (core) destination is derived. The left binding owns the
+    /// result; a failing destination query surfaces exactly and publishes
+    /// nothing.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_uses_left_authority_and_commits_left_owner() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_AUTHORITY_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::preselected_checked_generic_uses_left_authority_and_commits_left_owner",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated authority test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+    fn checked_contraction_plans_the_core_route_without_provider_events_after_staging() {
+        if !isolated(
+            "checked_contraction_plans_the_core_route_without_provider_events_after_staging",
+        ) {
             return;
         }
-
         let (left, lhs, right, rhs) = bound_pair(1, 1);
         tenet_core::clear_structure_caches();
-        let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
-        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
-        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
-
-        let (output, data) = tensorcontract_owned_checked_generic_preselected(
+        let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.5, -1.0);
+        let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.25, 2.0);
+        let axes = || TensorContractSpec::with_default_output_order(&[1], &[0]);
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        left.fail.set(Some(Query::Channel));
+        let error = tensorcontract_owned_checked_generic_in_context(
+            &mut context,
             &lhs,
             &lhs_data,
             &rhs,
             &rhs_data,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            axes(),
             1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-        )
-        .unwrap();
-
-        assert!(Arc::ptr_eq(output.provider_arc(), &left));
-        assert!(!Arc::ptr_eq(output.provider_arc(), &right));
-        assert_eq!(right.algebra_calls(), 0);
-        assert!(left.algebra_calls() > 0);
-        assert_eq!(data.len(), output.space().required_len().unwrap());
-        // The destination's one identity read and admission style, then the
-        // final guard's style: commit reuses the admitted identity (#2046).
-        assert!(left
-            .events
-            .borrow()
-            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
-
-        left.reset();
-        right.reset();
-        let (warm_output, warm_data) = tensorcontract_owned_checked_generic_preselected(
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-        )
-        .unwrap();
-        assert!(Arc::ptr_eq(warm_output.provider_arc(), &left));
-        assert!(!Arc::ptr_eq(warm_output.provider_arc(), &right));
-        assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(warm_data, data);
-        // The destination's one identity read and admission style, then the
-        // final guard's style: commit reuses the admitted identity (#2046).
-        assert!(left
-            .events
-            .borrow()
-            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_rejects_local_axes_before_provider_queries() {
-        let (left, lhs, right, rhs) = bound_pair(1, 1);
-        let candidate = contracted_axis_order_candidates(&[9], &[0]).remove(0);
-        let error = tensorcontract_owned_checked_generic_preselected(
-            &lhs,
-            &vec![0.0; lhs.space().required_len().unwrap()],
-            &rhs,
-            &vec![0.0; rhs.space().required_len().unwrap()],
-            TensorContractSpec::with_default_output_order(&[9], &[0]),
-            1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
         )
         .unwrap_err();
-
-        assert!(matches!(error, CheckedGenericPlanError::Operation(_)));
-        assert_eq!(left.algebra_calls(), 0);
-        assert_eq!(right.algebra_calls(), 0);
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::Provider(SpyError(Query::Channel))
+        ));
+        assert_eq!(cache_entries(), (0, 0));
+        let channel = Event::Query(Query::Channel);
+        let expected = [
+            (
+                "cold",
+                vec![
+                    Identity, Style, Braiding, Identity, Style, channel, channel, Style,
+                ],
+            ),
+            (
+                "warm",
+                vec![Identity, Style, Braiding, Identity, Style, Style],
+            ),
+        ];
+        let mut first = None;
+        for (call, events) in expected {
+            left.reset();
+            right.reset();
+            let (output, data) = tensorcontract_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                axes(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(last_route(&context), Route::Core, "{call}");
+            assert!(Arc::ptr_eq(output.provider_arc(), &left), "{call}");
+            assert!(!Arc::ptr_eq(output.provider_arc(), &right), "{call}");
+            assert_eq!(right.algebra_calls(), 0, "{call}");
+            assert_eq!(data.len(), output.space().required_len().unwrap());
+            assert_eq!(*left.events.borrow(), events, "{call}");
+            assert_eq!(*right.events.borrow(), [Identity, Style], "{call}");
+            // The destination and nothing else is committed.
+            assert_eq!(cache_entries(), (1, 0), "{call}");
+            let bits = data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(*first.get_or_insert_with(|| bits.clone()), bits, "{call}");
+        }
     }
 
+    /// What: local request errors (axes, conjugation, rank, payload length)
+    /// are reported before any provider query.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_executes_one_transforming_candidate() {
+    fn checked_contraction_rejects_local_errors_before_provider_queries() {
+        let (left, lhs, right, rhs) = bound_pair(1, 1);
+        let lhs_data = vec![0.0; lhs.space().required_len().unwrap()];
+        let rhs_data = vec![0.0; rhs.space().required_len().unwrap()];
+        let short = vec![0.0; rhs_data.len() - 1];
+        let cases: [(&str, TensorContractSpec<'_>, usize, &[f64]); 4] = [
+            (
+                "axis",
+                TensorContractSpec::with_default_output_order(&[9], &[0]),
+                1,
+                &rhs_data,
+            ),
+            (
+                "conjugate",
+                TensorContractSpec::new_with_conjugation(
+                    &[1],
+                    &[0],
+                    tenet_operations::OutputAxisOrder::identity(),
+                    true,
+                    false,
+                ),
+                1,
+                &rhs_data,
+            ),
+            (
+                "rank",
+                TensorContractSpec::with_default_output_order(&[1], &[0]),
+                3,
+                &rhs_data,
+            ),
+            (
+                "length",
+                TensorContractSpec::with_default_output_order(&[1], &[0]),
+                1,
+                &short,
+            ),
+        ];
+        for (name, axes, nout, rhs_data) in cases {
+            left.reset();
+            right.reset();
+            let error = contract((&lhs, &lhs_data), (&rhs, rhs_data), axes, nout).unwrap_err();
+            assert!(
+                !matches!(error, CheckedGenericPlanError::Provider(_)),
+                "{name}: {error:?}"
+            );
+            assert!(left.events.borrow().is_empty(), "{name}");
+            assert!(right.events.borrow().is_empty(), "{name}");
+        }
+    }
+
+    /// What: a contraction whose operands are not in core form takes the
+    /// `DynamicTree` artifact; only the lhs is recoupled (F and R queries),
+    /// the rhs borrowed in place.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_executes_one_transforming_candidate() {
+        if !isolated("checked_contraction_executes_one_transforming_candidate") {
+            return;
+        }
         let (left, lhs, right, rhs) = bound_pair(2, 2);
-        let candidate = contracted_axis_order_candidates(&[3, 2], &[0, 1]).remove(0);
+        tenet_core::clear_structure_caches();
         let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
-
-        let (output, data) = tensorcontract_owned_checked_generic_preselected(
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        crate::tree_transform::take_completed_transformer_activity();
+        let (output, data) = tensorcontract_owned_checked_generic_in_context(
+            &mut context,
             &lhs,
             &lhs_data,
             &rhs,
             &rhs_data,
             TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
             2,
-            &candidate,
-            FusionContractOrientation::RhsLhs,
         )
         .unwrap();
-
+        assert_eq!(last_route(&context), Route::DynamicTree);
         assert!(Arc::ptr_eq(output.provider_arc(), &left));
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.count(Query::F) > 0);
         assert!(left.count(Query::R) > 0);
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.builds, transformers.publications), (1, 1));
         assert_eq!(data.len(), output.space().required_len().unwrap());
+    }
+
+    /// The Core, CopyC and `DynamicTree` (one and three transforms) checked
+    /// fixtures: `(name, nout = nin, lhs axes, rhs axes, output, codomain
+    /// rank, route)`.
+    type Fixture = (
+        &'static str,
+        usize,
+        &'static [usize],
+        &'static [usize],
+        Option<&'static [usize]>,
+        usize,
+        Route,
+    );
+
+    const FIXTURES: [Fixture; 4] = [
+        ("core", 1, &[1], &[0], None, 1, Route::Core),
+        (
+            "copy_c",
+            2,
+            &[2, 3],
+            &[0, 1],
+            Some(&[1, 0, 2, 3]),
+            2,
+            Route::CopyC,
+        ),
+        ("lhs_only", 2, &[3, 2], &[0, 1], None, 2, Route::DynamicTree),
+        (
+            "three_stages",
+            2,
+            &[3, 1],
+            &[0, 3],
+            Some(&[2, 0, 3, 1]),
+            2,
+            Route::DynamicTree,
+        ),
+    ];
+
+    fn fixture_axes<'a>(
+        lhs: &'a [usize],
+        rhs: &'a [usize],
+        output: Option<&'a [usize]>,
+    ) -> TensorContractSpec<'a> {
+        match output {
+            None => TensorContractSpec::with_default_output_order(lhs, rhs),
+            Some(output) => {
+                TensorContractSpec::new(lhs, rhs, tenet_operations::OutputAxisOrder::Axes(output))
+            }
+        }
+    }
+
+    /// What: on every route a failing provider query (destination, source
+    /// spaces and structures, core destination, CopyC temporary, output
+    /// structure) or a malformed symbol surfaces exactly, and nothing is
+    /// published: no layout (cache 2), no transformer (cache 3), no
+    /// composed coefficient, no output.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_preserves_late_provider_and_shape_errors_on_every_route() {
+        if !isolated("checked_contraction_preserves_late_provider_and_shape_errors_on_every_route")
+        {
+            return;
+        }
+        for (name, n, lhs_axes, rhs_axes, output, nout, route) in FIXTURES {
+            let (left, lhs, right, rhs) = bound_pair(n, n);
+            let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+            let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+            let axes = || fixture_axes(lhs_axes, rhs_axes, output);
+            let mut failed = 0;
+            for query in [Query::Dual, Query::Channel, Query::N, Query::F, Query::R] {
+                tenet_core::clear_structure_caches();
+                left.reset();
+                right.reset();
+                left.fail.set(Some(query));
+                crate::tree_transform::take_completed_transformer_activity();
+                match contract((&lhs, &lhs_data), (&rhs, &rhs_data), axes(), nout) {
+                    Err(error) => {
+                        failed += 1;
+                        assert!(
+                            matches!(
+                                error,
+                                CheckedGenericPlanError::Provider(SpyError(actual)) if actual == query
+                            ),
+                            "{name} {query:?}: {error:?}"
+                        );
+                    }
+                    // A route that never asks this query succeeds.
+                    Ok(_) => {
+                        assert_eq!(left.count(query), 0, "{name} {query:?}");
+                        continue;
+                    }
+                }
+                assert_eq!(right.algebra_calls(), 0, "{name} {query:?}");
+                assert_eq!(cache_entries(), (0, 0), "{name} {query:?}");
+                assert_eq!(coefficient_admissions(), 0, "{name} {query:?}");
+                let transformers = crate::tree_transform::take_completed_transformer_activity();
+                assert_eq!(transformers.publications, 0, "{name} {query:?}");
+            }
+            assert!(failed >= 1, "{name}: some query fails");
+            if route == Route::DynamicTree {
+                tenet_core::clear_structure_caches();
+                left.reset();
+                left.malformed.set(Some(Query::R));
+                let error =
+                    contract((&lhs, &lhs_data), (&rhs, &rhs_data), axes(), nout).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
+                    ),
+                    "{name}"
+                );
+                assert_eq!(cache_entries(), (0, 0), "{name}");
+            }
+        }
+    }
+
+    /// What: each fixture plans its route, and the GEMM failing on the first
+    /// or a later job of the replay returns the error without publishing:
+    /// no layout, transformer, composed coefficient or output, so a failed
+    /// call leaves nothing behind (#2063). The pooled scratch a warm call
+    /// sized is reused, not grown, by a failing call.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_backend_failure_publishes_nothing_and_keeps_retained_scratch() {
+        if !isolated(
+            "checked_contraction_backend_failure_publishes_nothing_and_keeps_retained_scratch",
+        ) {
+            return;
+        }
+        for (name, n, lhs_axes, rhs_axes, output, nout, route) in FIXTURES {
+            let (_left, lhs, _right, rhs) = bound_pair(n, n);
+            let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+            let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+            let axes = || fixture_axes(lhs_axes, rhs_axes, output);
+
+            // Cold failure: nothing resident afterwards.
+            tenet_core::clear_structure_caches();
+            crate::tree_transform::take_completed_transformer_activity();
+            let mut context = failing_context(Some(0));
+            let error = tensorcontract_checked_generic(
+                &mut context,
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                axes(),
+                nout,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+                ),
+                "{name}"
+            );
+            assert_eq!(last_route(&context), route, "{name}");
+            assert_eq!(cache_entries(), (0, 0), "{name}");
+            assert_eq!(coefficient_admissions(), 0, "{name}");
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!(transformers.publications, 0, "{name}");
+
+            // Warm failure on the last job, after a success sized the scratch.
+            context.contract_backend_mut().fail_at = None;
+            let reference = tensorcontract_checked_generic(
+                &mut context,
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                axes(),
+                nout,
+            )
+            .unwrap()
+            .1;
+            let jobs = context.contract_backend_mut().jobs;
+            let resident = cache_entries();
+            let retained = context.retained_host_scratch_bytes();
+            let backend = context.contract_backend_mut();
+            backend.fail_at = Some(backend.jobs + (jobs - 1) / 2);
+            let error = tensorcontract_checked_generic(
+                &mut context,
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                axes(),
+                nout,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+                ),
+                "{name}"
+            );
+            assert_eq!(cache_entries(), resident, "{name}");
+            assert_eq!(context.retained_host_scratch_bytes(), retained, "{name}");
+            context.contract_backend_mut().fail_at = None;
+            let repeat = tensorcontract_checked_generic(
+                &mut context,
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                axes(),
+                nout,
+            )
+            .unwrap()
+            .1;
+            assert_eq!(
+                repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+    }
+
+    /// What: a successful canonical contraction commits its destination
+    /// once under the left provider and publishes nothing else.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_success_commits_once() {
+        if !isolated("checked_contraction_success_commits_once") {
+            return;
+        }
+        let (left, lhs, right, rhs) = bound_pair(1, 1);
+        tenet_core::clear_structure_caches();
+        let (output, _) = contract(
+            (&lhs, &vec![1.0; lhs.space().required_len().unwrap()]),
+            (&rhs, &vec![2.0; rhs.space().required_len().unwrap()]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(output.provider_arc(), &left));
+        assert_eq!(right.algebra_calls(), 0);
+        assert_eq!(cache_entries(), (1, 0));
+        // The commit guard's style is the last provider event: commit reuses
+        // the admitted identity (#2046).
+        assert_eq!(left.events.borrow().last(), Some(&Style));
+    }
+
+    /// What: the three-stage fixture's staged and output transforms build
+    /// their groups, then the core GEMM fails before the commit. Nothing is
+    /// published, so a retry replays the identical F/R provider ledger and
+    /// error. A committed call then publishes its groups, its intermediates
+    /// (cache 2, with the destination) and its three transformers (cache
+    /// 3); a repeat binds those transformers, so it makes no group lookup
+    /// and no F or R query and returns the same bits.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_publishes_composed_coefficients_only_after_its_commit() {
+        if !isolated("checked_contraction_publishes_composed_coefficients_only_after_its_commit") {
+            return;
+        }
+        let (left, lhs, right, rhs) = bound_pair(2, 2);
+        tenet_core::clear_structure_caches();
+        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
+        let axes = || fixture_axes(&[3, 1], &[0, 3], Some(&[2, 0, 3, 1]));
+        let run = |fail_at| {
+            let mut context = failing_context(fail_at);
+            let result = tensorcontract_checked_generic(
+                &mut context,
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                axes(),
+                2,
+            );
+            assert_eq!(last_route(&context), Route::DynamicTree);
+            result
+        };
+
+        let mut ledgers = Vec::new();
+        for _attempt in 0..2 {
+            left.reset();
+            right.reset();
+            crate::tree_transform::take_coefficient_group_activity();
+            let error = run(Some(0)).unwrap_err();
+            assert!(matches!(
+                error,
+                CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+            ));
+            let groups = crate::tree_transform::take_coefficient_group_activity();
+            assert!(groups.misses > 0);
+            assert_eq!((groups.hits, groups.publications), (0, 0));
+            assert_eq!(coefficient_admissions(), 0);
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!((transformers.builds, transformers.publications), (3, 0));
+            assert_eq!(cache_entries(), (0, 0));
+            assert!(left.count(Query::F) > 0 && left.count(Query::R) > 0);
+            // The F/R ledger: layout walks may publish pure-data layouts
+            // (#2030), so structural queries can shrink on a retry.
+            ledgers.push(
+                left.events
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .filter(|event| matches!(event, Event::Query(Query::F | Query::R)))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(ledgers[0], ledgers[1]);
+
+        left.reset();
+        let (first_space, first) = run(None).unwrap();
+        assert!(coefficient_admissions() > 0);
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.builds, transformers.publications), (3, 3));
+        // The destination and the three intermediates span three HomSpaces.
+        let committed = cache_entries();
+        assert_eq!(committed, (3, 3));
+        left.reset();
+        crate::tree_transform::take_coefficient_group_activity();
+        let (repeat_space, repeat) = run(None).unwrap();
+        let groups = crate::tree_transform::take_coefficient_group_activity();
+        assert_eq!((groups.hits, groups.misses, groups.publications), (0, 0, 0));
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!(
+            (
+                transformers.hits,
+                transformers.builds,
+                transformers.publications
+            ),
+            (3, 0, 0)
+        );
+        assert_eq!(cache_entries(), committed);
+        assert_eq!((left.count(Query::F), left.count(Query::R)), (0, 0));
+        assert_eq!(first_space.space(), repeat_space.space());
+        assert_eq!(
+            first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    /// What (#2063, F7 of the #1860 design review): the three-stage fixture
+    /// plans a `DynamicTree` artifact that stages the lhs, the rhs and the
+    /// core destination; two of its four committed spaces (the destination
+    /// and three intermediates) share a HomSpace, so within the first call
+    /// the later preview loses its admission to the earlier and its
+    /// transformer publishes under the winner's id: the second call builds
+    /// nothing.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn intermediates_sharing_a_homspace_converge_on_one_id_within_the_call() {
+        if !isolated("intermediates_sharing_a_homspace_converge_on_one_id_within_the_call") {
+            return;
+        }
+        let (_left, lhs, _right, rhs) = bound_pair(2, 2);
+        tenet_core::clear_structure_caches();
+        let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.75, -1.5);
+        let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 2.0);
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        let mut run = || {
+            let result = tensorcontract_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                fixture_axes(&[3, 1], &[0, 3], Some(&[2, 0, 3, 1])),
+                2,
+            )
+            .unwrap();
+            assert_eq!(last_route(&context), Route::DynamicTree);
+            result
+        };
+        crate::tree_transform::take_completed_transformer_activity();
+        let (cold_space, cold) = run();
+        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        assert_eq!((transformers.hits, transformers.builds), (0, 3));
+        let committed = cache_entries();
+        // Four committed spaces, three resident structures.
+        assert_eq!(committed.0, 3);
+        for _ in 0..3 {
+            let (space, data) = run();
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!(
+                (
+                    transformers.hits,
+                    transformers.builds,
+                    transformers.publications
+                ),
+                (3, 0, 0)
+            );
+            assert_eq!(cache_entries(), committed);
+            assert_eq!(space.space(), cold_space.space());
+            assert_eq!(
+                data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                cold.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// What (U15): general checked contraction with a fermionic or anyonic
+    /// provider returns the typed `Unsupported` after the pair admission and
+    /// one braiding read, before any structural query; canonical
+    /// composition crosses no legs and stays admitted.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_contraction_requires_bosonic_braiding_and_compose_does_not() {
+        for braiding in [BraidingStyleKind::Fermionic, BraidingStyleKind::Anyonic] {
+            let (left, lhs, right, rhs) = bound_pair(1, 1);
+            left.braiding.set(braiding);
+            right.braiding.set(braiding);
+            let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+            let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
+            let error = contract(
+                (&lhs, &lhs_data),
+                (&rhs, &rhs_data),
+                TensorContractSpec::with_default_output_order(&[1], &[0]),
+                1,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CheckedGenericPlanError::Operation(
+                        OperationError::UnsupportedTensorContractScope {
+                            message: "checked Generic contraction requires Bosonic braiding",
+                        }
+                    )
+                ),
+                "{braiding:?}: {error:?}"
+            );
+            assert_eq!(*left.events.borrow(), [Identity, Style, Braiding]);
+            assert_eq!(*right.events.borrow(), [Identity, Style]);
+            assert_eq!(left.algebra_calls(), 0);
+
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+            let (_, data) = tensorcompose_owned_checked_generic_in_context(
+                &mut context,
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+            )
+            .unwrap();
+            assert!(data.iter().any(|&value| value != 0.0), "{braiding:?}");
+        }
+    }
+
+    /// What: a staged space the planned route does not replay over, as a
+    /// declined `copyC` temporary would be, is dropped by the transaction's
+    /// commit unpublished; the temporary the CopyC route uses is committed.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_declined_staged_space_is_not_published() {
+        if !isolated("a_declined_staged_space_is_not_published") {
+            return;
+        }
+        let (_left, lhs, _right, rhs) = bound_pair(2, 2);
+        tenet_core::clear_structure_caches();
+        let provider = lhs.provider();
+        let authority = CheckedAuthority::contraction(&lhs).unwrap();
+        let (lhs_axes, rhs_axes, output) = ([2, 3], [0, 1], [1, 0, 2, 3]);
+        let destination = lhs
+            .prepare_final_homspace_generic_from_checked(provider, || {
+                FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                    provider,
+                    lhs.space().homspace(),
+                    rhs.space().homspace(),
+                    &lhs_axes,
+                    &rhs_axes,
+                    &output,
+                    2,
+                )
+                .map_err(CheckedGenericPlanError::from)
+            })
+            .unwrap();
+        let preview = destination.preview();
+        let mut txn = CheckedContractTxn::new();
+        let resolution = plan_contract_in::<HostEagerExecutor, CheckedGenericAdmissionMode, _>(
+            &mut txn,
+            PlanTarget::checked(authority, &preview),
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(rhs.space()),
+            (&lhs_axes, &rhs_axes, &output),
+            None,
+        )
+        .unwrap();
+        assert!(resolution.copy_c().is_some());
+        let declined = || {
+            lhs.prepare_final_homspace_generic_from_checked(provider, || {
+                lhs.space()
+                    .homspace()
+                    .try_permute_generic_checked(provider, &[0, 1, 2], &[3])
+                    .map_err(CheckedGenericPlanError::from)
+            })
+            .unwrap()
+        };
+        drop(txn.stage(declined()));
+        assert_eq!(cache_entries(), (0, 0));
+        txn.commit(
+            (
+                Arc::clone(preview.structure()),
+                Arc::clone(preview.structure()),
+            ),
+            &resolution,
+        );
+        // The temporary only. The declined space is dropped, and the output
+        // transformer stays unpublished: its destination (this test's
+        // uncommitted preview) is not canonical.
+        assert_eq!(cache_entries(), (1, 0));
+        // A complete-cache hit lends the one resident structure; a miss
+        // previews a fresh copy each time.
+        let resident = |prepared: PreparedCheckedGenericDynamicSpace| {
+            Arc::ptr_eq(&prepared.shared_structure(), &prepared.shared_structure())
+        };
+        assert!(!resident(declined()));
+        let temporary = lhs
+            .prepare_final_homspace_generic_from_checked(provider, || {
+                Ok::<_, CheckedGenericPlanError<SpyError>>(preview.homspace().clone())
+            })
+            .unwrap();
+        assert!(resident(temporary));
+    }
+
+    /// Resident `(cache 2, cache 3)` entries.
+    fn cache_entries() -> (usize, usize) {
+        let entries = |kind| tenet_core::structure_cache_info(kind).entries();
+        (
+            entries(tenet_core::StructureCacheKind::DegeneracyStructure),
+            entries(tenet_core::StructureCacheKind::CompletedTreeTransformer),
+        )
+    }
+
+    fn coefficient_admissions() -> u64 {
+        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::TreeTransformCoefficients)
+            .admissions()
     }
 
     #[test]
@@ -1423,202 +1754,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_preserves_late_provider_and_shape_errors() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_PROVIDER_FAILURE_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::preselected_checked_generic_preserves_late_provider_and_shape_errors",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated provider-failure test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        let (left, lhs, right, rhs) = bound_pair(2, 2);
-        tenet_core::clear_structure_caches();
-        let candidate = contracted_axis_order_candidates(&[3, 2], &[0, 1]).remove(0);
-        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
-        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
-
-        for query in [Query::Dual, Query::Channel, Query::N, Query::F, Query::R] {
-            left.reset();
-            right.reset();
-            left.fail.set(Some(query));
-            let error = tensorcontract_owned_checked_generic_preselected(
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
-                2,
-                &candidate,
-                FusionContractOrientation::LhsRhs,
-            )
-            .unwrap_err();
-            assert!(matches!(
-                error,
-                CheckedGenericPlanError::Provider(SpyError(actual)) if actual == query
-            ));
-            assert_eq!(right.algebra_calls(), 0);
-            assert_eq!(
-                tenet_core::structure_cache_info(
-                    tenet_core::StructureCacheKind::DegeneracyStructure
-                )
-                .entries(),
-                0
-            );
-        }
-
-        left.reset();
-        right.reset();
-        left.malformed.set(Some(Query::R));
-        let error = tensorcontract_owned_checked_generic_preselected(
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
-            2,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
-        ));
-        assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(
-            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
-                .entries(),
-            0
-        );
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_backend_failure_does_not_commit() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_FAILURE_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::preselected_checked_generic_backend_failure_does_not_commit",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated failure-atomicity test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        let (left, lhs, right, rhs) = bound_pair(1, 1);
-        tenet_core::clear_structure_caches();
-        let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
-        let mut transform_backend = DenseTreeTransformOperations::default();
-        let mut transform_workspaces = Default::default();
-        let mut fusion_workspace = FusionBlockContractWorkspace::default();
-        let error = tensorcontract_owned_checked_generic_preselected_with_core_gemm(
-            &lhs,
-            &vec![1.0; lhs.space().required_len().unwrap()],
-            &rhs,
-            &vec![2.0; rhs.space().required_len().unwrap()],
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-            &mut transform_backend,
-            &mut transform_workspaces,
-            &mut FailingGemm,
-            &mut fusion_workspace,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
-        ));
-        assert_eq!(right.algebra_calls(), 0);
-        assert!(left.algebra_calls() > 0);
-        // The layout walks succeeded before the backend failed, so their
-        // pure-data layouts may be published (#2030); no block structure is.
-        assert_eq!(
-            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
-                .entries(),
-            0
-        );
-        assert_eq!(
-            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
-                .entries(),
-            0
-        );
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn preselected_checked_generic_success_commits_once() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_SUCCESS_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::preselected_checked_generic_success_commits_once",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated commit test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        let (left, lhs, right, rhs) = bound_pair(1, 1);
-        tenet_core::clear_structure_caches();
-        let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
-        let (output, _) = tensorcontract_owned_checked_generic_preselected(
-            &lhs,
-            &vec![1.0; lhs.space().required_len().unwrap()],
-            &rhs,
-            &vec![2.0; rhs.space().required_len().unwrap()],
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-        )
-        .unwrap();
-
-        assert!(Arc::ptr_eq(output.provider_arc(), &left));
-        assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(
-            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
-                .entries(),
-            1
-        );
-        // The destination's one identity read and admission style, then the
-        // final guard's style: commit reuses the admitted identity (#2046).
-        assert!(left
-            .events
-            .borrow()
-            .ends_with(&[Event::Identity, Event::Style, Event::Style]));
-    }
-
     /// Rank-1 legs with the listed `(sector, degeneracy)` pairs on each side.
     fn homspace_with(codomain: &[(usize, usize)], domain: &[(usize, usize)]) -> FusionTreeHomSpace {
         let leg = |sectors: &[(usize, usize)]| {
@@ -1665,12 +1800,15 @@ mod tests {
         let rhs = bound_space(homspace_with(&[(1, 3)], &[(0, 1), (1, 2)]));
         let lhs_data = vec![one; lhs.space().required_len().unwrap()];
         let rhs_data = vec![two; rhs.space().required_len().unwrap()];
-        let (output, data) = tensorcontract_owned_checked_generic(
+        let mut context = TensorContractFusionExecutionContext::<D, RuleIdentity>::default();
+        let (output, data) = tensorcontract_owned_checked_generic_in_context(
+            &mut context,
             &lhs,
             &lhs_data,
             &rhs,
             &rhs_data,
             TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1,
         )
         .unwrap();
         let structure = output.space().structure();
@@ -1697,267 +1835,6 @@ mod tests {
             num_complex::Complex64::new(6.0, 0.0),
             |v| v.re.to_bits() == 0 && v.im.to_bits() == 0,
         );
-    }
-
-    struct FailingAtJob {
-        calls: usize,
-        fail_at: usize,
-    }
-
-    impl Rank2Gemm<f64> for FailingAtJob {
-        #[allow(clippy::too_many_arguments)]
-        fn matmul_rank2(
-            &mut self,
-            dst: &mut [f64],
-            _lhs: &[f64],
-            _rhs: &[f64],
-            _rows: usize,
-            _contracted: usize,
-            _cols: usize,
-            _alpha: f64,
-            _beta: f64,
-        ) -> Result<(), OperationError> {
-            let call = self.calls;
-            self.calls += 1;
-            if call == self.fail_at {
-                return Err(OperationError::StridedKernel {
-                    message: "injected failure on a later GEMM job".into(),
-                });
-            }
-            dst.fill(1.0);
-            Ok(())
-        }
-    }
-
-    /// Resident `(cache 2, cache 3)` entries.
-    fn cache_entries() -> (usize, usize) {
-        let entries = |kind| tenet_core::structure_cache_info(kind).entries();
-        (
-            entries(tenet_core::StructureCacheKind::DegeneracyStructure),
-            entries(tenet_core::StructureCacheKind::CompletedTreeTransformer),
-        )
-    }
-
-    fn coefficient_admissions() -> u64 {
-        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::TreeTransformCoefficients)
-            .admissions()
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn checked_contraction_publishes_composed_coefficients_only_after_its_commit() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_COEFFICIENTS_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::checked_contraction_publishes_composed_coefficients_only_after_its_commit",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated coefficient-publication test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        let (left, lhs, right, rhs) = bound_pair(2, 2);
-        tenet_core::clear_structure_caches();
-        let candidate = contracted_axis_order_candidates(&[3, 2], &[0, 1]).remove(0);
-        let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
-        let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
-        fn contract_with<G: Rank2Gemm<f64>>(
-            (lhs, lhs_data, rhs, rhs_data): (
-                &BoundDynamicFusionMapSpace<CheckedGenericSpy>,
-                &[f64],
-                &BoundDynamicFusionMapSpace<CheckedGenericSpy>,
-                &[f64],
-            ),
-            candidate: &ContractAxisOrderCandidate,
-            gemm: &mut G,
-        ) -> CheckedContractResult<CheckedGenericSpy, f64> {
-            let mut transform_backend = DenseTreeTransformOperations::default();
-            let mut transform_workspaces = Default::default();
-            let mut fusion_workspace = FusionBlockContractWorkspace::default();
-            tensorcontract_owned_checked_generic_preselected_with_core_gemm(
-                lhs,
-                lhs_data,
-                rhs,
-                rhs_data,
-                TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
-                2,
-                candidate,
-                FusionContractOrientation::RhsLhs,
-                &mut transform_backend,
-                &mut transform_workspaces,
-                gemm,
-                &mut fusion_workspace,
-            )
-        }
-        let operands = (&lhs, lhs_data.as_slice(), &rhs, rhs_data.as_slice());
-        let failing = || {
-            contract_with(
-                operands,
-                &candidate,
-                &mut FailingAtJob {
-                    calls: 0,
-                    fail_at: 0,
-                },
-            )
-        };
-        let succeeding = || {
-            let mut backend = DenseTreeTransformOperations::default();
-            let mut workspace = Default::default();
-            contract_with(
-                operands,
-                &candidate,
-                &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
-            )
-        };
-
-        // What: the staged and output transforms build their groups, then
-        // the core GEMM fails before the commit. Nothing is published, so a
-        // retry replays the identical F/R provider ledger and error.
-        let mut ledgers = Vec::new();
-        for _attempt in 0..2 {
-            left.reset();
-            right.reset();
-            crate::tree_transform::take_coefficient_group_activity();
-            let error = failing().unwrap_err();
-            assert!(matches!(
-                error,
-                CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
-            ));
-            let groups = crate::tree_transform::take_coefficient_group_activity();
-            assert!(groups.misses > 0);
-            assert_eq!((groups.hits, groups.publications), (0, 0));
-            assert_eq!(coefficient_admissions(), 0);
-            // Caches 2 and 3 too: a failed call commits no intermediate and
-            // publishes no transformer it built.
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
-            assert_eq!((transformers.builds, transformers.publications), (3, 0));
-            assert_eq!(cache_entries(), (0, 0));
-            assert!(left.count(Query::F) > 0 && left.count(Query::R) > 0);
-            // The F/R ledger: layout walks may publish pure-data layouts
-            // (#2030), so structural queries can shrink on a retry.
-            ledgers.push(
-                left.events
-                    .borrow()
-                    .iter()
-                    .copied()
-                    .filter(|event| matches!(event, Event::Query(Query::F | Query::R)))
-                    .collect::<Vec<_>>(),
-            );
-        }
-        assert_eq!(ledgers[0], ledgers[1]);
-
-        // What: a committed call publishes its groups, its three
-        // intermediates (cache 2, with the destination) and its three
-        // transformers (cache 3); a repeat binds those transformers, so it
-        // makes no group lookup and no F or R query and returns the same bits.
-        left.reset();
-        let (first_space, first) = succeeding().unwrap();
-        assert!(coefficient_admissions() > 0);
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
-        assert_eq!((transformers.builds, transformers.publications), (3, 3));
-        // The destination and the three intermediates span two HomSpaces.
-        let committed = cache_entries();
-        assert_eq!(committed, (2, 3));
-        left.reset();
-        crate::tree_transform::take_coefficient_group_activity();
-        let (repeat_space, repeat) = succeeding().unwrap();
-        let groups = crate::tree_transform::take_coefficient_group_activity();
-        assert_eq!((groups.hits, groups.misses, groups.publications), (0, 0, 0));
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
-        assert_eq!(
-            (
-                transformers.hits,
-                transformers.builds,
-                transformers.publications
-            ),
-            (3, 0, 0)
-        );
-        assert_eq!(cache_entries(), committed);
-        assert_eq!((left.count(Query::F), left.count(Query::R)), (0, 0));
-        assert_eq!(first_space.space(), repeat_space.space());
-        assert_eq!(
-            first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn intermediates_sharing_a_homspace_converge_on_one_id_within_the_call() {
-        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_SHARED_HOMSPACE_ISOLATED";
-        if std::env::var_os(ISOLATED).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "contract::checked_generic::tests::intermediates_sharing_a_homspace_converge_on_one_id_within_the_call",
-                ])
-                .env(ISOLATED, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated shared-HomSpace test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        // What: contracting the codomain leg of `V <- V` with the domain leg
-        // of another stages both operands to `V* <- V*`, which the core
-        // shares; the transposed output transforms from that core. Within
-        // the first call the rhs and core previews lose their admission to
-        // the staged lhs, so their transformers publish under its id: the
-        // second call builds nothing.
-        let (_left, lhs, _right, rhs) = bound_pair(1, 1);
-        tenet_core::clear_structure_caches();
-        let lhs_data = [1.5_f64];
-        let rhs_data = [-2.0];
-        let candidate = contracted_axis_order_candidates(&[0], &[1]).remove(0);
-        let run = || {
-            tensorcontract_owned_checked_generic_preselected(
-                &lhs,
-                &lhs_data,
-                &rhs,
-                &rhs_data,
-                TensorContractSpec::new(
-                    &[0],
-                    &[1],
-                    tenet_operations::OutputAxisOrder::Axes(&[1, 0]),
-                ),
-                1,
-                &candidate,
-                FusionContractOrientation::LhsRhs,
-            )
-            .unwrap()
-        };
-        crate::tree_transform::take_completed_transformer_activity();
-        let (cold_space, cold) = run();
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
-        assert_eq!((transformers.hits, transformers.builds), (0, 3));
-        let committed = cache_entries();
-        for _ in 0..3 {
-            let (space, data) = run();
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
-            assert_eq!(
-                (
-                    transformers.hits,
-                    transformers.builds,
-                    transformers.publications
-                ),
-                (3, 0, 0)
-            );
-            assert_eq!(cache_entries(), committed);
-            assert_eq!(space.space(), cold_space.space());
-            assert_eq!(data[0].to_bits(), cold[0].to_bits());
-        }
     }
 
     #[test]
@@ -2026,43 +1903,5 @@ mod tests {
         let transformers = crate::tree_transform::take_completed_transformer_activity();
         assert_eq!((transformers.hits, transformers.builds), (0, 3));
         assert_eq!(rebuilt, reference);
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn checked_generic_gemm_failure_on_a_later_job_returns_the_error_without_publishing() {
-        // What: with two coupled sectors the second GEMM job fails after the
-        // first wrote its block; the owner returns `Err` (no panic) and no
-        // output space or payload is returned.
-        let lhs = bound_space(homspace_with(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]));
-        let rhs = bound_space(homspace_with(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]));
-        let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
-        let mut transform_backend = DenseTreeTransformOperations::default();
-        let mut transform_workspaces = Default::default();
-        let mut fusion_workspace = FusionBlockContractWorkspace::default();
-        let mut gemm = FailingAtJob {
-            calls: 0,
-            fail_at: 1,
-        };
-        let error = tensorcontract_owned_checked_generic_preselected_with_core_gemm(
-            &lhs,
-            &vec![1.0; lhs.space().required_len().unwrap()],
-            &rhs,
-            &vec![2.0; rhs.space().required_len().unwrap()],
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1,
-            &candidate,
-            FusionContractOrientation::LhsRhs,
-            &mut transform_backend,
-            &mut transform_workspaces,
-            &mut gemm,
-            &mut fusion_workspace,
-        )
-        .unwrap_err();
-        assert_eq!(gemm.calls, 2);
-        assert!(matches!(
-            error,
-            CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
-        ));
     }
 }

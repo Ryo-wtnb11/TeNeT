@@ -37,7 +37,10 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         &DynamicFusionMapSpace,
     ) {
         (
-            &self.lhs_transform.transform_structure,
+            self.lhs_transform
+                .transform_structure
+                .as_ref()
+                .expect("test artifacts transform their lhs"),
             self.lhs_transform.space.structure(),
             &self.lhs_transform.replay_structure,
             &self.lhs_transform.space,
@@ -131,19 +134,25 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
 
     #[cfg(test)]
     pub(crate) fn twisted_transform_structure(&self) -> &TreeTransformStructure<C> {
-        if self.twist_lhs {
-            &self.lhs_transform.transform_structure
+        let entry = if self.twist_lhs {
+            &self.lhs_transform
         } else {
-            &self.rhs_transform.transform_structure
-        }
+            &self.rhs_transform
+        };
+        entry
+            .transform_structure
+            .as_ref()
+            .expect("a twisted source is transformed")
     }
 }
 
+/// The `DynamicTree` artifact of two stored operands in admission mode `M`,
+/// derived under `cache`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+pub(crate) fn compile_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
+    cache: &mut M::StructureCache,
     rule: &R,
-    layout_primer: LayoutKeyBuilder<R>,
+    authority: M::SpaceAuthority<'_>,
     plan: &FusionContractPlan,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
@@ -151,23 +160,20 @@ pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, cons
     rhs_space: &DynamicFusionMapSpace,
     rhs_structure: &Arc<BlockStructure>,
     profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
 where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
-    let lhs_transform = compile_transformed_source(
-        tree_context,
+    let lhs_transform = M::transformed_source(
+        cache,
+        authority,
         rule,
         lhs_space,
         lhs_structure,
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
-        layout_primer,
     )?;
     let lhs_layout_borrowable = source_is_borrowable_core_layout(
         lhs_space,
@@ -176,14 +182,14 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     );
-    let rhs_transform = compile_transformed_source(
-        tree_context,
+    let rhs_transform = M::transformed_source(
+        cache,
+        authority,
         rule,
         rhs_space,
         rhs_structure,
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
-        layout_primer,
     )?;
     let rhs_layout_borrowable = source_is_borrowable_core_layout(
         rhs_space,
@@ -192,18 +198,19 @@ where
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     );
-    let borrowing = resolve_source_borrowing(
+    let borrowing = resolve_source_borrowing_in::<M, R>(
         rule,
+        authority,
         plan,
         &lhs_transform.space,
         &rhs_transform.space,
         lhs_layout_borrowable,
         rhs_layout_borrowable,
     )?;
-    finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
-        tree_context,
+    finish_dynamic_tree_execution_artifact::<M, R, PROFILED>(
+        cache,
         rule,
-        layout_primer,
+        authority,
         plan,
         dst_space,
         lhs_transform,
@@ -214,16 +221,11 @@ where
     )
 }
 
+/// The multiplicity-free `DynamicTree` artifact over prelowered operands,
+/// a lazy adjoint read through its parent's storage.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
-    RuleKey,
-    BT,
-    R,
-    D,
-    C,
-    const PROFILED: bool,
->(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<R, const PROFILED: bool>(
+    planning: &mut TreeTransformPlanning,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -231,13 +233,10 @@ pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
     profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<R::Scalar>, OperationError>
 where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Scalar: DenseBlockScalar + MultiplicityFreePlanningScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
     debug_assert_eq!(
@@ -250,7 +249,7 @@ where
     );
     let lhs_direct = lhs.is_direct();
     let lhs_transform = compile_prelowered_source_transform(
-        tree_context,
+        planning,
         rule,
         lhs,
         plan.lhs_transform(),
@@ -266,7 +265,7 @@ where
         );
     let rhs_direct = rhs.is_direct();
     let rhs_transform = compile_prelowered_source_transform(
-        tree_context,
+        planning,
         rule,
         rhs,
         plan.rhs_transform(),
@@ -288,8 +287,8 @@ where
         lhs_layout_borrowable,
         rhs_layout_borrowable,
     )?;
-    let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
-        tree_context,
+    finish_dynamic_tree_execution_artifact::<MultiplicityFreeAdmissionMode, R, PROFILED>(
+        planning,
         rule,
         layout_primer,
         plan,
@@ -299,27 +298,23 @@ where
         borrowing,
         source_start,
         profile,
-    )?;
-    Ok(artifact)
+    )
 }
 
-pub(super) fn compile_prelowered_source_transform<RuleKey, BT, R, D, C>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+pub(super) fn compile_prelowered_source_transform<R>(
+    planning: &mut TreeTransformPlanning,
     rule: &R,
     source: &FusionOperandLayout<'_>,
     operation: &TreeTransformOperation,
     layout_primer: LayoutKeyBuilder<R>,
-) -> Result<DynamicFusionTransformedSourceEntry<C>, OperationError>
+) -> Result<DynamicFusionTransformedSourceEntry<R::Scalar>, OperationError>
 where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Scalar: MultiplicityFreePlanningScalar,
 {
     if source.is_direct() {
         compile_transformed_source(
-            tree_context,
+            planning,
             rule,
             source.storage_space(),
             source.storage_space().structure(),
@@ -328,30 +323,40 @@ where
             layout_primer,
         )
     } else {
-        compile_transformed_source_oriented(tree_context, rule, source, operation, layout_primer)
+        compile_transformed_source_oriented(planning, rule, source, operation, layout_primer)
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+fn finish_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
+    cache: &mut M::StructureCache,
     rule: &R,
-    layout_primer: LayoutKeyBuilder<R>,
+    authority: M::SpaceAuthority<'_>,
     plan: &FusionContractPlan,
     dst_space: &DynamicFusionMapSpace,
-    lhs_transform: DynamicFusionTransformedSourceEntry<C>,
-    rhs_transform: DynamicFusionTransformedSourceEntry<C>,
+    lhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
+    rhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
     borrowing: SourceBorrowing,
     source_start: Option<std::time::Instant>,
     mut profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
 where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
 {
+    // Why here, once: every executor reads a source's transformer only when
+    // that source is not borrowed (the route view, the CUDA admission).
+    for (entry, borrowed) in [
+        (&lhs_transform, borrowing.lhs_borrowed),
+        (&rhs_transform, borrowing.rhs_borrowed),
+    ] {
+        if !borrowed && entry.transform_structure.is_none() {
+            return Err(OperationError::InvalidArgument {
+                message: "a copied contraction source has no transformer",
+            }
+            .into());
+        }
+    }
     let physical_lhs_core_space = lhs_transform.space.clone();
     let physical_rhs_core_space = rhs_transform.space.clone();
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
@@ -365,18 +370,22 @@ where
     } else {
         &rhs_transform
     };
-    let source_twist_destination_scales = compile_contract_twist(
+    let source_twist_destination_scales = M::contract_twist_scales(
         rule,
+        authority,
         &twisted_transform.space,
         core_right_space.homspace(),
         borrowing.twist_lhs != reverse,
         plan.core_axes().as_spec().rhs_contracting_axes(),
     )?;
     if !source_twist_destination_scales.is_empty() {
-        validate_uniform_multi_scales(
-            &twisted_transform.transform_structure,
-            &source_twist_destination_scales,
-        )?;
+        let Some(structure) = &twisted_transform.transform_structure else {
+            return Err(OperationError::InvalidArgument {
+                message: "contraction twist must scale an owned source",
+            }
+            .into());
+        };
+        validate_uniform_multi_scales(structure, &source_twist_destination_scales)?;
     }
     if let Some(start) = source_start {
         profile
@@ -392,14 +401,14 @@ where
     let core_dst = if plan.output_transform_is_identity() {
         None
     } else {
-        Some(compile_core_dst(
-            tree_context,
+        Some(M::core_destination(
+            cache,
+            authority,
             rule,
             core_left_space,
             core_right_space,
             plan,
             dst_space,
-            layout_primer,
         )?)
     };
     if core_dst.is_some() {
@@ -417,7 +426,7 @@ where
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
     let block_plan_start = PROFILED.then(std::time::Instant::now);
-    let block_plan = super::resolution::compile_derived_core_plan(
+    let block_plan = M::derived_core_plan(
         rule,
         block_dst_space,
         core_left_space,
@@ -444,7 +453,8 @@ where
     if !source_twist_destination_scales.is_empty() && twisted_borrowed {
         return Err(OperationError::InvalidArgument {
             message: "contraction twist must scale an owned source",
-        });
+        }
+        .into());
     }
     Ok(DynamicTreeExecutionArtifact {
         orientation: plan.orientation(),

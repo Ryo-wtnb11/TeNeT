@@ -157,7 +157,7 @@ fn base_sequence(
     let (l, r) = (&artifact.lhs_transform, &artifact.rhs_transform);
     let lhs_core = source(
         &l.space,
-        &l.transform_structure,
+        l.transform_structure.as_ref().unwrap(),
         &l.replay_structure,
         artifact.lhs_borrowed,
         lhs,
@@ -165,7 +165,7 @@ fn base_sequence(
     );
     let rhs_core = source(
         &r.space,
-        &r.transform_structure,
+        r.transform_structure.as_ref().unwrap(),
         &r.replay_structure,
         artifact.rhs_borrowed,
         rhs,

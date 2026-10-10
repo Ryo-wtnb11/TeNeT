@@ -973,10 +973,14 @@ where
             orientation,
         )
         .unwrap();
-    let mut tree_context =
+    let mut tree_context: TreeTransformExecutionContext<D, RuleIdentity, f64, _> =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, D, _, false>(
-        &mut tree_context,
+    let artifact = compile_dynamic_tree_execution_artifact::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        false,
+    >(
+        tree_context.planning(),
         rule,
         crate::contract::encoded_layout_primer::<R>,
         &plan,

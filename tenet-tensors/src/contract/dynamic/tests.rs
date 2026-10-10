@@ -91,8 +91,12 @@ fn run_nan_poisoned_destination_case(
 
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, f64, _, false>(
-        &mut tree_context,
+    let artifact = compile_dynamic_tree_execution_artifact::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        false,
+    >(
+        tree_context.planning(),
         provider.as_ref(),
         encoded_layout_primer::<U1FusionRule>,
         &plan,
@@ -235,14 +239,18 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
         .unwrap();
     assert!(layout.is_direct());
     let operation = TreeTransformOperation::transpose([1], [0]);
-    let mut tree_context =
-        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+    let mut tree_context: TreeTransformExecutionContext<
+        f64,
+        <U1FusionRule as TreeTransformRuleCacheKey>::Key,
+        f64,
+        _,
+    > = TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     tenet_core::testing::mark_structure_canonical(source.structure());
-    let ordinary_cold = compile_transformed_source::<_, f64, _, _, _>(
-        &mut tree_context,
+    let ordinary_cold = compile_transformed_source(
+        tree_context.planning(),
         &rule,
         &source,
         source.structure(),
@@ -252,7 +260,7 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     )
     .unwrap();
     let direct_hit = compile_prelowered_source_transform(
-        &mut tree_context,
+        tree_context.planning(),
         &rule,
         &layout,
         &operation,
@@ -263,8 +271,16 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     // What: the Direct side of a mixed prelowered contraction uses the
     // ordinary parent-storage compiler and therefore the exact same entry.
     assert!(Arc::ptr_eq(
-        ordinary_cold.transform_structure.replay_core(),
-        direct_hit.transform_structure.replay_core()
+        ordinary_cold
+            .transform_structure
+            .as_ref()
+            .unwrap()
+            .replay_core(),
+        direct_hit
+            .transform_structure
+            .as_ref()
+            .unwrap()
+            .replay_core()
     ));
     assert_eq!(ordinary_cold.space, direct_hit.space);
 }
@@ -321,8 +337,8 @@ fn execution_layout_primer_runs_once_per_derivation() {
     reset_execution_primer_calls();
     let derive_source =
         |tree_context: &mut TreeTransformExecutionContext<f64, crate::RuleIdentity>| {
-            compile_transformed_source::<_, f64, _, _, _>(
-                tree_context,
+            compile_transformed_source(
+                tree_context.planning(),
                 &rule,
                 &source,
                 source.structure(),
@@ -341,16 +357,24 @@ fn execution_layout_primer_runs_once_per_derivation() {
     assert_eq!(execution_primer_calls(), 2);
     assert_eq!(cold_transform.space, warm_transform.space);
     assert!(Arc::ptr_eq(
-        cold_transform.transform_structure.replay_core(),
-        warm_transform.transform_structure.replay_core()
+        cold_transform
+            .transform_structure
+            .as_ref()
+            .unwrap()
+            .replay_core(),
+        warm_transform
+            .transform_structure
+            .as_ref()
+            .unwrap()
+            .replay_core()
     ));
 
     tenet_core::clear_structure_caches();
     reset_execution_primer_calls();
     let derive_core =
         |tree_context: &mut TreeTransformExecutionContext<f64, crate::RuleIdentity>| {
-            compile_core_dst::<_, f64, _, _, _>(
-                tree_context,
+            compile_core_dst(
+                tree_context.planning(),
                 &rule,
                 &source,
                 &scalar,

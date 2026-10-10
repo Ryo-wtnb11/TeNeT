@@ -1,6 +1,8 @@
 mod block_specs;
 mod plan;
 pub(crate) use plan::contracted_axis_order_candidates;
+#[cfg(test)]
+pub(crate) use plan::ContractAxisOrderCandidate;
 pub use plan::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use plan::{
@@ -9,9 +11,8 @@ pub(crate) use plan::{
     reset_candidate_score_calls, FusionContractCandidateFacts,
 };
 pub(crate) use plan::{
-    compile_tensorcontract_fusion_plan_from_ranks, contract_twist_on_physical_lhs,
-    min_dynamic_tree_materialized_elements, orient_fusion_contract_plan,
-    select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate, CACHED_ORIENTATIONS,
+    contract_twist_on_physical_lhs, min_dynamic_tree_materialized_elements,
+    select_complete_tensorcontract_fusion_plan, CACHED_ORIENTATIONS,
 };
 
 #[cfg(test)]

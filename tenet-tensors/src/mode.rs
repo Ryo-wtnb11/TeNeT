@@ -38,10 +38,15 @@ use tenet_core::{
 use tenet_operations::TreeTransformStructure;
 
 use crate::contract::{
-    compile_checked_generic_core_plan_general,
-    compile_fusion_block_contract_plan_prelowered_validated, core_homspace_matches,
-    rhs_contract_twist_factor_oriented, validate_fusion_contract_rule, DynamicFusionMapSpace,
-    FusionOperand, FusionOperandLayout, LayoutKeyBuilder, ValidatedCoreContract,
+    compile_checked_generic_core_plan_general, compile_contract_twist, compile_core_dst,
+    compile_derived_core_plan, compile_fusion_block_contract_plan_prelowered_validated,
+    compile_prelowered_dynamic_tree, compile_transformed_source, contract_axes_require_twist,
+    core_homspace_matches, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
+    rhs_contract_twist_factor_oriented, select_complete_tensorcontract_fusion_plan,
+    validate_fusion_contract_rule, CheckedAuthority, CheckedContractTxn, DynamicFusionCoreDstEntry,
+    DynamicFusionMapSpace, DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
+    FusionContractPlan, FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
+    ValidatedCoreContract, CHECKED_CONTRACTION_REQUIRES_BOSONIC, CHECKED_REQUIRES_DIRECT_OPERANDS,
 };
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound,
@@ -55,6 +60,8 @@ use crate::{
     TensorTraceFusionStructure, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::fusion_replay::MatrixOp;
+use tenet_operations::{TensorContractFusionProfile, TensorContractSpec};
 
 mod sealed {
     pub trait Sealed {}
@@ -208,7 +215,6 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     /// contraction call for checked Generic, whose pending coefficients
     /// publish only after that call's commit.
     type StructureCache;
-    type Structure;
     /// What the planner derives spaces under: the multiplicity-free layout
     /// primer, or the checked binding whose provider admission stages them.
     type SpaceAuthority<'a>: Copy
@@ -234,7 +240,7 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         operation: &TreeTransformOperation,
         dst: &Arc<BlockStructure>,
         src: TreeStructureSource<'_>,
-    ) -> Result<Self::Structure, Self::Error>;
+    ) -> Result<TreeTransformStructure<Self::Scalar>, Self::Error>;
 
     /// Checks that the destination and both operand spaces belong to `rule`
     /// before the planner reads sectors through it.
@@ -276,21 +282,122 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     ) -> Result<FusionBlockContractPlan<Self::Scalar>, Self::Error>
     where
         Self::Scalar: DenseBlockScalar;
+
+    /// The `DynamicTree` candidate of two direct operands: TensorKit
+    /// `contract!`'s `_contract_memcost` selection (`tensoroperations.jl:314-378`).
+    fn dynamic_tree_plan(
+        rule: &R,
+        authority: Self::SpaceAuthority<'_>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<FusionContractPlan, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
+
+    /// The core-layout space of one stored operand and its transformer:
+    /// TensorKit `blas_contract!`'s `copyA`/`copyB` (`tensoroperations.jl:411-433`).
+    #[allow(clippy::too_many_arguments)]
+    fn transformed_source(
+        cache: &mut Self::StructureCache,
+        authority: Self::SpaceAuthority<'_>,
+        rule: &R,
+        source: &DynamicFusionMapSpace,
+        source_structure: &Arc<BlockStructure>,
+        operation: &TreeTransformOperation,
+        source_conjugate: bool,
+    ) -> Result<DynamicFusionTransformedSourceEntry<Self::Scalar>, Self::Error>;
+
+    /// The core destination of a derived plan and the output transformer
+    /// from it into `output_dst`.
+    #[allow(clippy::too_many_arguments)]
+    fn core_destination(
+        cache: &mut Self::StructureCache,
+        authority: Self::SpaceAuthority<'_>,
+        rule: &R,
+        core_left: &DynamicFusionMapSpace,
+        core_right: &DynamicFusionMapSpace,
+        plan: &FusionContractPlan,
+        output_dst: &DynamicFusionMapSpace,
+    ) -> Result<DynamicFusionCoreDstEntry<Self::Scalar>, Self::Error>;
+
+    /// TensorKit `copyC`'s temporary (`tensoroperations.jl:436-446`): the
+    /// default-order contraction of `first` and `second`.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_c_temporary(
+        cache: &mut Self::StructureCache,
+        authority: Self::SpaceAuthority<'_>,
+        rule: &R,
+        first: FusionOperand<'_>,
+        second: FusionOperand<'_>,
+        first_axes: &[usize],
+        second_axes: &[usize],
+        open_axes: &[usize],
+        first_open: usize,
+    ) -> Result<DynamicFusionMapSpace, Self::Error>;
+
+    /// The fermionic contraction twist of one materialized core operand, as
+    /// `(block offset, θ_b ≠ 1)` sorted by offset.
+    fn contract_twist_scales(
+        rule: &R,
+        authority: Self::SpaceAuthority<'_>,
+        space: &DynamicFusionMapSpace,
+        core_right: &FusionTreeHomSpace,
+        space_is_core_left: bool,
+        rhs_contracting_axes: &[usize],
+    ) -> Result<Vec<(usize, Self::Scalar)>, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
+
+    /// The core plan of operands a [`FusionContractPlan`] derived, whose core
+    /// geometry holds by construction.
+    fn derived_core_plan(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        core_axes: TensorContractSpec<'_>,
+    ) -> Result<Arc<FusionBlockContractPlan<Self::Scalar>>, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
+
+    /// The `DynamicTree` artifact of a contraction with a lazy-adjoint
+    /// operand, whose sources are read through logical-key projections.
+    fn prelowered_dynamic_tree_artifact(
+        cache: &mut Self::StructureCache,
+        target: PlanTarget<'_, R, Self::SpaceAuthority<'_>>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        axes: TensorContractSpec<'_>,
+        profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<DynamicTreeExecutionArtifact<Self::Scalar>, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
+}
+
+/// The coefficient bounds of the multiplicity-free tree-structure cache.
+/// Why not `DenseBlockScalar`: the eager transform entries share the
+/// multiplicity-free [`PlanningAlgebra`] impl without it; only the core
+/// steps need it.
+pub(crate) trait MultiplicityFreePlanningScalar:
+    Copy + Add<Output = Self> + Mul<Output = Self> + Zero + Send + Sync + 'static
+{
+}
+
+impl<T> MultiplicityFreePlanningScalar for T where
+    T: Copy + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync + 'static
+{
 }
 
 impl<R> PlanningAlgebra<R> for MultiplicityFreeAdmissionMode
 where
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
-    // Why only the tree-structure cache's bounds here: the eager transform
-    // entries share this impl without `DenseBlockScalar`, which only
-    // `core_alpha` needs.
-    R::Scalar:
-        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync + 'static,
+    R::Scalar: MultiplicityFreePlanningScalar,
 {
     type Scalar = R::Scalar;
     type Error = OperationError;
     type StructureCache = TreeTransformPlanning;
-    type Structure = TreeTransformStructure<R::Scalar>;
     type SpaceAuthority<'a>
         = LayoutKeyBuilder<R>
     where
@@ -328,7 +435,7 @@ where
         operation: &TreeTransformOperation,
         dst: &Arc<BlockStructure>,
         src: TreeStructureSource<'_>,
-    ) -> Result<Self::Structure, OperationError> {
+    ) -> Result<TreeTransformStructure<R::Scalar>, OperationError> {
         match src {
             TreeStructureSource::Stored {
                 structure,
@@ -407,6 +514,128 @@ where
             &rhs.prepare(rule, primer)?,
         )
     }
+
+    fn dynamic_tree_plan(
+        rule: &R,
+        _primer: LayoutKeyBuilder<R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<FusionContractPlan, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
+        prepare_tensorcontract_fusion_plan_dyn_raw_canonical(rule, dst, lhs, rhs, axes)
+    }
+
+    fn transformed_source(
+        planning: &mut TreeTransformPlanning,
+        primer: LayoutKeyBuilder<R>,
+        rule: &R,
+        source: &DynamicFusionMapSpace,
+        source_structure: &Arc<BlockStructure>,
+        operation: &TreeTransformOperation,
+        source_conjugate: bool,
+    ) -> Result<DynamicFusionTransformedSourceEntry<R::Scalar>, OperationError> {
+        compile_transformed_source(
+            planning,
+            rule,
+            source,
+            source_structure,
+            operation,
+            source_conjugate,
+            primer,
+        )
+    }
+
+    fn core_destination(
+        planning: &mut TreeTransformPlanning,
+        primer: LayoutKeyBuilder<R>,
+        rule: &R,
+        core_left: &DynamicFusionMapSpace,
+        core_right: &DynamicFusionMapSpace,
+        plan: &FusionContractPlan,
+        output_dst: &DynamicFusionMapSpace,
+    ) -> Result<DynamicFusionCoreDstEntry<R::Scalar>, OperationError> {
+        compile_core_dst(
+            planning, rule, core_left, core_right, plan, output_dst, primer,
+        )
+    }
+
+    fn copy_c_temporary(
+        _planning: &mut TreeTransformPlanning,
+        primer: LayoutKeyBuilder<R>,
+        rule: &R,
+        first: FusionOperand<'_>,
+        second: FusionOperand<'_>,
+        first_axes: &[usize],
+        second_axes: &[usize],
+        open_axes: &[usize],
+        first_open: usize,
+    ) -> Result<DynamicFusionMapSpace, OperationError> {
+        DynamicFusionMapSpace::from_final_homspace_with_primer(
+            rule,
+            OrientedFusionTreeHomSpace::tensorcontract_homspace(
+                rule,
+                first.oriented_homspace(),
+                second.oriented_homspace(),
+                first_axes,
+                second_axes,
+                open_axes,
+                first_open,
+            )
+            .map_err(OperationError::from_core_preserving_context)?,
+            primer,
+        )
+    }
+
+    fn contract_twist_scales(
+        rule: &R,
+        _primer: LayoutKeyBuilder<R>,
+        space: &DynamicFusionMapSpace,
+        core_right: &FusionTreeHomSpace,
+        space_is_core_left: bool,
+        rhs_contracting_axes: &[usize],
+    ) -> Result<Vec<(usize, R::Scalar)>, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
+        compile_contract_twist(
+            rule,
+            space,
+            core_right,
+            space_is_core_left,
+            rhs_contracting_axes,
+        )
+    }
+
+    fn derived_core_plan(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        core_axes: TensorContractSpec<'_>,
+    ) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
+        compile_derived_core_plan(rule, dst, lhs, rhs, core_axes)
+    }
+
+    fn prelowered_dynamic_tree_artifact(
+        planning: &mut TreeTransformPlanning,
+        target: PlanTarget<'_, R>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        axes: TensorContractSpec<'_>,
+        profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<DynamicTreeExecutionArtifact<R::Scalar>, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
+        compile_prelowered_dynamic_tree(planning, target, lhs, rhs, axes, profile)
+    }
 }
 
 impl<R> PlanningAlgebra<R> for CheckedGenericAdmissionMode
@@ -415,14 +644,14 @@ where
 {
     type Scalar = f64;
     type Error = CheckedGenericPlanError<R::Error>;
-    /// The contraction call's composed coefficients and completed
-    /// transformers, flushed only after its commits.
-    type StructureCache = CheckedPendingCoefficients;
-    type Structure = TreeTransformStructure<f64>;
-    /// The binding whose provider admission stages derived spaces and
-    /// commits them after the call succeeds (#2063).
+    /// The contraction call's transaction: its staged intermediates,
+    /// composed coefficients and completed transformers, published only
+    /// after its commits (#2063).
+    type StructureCache = CheckedContractTxn;
+    /// The binding whose provider admission stages derived spaces, with the
+    /// entry's twist answer.
     type SpaceAuthority<'a>
-        = &'a BoundDynamicFusionMapSpace<R>
+        = CheckedAuthority<'a, R>
     where
         R: 'a;
 
@@ -437,21 +666,18 @@ where
         _row_trees: impl IntoIterator<Item = &'t FusionTreeKey>,
     ) -> Result<Option<f64>, Self::Error> {
         if rule.braiding_style() != BraidingStyleKind::Bosonic {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "checked Generic contraction requires Bosonic braiding",
-            }
-            .into());
+            return Err(CHECKED_CONTRACTION_REQUIRES_BOSONIC.into());
         }
         Ok(Some(f64::one()))
     }
 
     fn tree_structure(
-        coefficients: &mut CheckedPendingCoefficients,
+        txn: &mut CheckedContractTxn,
         rule: &R,
         operation: &TreeTransformOperation,
         dst: &Arc<BlockStructure>,
         src: TreeStructureSource<'_>,
-    ) -> Result<Self::Structure, Self::Error> {
+    ) -> Result<TreeTransformStructure<f64>, Self::Error> {
         let TreeStructureSource::Stored {
             structure,
             storage_conjugate,
@@ -498,6 +724,7 @@ where
             &source_proof,
             &reuse,
         )?;
+        let coefficients = txn.coefficients();
         coefficients.stage(reuse.into_pending());
         let built = plan.compile_shared_structures_with_storage_conjugation(
             Arc::clone(dst),
@@ -514,12 +741,12 @@ where
     /// admission already compared that identity once.
     fn validate_spaces(
         _rule: &R,
-        authority: &BoundDynamicFusionMapSpace<R>,
+        authority: CheckedAuthority<'_, R>,
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
     ) -> Result<(), Self::Error> {
-        let held = authority.space().admission().rule_identity();
+        let held = authority.binding.space().admission().rule_identity();
         for space in [dst, lhs, rhs] {
             match (space.admission().rule_identity(), held) {
                 (Some(expected), Some(actual)) if expected == actual => {}
@@ -536,19 +763,18 @@ where
         Ok(())
     }
 
-    /// Why an error rather than reading the braiding style here: a provider
-    /// read inside the planner would follow the destination's staging
-    /// (#2046). Checked composition, the one checked caller of the shared
-    /// core rung, never asks; checked contraction will carry its entry's U15
-    /// answer (#1860 leaf B). Until then a twisted question fails closed.
+    /// The entry's answer (U15): a contraction entry read the braiding style
+    /// once, before staging, and admits Bosonic only. Composition never
+    /// asks; asked without an answer, it fails closed.
     fn contract_twist_possible(
         _rule: &R,
-        _authority: &BoundDynamicFusionMapSpace<R>,
+        authority: CheckedAuthority<'_, R>,
     ) -> Result<bool, Self::Error> {
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: "checked Generic contraction requires Bosonic braiding",
+        if authority.twist_free() {
+            Ok(false)
+        } else {
+            Err(CHECKED_CONTRACTION_REQUIRES_BOSONIC.into())
         }
-        .into())
     }
 
     /// True by construction: the checked destination is derived from these
@@ -571,16 +797,13 @@ where
     /// are direct, so no logical-key projection is needed.
     fn irregular_core(
         _validated: ValidatedCoreContract<'_, R>,
-        _authority: &BoundDynamicFusionMapSpace<R>,
+        _authority: CheckedAuthority<'_, R>,
         dst: &DynamicFusionMapSpace,
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
     ) -> Result<FusionBlockContractPlan<f64>, Self::Error> {
         if lhs.storage_conjugate() || rhs.storage_conjugate() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "checked Generic contraction currently requires eager direct operands",
-            }
-            .into());
+            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
         }
         let (lhs, rhs) = (lhs.storage_space(), rhs.storage_space());
         Ok(compile_checked_generic_core_plan_general(
@@ -591,5 +814,215 @@ where
             rhs.structure(),
             rhs.nout(),
         )?)
+    }
+
+    /// The Complete scorer over the planner's previews: checked spaces are
+    /// always Complete, and the twist is the entry's answer, so no provider
+    /// is read.
+    fn dynamic_tree_plan(
+        rule: &R,
+        authority: CheckedAuthority<'_, R>,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<FusionContractPlan, Self::Error> {
+        select_complete_tensorcontract_fusion_plan(
+            |homspace, axes| {
+                contract_axes_require_twist::<Self, R>(rule, authority, homspace, axes)
+            },
+            dst,
+            lhs,
+            rhs,
+            axes,
+        )
+    }
+
+    /// An identity permutation borrows the source and derives nothing
+    /// (TensorKit `has_shared_permute`); any other stages its permuted
+    /// HomSpace under the authority, then its transformer.
+    fn transformed_source(
+        txn: &mut CheckedContractTxn,
+        authority: CheckedAuthority<'_, R>,
+        rule: &R,
+        source: &DynamicFusionMapSpace,
+        source_structure: &Arc<BlockStructure>,
+        operation: &TreeTransformOperation,
+        source_conjugate: bool,
+    ) -> Result<DynamicFusionTransformedSourceEntry<f64>, Self::Error> {
+        if source_conjugate {
+            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
+        }
+        if operation.is_identity_for(source.nout(), source.nin()) {
+            return Ok(DynamicFusionTransformedSourceEntry {
+                space: Arc::new(source.clone()),
+                replay_structure: Arc::clone(source_structure),
+                transform_structure: None,
+            });
+        }
+        let prepared = authority
+            .binding
+            .prepare_final_homspace_generic_from_checked(rule, || {
+                source
+                    .homspace()
+                    .try_permute_generic_checked(
+                        rule,
+                        operation.codomain_permutation(),
+                        operation.domain_permutation(),
+                    )
+                    .map_err(CheckedGenericPlanError::from)
+            })?;
+        let space = txn.stage(prepared);
+        let transform_structure = Self::tree_structure(
+            txn,
+            rule,
+            operation,
+            space.structure(),
+            TreeStructureSource::Stored {
+                structure: source_structure,
+                storage_conjugate: false,
+            },
+        )?;
+        Ok(DynamicFusionTransformedSourceEntry {
+            space: Arc::new(space),
+            replay_structure: Arc::clone(source_structure),
+            transform_structure: Some(transform_structure),
+        })
+    }
+
+    fn core_destination(
+        txn: &mut CheckedContractTxn,
+        authority: CheckedAuthority<'_, R>,
+        rule: &R,
+        core_left: &DynamicFusionMapSpace,
+        core_right: &DynamicFusionMapSpace,
+        plan: &FusionContractPlan,
+        output_dst: &DynamicFusionMapSpace,
+    ) -> Result<DynamicFusionCoreDstEntry<f64>, Self::Error> {
+        let core_axes = plan.core_axes().as_spec();
+        // The plan's core output is the default order (its source transforms
+        // place every open leg).
+        let open_axes: smallvec::SmallVec<[usize; 16]> =
+            (0..plan.core_dst_open_lhs_rank() + plan.core_dst_open_rhs_rank()).collect();
+        let prepared = authority
+            .binding
+            .prepare_final_homspace_generic_from_checked(rule, || {
+                FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                    rule,
+                    core_left.homspace(),
+                    core_right.homspace(),
+                    core_axes.lhs_contracting_axes(),
+                    core_axes.rhs_contracting_axes(),
+                    &open_axes,
+                    plan.core_dst_open_lhs_rank(),
+                )
+                .map_err(CheckedGenericPlanError::from)
+            })?;
+        let space = txn.stage(prepared);
+        let output_transform_structure = Self::tree_structure(
+            txn,
+            rule,
+            plan.output_transform(),
+            output_dst.structure(),
+            TreeStructureSource::Stored {
+                structure: space.structure(),
+                storage_conjugate: false,
+            },
+        )?;
+        Ok(DynamicFusionCoreDstEntry {
+            space: Arc::new(space),
+            output_transform_structure,
+        })
+    }
+
+    fn copy_c_temporary(
+        txn: &mut CheckedContractTxn,
+        authority: CheckedAuthority<'_, R>,
+        rule: &R,
+        first: FusionOperand<'_>,
+        second: FusionOperand<'_>,
+        first_axes: &[usize],
+        second_axes: &[usize],
+        open_axes: &[usize],
+        first_open: usize,
+    ) -> Result<DynamicFusionMapSpace, Self::Error> {
+        let prepared = authority
+            .binding
+            .prepare_final_homspace_generic_from_checked(rule, || {
+                OrientedFusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                    rule,
+                    first.oriented_homspace(),
+                    second.oriented_homspace(),
+                    first_axes,
+                    second_axes,
+                    open_axes,
+                    first_open,
+                )
+                .map_err(CheckedGenericPlanError::from)
+            })?;
+        Ok(txn.stage(prepared))
+    }
+
+    /// None: a twist is never possible once the entry admitted Bosonic
+    /// braiding (U15).
+    fn contract_twist_scales(
+        rule: &R,
+        authority: CheckedAuthority<'_, R>,
+        _space: &DynamicFusionMapSpace,
+        _core_right: &FusionTreeHomSpace,
+        _space_is_core_left: bool,
+        _rhs_contracting_axes: &[usize],
+    ) -> Result<Vec<(usize, f64)>, Self::Error> {
+        if Self::contract_twist_possible(rule, authority)? {
+            return Err(CHECKED_CONTRACTION_REQUIRES_BOSONIC.into());
+        }
+        Ok(Vec::new())
+    }
+
+    /// The canonical coupled-region plan, else the structure-only re-base
+    /// (the same builders as the core rung). Why no core-form check: the
+    /// planner derived these operands in core form from one validated
+    /// request.
+    fn derived_core_plan(
+        _rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        _core_axes: TensorContractSpec<'_>,
+    ) -> Result<Arc<FusionBlockContractPlan<f64>>, Self::Error> {
+        let plan =
+            match FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
+                dst.structure(),
+                dst.nout(),
+                lhs.structure(),
+                lhs.nout(),
+                rhs.structure(),
+                rhs.nout(),
+                MatrixOp::Identity,
+                MatrixOp::Identity,
+            )? {
+                Some(plan) => plan,
+                None => compile_checked_generic_core_plan_general(
+                    dst.structure(),
+                    dst.nout(),
+                    lhs.structure(),
+                    lhs.nout(),
+                    rhs.structure(),
+                    rhs.nout(),
+                )?,
+            };
+        Ok(Arc::new(plan))
+    }
+
+    /// Lazy checked adjoints are #1865.
+    fn prelowered_dynamic_tree_artifact(
+        _txn: &mut CheckedContractTxn,
+        _target: PlanTarget<'_, R, CheckedAuthority<'_, R>>,
+        _lhs: FusionOperand<'_>,
+        _rhs: FusionOperand<'_>,
+        _axes: TensorContractSpec<'_>,
+        _profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<DynamicTreeExecutionArtifact<f64>, Self::Error> {
+        Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into())
     }
 }
