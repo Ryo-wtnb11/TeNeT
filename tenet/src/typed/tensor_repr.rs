@@ -631,33 +631,6 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
-    #[cfg(feature = "cuda")]
-    pub(super) fn dense_adjoint_view(&self) -> Result<Self, Error>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
-    {
-        Ok(match &self.repr {
-            TypedTensorRepr::Owned(parent) => {
-                let logical_space = <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(&parent.space)?;
-                debug_assert!(Arc::ptr_eq(
-                    parent.space.provider_arc(),
-                    logical_space.provider_arc()
-                ));
-                Self {
-                    runtime: self.runtime.clone(),
-                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
-                        Arc::clone(parent),
-                        logical_space,
-                    ))),
-                }
-            }
-            TypedTensorRepr::Adjoint(view) => Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            },
-        })
-    }
-
     /// The provider allocation that owns this tensor's categorical layout.
     #[inline]
     pub fn provider(&self) -> &R {
@@ -766,8 +739,8 @@ impl<R, D> TensorMap<R, D> {
     }
 }
 
-// Generic over storage so the device `adjoint` applies the same compact rule
-// as Host (#1452) to any compact diagonal a device tensor holds.
+// Generic over storage: the one `adjoint` body applies the compact rule
+// (#1452) on every storage.
 impl<R, D, S> TensorMap<R, D, S> {
     pub(super) fn with_spectrum(
         &self,

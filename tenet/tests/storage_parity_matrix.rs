@@ -18,7 +18,9 @@
 //! `v d v^H` and the norm of `d`. `twist` runs on fermion parity (the U(1)
 //! and SU(2) fixtures are bosonic, where it is the identity) and is checked
 //! through `inner(t, twist(t))` against `Σ θ |t|²`, with θ = −1 for each
-//! listed leg whose uncoupled sector is odd.
+//! listed leg whose uncoupled sector is odd. `materialize` of a lazy
+//! adjoint is checked through `inner(a^H, b^H) = conj(inner(a, b))` over the
+//! written entries and the exact round trip `(a^H)^H = a`.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
@@ -808,4 +810,199 @@ fn twist_cuda_rows_match_host() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     rows::<f64>(&runtime, |x| x.re);
     rows::<Complex64>(&runtime, |x| x);
+}
+
+/// `adjoint`/`adjoint_view`/`materialize` Host rows on `[V, V*] <- [V]`:
+/// dense, lazy adjoint and compact operands. The lazy materialization is
+/// checked through `inner(a^H, b^H) = conj(inner(a, b))`, which pins the
+/// conjugation, and through the exact round trip `(a^H)^H = a`.
+macro_rules! materialize_rows {
+    ($runtime:expr, $leg:expr, $dim:expr, $D:ty, $conv:expr, $cuda:expr) => {{
+        let runtime: &Runtime = $runtime;
+        let leg = $leg;
+        let dual = leg.try_dual().unwrap();
+        let dim = $dim;
+        let conv = $conv;
+        let build = |seed: f64| {
+            let mut entries = Vec::new();
+            let t = TensorMap::<_, $D>::from_subblock_fn(
+                runtime,
+                [&leg, &dual],
+                [&leg],
+                |trees, ix| {
+                    let x: $D = conv(entry(seed, ix[0] + 2 * ix[1], ix[1], ix[2]));
+                    entries.push((dim(trees), Complex64::from(x)));
+                    x
+                },
+            )
+            .unwrap();
+            (t, entries)
+        };
+        let (a, a_entries) = build(0.9);
+        let (b, b_entries) = build(-0.4);
+
+        let owned = a.materialize().unwrap();
+        assert_eq!(owned.dense_data().unwrap(), a.dense_data().unwrap());
+        assert_ne!(
+            owned.dense_data().unwrap().as_ptr(),
+            a.dense_data().unwrap().as_ptr(),
+            "a fresh payload"
+        );
+
+        let lazy_a = a.adjoint().unwrap();
+        let lazy_b = b.adjoint().unwrap();
+        assert_eq!(lazy_a.codomain(), a.domain());
+        assert_eq!(lazy_a.domain(), a.codomain());
+        assert!(lazy_a.dense_data().is_err(), "dense adjoint is lazy");
+        assert_eq!(
+            lazy_a.adjoint().unwrap().dense_data().unwrap().as_ptr(),
+            a.dense_data().unwrap().as_ptr(),
+            "adjoint twice is the parent"
+        );
+        let (ma, mb) = (lazy_a.materialize().unwrap(), lazy_b.materialize().unwrap());
+        assert!(close(ma.norm(2.0).unwrap(), norm_oracle(&a_entries, 2.0)));
+        let expected = inner_oracle(&a_entries, &b_entries).conj();
+        assert!(close_c(ma.inner(&mb).unwrap().into(), expected));
+        assert_eq!(
+            ma.adjoint()
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            a.dense_data().unwrap(),
+            "exact round trip"
+        );
+
+        // The borrowed view is the operand `adjoint` gives.
+        assert_eq!(
+            a.compose(a.adjoint_view()).unwrap().dense_data().unwrap(),
+            a.compose(&lazy_a).unwrap().dense_data().unwrap()
+        );
+
+        // Compact: the adjoint stays compact; materialize densifies.
+        let spectra: Vec<_> = leg
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(s, sector)| SectorSpectrum {
+                sector,
+                values: (0..leg.degeneracy(&sector).unwrap())
+                    .map(|i| conv(entry(0.3, s, i, i)))
+                    .collect(),
+            })
+            .collect();
+        let compact = TensorMap::<_, $D>::diagonal(runtime, &leg, spectra).unwrap();
+        let adjoint = compact.adjoint().unwrap();
+        assert!(
+            adjoint.dense_data().is_err(),
+            "compact adjoint stays compact"
+        );
+        for t in [&compact, &adjoint] {
+            let dense = t.materialize().unwrap();
+            assert!(dense.dense_data().is_ok());
+            assert!(close(dense.norm(2.0).unwrap(), t.norm(2.0).unwrap()));
+        }
+        // `inner(d^H, d) = Σ x²` and `inner(d, d^H) = conj(Σ x²)`.
+        let forward: Complex64 = adjoint.inner(&compact).unwrap().into();
+        let backward: Complex64 = compact.inner(&adjoint).unwrap().into();
+        assert!(close_c(forward, backward.conj()));
+
+        $cuda(&a, &lazy_a);
+    }};
+}
+
+fn no_cuda_materialize<T>(_: &T, _: &T) {}
+
+/// The quantum dimension of an Abelian coupled sector.
+fn one<S>(_: &tenet::typed::BlockFusionTrees<S>) -> f64 {
+    1.0
+}
+
+#[test]
+fn materialize_host_rows_match_the_hand_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    materialize_rows!(&runtime, u1_leg(), one, f64, real, no_cuda_materialize);
+    materialize_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_materialize
+    );
+    materialize_rows!(&runtime, su2_leg(), su2_dim, f64, real, no_cuda_materialize);
+    materialize_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        no_cuda_materialize
+    );
+    materialize_rows!(&runtime, fz2_leg(), one, f64, real, no_cuda_materialize);
+    materialize_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_materialize
+    );
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn materialize_cuda_rows_match_host() {
+    use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+
+    fn device_rows<R, D>(a: &TensorMap<R, D>, lazy_a: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: tenet::typed::CudaPayload + std::fmt::Debug,
+    {
+        let a_dev = a.to_cuda().unwrap();
+        for (host, device) in [
+            (a.clone(), a_dev.clone()),
+            (lazy_a.clone(), a_dev.adjoint().unwrap()),
+            (
+                lazy_a.adjoint().unwrap(),
+                a_dev.adjoint().unwrap().adjoint().unwrap(),
+            ),
+        ] {
+            let device = device.materialize().unwrap().to_host().unwrap();
+            let host = host.materialize().unwrap();
+            assert_eq!(device.codomain(), host.codomain());
+            assert_eq!(device.domain(), host.domain());
+            assert_eq!(
+                device.dense_data().unwrap(),
+                host.dense_data().unwrap(),
+                "materialize moves bits, so exact"
+            );
+        }
+    }
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    materialize_rows!(&runtime, u1_leg(), one, f64, real, device_rows);
+    materialize_rows!(&runtime, u1_leg(), one, Complex64, complex, device_rows);
+    materialize_rows!(&runtime, su2_leg(), su2_dim, f64, real, device_rows);
+    materialize_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        device_rows
+    );
+    materialize_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
+    materialize_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
 }

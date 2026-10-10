@@ -318,6 +318,7 @@ const TYPED: &[&str] = &[
     "LegSelection",
     "LinalgBackend",
     "Lq",
+    "MaterializeExec",
     "MemberFault",
     "ComposePlan",
     "ContractPlan",

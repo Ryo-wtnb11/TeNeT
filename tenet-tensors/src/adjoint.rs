@@ -296,14 +296,96 @@ where
     Ok((adjoint_space, result))
 }
 
+/// The adjoint block map (#1839 item 4): for every block of an adjoint
+/// layout, the parent block it conjugate-transposes, or none for a block that
+/// reads as zero. Every storage materializes a lazy adjoint from this one map
+/// and owns only its lowering (Host: the `overwrite_owned_blocks` writer;
+/// CUDA: strided copies or an element table).
+///
+/// Borrowed and lookup-only, so building it allocates nothing. It does no
+/// provider work: callers derive and admit `adjoint_space` first.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct AdjointBlockMap<'a> {
+    parent: FusionOperand<'a>,
+    adjoint_space: &'a DynamicFusionMapSpace,
+}
+
+/// One adjoint block's parent block, read through
+/// [`AdjointBlockSource::stride`] in the adjoint block's axis order.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct AdjointBlockSource<'a> {
+    parent: FusionOperand<'a>,
+    block: tenet_core::BlockRef<'a>,
+}
+
+impl<'a> AdjointBlockMap<'a> {
+    /// The map from `space` (the parent) to its admitted `adjoint_space`.
+    pub fn new(space: &'a DynamicFusionMapSpace, adjoint_space: &'a DynamicFusionMapSpace) -> Self {
+        Self {
+            parent: FusionOperand::adjoint(space),
+            adjoint_space,
+        }
+    }
+
+    pub fn parent_space(&self) -> &'a DynamicFusionMapSpace {
+        self.parent.storage_space()
+    }
+
+    pub fn adjoint_space(&self) -> &'a DynamicFusionMapSpace {
+        self.adjoint_space
+    }
+
+    /// The parent block of adjoint `block`: [`None`] for a block without a
+    /// fusion-tree key (it has no adjoint source and reads as zero), and
+    /// [`OperationError::MissingBlockKey`] naming the swapped pair when the
+    /// parent lacks it.
+    pub fn source(
+        &self,
+        block: tenet_core::BlockRef<'_>,
+    ) -> Result<Option<AdjointBlockSource<'a>>, OperationError> {
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Ok(None);
+        };
+        let structure: &'a BlockStructure = self.parent_space().structure();
+        let source_index = structure
+            .find_block_index_by_adjoint_fusion_tree_pair(key)
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(BlockKey::FusionTree(FusionTreePairKey::pair(
+                    key.domain_tree().clone(),
+                    key.codomain_tree().clone(),
+                ))),
+            })?;
+        let block = structure
+            .block(source_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(Some(AdjointBlockSource {
+            parent: self.parent,
+            block,
+        }))
+    }
+}
+
+impl AdjointBlockSource<'_> {
+    pub fn offset(&self) -> usize {
+        self.block.offset()
+    }
+
+    /// The parent stride of adjoint axis `axis`.
+    pub fn stride(&self, axis: usize) -> Result<usize, OperationError> {
+        Ok(self.block.strides()[self.parent.storage_axis(axis)?])
+    }
+}
+
 /// Materialize adjoint payload bytes between an already-admitted source and
 /// destination layout.
 ///
 /// Per logical block this is one strided copy with conjugation from the
-/// parent block, read through [`FusionOperand::adjoint`] and the same owner
+/// parent block that [`AdjointBlockMap`] names, through the same owner
 /// (`overwrite_owned_blocks`, layout normalized and bounds checked once per
 /// block, output left unfilled when its blocks tile it) that the oriented add
-/// path uses, so the adjoint axis/key map lives in one place. The receiver-sized output copy itself is the retained limitation
+/// path uses. The receiver-sized output copy itself is the retained limitation
 /// recorded on #1177.
 ///
 /// This contains no provider work: callers must derive and admit
@@ -318,30 +400,16 @@ where
     D: AdjointScalar,
 {
     validate_adjoint_data_extent(space.required_len(), data.len())?;
-    let source = FusionOperand::adjoint(space);
-    let structure = space.structure();
+    let map = AdjointBlockMap::new(space, adjoint_space);
     overwrite_owned_blocks(adjoint_space.structure(), |block, writer| {
-        // Why not an error: a non-fusion-tree block has no adjoint source
-        // and reads as zero, as it did when the payload was zero-filled.
-        let BlockKey::FusionTree(key) = block.key() else {
+        let Some(source) = map.source(block)? else {
             return writer.zero();
         };
-        let source_index = structure
-            .find_block_index_by_adjoint_fusion_tree_pair(key)
-            .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(BlockKey::FusionTree(FusionTreePairKey::pair(
-                    key.domain_tree().clone(),
-                    key.codomain_tree().clone(),
-                ))),
-            })?;
-        let source_block = structure
-            .block(source_index)
-            .map_err(OperationError::from_core_preserving_context)?;
         writer.copy(
-            |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
+            |axis| source.stride(axis),
             data,
-            source_block.offset(),
-            source.storage_conjugate(),
+            source.offset(),
+            true,
             D::one(),
         )
     })

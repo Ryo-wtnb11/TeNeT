@@ -42,4 +42,15 @@ fn unified_methods_resolve_in_path_form() {
     // L5 twist.
     let twisted = TensorMap::twist(&t, &[0], Direction::Forward).unwrap();
     assert_eq!(twisted.dense_data().unwrap(), t.dense_data().unwrap());
+
+    // L6 adjoint/materialize.
+    let adjoint = TensorMap::adjoint(&t).unwrap();
+    let owned = TensorMap::materialize(&adjoint).unwrap();
+    assert_eq!(owned.dense_data().unwrap(), t.dense_data().unwrap());
+    let view = TensorMap::adjoint_view(&t);
+    // `t` is the identity, so `t ∘ t^H` is `t`.
+    assert_eq!(
+        t.compose(view).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
 }

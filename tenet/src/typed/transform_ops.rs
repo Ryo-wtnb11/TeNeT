@@ -1406,11 +1406,12 @@ pub(super) fn map_spectrum_dtype<A: Copy, B>(
         .collect()
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedAdjointSpace<R>,
     D: TensorScalar,
+    S: TypedStorage<R, D>,
 {
     /// Returns the adjoint `self^H`, swapping codomain and domain and
     /// conjugate-transposing every coupled-sector block.
@@ -1421,7 +1422,9 @@ where
     /// returns the original owned parent. Compact diagonal storage instead
     /// performs an owned `O(sum_c k_c)` conjugation and stays compact, as
     /// TensorKit `adjoint(::DiagonalTensorMap)` does.
-    /// Every result keeps the source's exact provider `Arc`.
+    /// Every result keeps the source's exact provider `Arc`, and a lazy view
+    /// shares the parent's storage, so on CUDA it reads the same device
+    /// allocation without any transfer.
     ///
     /// If layout construction or checked pivotal data fails, that layout or
     /// provider error is returned before a view is created. For real payloads
@@ -1469,7 +1472,7 @@ where
 
     /// Borrowed adjoint view: the operand [`Self::adjoint`] would give,
     /// passed without building it. See [`TensorRef`].
-    pub fn adjoint_view(&self) -> TensorRef<'_, R, D> {
+    pub fn adjoint_view(&self) -> TensorRef<'_, R, D, S> {
         TensorRef {
             base: self,
             adjoint: Some(|tensor| {

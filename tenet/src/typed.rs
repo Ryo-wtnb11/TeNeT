@@ -316,10 +316,6 @@ pub(crate) use numeric::{
 };
 use numeric::{max_abs, pinv_seam_error, scaled_power};
 mod block_layout;
-#[cfg(feature = "cuda")]
-use block_layout::for_each_block_element;
-#[cfg(feature = "cuda")]
-use block_layout::logical_adjoint_axis_to_parent;
 #[cfg(test)]
 pub(crate) use block_layout::CAT_PLAN_DECLINES_ORIENTED;
 pub(crate) use block_layout::{
@@ -425,6 +421,8 @@ mod cuda_transfer;
 #[cfg(feature = "cuda")]
 mod cuda_transform;
 mod inspection;
+#[doc(hidden)]
+pub use inspection::MaterializeExec;
 mod linear_ops;
 mod network_seam;
 #[cfg(test)]
