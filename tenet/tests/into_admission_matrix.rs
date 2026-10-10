@@ -46,6 +46,12 @@
 //! Bosonic Z3 × Z3 with an alternating-bicharacter `R` matches a hand
 //! calculation of the braiding phase; Fibonacci `contract_into` is refused
 //! like eager.
+//! Trace rows (leaf C): TensorKit `tensortrace!` → `trace_permute!`
+//! (`tensoroperations.jl:79, 208`) checks `space(tdst)` before the pair
+//! duality and runs `_trace_permute!` (L242, L267) with its `β` pass first.
+//! Owned and lazy-adjoint `[v, w'] ← [v, w']` sources × {both partial
+//! traces, the full trace}, and a compact diagonal traced over its only pair
+//! (its spectrum read from the compiled terms), in every real-symbol column.
 //!
 //! A compact cell's destination is dense: its off-diagonal entries are
 //! `β·dst₀` where the dense replay writes `α·(c·0) + β·dst₀`, so cells compare
@@ -55,7 +61,8 @@
 //! cells: checked Generic and complex-symbol rules × CUDA (the device
 //! transforms are bounded `MultiplicityFreeRigidSymbols<Scalar = f64>`,
 //! #1756), and a complex-symbol rule × lazy adjoint (`TypedAdjointSpace`
-//! needs `Scalar = f64`). Fibonacci `permute` is anyonic and asserted as the
+//! needs `Scalar = f64`), and a complex-symbol rule × trace (neither eager
+//! nor `_into` has one). Fibonacci `permute` is anyonic and asserted as the
 //! same rejection as eager.
 
 use std::collections::BTreeMap;
@@ -191,6 +198,10 @@ macro_rules! entries {
 /// `α·eager + β·dst₀` and keeps the destination's allocation and provider.
 macro_rules! cell {
     ($rows:expr, $runtime:expr, $source:expr, $key:expr, $d:ty, $name:expr,
+     |$t:ident| $eager:expr, |$dst:ident, $a:ident, $b:ident| $into:expr) => {
+        cell!(dense; $rows, $runtime, $source, $key, $d, $name, |$t| $eager, |$dst, $a, $b| $into)
+    };
+    ($kind:ident; $rows:expr, $runtime:expr, $source:expr, $key:expr, $d:ty, $name:expr,
      |$t:ident| $eager:expr, |$dst:ident, $a:ident, $b:ident| $into:expr) => {{
         let cold = $source.dense_data().is_err();
         let eager = {
@@ -203,6 +214,7 @@ macro_rules! cell {
             $eager.unwrap()
         };
         beta_cells!(
+            $kind,
             $rows,
             $runtime,
             eager,
@@ -235,6 +247,7 @@ macro_rules! contract_cell {
             .contract(&$rhs.materialize().unwrap(), &spec)
             .unwrap();
         beta_cells!(
+            dense,
             $rows,
             $runtime,
             eager,
@@ -253,11 +266,30 @@ macro_rules! contract_cell {
     }};
 }
 
+/// A fresh `dst₀` on `$eager`'s legs filled by `$seed`. `traced` also
+/// takes a rank-0 (full-trace) result, which has no leg for
+/// `from_subblock_fn`: its one entry is seeded by scaling eager's own into a
+/// fresh payload (`scale` needs a real-symbol rule, so `dense` cells, which
+/// include complex-symbol rules, never name it).
+macro_rules! seeded_destination {
+    (dense, $runtime:expr, $eager:expr, $seed:expr) => {
+        TensorMap::from_subblock_fn($runtime, &$eager.codomain(), &$eager.domain(), $seed).unwrap()
+    };
+    (traced, $runtime:expr, $eager:expr, $seed:expr) => {
+        if $eager.rank() == 0 {
+            let (trees, _) = $eager.subblocks().unwrap().next().unwrap();
+            $eager.scale($seed(&trees, &[])).unwrap()
+        } else {
+            seeded_destination!(dense, $runtime, $eager, $seed)
+        }
+    };
+}
+
 /// The `β` loop of a cell: `eager` matches the reference-step `oracle`,
 /// then `$into` on a fresh `dst₀` equals `α·eager + β·dst₀`, keeps the
 /// destination's allocation and provider, and `$cold` holds.
 macro_rules! beta_cells {
-    ($rows:expr, $runtime:expr, $eager:expr, $oracle:expr, $key:expr, $d:ty, $name:expr,
+    ($kind:ident, $rows:expr, $runtime:expr, $eager:expr, $oracle:expr, $key:expr, $d:ty, $name:expr,
      |$dst:ident, $a:ident, $b:ident| $into:expr, $cold:expr) => {{
         let key = $key;
         let eager = $eager;
@@ -268,19 +300,15 @@ macro_rules! beta_cells {
             assert!(close(e, o), "{} [{i}]: eager {e} vs oracle {o}", $name);
         }
         for beta in BETAS {
-            let mut destination: TensorMap<_, $d> = TensorMap::from_subblock_fn(
-                $runtime,
-                &eager.codomain(),
-                &eager.domain(),
-                |trees, index| {
-                    if beta == 0.0 {
-                        <$d>::lift(f64::NAN)
-                    } else {
-                        <$d>::lift(value(&format!("dst{}", key(trees)), index))
-                    }
-                },
-            )
-            .unwrap();
+            let seed = |trees: &BlockFusionTrees<_>, index: &[usize]| {
+                if beta == 0.0 {
+                    <$d>::lift(f64::NAN)
+                } else {
+                    <$d>::lift(value(&format!("dst{}", key(trees)), index))
+                }
+            };
+            let mut destination: TensorMap<_, $d> =
+                seeded_destination!($kind, $runtime, eager, seed);
             let before = dense(&destination);
             let payload = destination.dense_data().unwrap().as_ptr();
             let provider = destination.provider() as *const _;
@@ -873,6 +901,305 @@ fn lazy_adjoint_transform_into_allocates_no_parent_sized_buffer() {
         lazy_into_allocations!(source!(&runtime, v, v, |t: &BlockFusionTrees<Vec<i64>>| {
             twice(t, sun_spin)
         }));
+    }
+}
+
+/// `(name, pairs)` of every trace of `[v, w'] ← [v, w']`: the two partial
+/// traces and the full trace to a scalar.
+const TRACE_PAIRS: [(&str, &[(usize, usize)]); 3] = [
+    ("trace (0, 2)", &[(0, 2)]),
+    ("trace (1, 3)", &[(1, 3)]),
+    ("full trace", &[(0, 2), (1, 3)]),
+];
+
+/// Every `trace_pairs_into` of a rank-(2, 2) `$source`.
+macro_rules! trace_cells {
+    ($runtime:expr, $source:expr, $key:expr, $d:ty) => {{
+        let mut rows: Rows = Vec::new();
+        for (name, pairs) in TRACE_PAIRS {
+            cell!(
+                traced;
+                rows,
+                $runtime,
+                $source,
+                $key,
+                $d,
+                name,
+                |t| t.trace_pairs(pairs),
+                |d, a, b| $source.trace_pairs_into(pairs, d, a, b)
+            );
+        }
+        rows
+    }};
+}
+
+/// The trace rows of both lanes: `[owned f64, owned c64, lazy f64, lazy
+/// c64, compact f64, compact c64]`; the compact source is a diagonal on
+/// `$v` traced over its only pair.
+macro_rules! trace_lanes {
+    ($runtime:expr, $v:expr, $w:expr, $sectors:expr, $name:expr, $key:expr) => {{
+        let c64 = || {
+            source!($runtime, $v, $w, $key)
+                .convert::<Complex64>()
+                .scale(Complex64::new(1.0, 2.0))
+                .unwrap()
+        };
+        let owned_f64 = {
+            let source = source!($runtime, $v, $w, $key);
+            trace_cells!($runtime, source, $key, f64)
+        };
+        let owned_c64 = {
+            let source = c64();
+            trace_cells!($runtime, source, $key, Complex64)
+        };
+        let lazy_f64 = {
+            let source = source!($runtime, $v, $w, $key).adjoint().unwrap();
+            trace_cells!($runtime, source, $key, f64)
+        };
+        let lazy_c64 = {
+            let source = c64().adjoint().unwrap();
+            trace_cells!($runtime, source, $key, Complex64)
+        };
+        let compact_f64 = {
+            let mut rows: Rows = Vec::new();
+            let bond = bond!($runtime, $v, $sectors, $name, f64, |x: f64| x);
+            cell!(
+                traced;
+                rows,
+                $runtime,
+                bond,
+                $key,
+                f64,
+                "compact full trace",
+                |t| t.trace_pairs(&[(0, 1)]),
+                |d, a, b| bond.trace_pairs_into(&[(0, 1)], d, a, b)
+            );
+            rows
+        };
+        let compact_c64 = {
+            let mut rows: Rows = Vec::new();
+            let bond = bond!($runtime, $v, $sectors, $name, Complex64, |x: f64| {
+                Complex64::new(x, 2.0 * x)
+            });
+            cell!(
+                traced;
+                rows,
+                $runtime,
+                bond,
+                $key,
+                Complex64,
+                "compact full trace",
+                |t| t.trace_pairs(&[(0, 1)]),
+                |d, a, b| bond.trace_pairs_into(&[(0, 1)], d, a, b)
+            );
+            rows
+        };
+        [owned_f64, owned_c64, lazy_f64, lazy_c64, compact_f64, compact_c64]
+    }};
+}
+
+#[test]
+fn multiplicity_free_real_symbol_trace_pairs_into_is_alpha_eager_plus_beta_destination() {
+    let runtime = host_runtime();
+    let (v, w) = u1_legs();
+    trace_lanes!(
+        &runtime,
+        v,
+        w,
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2)
+        ],
+        |s: &U1Irrep| format!("{s:?}"),
+        debug_key::<U1Irrep>
+    );
+    // Fermion parity with a dual leg: the supertrace twist.
+    let (v, w) = fz2_legs();
+    trace_lanes!(
+        &runtime,
+        v,
+        w,
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+        |s: &Z2Irrep| format!("{s:?}"),
+        debug_key::<Z2Irrep>
+    );
+    let v = su2_leg();
+    trace_lanes!(
+        &runtime,
+        v,
+        v,
+        SU2_SECTORS.map(|(s, k)| (SU2Irrep::from_twice_spin(s), k)),
+        |s: &SU2Irrep| su2_spin(s).to_string(),
+        |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin)
+    );
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_trace_pairs_into_is_alpha_eager_plus_beta_destination_and_matches_multiplicity_free(
+) {
+    let runtime = host_runtime();
+    let mf = su2_leg();
+    let checked = sun2_leg();
+    let mf_rows = trace_lanes!(
+        &runtime,
+        mf,
+        mf,
+        SU2_SECTORS.map(|(s, k)| (SU2Irrep::from_twice_spin(s), k)),
+        |s: &SU2Irrep| su2_spin(s).to_string(),
+        |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin)
+    );
+    let checked_rows = trace_lanes!(
+        &runtime,
+        checked,
+        checked,
+        SU2_SECTORS.map(|(s, k)| (vec![s as i64], k)),
+        |s: &Vec<i64>| sun_spin(s).to_string(),
+        |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin)
+    );
+    for (mf, checked) in mf_rows.into_iter().zip(checked_rows) {
+        assert_eq!(mf.len(), checked.len());
+        for ((name, mf), (_, checked)) in mf.iter().zip(&checked) {
+            assert_eq!(
+                mf.keys().collect::<Vec<_>>(),
+                checked.keys().collect::<Vec<_>>(),
+                "{name}"
+            );
+            for (key, mf) in mf {
+                for (&c, &m) in checked[key].iter().zip(mf) {
+                    assert!(
+                        close(c, m),
+                        "{name} {key}: checked {c} vs multiplicity-free {m}"
+                    );
+                }
+            }
+        }
+    }
+
+    // SU(3): `8 ⊗ 8 → 8` carries outer multiplicity two.
+    let v = GradedSpace::try_new(
+        Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap()),
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    trace_lanes!(
+        &runtime,
+        v,
+        v,
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+        |s: &Vec<i64>| format!("{s:?}"),
+        debug_key::<Vec<i64>>
+    );
+}
+
+/// A warm `trace_pairs_into` writes the caller's buffer: no allocation as
+/// large as the result (checked, against eager), as the lazy source's parent
+/// payload (read through it), or as a compact source's dense image (its
+/// spectrum is read from the compiled terms).
+#[test]
+fn trace_pairs_into_allocates_no_result_parent_or_dense_compact_buffer() {
+    let _serial = counting_alloc::serial();
+    let runtime = host_runtime();
+    let rule = Arc::new(U1FusionRule);
+    let v = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (U1Irrep::new(-1), 6),
+            (U1Irrep::new(0), 8),
+            (U1Irrep::new(1), 6),
+        ],
+    )
+    .unwrap();
+    macro_rules! lazy_trace {
+        ($parent:expr) => {{
+            let parent = $parent;
+            let lazy = parent.adjoint().unwrap();
+            let mut destination = lazy.trace_pairs(&[(0, 2)]).unwrap();
+            let payload_bytes = std::mem::size_of_val(parent.dense_data().unwrap());
+            for _ in 0..2 {
+                lazy.trace_pairs_into(&[(0, 2)], &mut destination, 1.0, 0.5)
+                    .unwrap();
+            }
+            let (_, into) = counting_alloc::measure_matching(payload_bytes..=usize::MAX, || {
+                lazy.trace_pairs_into(&[(0, 2)], &mut destination, 1.0, 0.5)
+                    .unwrap()
+            });
+            assert_eq!(into.matched_calls, 0, "{into:?}, payload {payload_bytes}");
+            assert!(lazy.dense_data().is_err(), "the lazy source materialized");
+        }};
+    }
+    lazy_trace!(source!(&runtime, v, v, debug_key::<U1Irrep>));
+
+    // One sector of degeneracy k = 128: the dense image is P = k² entries.
+    let k = 128;
+    let leg = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), k)]).unwrap();
+    let bond = bond!(
+        &runtime,
+        leg,
+        [(U1Irrep::new(0), k)],
+        |s: &U1Irrep| format!("{s:?}"),
+        f64,
+        |x: f64| x
+    );
+    let mut destination = bond.trace_pairs(&[(0, 1)]).unwrap();
+    let p_bytes = k * k * std::mem::size_of::<f64>();
+    for _ in 0..2 {
+        bond.trace_pairs_into(&[(0, 1)], &mut destination, 1.0, 0.5)
+            .unwrap();
+    }
+    let (_, into) = counting_alloc::measure_matching(p_bytes..=usize::MAX, || {
+        bond.trace_pairs_into(&[(0, 1)], &mut destination, 1.0, 0.5)
+            .unwrap()
+    });
+    assert_eq!(into.matched_calls, 0, "{into:?}, P {p_bytes}");
+    assert!(into.bytes < p_bytes as u64, "{into:?}, P {p_bytes}");
+    assert!(
+        bond.dense_data().is_err(),
+        "the compact source materialized"
+    );
+    // The control: its dense twin's trace reads the P-sized payload, which
+    // the probe would see if the compact read declined.
+    let dense_twin = bond.materialize().unwrap();
+    let (_, control) = counting_alloc::measure_matching(p_bytes..=usize::MAX, || {
+        drop(bond.materialize().unwrap());
+        dense_twin
+            .trace_pairs_into(&[(0, 1)], &mut destination, 1.0, 0.5)
+            .unwrap()
+    });
+    assert!(control.matched_calls >= 1, "{control:?}");
+
+    #[cfg(feature = "racah-generated")]
+    {
+        let v = sun2_leg();
+        let key = |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin);
+        lazy_trace!(source!(&runtime, v, v, key));
+        // A large untraced leg, so the result payload dominates the staging.
+        let w = GradedSpace::try_new(
+            Arc::new(tenet::sector::SUNFusionRule::new(2).unwrap()),
+            [(vec![0i64], 24), (vec![1], 24), (vec![2], 24)],
+        )
+        .unwrap();
+        let source = source!(&runtime, v, w, key);
+        let mut destination = source.trace_pairs(&[(0, 2)]).unwrap();
+        let payload_bytes = std::mem::size_of_val(destination.dense_data().unwrap());
+        for _ in 0..2 {
+            drop(source.trace_pairs(&[(0, 2)]).unwrap());
+            source
+                .trace_pairs_into(&[(0, 2)], &mut destination, 1.0, 0.5)
+                .unwrap();
+        }
+        let (_, eager) = counting_alloc::measure(|| drop(source.trace_pairs(&[(0, 2)]).unwrap()));
+        let (_, into) = counting_alloc::measure_matching(payload_bytes..=usize::MAX, || {
+            source
+                .trace_pairs_into(&[(0, 2)], &mut destination, 1.0, 0.5)
+                .unwrap()
+        });
+        assert_eq!(into.matched_calls, 0, "{into:?}");
+        assert!(
+            eager.bytes >= into.bytes + payload_bytes as u64,
+            "eager {eager:?} vs into {into:?}, payload {payload_bytes}"
+        );
     }
 }
 

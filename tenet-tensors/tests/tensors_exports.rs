@@ -328,6 +328,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "tensortrace_stage_checked_generic",
         "tensortrace_multiplicity_free_in",
         "tensortrace_checked_generic_in",
+        "tensortrace_into_multiplicity_free_in",
+        "tensortrace_into_checked_generic_in",
         "TensorTraceStage",
         "TracePreflight",
         "tensortrace_fusion_dyn_structure_into_raw",

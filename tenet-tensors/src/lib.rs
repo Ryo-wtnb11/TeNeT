@@ -157,6 +157,7 @@ pub use tensortrace::{
     tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_owned_generic_checked,
     tensortrace_fusion_dyn_preflight_checked, tensortrace_fusion_dyn_preflight_generic_checked,
     tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
+    tensortrace_into_checked_generic_in, tensortrace_into_multiplicity_free_in,
     tensortrace_multiplicity_free_in, tensortrace_stage_checked_generic,
     tensortrace_stage_multiplicity_free, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStage, TensorTraceStructure,
