@@ -161,7 +161,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let mut tree_context =
+    let mut tree_context: TreeTransformExecutionContext<D, R::Key, f64, _> =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
@@ -179,8 +179,12 @@ where
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
-        &mut tree_context,
+    let artifact = compile_dynamic_tree_execution_artifact::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        false,
+    >(
+        tree_context.planning(),
         rule,
         encoded_layout_primer::<R>,
         plan,
@@ -247,7 +251,7 @@ where
         + TreeTransformRuleCacheKey<Key = crate::RuleIdentity>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let mut tree_context =
+    let mut tree_context: TreeTransformExecutionContext<D, crate::RuleIdentity, f64, _> =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
@@ -256,8 +260,8 @@ where
     let layout_primer = encoded_layout_primer::<R>;
     let lhs_layout = lhs.prepare(rule, layout_primer)?;
     let rhs_layout = rhs.prepare(rule, layout_primer)?;
-    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
-        &mut tree_context,
+    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, false>(
+        tree_context.planning(),
         rule,
         layout_primer,
         plan,
@@ -316,8 +320,12 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
-        tree_context,
+    let artifact = compile_dynamic_tree_execution_artifact::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        false,
+    >(
+        tree_context.planning(),
         rule,
         layout_primer,
         plan,

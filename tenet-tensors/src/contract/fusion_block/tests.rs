@@ -1187,7 +1187,26 @@ fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
             .map(|index| ((index * 7 + 3) % 13) as f64 * 0.25 - 1.5 + seed)
             .collect::<Vec<_>>()
     };
-    let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]);
+    // The checked core plan of `lhs[2, 3] . rhs[0, 1]` (core form): the
+    // coupled-region plan, else the general per-subblock builder.
+    let checked_core = |dst: &Arc<tenet_core::BlockStructure>,
+                        lhs: &Arc<tenet_core::BlockStructure>,
+                        rhs: &Arc<tenet_core::BlockStructure>| {
+        FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
+            dst,
+            2,
+            lhs,
+            2,
+            rhs,
+            2,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+        .unwrap()
+        .unwrap_or_else(|| {
+            compile_checked_generic_core_plan_general(dst, 2, lhs, 2, rhs, 2).unwrap()
+        })
+    };
 
     let dst = space([full(false), full(true)], [full(false), full(false)]);
     let cases = [
@@ -1206,16 +1225,7 @@ fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
         let (lhs_data, rhs_data) = (values(lhs, 0.0), values(rhs, 0.5));
         let init = values(&dst, 2.0);
         reset_layout_lookups();
-        let region = compile_checked_generic_core_plan(
-            dst.structure(),
-            2,
-            lhs.structure(),
-            2,
-            rhs.structure(),
-            2,
-            axes,
-        )
-        .unwrap();
+        let region = checked_core(dst.structure(), lhs.structure(), rhs.structure());
         // What: canonical staged structures never build per-subblock layouts.
         assert_eq!(layout_compiles(), 0, "{name}");
         let general = compile_checked_generic_core_plan_general(
@@ -1305,9 +1315,7 @@ fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
     let rhs_data = values(rhs, 0.5);
     let init = values(&dst, 2.0);
     reset_layout_lookups();
-    let fallback =
-        compile_checked_generic_core_plan(dst.structure(), 2, &packed, 2, rhs.structure(), 2, axes)
-            .unwrap();
+    let fallback = checked_core(dst.structure(), &packed, rhs.structure());
     assert!(layout_compiles() > 0);
     let got = run_core_plan(
         &fallback,

@@ -332,67 +332,6 @@ where
     )
 }
 
-/// Compiles the coefficient-free Generic core GEMM against staged,
-/// uncommitted structures. The core form crosses no legs, so braiding
-/// admission belongs to the caller that stages source and output transforms.
-///
-/// The caller owns categorical validation and exact HomSpace derivation. This
-/// leaf only validates the preselected core geometry and compiles the existing
-/// provider-neutral block plan.
-pub(crate) fn compile_checked_generic_core_plan(
-    dst_structure: &Arc<tenet_core::BlockStructure>,
-    dst_nout: usize,
-    lhs_structure: &Arc<tenet_core::BlockStructure>,
-    lhs_nout: usize,
-    rhs_structure: &Arc<tenet_core::BlockStructure>,
-    rhs_nout: usize,
-    axes: TensorContractSpec<'_>,
-) -> Result<FusionBlockContractPlan, OperationError> {
-    reject_fusion_contract_conjugation(axes)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_structure.rank(),
-        rhs_structure.rank(),
-        dst_structure.rank(),
-        axes,
-    )?;
-    if !is_core_form_source(lhs_structure.rank(), lhs_nout, rhs_nout, &axis_plan)
-        || !is_core_form_output(
-            dst_nout,
-            lhs_nout,
-            rhs_structure.rank(),
-            rhs_nout,
-            &axis_plan,
-        )
-    {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "preselected checked Generic candidate did not lower to core form",
-        });
-    }
-
-    if let Some(plan) =
-        FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
-            dst_structure,
-            dst_nout,
-            lhs_structure,
-            lhs_nout,
-            rhs_structure,
-            rhs_nout,
-            MatrixOp::Identity,
-            MatrixOp::Identity,
-        )?
-    {
-        return Ok(plan);
-    }
-    compile_checked_generic_core_plan_general(
-        dst_structure,
-        dst_nout,
-        lhs_structure,
-        lhs_nout,
-        rhs_structure,
-        rhs_nout,
-    )
-}
-
 /// The per-subblock checked core builder: re-bases expert tilings whose
 /// coupled-sector trees are not canonically aligned, or reports the same
 /// structure error as before the coupled-region route.

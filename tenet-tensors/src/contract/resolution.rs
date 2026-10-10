@@ -241,6 +241,25 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         }
     }
 
+    /// The derived intermediates this route replays over: a `CopyC`
+    /// temporary, or a `DynamicTree`'s core sources and core destination.
+    pub(crate) fn derived_structures(&self) -> smallvec::SmallVec<[&Arc<BlockStructure>; 3]> {
+        match &self.route {
+            ContractRoute::Core { .. } => smallvec::SmallVec::new(),
+            ContractRoute::CopyC(copy) => smallvec::smallvec![&copy.temporary],
+            ContractRoute::DynamicTree(artifact) => {
+                let mut structures = smallvec::smallvec![
+                    artifact.lhs_transform.space.structure(),
+                    artifact.rhs_transform.space.structure()
+                ];
+                if let Some(core) = &artifact.core_dst {
+                    structures.push(core.space.structure());
+                }
+                structures
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn is_swapped_core(&self) -> bool {
         matches!(self.route, ContractRoute::Core { swapped: true, .. })
@@ -281,11 +300,8 @@ impl StorageContractResolution<f64> {
                     (artifact.lhs_borrowed, &artifact.lhs_transform, lhs_scales),
                     (artifact.rhs_borrowed, &artifact.rhs_transform, rhs_scales),
                 ] {
-                    if !borrowed {
-                        entries += CudaSingleMemberRegions::admit_scaled(
-                            &transform.transform_structure,
-                            scales,
-                        )?;
+                    if let (false, Some(structure)) = (borrowed, &transform.transform_structure) {
+                        entries += CudaSingleMemberRegions::admit_scaled(structure, scales)?;
                     }
                 }
                 if let Some(output) = &artifact.core_dst {
@@ -789,7 +805,12 @@ where
     R::Scalar: DenseBlockScalar,
 {
     copy_c_order(
-        rule,
+        || {
+            Ok::<_, OperationError>(
+                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic,
+            )
+        },
+        |homspace, axes| rhs_contract_axes_require_twist(rule, homspace, axes),
         dst,
         lhs,
         rhs,
@@ -806,6 +827,10 @@ where
 /// of the planner's core walk over the requested order, which therefore runs
 /// once) and the twist rule of the core the temporary will run.
 ///
+/// `twist_possible` answers whether the rule can twist at all, `twist`
+/// whether given core-right contracted legs carry the twist (both read
+/// where the walk and the scorer ask, as their rule reads were).
+///
 /// `twist_consumable`: the planner's core carries a twist uniform per RHS
 /// coupled sector as per-job alpha (#1858), so a twisted default order is
 /// still a zero-copy temporary for it (a nonuniform one makes the
@@ -813,8 +838,9 @@ where
 /// `blas_contract!` instead copies an operand to twist it
 /// (`tensoroperations.jl:399-429` @cfaa073), which `false` keeps.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn copy_c_order<R>(
-    rule: &R,
+pub(crate) fn copy_c_order<E>(
+    twist_possible: impl Fn() -> Result<bool, E> + Copy,
+    twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E> + Copy,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
@@ -825,8 +851,7 @@ pub(crate) fn copy_c_order<R>(
     twist_consumable: bool,
 ) -> Option<FusionContractOrientation>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    E: From<OperationError>,
 {
     let lhs_open = lhs.storage_space().rank().checked_sub(lhs_axes.len())?;
     let rhs_open = rhs.storage_space().rank().checked_sub(rhs_axes.len())?;
@@ -837,11 +862,7 @@ where
     let zero_copy = |lhs, rhs, lhs_axes, rhs_axes, output, dst_nout| {
         matches!(
             try_zero_copy_contract_candidates(
-                || {
-                    Ok::<_, OperationError>(
-                        rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic,
-                    )
-                },
+                twist_possible,
                 dst_nout,
                 lhs,
                 rhs,
@@ -882,7 +903,7 @@ where
     }
     let dynamic = |orientation| {
         min_dynamic_tree_materialized_elements(
-            rule,
+            twist,
             dst,
             lhs,
             rhs,
@@ -937,6 +958,30 @@ where
         "copyC shortcut disagrees with full candidate scoring"
     );
     copy_c.or_else(scored).unwrap_or(false).then_some(order)
+}
+
+/// Whether the core-right contracted legs `rhs_contracting_axes` of
+/// `homspace` carry TensorKit's fermionic supertrace twist in mode `M`: the
+/// rule can twist and one of them is dual (`blas_contract!`,
+/// `tensoroperations.jl:398-410` @cfaa073).
+pub(crate) fn contract_axes_require_twist<M, R>(
+    rule: &R,
+    authority: M::SpaceAuthority<'_>,
+    homspace: &FusionTreeHomSpace,
+    rhs_contracting_axes: &[usize],
+) -> Result<bool, M::Error>
+where
+    M: PlanningAlgebra<R>,
+{
+    if !M::contract_twist_possible(rule, authority)? {
+        return Ok(false);
+    }
+    for &axis in rhs_contracting_axes {
+        if external_axis_is_dual(homspace, axis)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn rhs_contract_axes_require_twist<R>(

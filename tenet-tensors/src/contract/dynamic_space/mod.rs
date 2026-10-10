@@ -263,7 +263,9 @@ pub struct ValidatedDynamicFusionLayout(DynamicFusionMapSpace);
 pub struct PreparedCheckedGenericDynamicSpace {
     nout: usize,
     nin: usize,
-    homspace: FusionTreeHomSpace,
+    /// Shared so a preview lends it; the commit keeps it unless the
+    /// canonical winner's differs.
+    homspace: Arc<FusionTreeHomSpace>,
     structure: PreparedBlockStructure,
     identity: RuleIdentity,
 }
@@ -279,7 +281,7 @@ impl PreparedCheckedGenericDynamicSpace {
         Self {
             nout,
             nin,
-            homspace,
+            homspace: Arc::new(homspace),
             structure,
             identity,
         }
@@ -315,7 +317,7 @@ impl PreparedCheckedGenericDynamicSpace {
         DynamicFusionMapSpace {
             nout: self.nout,
             nin: self.nin,
-            homspace: Arc::new(self.homspace.clone()),
+            homspace: Arc::clone(&self.homspace),
             subblock_structure: self.shared_structure(),
             admission: FusionSpaceAdmission::Complete(self.identity.clone()),
             adjoint: OnceLock::new(),
@@ -333,11 +335,11 @@ impl PreparedCheckedGenericDynamicSpace {
     pub(crate) fn commit(self) -> DynamicFusionMapSpace {
         let (canonical_homspace, subblock_structure) =
             self.structure.commit_with_complete_homspace();
-        let homspace = canonical_homspace.unwrap_or(self.homspace);
+        let homspace = canonical_homspace.map_or(self.homspace, Arc::new);
         DynamicFusionMapSpace {
             nout: self.nout,
             nin: self.nin,
-            homspace: Arc::new(homspace),
+            homspace,
             subblock_structure,
             admission: FusionSpaceAdmission::Complete(self.identity),
             adjoint: OnceLock::new(),
@@ -782,9 +784,11 @@ impl DynamicFusionMapSpace {
         Ok(PreparedCheckedGenericDynamicSpace {
             nout: codomain_axes.len(),
             nin: domain_axes.len(),
-            homspace: homspace
-                .into_inner()
-                .expect("successful producer records HomSpace"),
+            homspace: Arc::new(
+                homspace
+                    .into_inner()
+                    .expect("successful producer records HomSpace"),
+            ),
             structure,
             identity: actual
                 .into_inner()

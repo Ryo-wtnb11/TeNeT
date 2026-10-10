@@ -568,11 +568,17 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
         let source = |entry: &'r DynamicFusionTransformedSourceEntry<C>,
                       borrowed: bool,
                       scales: &'r [(usize, C)]| {
-            (!borrowed).then_some(SourceStage {
-                transform: &entry.transform_structure,
-                payload_structure: &entry.replay_structure,
-                scales,
-            })
+            // A copied source always has its transformer (checked when the
+            // artifact is assembled).
+            entry
+                .transform_structure
+                .as_ref()
+                .filter(|_| !borrowed)
+                .map(|transform| SourceStage {
+                    transform,
+                    payload_structure: &entry.replay_structure,
+                    scales,
+                })
         };
         Self {
             lhs_core: artifact.lhs_transform.space.structure(),

@@ -227,16 +227,16 @@ pub(crate) fn contracted_axis_order_candidates(
     candidates
 }
 
-fn select_best_scored_contract_candidate<P, F>(
+fn select_best_scored_contract_candidate<P, F, E>(
     axes: TensorContractSpec<'_>,
     orientations: &[FusionContractOrientation],
     mut score: F,
-) -> Result<(P, FusionContractCandidateFacts), OperationError>
+) -> Result<(P, FusionContractCandidateFacts), E>
 where
     F: FnMut(
         &ContractAxisOrderCandidate,
         FusionContractOrientation,
-    ) -> Result<(P, FusionContractCandidateFacts), OperationError>,
+    ) -> Result<(P, FusionContractCandidateFacts), E>,
 {
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
@@ -324,6 +324,7 @@ impl CandidatePlan {
         })
     }
 
+    #[cfg(test)]
     fn from_plan(plan: &FusionContractPlan) -> Self {
         let permutation = |operation: &TreeTransformOperation| {
             if operation.kind() != TreeTransformOperationKind::Permute {
@@ -392,16 +393,6 @@ impl CandidatePlan {
             self.core_dst_open_lhs_rank,
             self.core_dst_open_rhs_rank,
         )
-    }
-
-    /// [`TreeTransformOperation::is_identity_for`] of the lhs permutation.
-    fn lhs_transform_is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
-        output_permutation_is_identity(&self.lhs[0], &self.lhs[1], codomain_rank, domain_rank)
-    }
-
-    /// [`TreeTransformOperation::is_identity_for`] of the rhs permutation.
-    fn rhs_transform_is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
-        output_permutation_is_identity(&self.rhs[0], &self.rhs[1], codomain_rank, domain_rank)
     }
 
     fn materialize(&self) -> FusionContractPlan {
@@ -783,6 +774,7 @@ where
     Ok(orient_fusion_contract_plan(plan, orientation))
 }
 
+#[cfg(test)]
 pub(crate) fn orient_fusion_contract_plan(
     plan: FusionContractPlan,
     orientation: FusionContractOrientation,
@@ -1137,7 +1129,7 @@ where
         .orient(orientation);
         if complete {
             let facts = score_complete_fusion_contract_candidate(
-                rule,
+                |homspace, axes| source_contract_homspace_requires_twist(rule, homspace, axes),
                 dst,
                 lhs,
                 rhs,
@@ -1395,51 +1387,6 @@ fn fusion_contract_candidate_facts(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn select_complete_bosonic_contract_candidate(
-    dst_nout: usize,
-    output_rank: usize,
-    destination_required_len: usize,
-    lhs_nout: usize,
-    lhs_rank: usize,
-    lhs_required_len: usize,
-    rhs_nout: usize,
-    rhs_rank: usize,
-    rhs_required_len: usize,
-    axes: TensorContractSpec<'_>,
-) -> Result<(ContractAxisOrderCandidate, FusionContractOrientation), OperationError> {
-    select_best_scored_contract_candidate(axes, &CACHED_ORIENTATIONS, |candidate, orientation| {
-        let candidate_axes =
-            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-        let shape = CandidatePlan::from_ranks(
-            dst_nout,
-            output_rank,
-            lhs_rank,
-            rhs_rank,
-            candidate_axes,
-            false,
-            false,
-        )?
-        .orient(orientation);
-        let facts = fusion_contract_candidate_facts(
-            candidate.clone(),
-            CandidateRoute::of_candidate(&shape),
-            FusionContractMaterializationInputs {
-                lhs_exact_identity_borrowable: shape
-                    .lhs_transform_is_identity_for(lhs_nout, lhs_rank - lhs_nout),
-                rhs_exact_identity_borrowable: shape
-                    .rhs_transform_is_identity_for(rhs_nout, rhs_rank - rhs_nout),
-                core_right_requires_twist: false,
-                lhs_required_len: CandidateRequiredLen::Known(lhs_required_len),
-                rhs_required_len: CandidateRequiredLen::Known(rhs_required_len),
-                output_required_len: CandidateRequiredLen::Known(destination_required_len),
-            },
-        )?;
-        Ok((shape.orientation, facts))
-    })
-    .map(|(orientation, facts)| (facts.axis_order, orientation))
-}
-
 /// The fewest elements any DynamicTree candidate of `axes` over
 /// `orientations` materializes into `dst`: TensorKit `_contract_memcost`
 /// (tensoroperations.jl L378) minimized over `_contract_candidates` (L360).
@@ -1447,17 +1394,16 @@ pub(crate) fn select_complete_bosonic_contract_candidate(
 /// (`score_complete_fusion_contract_candidate`), run without building a
 /// plan; `None` when an admission is not Complete, where the selector would
 /// probe transformed layouts instead.
-pub(crate) fn min_dynamic_tree_materialized_elements<R>(
-    rule: &R,
+pub(crate) fn min_dynamic_tree_materialized_elements<E>(
+    twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
     orientations: &[FusionContractOrientation],
-) -> Result<Option<usize>, OperationError>
+) -> Result<Option<usize>, E>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
+    E: From<OperationError>,
 {
     let complete = [dst.admission(), lhs.admission(), rhs.admission()]
         .into_iter()
@@ -1479,7 +1425,7 @@ where
         )?
         .orient(orientation);
         let facts = score_complete_fusion_contract_candidate(
-            rule,
+            &twist,
             dst,
             &lhs,
             &rhs,
@@ -1491,18 +1437,57 @@ where
     .map(|((), facts)| Some(facts.total_materialized_elements()))
 }
 
-fn score_complete_fusion_contract_candidate<R, S>(
-    rule: &R,
+/// The `DynamicTree` candidate of two direct operands over Complete spaces,
+/// the destination derived from them by construction: the Complete scorer
+/// of the selector ([`prepare_tensorcontract_fusion_plan_dyn_raw_canonical`]),
+/// over both orientations, with `twist` reading the core-right twist.
+pub(crate) fn select_complete_tensorcontract_fusion_plan<E>(
+    twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, E>
+where
+    E: From<OperationError>,
+{
+    select_best_scored_contract_candidate(axes, &CACHED_ORIENTATIONS, |candidate, orientation| {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let shape = CandidatePlan::from_ranks(
+            dst.nout(),
+            dst.rank(),
+            lhs.rank(),
+            rhs.rank(),
+            candidate_axes,
+            false,
+            false,
+        )?
+        .orient(orientation);
+        let facts = score_complete_fusion_contract_candidate(
+            &twist,
+            dst,
+            lhs,
+            rhs,
+            candidate.clone(),
+            &shape,
+        )?;
+        Ok((shape, facts))
+    })
+    .map(|(shape, _)| shape.materialize())
+}
+
+fn score_complete_fusion_contract_candidate<S, E>(
+    twist: impl Fn(&FusionTreeHomSpace, &[usize]) -> Result<bool, E>,
     dst: &DynamicFusionMapSpace,
     lhs: &S,
     rhs: &S,
     axis_order: ContractAxisOrderCandidate,
     plan: &CandidatePlan,
-) -> Result<FusionContractCandidateFacts, OperationError>
+) -> Result<FusionContractCandidateFacts, E>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
     S: ContractPlanSource,
+    E: From<OperationError>,
 {
     #[cfg(test)]
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
@@ -1533,9 +1518,8 @@ where
         FusionContractOrientation::LhsRhs => (rhs, axis_order.rhs()),
         FusionContractOrientation::RhsLhs => (lhs, axis_order.lhs()),
     };
-    let core_right_requires_twist =
-        source_contract_homspace_requires_twist(rule, core_right.homspace(), core_right_axes)?;
-    fusion_contract_candidate_facts(
+    let core_right_requires_twist = twist(core_right.homspace(), core_right_axes)?;
+    Ok(fusion_contract_candidate_facts(
         axis_order,
         CandidateRoute::of_candidate(plan),
         FusionContractMaterializationInputs {
@@ -1546,7 +1530,7 @@ where
             rhs_required_len: CandidateRequiredLen::Space(rhs.storage_space()),
             output_required_len: CandidateRequiredLen::Space(dst),
         },
-    )
+    )?)
 }
 
 #[expect(
@@ -1678,6 +1662,7 @@ fn compile_tensorcontract_fusion_plan_from_spaces(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_tensorcontract_fusion_plan_from_ranks(
     dst_nout: usize,
@@ -1709,8 +1694,7 @@ mod tests {
         prepare_tensorcontract_fusion_plan_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-        reset_candidate_build_calls, reset_candidate_score_calls,
-        select_complete_bosonic_contract_candidate, FusionContractOrientation,
+        reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
     };
     use crate::contract::dynamic_space::{encoded_layout_primer, MetadataOutput, MetadataRequest};
     use crate::contract::{DynamicFusionMapSpace, FusionOperand};
@@ -2043,7 +2027,7 @@ mod tests {
         .unwrap();
 
         let complete = super::score_complete_fusion_contract_candidate(
-            &rule,
+            |homspace, axes| super::source_contract_homspace_requires_twist(&rule, homspace, axes),
             &dst,
             &lhs,
             &rhs,
@@ -2323,26 +2307,5 @@ mod tests {
         assert_eq!(facts[0].rhs_materialized_elements(), 2);
         assert_eq!(facts[0].output_materialized_elements(), 2);
         assert_eq!(facts[0].total_materialized_elements(), 4);
-    }
-
-    #[test]
-    fn complete_bosonic_selector_keeps_zero_materialization_candidate() {
-        let (candidate, orientation) = select_complete_bosonic_contract_candidate(
-            2,
-            3,
-            17,
-            2,
-            3,
-            11,
-            1,
-            2,
-            7,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
-        )
-        .unwrap();
-
-        assert_eq!(candidate.lhs(), &[2]);
-        assert_eq!(candidate.rhs(), &[0]);
-        assert_eq!(orientation, FusionContractOrientation::LhsRhs);
     }
 }

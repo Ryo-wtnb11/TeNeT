@@ -1,4 +1,3 @@
-use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
@@ -6,15 +5,19 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols,
 };
 
-use crate::mode::TreeStructureSource;
+use crate::mode::{MultiplicityFreePlanningScalar, PlanningAlgebra, TreeStructureSource};
+#[cfg(test)]
 use crate::tree_context::TreeTransformExecutionContext;
+use crate::tree_transform::TreeTransformPlanning;
 #[cfg(test)]
 use crate::DenseTreeTransformOperations;
 use crate::{
-    DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
-    TreeTransformBackend, TreeTransformOperation, TreeTransformOperationKind,
+    DenseBlockScalar, OperationError, TreeTransformOperation, TreeTransformOperationKind,
     TreeTransformRuleCacheKey, TreeTransformStructure,
 };
+#[cfg(test)]
+use crate::{DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformBackend};
+use tenet_core::MultiplicityFreeAdmissionMode;
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
 #[cfg(test)]
@@ -27,7 +30,7 @@ use super::fusion::{
 };
 #[cfg(test)]
 use super::fusion_block::FusionBlockContractWorkspace;
-use super::resolution::rhs_contract_requires_twist;
+use super::resolution::{contract_axes_require_twist, rhs_contract_requires_twist};
 use tenet_operations::TensorContractFusionProfile;
 
 #[cfg(test)]
@@ -61,11 +64,11 @@ pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 
+use super::fusion;
 #[cfg(test)]
 use super::fusion_block;
 #[cfg(test)]
 use super::{backend, dynamic_space};
-use super::{fusion, resolution};
 
 mod artifact;
 #[cfg(test)]
@@ -81,8 +84,12 @@ mod typed_eager;
 pub(crate) use artifact::*;
 #[cfg(test)]
 pub(crate) use test_entry::*;
-pub(in crate::contract) use transformed_spaces::DynamicFusionTransformedSourceEntry;
 use transformed_spaces::*;
+pub(crate) use transformed_spaces::{
+    compile_core_dst, compile_transformed_source, DynamicFusionCoreDstEntry,
+    DynamicFusionTransformedSourceEntry,
+};
+pub(crate) use twist::compile_contract_twist;
 pub(super) use twist::*;
 #[cfg(test)]
 pub(crate) use typed_eager::*;
@@ -222,13 +229,64 @@ where
 {
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let core_right = if reverse { lhs_core } else { rhs_core };
-    if !rhs_contract_requires_twist(rule, core_right, plan.core_axes().as_spec())? {
+    let twisted = rhs_contract_requires_twist(rule, core_right, plan.core_axes().as_spec())?;
+    source_borrowing(
+        twisted,
+        plan,
+        lhs_core,
+        rhs_core,
+        lhs_layout_borrowable,
+        rhs_layout_borrowable,
+    )
+}
+
+/// [`resolve_source_borrowing`] in admission mode `M`.
+fn resolve_source_borrowing_in<M, R>(
+    rule: &R,
+    authority: M::SpaceAuthority<'_>,
+    plan: &FusionContractPlan,
+    lhs_core: &DynamicFusionMapSpace,
+    rhs_core: &DynamicFusionMapSpace,
+    lhs_layout_borrowable: bool,
+    rhs_layout_borrowable: bool,
+) -> Result<SourceBorrowing, M::Error>
+where
+    M: PlanningAlgebra<R>,
+{
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
+    let core_right = if reverse { lhs_core } else { rhs_core };
+    let twisted = contract_axes_require_twist::<M, R>(
+        rule,
+        authority,
+        core_right.homspace(),
+        plan.core_axes().as_spec().rhs_contracting_axes(),
+    )?;
+    Ok(source_borrowing(
+        twisted,
+        plan,
+        lhs_core,
+        rhs_core,
+        lhs_layout_borrowable,
+        rhs_layout_borrowable,
+    )?)
+}
+
+fn source_borrowing(
+    core_right_requires_twist: bool,
+    plan: &FusionContractPlan,
+    lhs_core: &DynamicFusionMapSpace,
+    rhs_core: &DynamicFusionMapSpace,
+    lhs_layout_borrowable: bool,
+    rhs_layout_borrowable: bool,
+) -> Result<SourceBorrowing, OperationError> {
+    if !core_right_requires_twist {
         return Ok(SourceBorrowing {
             lhs_borrowed: lhs_layout_borrowable,
             rhs_borrowed: rhs_layout_borrowable,
             twist_lhs: false,
         });
     }
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let required_len = |space: &DynamicFusionMapSpace| {
         space
             .required_len()

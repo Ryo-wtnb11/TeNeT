@@ -13,7 +13,7 @@ use super::*;
 /// `space` folds into the moves writing those blocks (Host and device
 /// alike). A zero-element block is left out because it can share its offset
 /// with the next block.
-pub(in crate::contract) fn compile_contract_twist<R>(
+pub(crate) fn compile_contract_twist<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
     core_right: &FusionTreeHomSpace,

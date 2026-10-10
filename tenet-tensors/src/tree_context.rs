@@ -817,15 +817,22 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        self.planning
-            .set_recoupling_threads(self.backend.recoupling_threads());
         <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::tree_structure(
-            &mut self.planning,
+            self.planning(),
             rule,
             operation,
             dst_structure,
             src,
         )
+    }
+
+    /// This context's multiplicity-free planning state, set to recouple on
+    /// its backend's threads: the [`PlanningAlgebra::StructureCache`] a
+    /// multiplicity-free resolution scope plans with.
+    pub(crate) fn planning(&mut self) -> &mut TreeTransformPlanning {
+        self.planning
+            .set_recoupling_threads(self.backend.recoupling_threads());
+        &mut self.planning
     }
 
     #[allow(clippy::too_many_arguments)]
