@@ -982,3 +982,5 @@ fn checked_composer_transpose_round_trips_are_identity() {
         }
     }
 }
+
+mod contract_oracles;

@@ -281,7 +281,7 @@ where
             space: PreparedCheckedGenericDynamicSpace {
                 nout,
                 nin,
-                homspace: Arc::new(homspace),
+                homspace,
                 structure,
                 identity,
             }
@@ -351,7 +351,7 @@ where
         Ok(PreparedCheckedGenericDynamicSpace {
             nout: homspace.codomain().len(),
             nin: homspace.domain().len(),
-            homspace: Arc::new(homspace),
+            homspace,
             structure,
             identity: actual
                 .into_inner()
@@ -956,7 +956,7 @@ where
         Ok(PreparedCheckedGenericDynamicSpace {
             nout,
             nin,
-            homspace: Arc::new(homspace),
+            homspace,
             structure,
             identity: actual
                 .into_inner()
