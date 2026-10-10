@@ -1020,7 +1020,10 @@ fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
     for (lhs_name, (lhs_space, lhs_data)) in &tilings {
         for (rhs_name, (rhs_space, rhs_data)) in &tilings {
             let (space, product) = context
-                .tensorcompose_checked_generic_in(lhs_space, lhs_data, rhs_space, rhs_data)
+                .tensorcompose_checked_generic_in(
+                    direct_side(lhs_space, lhs_data),
+                    direct_side(rhs_space, rhs_data),
+                )
                 .unwrap();
             let actual = entries(space.space().structure(), &product);
             assert_eq!(
@@ -1032,6 +1035,61 @@ fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
                 assert!(
                     (value - expected).abs() <= 1e-10 * expected.abs().max(1.0),
                     "{lhs_name}·{rhs_name}: {key:?}: {value} != {expected}"
+                );
+            }
+        }
+    }
+
+    // What (#1865): the lazy adjoint of each tiling composes as its
+    // materialization does. Its logical space is canonical while the
+    // parent's storage order is caller-chosen, so a restacked parent
+    // reaches the checked irregular core, read with `MatrixOp::Adjoint`.
+    // Oracle (TensorKit `subblock(t', (f₁, f₂)) = permutedims(conj(subblock(t,
+    // (f₂, f₁))))`, real here): `(A'B)[X, Z] = Σ_Y A[Y, X] B[Y, Z]`.
+    let mut adjoint_square = Entries::new();
+    for ((lhs_key, lhs_index), lhs_value) in &good {
+        let BlockKey::FusionTree(lhs_tree) = lhs_key else {
+            unreachable!()
+        };
+        for ((rhs_key, rhs_index), rhs_value) in &good {
+            let BlockKey::FusionTree(rhs_tree) = rhs_key else {
+                unreachable!()
+            };
+            if lhs_tree.codomain_tree() == rhs_tree.codomain_tree()
+                && lhs_index[..2] == rhs_index[..2]
+            {
+                let key = BlockKey::FusionTree(FusionTreePairKey::pair(
+                    lhs_tree.domain_tree().clone(),
+                    rhs_tree.domain_tree().clone(),
+                ));
+                let index = [&lhs_index[2..], &rhs_index[2..]].concat();
+                *adjoint_square.entry((key, index)).or_insert(0.0) += lhs_value * rhs_value;
+            }
+        }
+    }
+    for (lhs_name, (lhs_space, lhs_data)) in &tilings {
+        let logical = crate::adjoint_bound_space_dyn_generic_checked(lhs_space).unwrap();
+        for (rhs_name, (rhs_space, rhs_data)) in &tilings {
+            let (space, product) = context
+                .tensorcompose_checked_generic_in(
+                    (
+                        &logical,
+                        crate::FusionOperand::adjoint(lhs_space.space()),
+                        lhs_data,
+                    ),
+                    direct_side(rhs_space, rhs_data),
+                )
+                .unwrap();
+            let actual = entries(space.space().structure(), &product);
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                adjoint_square.keys().collect::<Vec<_>>(),
+                "{lhs_name}'·{rhs_name}: keys"
+            );
+            for ((key, value), expected) in actual.iter().zip(adjoint_square.values()) {
+                assert!(
+                    (value - expected).abs() <= 1e-10 * expected.abs().max(1.0),
+                    "{lhs_name}'·{rhs_name}: {key:?}: {value} != {expected}"
                 );
             }
         }

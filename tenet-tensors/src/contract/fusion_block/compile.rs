@@ -197,15 +197,6 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    let rule = validated.preflight.rule;
-    let lhs_op = match lhs.orientation() {
-        FusionTreePairOrientation::Direct => MatrixOp::Identity,
-        FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
-    };
-    let rhs_op = match rhs.orientation() {
-        FusionTreePairOrientation::Direct => MatrixOp::Identity,
-        FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
-    };
     if let Some(plan) = try_compile_oriented_canonical_core_plan(
         &validated,
         dst_space,
@@ -214,7 +205,27 @@ where
     )? {
         return Ok(plan);
     }
+    compile_operand_core_plan_general(dst_space, lhs, rhs)
+}
 
+/// The packed core plan of two operands whose coupled-sector tiling is not
+/// canonical (#1517), a lazy adjoint read through its parent's storage with
+/// [`MatrixOp::Adjoint`]. Structure-only: the core glues `lhs.domain` to
+/// `rhs.codomain` without crossing legs, so every coefficient is 1 in both
+/// modes.
+pub(crate) fn compile_operand_core_plan_general<C>(
+    dst_space: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
+) -> Result<FusionBlockContractPlan<C>, OperationError>
+where
+    C: DenseBlockScalar,
+{
+    let matrix_op = |source: &FusionOperandLayout<'_>| match source.orientation() {
+        FusionTreePairOrientation::Direct => MatrixOp::Identity,
+        FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
+    };
+    let (lhs_op, rhs_op) = (matrix_op(lhs), matrix_op(rhs));
     let compile_source = |source: &FusionOperandLayout<'_>| {
         if source.is_direct() {
             FusionBlockMatrixLayout::compile(source.storage_space())
@@ -225,9 +236,10 @@ where
     let finish_source =
         |group: FusionBlockMatrixGroupBuilder, source: &FusionOperandLayout<'_>, op| {
             if source.is_direct() {
-                group.finish(rule, source.storage_space())
+                let storage = source.storage_space();
+                group.finish_generic(storage.structure(), storage.nout())
             } else {
-                group.finish_operand(rule, source, op)
+                group.finish_operand_generic(source, op)
             }
         };
     let lhs_layout = compile_source(lhs)?;
@@ -240,7 +252,7 @@ where
         dst_layout,
         |group| finish_source(group, lhs, lhs_op),
         |group| finish_source(group, rhs, rhs_op),
-        |group| group.finish(rule, dst_space),
+        |group| group.finish_generic(dst_space.structure(), dst_space.nout()),
     )?;
     FusionBlockContractPlan::from_parts_with_ops_generic(
         Arc::clone(dst_space.structure()),
@@ -810,6 +822,7 @@ impl FusionBlockMatrixGroupBuilder {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn finish_operand<R>(
         self,
         _rule: &R,
@@ -819,6 +832,19 @@ impl FusionBlockMatrixGroupBuilder {
     where
         R: MultiplicityFreeRigidSymbols,
         R::Scalar: DenseBlockScalar,
+    {
+        self.finish_operand_generic(source, op)
+    }
+
+    /// The operand sibling of [`Self::finish_generic`]: a lazy adjoint's
+    /// subblocks addressed in its parent's storage, laid out for `op`.
+    pub(super) fn finish_operand_generic<C>(
+        self,
+        source: &FusionOperandLayout<'_>,
+        op: MatrixOp,
+    ) -> Result<FusionBlockMatrixGroup<C>, OperationError>
+    where
+        C: DenseBlockScalar,
     {
         let storage = source.storage_space();
         let physical_rows = match op {
@@ -880,7 +906,7 @@ impl FusionBlockMatrixGroupBuilder {
                 },
                 matrix_offset: offset_to_isize(matrix_offset)?,
                 matrix_strides,
-                coefficient: R::Scalar::one(),
+                coefficient: C::one(),
             });
         }
         let matrix_elements = self

@@ -1142,6 +1142,112 @@ fn adjoint_contract_and_compose_stay_parent_native() {
     assert_parent_native_contract_and_compose(&su2_c64);
 }
 
+/// `t'·t`, `t'∘t`, `t·t'` and `t'·t'` of a checked SU(3) tensor `t` read
+/// the parent payload without materializing `t'`, and equal (i) the
+/// contraction of `copy(t')` and, for `t'∘t`, (iii) the coupled-block
+/// product `B_c(t)ᴴ B_c(t)` over every block, the `8 ⊗ 8 → 8` rows of outer
+/// multiplicity two included.
+#[cfg(feature = "racah-generated")]
+fn assert_checked_adjoint_contract_and_compose<D>(source: &TensorMap<tenet_core::SUNFusionRule, D>)
+where
+    D: TensorScalar + core::fmt::Debug,
+{
+    let lazy = source.adjoint().unwrap();
+    let eager = lazy.materialized_tensor_uncached().unwrap();
+    let spec = |lhs, rhs, codomain, domain| ContractSpec {
+        lhs,
+        rhs,
+        codomain,
+        domain,
+    };
+    let (core, flip, both) = (
+        spec(&[1, 2], &[0, 1], &[0], &[1]),
+        spec(&[2], &[0], &[0, 1], &[2, 3]),
+        spec(&[1], &[0], &[0, 1], &[2, 3]),
+    );
+    UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+    let outputs = [
+        (
+            lazy.contract(source, &core).unwrap(),
+            eager.contract(source, &core).unwrap(),
+        ),
+        (
+            lazy.compose(source).unwrap(),
+            eager.compose(source).unwrap(),
+        ),
+        (
+            source.contract(&lazy, &flip).unwrap(),
+            source.contract(&eager, &flip).unwrap(),
+        ),
+        (
+            lazy.contract(&lazy, &both).unwrap(),
+            eager.contract(&eager, &both).unwrap(),
+        ),
+    ];
+    assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
+    assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
+    let close = |actual: &TensorMap<_, D>, expected: &TensorMap<_, D>| {
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        let (actual, expected) = (actual.dense_data().unwrap(), expected.dense_data().unwrap());
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().zip(expected).all(|(&actual, &expected)| {
+            (actual.widen_complex() - expected.widen_complex()).norm() < 1e-10
+        }));
+    };
+    for (actual, expected) in &outputs {
+        close(actual, expected);
+    }
+    let mut multiplicity_rows = false;
+    for composed in [&outputs[0].0, &outputs[1].0] {
+        for (sector, block) in composed.blocks().unwrap() {
+            let parent = source.block(&sector).unwrap();
+            assert_eq!((block.rows(), block.cols()), (parent.cols(), parent.cols()));
+            multiplicity_rows |= sector == vec![1, 1] && parent.rows() > parent.cols();
+            for row in 0..block.rows() {
+                for col in 0..block.cols() {
+                    let expected: num_complex::Complex64 = (0..parent.rows())
+                        .map(|k| {
+                            parent.get(k, row).unwrap().widen_complex().conj()
+                                * parent.get(k, col).unwrap().widen_complex()
+                        })
+                        .sum();
+                    let actual = block.get(row, col).unwrap().widen_complex();
+                    assert!((actual - expected).norm() < 1e-10, "{sector:?}");
+                }
+            }
+        }
+    }
+    assert!(multiplicity_rows);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_su3_adjoint_contract_and_compose_read_the_parent() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    // `8 ⊗ 8 → 8` has outer multiplicity two.
+    let leg = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![0, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+            indices.iter().sum::<usize>() as f64 + trees.coupled().iter().sum::<i64>() as f64 - 1.5
+        })
+        .unwrap();
+    assert_checked_adjoint_contract_and_compose(&source);
+    assert_checked_adjoint_contract_and_compose(
+        &source
+            .convert::<Complex64>()
+            .scale(num_complex::Complex64::new(1.0, 2.0)),
+    );
+}
+
 fn assert_rank_three_su2_contract_and_compose<D>(source: &TensorMap<SU2FusionRule, D>)
 where
     D: TensorScalar + core::fmt::Debug,

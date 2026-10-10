@@ -2,11 +2,13 @@ mod api;
 mod backend;
 mod checked_generic;
 pub(crate) use checked_generic::{
-    CheckedAuthority, CheckedContractTxn, CHECKED_CONTRACTION_REQUIRES_BOSONIC,
-    CHECKED_REQUIRES_DIRECT_OPERANDS,
+    validate_checked_operand_relation, CheckedAuthority, CheckedContractTxn,
+    CHECKED_CONTRACTION_REQUIRES_BOSONIC,
 };
 mod context;
-pub(crate) use context::{compile_prelowered_dynamic_tree, PlanTarget};
+pub(crate) use context::{
+    compile_prelowered_dynamic_tree, compile_stored_dynamic_tree, PlanTarget,
+};
 mod dynamic;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
@@ -46,8 +48,8 @@ pub(crate) use fusion::{
 mod fusion_block;
 pub(crate) use fusion_block::{
     compile_checked_generic_core_plan_general,
-    compile_fusion_block_contract_plan_prelowered_validated, core_homspace_matches,
-    validate_fusion_contract_rule, ValidatedCoreContract,
+    compile_fusion_block_contract_plan_prelowered_validated, compile_operand_core_plan_general,
+    core_homspace_matches, validate_fusion_contract_rule, ValidatedCoreContract,
 };
 mod resolution;
 pub(crate) use resolution::{compile_derived_core_plan, contract_axes_require_twist};

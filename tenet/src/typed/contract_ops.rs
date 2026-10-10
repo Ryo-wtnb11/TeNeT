@@ -592,7 +592,6 @@ where
         {
             return Ok(compact);
         }
-        <R::Mode as TypedTensorContractDispatch<R, D>>::admit_operands(self, other)?;
         let (space, data) =
             <R::Mode as TypedTensorContractDispatch<R, D>>::contract(self, other, spec)?;
         Ok(self.published(space, data))
@@ -765,7 +764,6 @@ where
         {
             return Ok(compact);
         }
-        <R::Mode as TypedTensorContractDispatch<R, D>>::admit_operands(self, other)?;
         let (space, data) = <R::Mode as TypedTensorContractDispatch<R, D>>::compose(self, other)?;
         Ok(self.published(space, data))
     }

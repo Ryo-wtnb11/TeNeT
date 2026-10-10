@@ -2628,7 +2628,7 @@ fn compile_dynamic_tree_in<M, R>(
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
     irregular_core: bool,
-    mut profile: Option<&mut TensorContractFusionProfile>,
+    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<StorageContractResolution<M::Scalar>, M::Error>
 where
     M: PlanningAlgebra<R>,
@@ -2638,45 +2638,15 @@ where
     // its own, and the artifact compilers assume a validated request.
     validate_raw_contract_request::<M, R>(target, lhs, rhs, axes)?;
     let artifact = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
-        let PlanTarget {
-            rule,
-            space: dst_space,
-            authority,
-        } = target;
-        let plan_start = profile.is_some().then(std::time::Instant::now);
         let (lhs_space, rhs_space) = (lhs.storage_space(), rhs.storage_space());
-        let plan = M::dynamic_tree_plan(rule, authority, dst_space, lhs_space, rhs_space, axes)?;
-        let artifact_start = attribute_plan_build(plan_start, profile.as_deref_mut());
-        let before = attributed_artifact_parts(profile.as_deref());
-        let artifact = if profile.is_some() {
-            super::dynamic::compile_dynamic_tree_execution_artifact::<M, R, true>(
-                cache,
-                rule,
-                authority,
-                &plan,
-                dst_space,
-                lhs_space,
-                lhs_space.structure(),
-                rhs_space,
-                rhs_space.structure(),
-                profile.as_deref_mut(),
-            )?
-        } else {
-            super::dynamic::compile_dynamic_tree_execution_artifact::<M, R, false>(
-                cache,
-                rule,
-                authority,
-                &plan,
-                dst_space,
-                lhs_space,
-                lhs_space.structure(),
-                rhs_space,
-                rhs_space.structure(),
-                None,
-            )?
-        };
-        attribute_artifact_prepare(artifact_start, before, profile.as_deref_mut());
-        artifact
+        compile_stored_dynamic_tree::<M, R>(
+            cache,
+            target,
+            (lhs_space, lhs_space.structure()),
+            (rhs_space, rhs_space.structure()),
+            axes,
+            profile,
+        )?
     } else {
         M::prelowered_dynamic_tree_artifact(cache, target, lhs, rhs, axes, profile)?
     };
@@ -2692,6 +2662,62 @@ where
     Ok(StorageContractResolution::new(ContractRoute::DynamicTree(
         Arc::new(artifact),
     )))
+}
+
+/// The `DynamicTree` artifact over two sources given as the logical space the
+/// plan is selected on and the storage structure replay reads: a direct
+/// operand's own space and structure, or (checked Generic) a lazy adjoint's
+/// logical space over its parent's storage.
+pub(crate) fn compile_stored_dynamic_tree<M, R>(
+    cache: &mut M::StructureCache,
+    target: PlanTarget<'_, R, M::SpaceAuthority<'_>>,
+    (lhs_space, lhs_structure): (&DynamicFusionMapSpace, &Arc<BlockStructure>),
+    (rhs_space, rhs_structure): (&DynamicFusionMapSpace, &Arc<BlockStructure>),
+    axes: TensorContractSpec<'_>,
+    mut profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<super::dynamic::DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
+where
+    M: PlanningAlgebra<R>,
+    M::Scalar: DenseBlockScalar,
+{
+    let PlanTarget {
+        rule,
+        space: dst_space,
+        authority,
+    } = target;
+    let plan_start = profile.is_some().then(std::time::Instant::now);
+    let plan = M::dynamic_tree_plan(rule, authority, dst_space, lhs_space, rhs_space, axes)?;
+    let artifact_start = attribute_plan_build(plan_start, profile.as_deref_mut());
+    let before = attributed_artifact_parts(profile.as_deref());
+    let artifact = if profile.is_some() {
+        super::dynamic::compile_dynamic_tree_execution_artifact::<M, R, true>(
+            cache,
+            rule,
+            authority,
+            &plan,
+            dst_space,
+            lhs_space,
+            lhs_structure,
+            rhs_space,
+            rhs_structure,
+            profile.as_deref_mut(),
+        )?
+    } else {
+        super::dynamic::compile_dynamic_tree_execution_artifact::<M, R, false>(
+            cache,
+            rule,
+            authority,
+            &plan,
+            dst_space,
+            lhs_space,
+            lhs_structure,
+            rhs_space,
+            rhs_structure,
+            None,
+        )?
+    };
+    attribute_artifact_prepare(artifact_start, before, profile);
+    Ok(artifact)
 }
 
 /// The multiplicity-free `DynamicTree` artifact of a contraction with a

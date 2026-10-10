@@ -278,24 +278,16 @@ where
         Ok(None)
     }
 
-    /// Representations the mode cannot yet contract. Deleted by #1865.
-    fn admit_operands(
-        _lhs: &TensorMap<R, D>,
-        _rhs: &TensorMap<R, D>,
-    ) -> Result<(), Self::FacadeError> {
-        Ok(())
-    }
-
-    /// Contracts the dense payloads of two admitted operands into a fresh
-    /// destination payload.
+    /// Contracts two operands, a lazy adjoint read through its parent's
+    /// payload, into a fresh destination payload.
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 
-    /// Composes the dense payloads of two admitted operands into a fresh
-    /// destination payload.
+    /// Composes two operands, a lazy adjoint read through its parent's
+    /// payload, into a fresh destination payload.
     fn compose(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,

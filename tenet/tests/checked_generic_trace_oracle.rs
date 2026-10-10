@@ -67,8 +67,8 @@ fn assert_trace_matches<D>(
 {
     let got = source.trace_pairs(pairs).unwrap();
     // Contract the pairs one at a time, renumbering the later pairs past
-    // the two legs each contraction removes. Checked Generic contraction
-    // takes direct owned operands, so a lazy adjoint is materialized first.
+    // the two legs each contraction removes. A lazy adjoint is materialized
+    // first, so the oracle contracts owned operands only.
     let owned = source.materialize().unwrap();
     let mut oracle = contract_pair(runtime, &owned, pairs[0].0, pairs[0].1);
     let mut removed = vec![pairs[0].0, pairs[0].1];
