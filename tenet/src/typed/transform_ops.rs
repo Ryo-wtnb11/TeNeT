@@ -64,10 +64,8 @@ pub(super) fn braid_operation(
 
 impl<R, D> TensorMap<R, D>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
     D: TensorScalar,
 {
     /// `destination = alpha * self.permute(codomain_axes, domain_axes) +
@@ -85,10 +83,14 @@ where
     ///
     /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], then
     /// [`Error::InvalidArgument`] for a lazy-adjoint or compact source, a
-    /// destination that is not owned dense host storage, one that aliases
-    /// the source, or one whose length does not match the result,
-    /// `SpaceMismatch` for one whose space or block layout does not; [`Error::DestinationShared`] when `destination` shares its
-    /// storage with a clone. Plan-construction failures count as validation.
+    /// destination that is not owned dense host storage, or one that aliases
+    /// the source; then the operation's own errors, as for [`Self::permute`];
+    /// `SpaceMismatch` for a destination whose space or block layout does not
+    /// match the result, [`Error::InvalidArgument`] for one whose length does
+    /// not, and [`Error::DestinationShared`] when `destination` shares its
+    /// storage with a clone. Checked Generic reports these in
+    /// [`GenericTensorError::Facade`] and staging failures in
+    /// [`GenericTensorError::Plan`], as for [`Self::permute`].
     ///
     /// # Failure
     ///
@@ -104,18 +106,18 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), Error> {
+    ) -> Result<(), TypedFacadeError<R>> {
         self.tree_transform_into(
             destination,
             alpha,
             beta,
-            |_, _| {
+            || {
                 Ok(TreeTransformOperation::permute(
                     codomain_axes.iter().copied(),
                     domain_axes.iter().copied(),
                 ))
             },
-            |_, _, probe| {
+            |probe| {
                 probe(tree_operation_view(
                     TreeTransformOperationKind::Permute,
                     codomain_axes,
@@ -146,7 +148,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), Error> {
+    ) -> Result<(), TypedFacadeError<R>> {
         let operation = braid_operation(
             self.rank(),
             self.codomain_rank(),
@@ -159,8 +161,8 @@ where
             destination,
             alpha,
             beta,
-            |_, _| Ok(operation),
-            |_, _, probe| {
+            || Ok(operation),
+            |probe| {
                 probe(tenet_tensors::TreeTransformOperationView::of(
                     &probe_operation,
                 ))
@@ -186,15 +188,15 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), Error> {
+    ) -> Result<(), TypedFacadeError<R>> {
         self.tree_transform_into(
             destination,
             alpha,
             beta,
-            |source, _| {
+            || {
                 with_planar_axes(
-                    source.codomain_rank(),
-                    source.rank(),
+                    self.codomain_rank(),
+                    self.rank(),
                     PlanarRequestKind::Explicit {
                         codomain_axes,
                         domain_axes,
@@ -207,7 +209,7 @@ where
                     },
                 )
             },
-            |_, _, probe| {
+            |probe| {
                 probe(tree_operation_view(
                     TreeTransformOperationKind::Transpose,
                     codomain_axes,
@@ -229,27 +231,31 @@ where
     /// validation (a backend or other execution error) the destination's
     /// contents are unspecified, while its space and block structure stay
     /// intact.
-    pub fn repartition_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
+    pub fn repartition_into(
+        &self,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TypedFacadeError<R>> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
         let destination_codomain_rank = destination.codomain_rank();
+        let destination_rank = destination.rank();
         self.tree_transform_into(
             destination,
             alpha,
             beta,
-            |source, destination| {
-                if destination.rank() != source.rank() {
+            || {
+                if destination_rank != source_rank {
                     return Err(Error::InvalidArgument(format!(
-                        "repartition destination rank {} does not match source rank {}",
-                        destination.rank(),
-                        source.rank()
+                        "repartition destination rank {destination_rank} does not match source rank {source_rank}"
                     )));
                 }
                 with_planar_axes(
-                    source.codomain_rank(),
-                    source.rank(),
+                    source_codomain_rank,
+                    source_rank,
                     PlanarRequestKind::Repartition {
-                        num_codomain: destination.codomain_rank(),
+                        num_codomain: destination_codomain_rank,
                     },
                     |codomain_axes, domain_axes| {
                         Ok(TreeTransformOperation::transpose(
@@ -259,8 +265,8 @@ where
                     },
                 )
             },
-            |source, destination, probe| {
-                if destination.rank() == source.rank() {
+            |probe| {
+                if destination_rank == source_rank {
                     repartition_probe(
                         source_codomain_rank,
                         source_rank,
@@ -272,163 +278,43 @@ where
         )
     }
 
-    /// One admission and replay boundary for every typed Host
-    /// beta-accumulating tree transform.
+    /// The one admission boundary of every typed Host beta-accumulating tree
+    /// transform; the mode's [`TypedTensorTransformDispatch::transform_into`]
+    /// stages, checks the destination's space and writes.
     fn tree_transform_into(
         &self,
         destination: &mut Self,
         alpha: D,
         beta: D,
-        operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
-        exact_layout_probe: impl FnOnce(
-            &Self,
-            &Self,
-            &mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>),
-        ),
-    ) -> Result<(), Error> {
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), TypedFacadeError<R>> {
         if !self.runtime.same_runtime(&destination.runtime) {
-            return Err(Error::RuntimeMismatch);
+            return Err(Error::RuntimeMismatch.into());
         }
-        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
-        if identity != TypedSectorAdmission::typed_rule_identity(destination.provider()) {
-            return Err(Error::RuleMismatch);
-        }
-
-        let source_body = match &self.repr {
-            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
-                body
-            }
-            _ => {
-                return Err(Error::InvalidArgument(
-                    "typed destination tree transform requires an ordinary dense host source"
-                        .to_string(),
-                ))
-            }
-        };
-        let destination_body = match &destination.repr {
-            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
-                body
-            }
-            _ => {
-                return Err(Error::InvalidArgument(
-                    "destination must use ordinary dense host storage".to_string(),
-                ))
-            }
-        };
-        if Arc::ptr_eq(&source_body.data, &destination_body.data) {
-            return Err(Error::InvalidArgument(
-                "destination storage must not alias an input".to_string(),
-            ));
-        }
-
-        // A destination proved once to be this operation's result space of
-        // this source hits the completed transformer directly: the owned
-        // operation and the result space are not rebuilt.
-        let mut exact_layout_hit = None;
-        exact_layout_probe(self, destination, &mut |view| {
-            exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit(
-                &identity,
-                view,
-                &source_body.space,
-                &destination_body.space,
-            );
-        });
-        let operation = match exact_layout_hit {
-            Some(_) => None,
-            None => {
-                let operation = operation(self, destination)?;
-                let expected = source_body
-                    .space
-                    .transformed_multiplicity_free(&operation)?;
-                if destination_body.space.space() != expected.space() {
-                    return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                        message: "destination fusion space or block layout does not match the operation result",
-                    }));
-                }
-                Some(operation)
-            }
-        };
-        let required = destination_body.space.space().required_len()?;
-        let actual = match destination_body.data.as_ref() {
-            TypedData::Dense(data) => data.len(),
-            TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
-        };
-        if actual != required {
-            return Err(Error::InvalidArgument(format!(
-                "destination storage length {actual} does not match required length {required}"
-            )));
-        }
-        if Arc::strong_count(destination_body) != 1
-            || Arc::strong_count(&destination_body.data) != 1
+        // The held admitted identities: provider-free, and the provider's
+        // own by #2046.
+        if self.logical_space().space().admission().rule_identity()
+            != destination
+                .logical_space()
+                .space()
+                .admission()
+                .rule_identity()
         {
-            return Err(Error::DestinationShared);
+            return Err(Error::RuleMismatch.into());
         }
-
-        let source_structure = source_body.space.space().structure();
-        let source_data = match source_body.data.as_ref() {
-            TypedData::Dense(data) => data.as_slice(),
-            TypedData::Diagonal(_) => unreachable!("dense source checked above"),
-        };
-        {
-            let mut lease = self.runtime.lease_context()?;
-            let context = lease
-                .context()
-                .multiplicity_free_lane::<D>()?
-                .tree_context_mut();
-            let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
-                unreachable!("ordinary destination checked above")
-            };
-            let destination_body =
-                Arc::get_mut(destination_body).expect("unique destination body checked above");
-            let destination_provider = destination_body.space.provider();
-            let destination_structure = destination_body.space.space().structure();
-            let destination_data = Arc::get_mut(&mut destination_body.data)
-                .expect("unique destination payload checked above");
-            let TypedData::Dense(destination_data) = destination_data else {
-                unreachable!("dense destination checked above")
-            };
-            match (&exact_layout_hit, &operation) {
-                (Some(structure), _) => context.replay_tree_transform_dyn_into(
-                    structure,
-                    destination_structure,
-                    source_structure,
-                    destination_data.as_mut_slice(),
-                    source_data,
-                    alpha,
-                    beta,
-                )?,
-                (None, Some(operation)) => context.tree_transform_dyn_into_ref(
-                    destination_provider,
-                    operation,
-                    destination_structure,
-                    source_structure,
-                    destination_data.as_mut_slice(),
-                    source_data,
-                    alpha,
-                    beta,
-                )?,
-                (None, None) => unreachable!("a miss builds the operation"),
-            }
-        }
-        if let Some(operation) = &operation {
-            // Retention is an optimization: a lookup-only key keeps no proof.
-            let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout(
-                &identity,
-                operation,
-                &source_body.space,
-                destination.logical_space(),
-            );
-        }
-        Ok(())
+        let (source_body, _) = owned_dense_source(self)?;
+        destination_precheck(destination, &source_body.data, "host")?;
+        <R::Mode as TypedTensorTransformDispatch<R, D>>::transform_into(
+            self,
+            destination,
+            alpha,
+            beta,
+            operation,
+            exact_layout_probe,
+        )
     }
-}
 
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorTransformDispatch<R, D>,
-    D: TensorScalar,
-{
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
     ///
     /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
@@ -695,6 +581,105 @@ where
     }
 }
 
+/// The owned dense body and payload of a transform `_into` source.
+#[allow(clippy::type_complexity)]
+pub(super) fn owned_dense_source<R, D>(
+    source: &TensorMap<R, D>,
+) -> Result<(&Arc<TypedTensorBody<R, D>>, &[D]), Error> {
+    match &source.repr {
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(data) => Ok((body, data.as_slice())),
+            TypedData::Diagonal(_) => Err(non_dense_into_source()),
+        },
+        TypedTensorRepr::Adjoint(_) => Err(non_dense_into_source()),
+    }
+}
+
+fn non_dense_into_source() -> Error {
+    Error::InvalidArgument(
+        "typed destination tree transform requires an ordinary dense host source".to_string(),
+    )
+}
+
+/// The multiplicity-free [`TypedTensorTransformDispatch::transform_into`] of
+/// either coefficient lane: the exact-layout hit replays its proved
+/// transformer; a miss runs the owned transform's staging into the caller's
+/// buffer and records the proof for the next call.
+#[allow(private_bounds)]
+fn tree_transform_into_multiplicity_free<R, D>(
+    source: &TensorMap<R, D>,
+    destination: &mut TensorMap<R, D>,
+    alpha: D,
+    beta: D,
+    operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+    exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + crate::runtime::MultiplicityFreeCoefficientLane<
+            <R as MultiplicityFreeFusionSymbols>::Scalar,
+        >,
+{
+    let (source_body, source_data) = owned_dense_source(source)?;
+    let identity = source_body.space.space().admission().rule_identity();
+    let mut lease = source.runtime.lease_context()?;
+    let context = D::lane(lease.context())?.tree_context_mut();
+    // A destination proved once to be this operation's result space of
+    // this source hits the completed transformer directly: the owned
+    // operation and the result space are not rebuilt.
+    let mut exact_layout_hit = None;
+    if let Some(identity) = identity {
+        exact_layout_probe(&mut |view| {
+            exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit_of(
+                identity,
+                view,
+                &source_body.space,
+                destination.logical_space(),
+            );
+        });
+    }
+    if let Some(structure) = exact_layout_hit {
+        let destination_structure = Arc::clone(destination.logical_space().space().structure());
+        return Ok(context.replay_tree_transform_dyn_into(
+            &structure,
+            &destination_structure,
+            source_body.space.space().structure(),
+            destination_slice(destination)?,
+            source_data,
+            alpha,
+            beta,
+        )?);
+    }
+    let operation = operation()?;
+    let destination_space = destination.logical_space().space().clone();
+    context.tree_transform_into_multiplicity_free_in(
+        &source_body.space,
+        source_data,
+        &operation,
+        &destination_space,
+        || destination_slice(destination),
+        alpha,
+        beta,
+    )?;
+    drop(lease);
+    if let Some(identity) = identity {
+        // Retention is an optimization: a lookup-only key keeps no proof.
+        let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout_of::<
+            R,
+            <R as MultiplicityFreeFusionSymbols>::Scalar,
+        >(
+            identity,
+            &operation,
+            &source_body.space,
+            destination.logical_space(),
+        );
+    }
+    Ok(())
+}
+
 /// The owned multiplicity-free transform of either coefficient lane: one
 /// destination derivation and one replay (or overwrite) into a fresh payload.
 #[allow(private_bounds)]
@@ -852,6 +837,24 @@ where
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
         tree_transform_multiplicity_free_owned(tensor, operation)
     }
+
+    fn transform_into(
+        source: &TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Error> {
+        tree_transform_into_multiplicity_free(
+            source,
+            destination,
+            alpha,
+            beta,
+            operation,
+            exact_layout_probe,
+        )
+    }
 }
 
 impl<R> MultiplicityFreeTransformExecution<R, num_complex::Complex64> for num_complex::Complex64
@@ -879,6 +882,24 @@ where
         operation: TreeTransformOperation,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
         tree_transform_multiplicity_free_owned(tensor, operation)
+    }
+
+    fn transform_into(
+        source: &TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
+        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
+        exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
+    ) -> Result<(), Error> {
+        tree_transform_into_multiplicity_free(
+            source,
+            destination,
+            alpha,
+            beta,
+            operation,
+            exact_layout_probe,
+        )
     }
 }
 

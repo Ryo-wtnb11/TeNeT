@@ -315,6 +315,21 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         txn: &'c mut Self::ContractTxn,
     ) -> &'c mut Self::StructureCache;
 
+    /// Whether `dst` is, by value, the destination `stage` staged: TensorKit
+    /// `spacecheck_transform` for an existing destination. Provider-free and
+    /// allocation-free.
+    fn staged_destination_matches(
+        stage: &Self::TransformStage,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool;
+
+    /// Whether an existing-destination replay resolves its structure against
+    /// the caller's matched destination structure rather than the staged
+    /// preview. Multiplicity-free: yes, because the typed exact-layout proof
+    /// keys the caller's structure content. Checked Generic: no, because its
+    /// staged transformer is keyed by the preview and rekeyed at commit.
+    const INTO_RESOLVES_CALLER_DESTINATION: bool;
+
     /// Commits the staged destination after replay, then publishes what the
     /// transform staged.
     fn commit_transform(
@@ -660,6 +675,15 @@ where
     ) -> &'c mut TreeTransformPlanning {
         planning
     }
+
+    fn staged_destination_matches(
+        stage: &BoundDynamicFusionMapSpace<R>,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        stage.space() == dst
+    }
+
+    const INTO_RESOLVES_CALLER_DESTINATION: bool = true;
 
     fn commit_transform(
         _logical: &BoundDynamicFusionMapSpace<R>,
@@ -1232,6 +1256,16 @@ where
     ) -> &'c mut CheckedContractTxn {
         txn
     }
+
+    /// Why not `preview()`: it allocates an `Arc<HomSpace>`.
+    fn staged_destination_matches(
+        (prepared, _, _): &Self::TransformStage,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        prepared.matches(dst)
+    }
+
+    const INTO_RESOLVES_CALLER_DESTINATION: bool = false;
 
     /// Publication follows commit: only now are the destination's ids
     /// committed, and only a resident (canonical) destination is keyed.
