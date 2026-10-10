@@ -142,12 +142,334 @@ where
     }
 }
 
+impl<R, D, S> TensorMap<R, D, S>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedSpaceModeDispatch<R>,
+    D: TensorScalar,
+    S: ReduceExec<R, D>,
+{
+    /// TensorKit `norm(t, p)`: the entrywise `p`-norm of the reduced blocks,
+    ///
+    /// ```text
+    /// p == 2       -> sqrt(sum_c dim(c) * sum_ij |self_c[i,j]|^2)
+    /// p == Inf     -> max_c max_ij |self_c[i,j]|          (not dim-weighted)
+    /// finite p > 0 -> (sum_c dim(c) * sum_ij |self_c[i,j]|^p)^(1/p)
+    /// ```
+    ///
+    /// `p == 2.0` is the quantum-dimension-weighted Frobenius norm and is the
+    /// only exponent the CUDA storage supports; `p` is an `f64` exactly as in
+    /// TensorKit, so each norm has one spelling. The entrywise norm is never
+    /// an operator norm, matrices included.
+    ///
+    /// For `p == 2`, abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
+    /// norm. Compact diagonal input is reduced directly in `O(sum_c k_c)`;
+    /// dense input is one pass over the payload. Lazy adjoints read their
+    /// parent orientation without materializing. Both admission modes share
+    /// this one body; they differ only in how `dim(c)` is asked for.
+    ///
+    /// The Host norm does not overflow or underflow while the norm itself is
+    /// representable: when the unscaled sum of squares leaves the `f64` range,
+    /// two more passes rescale every entry by the largest magnitude, as Julia's
+    /// `LinearAlgebra.generic_norm2` does. An entry of NaN magnitude `|x|` gives
+    /// NaN; otherwise an infinite magnitude gives `inf`.
+    ///
+    /// `p == Inf` follows Julia's NaN-propagating `max`: a payload holding
+    /// any NaN, including a complex entry whose real or imaginary part alone
+    /// is NaN, returns NaN; an infinite entry returns `+inf`; a tensor with no
+    /// stored entries returns `+0.0`. Every exponent is one pass over the
+    /// payload, `O(sum_c k_c)` on compact diagonal storage.
+    ///
+    /// # CUDA storage
+    ///
+    /// The device norm accumulates in `f64` at every payload dtype, within
+    /// and across coupled sectors, like the Host norm: an `f32`/`Complex32`
+    /// payload is widened on the device by one cast (one device allocation
+    /// of twice the payload bytes and one elementwise pass), because
+    /// Tenferro 0.7.1 offers no widening reduction (#1344). Unlike the Host
+    /// norm, an `f64`/`Complex64` device sum is not rescaled: it returns
+    /// `inf` once the squared norm exceeds `f64::MAX` and loses accuracy
+    /// below `f64::MIN_POSITIVE`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or
+    ///   `-inf`; TensorKit throws `ArgumentError` over the same domain.
+    /// - [`Error::UnsupportedOnDevice`] for any other `p != 2` on CUDA
+    ///   storage, rather than a hidden Host transfer.
+    /// - If a checked provider cannot supply a quantum dimension, its original
+    ///   error is available as the source. An invalid coupled-sector layout
+    ///   returns [`Error::Core`].
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let id: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
+    /// let twice = id.axpby(1.0, &id, 1.0)?;
+    /// assert!((twice.norm(2.0)? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
+    /// assert_eq!(twice.norm(f64::INFINITY)?, 2.0);
+    /// assert_eq!(id.inner(&id)?, 2.0);
+    /// assert_eq!(id.tr()?, 2.0);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn norm(&self, p: f64) -> Result<f64, TypedFacadeError<R>> {
+        // Checked before any dispatch so an invalid `p` is rejected the same
+        // way on every representation and storage.
+        validate_norm_p(p)?;
+        if let Some(spectrum) = S::as_host(self).and_then(TensorMap::spectrum) {
+            return compact_norm(spectrum, self.logical_space().provider(), p);
+        }
+        // Every entrywise norm is adjoint invariant: reduce the parent's
+        // payload without materializing the logical adjoint.
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            return S::dense_norm(
+                &Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+                },
+                p,
+            );
+        }
+        S::dense_norm(self, p)
+    }
+
+    /// Returns the quantum-dimension-weighted Frobenius inner product
+    /// `sum_c dim(c) * sum_ij conj(self_c[i,j]) * other_c[i,j]`.
+    ///
+    /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
+    /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
+    /// same runtime, hom space, and block layout. A compact
+    /// diagonal operand is reduced directly from its stored spectrum in
+    /// `O(sum_c k_c)` payload reads, including against a dense lazy adjoint;
+    /// it is never densified. Its off-diagonal entries are structural zeros,
+    /// so matching dense off-diagonal values are not read even when they are
+    /// `NaN` or infinite. This deliberately differs from TensorKit 0.17's
+    /// current generic mixed-block reduction, which visits those stored dense
+    /// positions and therefore propagates their non-finite values. See
+    /// [`Self::norm`] for the weighting, lazy behavior, and example.
+    ///
+    /// On CUDA storage the sum accumulates in `f64` within and across coupled
+    /// sectors at every payload dtype and narrows to `D` once, as on the
+    /// Host; a single-precision call widens each distinct operand on the
+    /// device first (#1383). A lazy adjoint CUDA operand returns
+    /// [`Error::UnsupportedOnDevice`].
+    #[doc(alias = "dot")]
+    pub fn inner<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D, S>>,
+    ) -> Result<D, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        if self.logical_space().space() != other.logical_space().space() {
+            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+                message: "tensors live on different spaces or block layouts",
+            })
+            .into());
+        }
+        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+            if let Some(value) = lhs.compact_inner_arms(rhs)? {
+                return Ok(value);
+            }
+        }
+        S::dense_inner(self, other)
+    }
+}
+
+/// The compact arm of [`TensorMap::norm`] over a validated `p`: the stored
+/// diagonal of each coupled block, in `O(sum_c k_c)`.
+fn compact_norm<R, D>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    provider: &R,
+    p: f64,
+) -> Result<f64, TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedSpaceModeDispatch<R>,
+    D: TensorScalar,
+{
+    if p == 2.0 {
+        return rescaled_power_norm(
+            compact_inner(spectrum, spectrum, run_cached_dim(provider))?.re,
+            2.0,
+            || spectrum_max_abs(spectrum),
+            |max| {
+                spectrum_weighted_sum(spectrum, run_cached_dim(provider), |value| {
+                    scaled_power(value, max, 2.0)
+                })
+            },
+        );
+    }
+    if p.is_infinite() {
+        return Ok(spectrum_max_abs(spectrum));
+    }
+    let power = |value: D| value.widen_complex().norm().powf(p);
+    rescaled_power_norm(
+        spectrum_weighted_sum(spectrum, run_cached_dim(provider), power)?,
+        p,
+        || spectrum_max_abs(spectrum),
+        |max| {
+            spectrum_weighted_sum(spectrum, run_cached_dim(provider), |value| {
+                scaled_power(value, max, p)
+            })
+        },
+    )
+}
+
+/// The dense kernels of `norm` and `inner` for one storage (#1756).
+///
+/// [`TensorMap::norm`] and [`TensorMap::inner`] own admission, the compact
+/// arms and the lazy-adjoint redirect of `norm`; each calls exactly one of
+/// these kernels last. A storage without a kernel for an argument returns
+/// [`Error::UnsupportedOnDevice`] there.
+#[doc(hidden)]
+pub trait ReduceExec<R, D>: TypedStorage<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedSpaceModeDispatch<R>,
+{
+    /// `norm(t, p)` of an owned dense tensor, `p` already validated.
+    fn dense_norm(t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, TypedFacadeError<R>>;
+
+    /// `inner(x, y)` of two dense operands, owned or lazy adjoint, on one
+    /// runtime and one space.
+    fn dense_inner(
+        x: &TensorMap<R, D, Self>,
+        y: &TensorMap<R, D, Self>,
+    ) -> Result<D, TypedFacadeError<R>>;
+}
+
+impl<R, D> ReduceExec<R, D> for Vec<D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedSpaceModeDispatch<R>,
+    D: TensorScalar,
+{
+    fn dense_norm(t: &TensorMap<R, D>, p: f64) -> Result<f64, TypedFacadeError<R>> {
+        let provider = t.logical_space().provider();
+        let payload = t
+            .owned_body()
+            .expect("owned norm input")
+            .materialized_dense_data();
+        let data: &[D] = &payload;
+        if p.is_infinite() {
+            return Ok(max_abs(data.iter().copied()));
+        }
+        let structure = t.logical_space().space().structure();
+        let nout = t.logical_space().space().nout();
+        let sum = if p == 2.0 {
+            let unique = <R::Mode as TypedTensorModeDispatch<R>>::fusion_style(provider)
+                == tenet_core::FusionStyleKind::Unique;
+            // Why not `t.inner(t)`: it narrows the wide sum to `D`, which
+            // for `f32`/`Complex32` rounds `|t|²` to single precision and can
+            // leave it subnormal, above the rescaling threshold.
+            dense_weighted_inner(
+                unique,
+                structure,
+                nout,
+                data,
+                data,
+                run_cached_dim(provider),
+            )?
+            .re
+        } else {
+            coupled_region_weighted_sum(structure, nout, data, run_cached_dim(provider), |value| {
+                value.widen_complex().norm().powf(p)
+            })?
+        };
+        rescaled_power_norm(
+            sum,
+            p,
+            || max_abs(data.iter().copied()),
+            |max| {
+                coupled_region_weighted_sum(
+                    structure,
+                    nout,
+                    data,
+                    run_cached_dim(provider),
+                    |value| scaled_power(value, max, p),
+                )
+            },
+        )
+    }
+
+    fn dense_inner(x: &TensorMap<R, D>, y: &TensorMap<R, D>) -> Result<D, TypedFacadeError<R>> {
+        let _host_pool = x.runtime.enter_host_pool();
+        let provider = x.logical_space().provider();
+        if matches!(&x.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&y.repr, TypedTensorRepr::Adjoint(_))
+        {
+            let (lhs_operand, lhs_data) = x.fusion_operand_and_data();
+            let (rhs_operand, rhs_data) = y.fusion_operand_and_data();
+            return match (&x.repr, &y.repr) {
+                (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
+                    tenet_tensors::oriented_fusion_inner_with(
+                        lhs.parent.space.space().structure(),
+                        tenet_tensors::FusionOperand::direct(rhs.parent.space.space()),
+                        rhs.parent_data(),
+                        tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
+                        lhs.parent_data(),
+                        run_cached_dim(provider),
+                    )
+                }
+                _ => tenet_tensors::oriented_fusion_inner_with(
+                    x.logical_space().space().structure(),
+                    lhs_operand,
+                    &lhs_data,
+                    rhs_operand,
+                    &rhs_data,
+                    run_cached_dim(provider),
+                ),
+            };
+        }
+        let unique = <R::Mode as TypedTensorModeDispatch<R>>::fusion_style(provider)
+            == tenet_core::FusionStyleKind::Unique;
+        // `D::from_complex64` is `.re` for the real scalar and the identity for
+        // the complex one, so one static conversion covers both scalar types.
+        Ok(D::from_complex64(dense_weighted_inner(
+            unique,
+            x.logical_space().space().structure(),
+            x.logical_space().space().nout(),
+            x.owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data()
+                .as_ref(),
+            y.owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data()
+                .as_ref(),
+            run_cached_dim(provider),
+        )?))
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedSpaceModeDispatch<R>,
     D: TensorScalar,
 {
+    /// The compact arms of [`Self::inner`]: `None` when neither operand is
+    /// compact. Compact operands reduce without materializing their
+    /// structural zeros.
+    fn compact_inner_arms(&self, other: &Self) -> Result<Option<D>, TypedFacadeError<R>> {
+        let value = match (self.spectrum(), other.spectrum()) {
+            (Some(lhs), Some(rhs)) => {
+                compact_inner(lhs, rhs, run_cached_dim(self.logical_space().provider()))?
+            }
+            (Some(lhs), None) => Self::compact_dense_inner(lhs, other, true)?,
+            (None, Some(rhs)) => Self::compact_dense_inner(rhs, self, false)?,
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(D::from_complex64(value)))
+    }
+
     /// Mixed compact/dense inner over the stored diagonal only. A compact
     /// operand defines structural zeros off diagonal, so those dense entries
     /// are not part of this reduction (including non-finite values).
@@ -239,287 +561,6 @@ where
             runtime: runtime.clone(),
             repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
         }
-    }
-
-    /// The `p == 2` arm of [`Self::norm`]: TensorKit's Frobenius norm
-    /// weighted by the coupled sectors' quantum dimensions,
-    /// `norm(t)^2 = Σ_c dim(c) * |block_c|^2`.
-    fn frobenius_norm(&self) -> Result<f64, TypedFacadeError<R>> {
-        let provider = self.logical_space().provider();
-        if let Some(spectrum) = self.spectrum() {
-            return rescaled_power_norm(
-                compact_inner(spectrum, spectrum, run_cached_dim(provider))?.re,
-                2.0,
-                || spectrum_max_abs(spectrum),
-                |max| {
-                    spectrum_weighted_sum(spectrum, run_cached_dim(provider), |value| {
-                        scaled_power(value, max, 2.0)
-                    })
-                },
-            );
-        }
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return Self::adjoint_parent(view, &self.runtime).frobenius_norm();
-        }
-        let payload = self
-            .owned_body()
-            .expect("owned norm input")
-            .materialized_dense_data();
-        let data: &[D] = &payload;
-        let structure = self.logical_space().space().structure();
-        let nout = self.logical_space().space().nout();
-        let unique = <R::Mode as TypedTensorModeDispatch<R>>::fusion_style(provider)
-            == tenet_core::FusionStyleKind::Unique;
-        // Why not `self.inner(self)`: it narrows the wide sum to `D`, which
-        // for `f32`/`Complex32` rounds `|t|²` to single precision and can
-        // leave it subnormal, above the rescaling threshold.
-        rescaled_power_norm(
-            dense_weighted_inner(
-                unique,
-                structure,
-                nout,
-                data,
-                data,
-                run_cached_dim(provider),
-            )?
-            .re,
-            2.0,
-            || max_abs(data.iter().copied()),
-            |max| {
-                coupled_region_weighted_sum(
-                    structure,
-                    nout,
-                    data,
-                    run_cached_dim(provider),
-                    |value| scaled_power(value, max, 2.0),
-                )
-            },
-        )
-    }
-
-    /// The `p == Inf` arm of [`Self::norm`]: the largest stored magnitude,
-    /// not dimension weighted, NaN-propagating, `+0.0` without entries.
-    fn max_norm(&self) -> f64 {
-        if let Some(spectrum) = self.spectrum() {
-            return spectrum_max_abs(spectrum);
-        }
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return max_abs(view.parent_data().iter().copied());
-        }
-        max_abs(
-            self.owned_body()
-                .expect("owned norm input")
-                .materialized_dense_data()
-                .as_ref()
-                .iter()
-                .copied(),
-        )
-    }
-
-    /// The finite `p != 2` arm of [`Self::norm`].
-    fn power_norm(&self, p: f64) -> Result<f64, TypedFacadeError<R>> {
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return Self::adjoint_parent(view, &self.runtime).power_norm(p);
-        }
-        let provider = self.logical_space().provider();
-        let power = |value: D| value.widen_complex().norm().powf(p);
-        if let Some(spectrum) = self.spectrum() {
-            return rescaled_power_norm(
-                spectrum_weighted_sum(spectrum, run_cached_dim(provider), power)?,
-                p,
-                || spectrum_max_abs(spectrum),
-                |max| {
-                    spectrum_weighted_sum(spectrum, run_cached_dim(provider), |value| {
-                        scaled_power(value, max, p)
-                    })
-                },
-            );
-        }
-        let structure = self.logical_space().space().structure();
-        let nout = self.logical_space().space().nout();
-        let payload = self
-            .owned_body()
-            .expect("owned norm input")
-            .materialized_dense_data();
-        let data: &[D] = &payload;
-        rescaled_power_norm(
-            coupled_region_weighted_sum(structure, nout, data, run_cached_dim(provider), power)?,
-            p,
-            || max_abs(data.iter().copied()),
-            |max| {
-                coupled_region_weighted_sum(
-                    structure,
-                    nout,
-                    data,
-                    run_cached_dim(provider),
-                    |value| scaled_power(value, max, p),
-                )
-            },
-        )
-    }
-
-    /// TensorKit `norm(t, p)`: the entrywise `p`-norm of the reduced blocks,
-    ///
-    /// ```text
-    /// p == 2       -> sqrt(sum_c dim(c) * sum_ij |self_c[i,j]|^2)
-    /// p == Inf     -> max_c max_ij |self_c[i,j]|          (not dim-weighted)
-    /// finite p > 0 -> (sum_c dim(c) * sum_ij |self_c[i,j]|^p)^(1/p)
-    /// ```
-    ///
-    /// `p == 2.0` is the quantum-dimension-weighted Frobenius norm and is the
-    /// only exponent the CUDA storage supports; `p` is an `f64` exactly as in
-    /// TensorKit, so each norm has one spelling. The entrywise norm is never
-    /// an operator norm, matrices included.
-    ///
-    /// For `p == 2`, abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
-    /// norm. Compact diagonal input is reduced directly in `O(sum_c k_c)`;
-    /// dense input is one pass over the payload. Lazy adjoints read their
-    /// parent orientation without materializing. Both admission modes share
-    /// this one body; they differ only in how `dim(c)` is asked for.
-    ///
-    /// The Host norm does not overflow or underflow while the norm itself is
-    /// representable: when the unscaled sum of squares leaves the `f64` range,
-    /// two more passes rescale every entry by the largest magnitude, as Julia's
-    /// `LinearAlgebra.generic_norm2` does. An entry of NaN magnitude `|x|` gives
-    /// NaN; otherwise an infinite magnitude gives `inf`.
-    ///
-    /// `p == Inf` follows Julia's NaN-propagating `max`: a payload holding
-    /// any NaN, including a complex entry whose real or imaginary part alone
-    /// is NaN, returns NaN; an infinite entry returns `+inf`; a tensor with no
-    /// stored entries returns `+0.0`. Every exponent is one pass over the
-    /// payload, `O(sum_c k_c)` on compact diagonal storage.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or
-    ///   `-inf`; TensorKit throws `ArgumentError` over the same domain.
-    /// - If a checked provider cannot supply a quantum dimension, its original
-    ///   error is available as the source. An invalid coupled-sector layout
-    ///   returns [`Error::Core`].
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use tenet::sector::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
-    ///
-    /// let runtime = Runtime::builder().build()?;
-    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
-    /// let id: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
-    /// let twice = id.axpby(1.0, &id, 1.0)?;
-    /// assert!((twice.norm(2.0)? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
-    /// assert_eq!(twice.norm(f64::INFINITY)?, 2.0);
-    /// assert_eq!(id.inner(&id)?, 2.0);
-    /// assert_eq!(id.tr()?, 2.0);
-    /// # Ok::<(), tenet::typed::Error>(())
-    /// ```
-    pub fn norm(&self, p: f64) -> Result<f64, TypedFacadeError<R>> {
-        // Checked before any dispatch so an invalid `p` is rejected the same
-        // way on compact and dense storage.
-        validate_norm_p(p)?;
-        if p == 2.0 {
-            return self.frobenius_norm();
-        }
-        if p.is_infinite() {
-            return Ok(self.max_norm());
-        }
-        self.power_norm(p)
-    }
-
-    /// Returns the quantum-dimension-weighted Frobenius inner product
-    /// `sum_c dim(c) * sum_ij conj(self_c[i,j]) * other_c[i,j]`.
-    ///
-    /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
-    /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
-    /// same runtime, hom space, and block layout. A compact
-    /// diagonal operand is reduced directly from its stored spectrum in
-    /// `O(sum_c k_c)` payload reads, including against a dense lazy adjoint;
-    /// it is never densified. Its off-diagonal entries are structural zeros,
-    /// so matching dense off-diagonal values are not read even when they are
-    /// `NaN` or infinite. This deliberately differs from TensorKit 0.17's
-    /// current generic mixed-block reduction, which visits those stored dense
-    /// positions and therefore propagates their non-finite values. See
-    /// [`Self::norm`] for the weighting, lazy behavior, and example.
-    #[doc(alias = "dot")]
-    pub fn inner<'a>(
-        &self,
-        other: impl Into<TensorRef<'a, R, D>>,
-    ) -> Result<D, TypedFacadeError<R>> {
-        let other = other.into().operand()?;
-        let other = &*other;
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch.into());
-        }
-        let _host_pool = self.runtime.enter_host_pool();
-        if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            })
-            .into());
-        }
-        let provider = self.logical_space().provider();
-        // Compact operands reduce without materializing their structural zeros.
-        if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
-            return Ok(D::from_complex64(compact_inner(
-                lhs,
-                rhs,
-                run_cached_dim(provider),
-            )?));
-        }
-        if let Some(lhs) = self.spectrum() {
-            return Ok(D::from_complex64(Self::compact_dense_inner(
-                lhs, other, true,
-            )?));
-        }
-        if let Some(rhs) = other.spectrum() {
-            return Ok(D::from_complex64(Self::compact_dense_inner(
-                rhs, self, false,
-            )?));
-        }
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
-            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
-        {
-            let (lhs_operand, lhs_data) = self.fusion_operand_and_data();
-            let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
-            return match (&self.repr, &other.repr) {
-                (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
-                    tenet_tensors::oriented_fusion_inner_with(
-                        lhs.parent.space.space().structure(),
-                        tenet_tensors::FusionOperand::direct(rhs.parent.space.space()),
-                        rhs.parent_data(),
-                        tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
-                        lhs.parent_data(),
-                        run_cached_dim(provider),
-                    )
-                }
-                _ => tenet_tensors::oriented_fusion_inner_with(
-                    self.logical_space().space().structure(),
-                    lhs_operand,
-                    &lhs_data,
-                    rhs_operand,
-                    &rhs_data,
-                    run_cached_dim(provider),
-                ),
-            };
-        }
-        let unique = <R::Mode as TypedTensorModeDispatch<R>>::fusion_style(provider)
-            == tenet_core::FusionStyleKind::Unique;
-        // `D::from_complex64` is `.re` for the real scalar and the identity for
-        // the complex one, so one static conversion covers both scalar types.
-        Ok(D::from_complex64(dense_weighted_inner(
-            unique,
-            self.logical_space().space().structure(),
-            self.logical_space().space().nout(),
-            self.owned_body()
-                .expect("owned inner input")
-                .materialized_dense_data()
-                .as_ref(),
-            other
-                .owned_body()
-                .expect("owned inner input")
-                .materialized_dense_data()
-                .as_ref(),
-            run_cached_dim(provider),
-        )?))
     }
 
     /// Returns the quantum-dimension-weighted block trace
