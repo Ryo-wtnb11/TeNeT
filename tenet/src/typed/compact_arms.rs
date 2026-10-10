@@ -467,7 +467,8 @@ where
     if tensor.rank() != 2 || tensor.codomain_rank() != 1 || axes.trace_lhs_axes().len() != 1 {
         return Ok(None);
     }
-    let destination = tenet_tensors::tensortrace_stage_multiplicity_free(space, axes, dst_nout)?;
+    let destination = tenet_tensors::tensortrace_stage_multiplicity_free(space, axes, dst_nout)?
+        .into_destination();
     let traced_leg_is_dual: bool =
         tensor.logical_space().space().homspace().codomain().legs()[0].is_dual();
     let provider: &R = tensor.logical_space().provider();

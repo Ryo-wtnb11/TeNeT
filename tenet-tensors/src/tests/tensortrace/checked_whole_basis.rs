@@ -662,3 +662,34 @@ fn owned_checked_trace_publishes_after_success_only() {
         warm.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
     );
 }
+
+/// What (#2146): the owned checked trace preflights once per call. Its
+/// stage asks exactly the preflight's queries, and its execution asks the
+/// committed-destination compile's queries without that compile's own
+/// preflight, in the same order, cold and warm.
+#[test]
+fn owned_checked_trace_preflights_once() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let provider = &*fixture.provider;
+    let data = vec![1.0_f64; fixture.src.space().required_len().unwrap()];
+    // Not `reset`: a renewed identity would reject the bound source.
+    provider.calls.take();
+    crate::tensortrace_fusion_dyn_preflight_generic_checked(&fixture.src, axes(), 1).unwrap();
+    let preflight = provider.calls.take();
+    assert!(!preflight.is_empty());
+    let owned = |compile_calls: Vec<Call>| {
+        assert_eq!(compile_calls[..preflight.len()], preflight[..]);
+        let stage = crate::tensortrace_stage_checked_generic(&fixture.src, axes(), 1).unwrap();
+        assert_eq!(provider.calls.take(), preflight);
+        crate::tensortrace_checked_generic_in(stage, &fixture.src, || &data[..], axes(), 1.0)
+            .unwrap();
+        assert_eq!(provider.calls.take(), compile_calls[preflight.len()..]);
+    };
+    compile(&fixture).unwrap();
+    owned(provider.calls.take());
+    publishing_compile(&fixture).unwrap();
+    owned(provider.calls.take());
+}

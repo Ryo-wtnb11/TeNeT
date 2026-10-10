@@ -40,14 +40,9 @@ fn source() -> BoundDynamicFusionMapSpace<CheckedTraceToy> {
 
 fn stage(
     src: &BoundDynamicFusionMapSpace<CheckedTraceToy>,
-) -> crate::PreparedCheckedGenericDynamicSpace {
-    let axes = TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]);
-    let preflight = crate::tensortrace_fusion_dyn_preflight_generic_checked(src, axes, 1).unwrap();
-    src.prepare_final_homspace_generic_with_checked(
-        src.provider(),
-        preflight.into_selected_homspace(),
-    )
-    .unwrap()
+) -> crate::TensorTraceStage<'_, CheckedTraceToy, crate::PreparedCheckedGenericDynamicSpace> {
+    crate::tensortrace_stage_checked_generic(src, TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]), 1)
+        .unwrap()
 }
 
 /// The complete-layout owner's admission state; sector-cache admission after
@@ -146,12 +141,19 @@ fn destination_error_precedes_pivotal_and_payload() {
     }
     let src = source();
     clear_structure_caches();
-    let wrong_dst = src
-        .prepare_final_homspace_generic_with_checked(
-            src.provider(),
-            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
-        )
-        .unwrap();
+    // A stage whose source is another binding is compiled as against a
+    // committed destination, so its `dst` comparison runs.
+    let other = src.clone();
+    let wrong_dst = crate::TensorTraceStage {
+        destination: src
+            .prepare_final_homspace_generic_with_checked(
+                src.provider(),
+                FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
+            )
+            .unwrap(),
+        src: &other,
+        axes: TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+    };
     TRACE_TEST_FAIL_TWIST.set(true);
     TRACE_TEST_TWIST_CALLS.set(0);
     let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
@@ -318,7 +320,7 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     ));
     assert_eq!(owner(), before);
     let staged = stage(&src);
-    let stale = staged.structure().content_key();
+    let stale = staged.destination.structure().content_key();
     clear_structure_caches();
     let (out, data) = tensortrace_checked_generic_in(
         staged,
