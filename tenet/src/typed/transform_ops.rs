@@ -740,9 +740,40 @@ where
         )?)
 }
 
+/// TensorKit `permute(t') = adjoint(permute(parent, adjointtensorindices(..)))`
+/// and its `braid`/`transpose`/`repartition` twins: the lazy adjoint of the
+/// parent's owned transform, one body for every mode. `None` unless `tensor`
+/// is a lazy adjoint.
+pub(super) fn lazy_adjoint_of_transformed_parent<R, D>(
+    tensor: &TensorMap<R, D>,
+    operation: &TreeTransformOperation,
+) -> Result<Option<TensorMap<R, D>>, TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,
+    D: TensorScalar,
+{
+    let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
+        return Ok(None);
+    };
+    let parent_space = view.parent.space.space();
+    let lowered =
+        lower_adjoint_tree_transform_operation(parent_space.nout(), parent_space.nin(), operation)?;
+    TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+    }
+    .tree_transform(lowered)?
+    .adjoint()
+    .map(Some)
+}
+
 impl<R, D> MultiplicityFreeTransformExecution<R, f64> for D
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
     D: TensorScalar,
 {
     fn try_compact(
@@ -756,28 +787,7 @@ where
         tensor: &TensorMap<R, Self>,
         operation: &TreeTransformOperation,
     ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-            return Ok(None);
-        };
-        let parent_space = view.parent.space.space();
-        let lowered = lower_adjoint_tree_transform_operation(
-            parent_space.nout(),
-            parent_space.nin(),
-            operation,
-        )?;
-        // A lazy adjoint's parent is owned and dense, so it takes the owned
-        // route directly.
-        let parent = TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-        };
-        let (space, data) = tree_transform_multiplicity_free_owned(&parent, lowered)?;
-        TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        }
-        .adjoint()
-        .map(Some)
+        lazy_adjoint_of_transformed_parent(tensor, operation)
     }
 
     fn transform(

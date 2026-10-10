@@ -47,12 +47,18 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
+    // Read before the checks below: a transformed adjoint stays lazy, and
+    // they materialize it on purpose.
+    assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
     for (actual, expected) in outputs {
-        assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
+        assert!(matches!(&actual.repr, TypedTensorRepr::Adjoint(_)));
         assert_eq!(
             actual.logical_space().space(),
             expected.logical_space().space()
         );
+        assert!(actual.norm(2.0).unwrap().is_finite());
+        assert!(actual.qr_compact(&[0, 1], &[2]).is_ok());
+        let actual = actual.materialize().unwrap();
         assert_eq!(
             actual.dense_data().unwrap().len(),
             expected.dense_data().unwrap().len()
@@ -63,10 +69,7 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
             .iter()
             .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
-        assert!(actual.norm(2.0).unwrap().is_finite());
-        assert!(actual.qr_compact(&[0, 1], &[2]).is_ok());
     }
-    assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -675,15 +678,16 @@ fn absorb_uses_operation_local_logical_payloads_without_warming_lazy_inputs() {
 
 fn assert_parent_native_transform<R, D>(
     source: &TensorMap<R, D>,
-    operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, Error>,
+    eager: &TensorMap<R, D>,
+    operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, TypedFacadeError<R>>,
 ) where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,
     D: TensorScalar + core::fmt::Debug,
 {
     let lazy = source.adjoint().unwrap();
-    let eager = eager_adjoint_oracle(source);
     let actual = operation(&lazy).unwrap();
-    let expected = operation(&eager).unwrap();
+    let expected = operation(eager).unwrap();
     let TypedTensorRepr::Adjoint(_) = &actual.repr else {
         panic!("a transformed lazy adjoint must remain parent-backed");
     };
@@ -711,15 +715,19 @@ fn assert_parent_native_transform<R, D>(
         }));
 }
 
-fn assert_parent_native_transform_suite<R, D>(source: &TensorMap<R, D>)
+/// `eager` is an independently built `source^H`.
+fn assert_parent_native_transform_suite<R, D>(source: &TensorMap<R, D>, eager: &TensorMap<R, D>)
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,
     D: TensorScalar + core::fmt::Debug,
 {
-    assert_parent_native_transform(source, |tensor| tensor.permute(&[2, 0], &[1]));
-    assert_parent_native_transform(source, |tensor| tensor.braid(&[2, 0], &[1], &[17, 3, 11]));
-    assert_parent_native_transform(source, |tensor| tensor.transpose(&[2, 1], &[0]));
-    assert_parent_native_transform(source, |tensor| tensor.repartition(2));
+    assert_parent_native_transform(source, eager, |tensor| tensor.permute(&[2, 0], &[1]));
+    assert_parent_native_transform(source, eager, |tensor| {
+        tensor.braid(&[2, 0], &[1], &[17, 3, 11])
+    });
+    assert_parent_native_transform(source, eager, |tensor| tensor.transpose(&[2, 1], &[0]));
+    assert_parent_native_transform(source, eager, |tensor| tensor.repartition(2));
 }
 
 #[test]
@@ -732,10 +740,53 @@ fn nonidentity_adjoint_transforms_stay_parent_native_for_unique_simple_and_both_
     let su2_c64 = su2
         .convert::<Complex64>()
         .scale(num_complex::Complex64::new(1.0, 2.0));
-    assert_parent_native_transform_suite(&u1);
-    assert_parent_native_transform_suite(&u1_c64);
-    assert_parent_native_transform_suite(&su2);
-    assert_parent_native_transform_suite(&su2_c64);
+    assert_parent_native_transform_suite(&u1, &eager_adjoint_oracle(&u1));
+    assert_parent_native_transform_suite(&u1_c64, &eager_adjoint_oracle(&u1_c64));
+    assert_parent_native_transform_suite(&su2, &eager_adjoint_oracle(&su2));
+    assert_parent_native_transform_suite(&su2_c64, &eager_adjoint_oracle(&su2_c64));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn nonidentity_adjoint_transforms_stay_parent_native_for_checked_generic_and_both_dtypes() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2 = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(2).unwrap()),
+        [(vec![0], 2), (vec![1], 3), (vec![2], 2)],
+    )
+    .unwrap();
+    // `8 ⊗ 8 → 8` has outer multiplicity two.
+    let su3 = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![0, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    for leg in [su2, su3] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+                indices.iter().sum::<usize>() as f64 + trees.coupled().iter().sum::<i64>() as f64
+                    - 1.5
+            })
+            .unwrap();
+        let source_c64 = source
+            .convert::<Complex64>()
+            .scale(num_complex::Complex64::new(1.0, 2.0));
+        // Oracle (i): TensorKit `copy(t')`, which no transform route reads.
+        let eager = source
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        assert_parent_native_transform_suite(&source, &eager);
+        let eager_c64 = source_c64
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        assert_parent_native_transform_suite(&source_c64, &eager_c64);
+    }
 }
 
 fn assert_parent_native_elementwise<R, D>(source: &TensorMap<R, D>, alpha: D, beta: D)

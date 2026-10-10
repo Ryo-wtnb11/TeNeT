@@ -110,9 +110,10 @@ where
         Ok(None)
     }
 
-    /// The lazy adjoint of the transformed parent, or `None` to transform the
-    /// conjugated storage directly. The method is where a mode discharges
-    /// [`TypedAdjointSpace`]; #1865 implements it for checked Generic.
+    /// The lazy adjoint of the transformed parent for a lazy-adjoint input,
+    /// else `None`. The method is where a mode discharges
+    /// [`TypedAdjointSpace`]; the default `None` is for a mode that cannot
+    /// hold a lazy adjoint.
     fn try_lazy_adjoint_transform(
         _tensor: &TensorMap<R, D>,
         _operation: &TreeTransformOperation,
@@ -120,9 +121,9 @@ where
         Ok(None)
     }
 
-    /// Transforms the dense payload of `tensor` (a compact diagonal
-    /// densified, a lazy adjoint read through its conjugated parent) into a
-    /// fresh destination payload.
+    /// Transforms the owned dense payload of `tensor` (a compact diagonal
+    /// densified) into a fresh destination payload. A lazy adjoint never
+    /// reaches it: `try_lazy_adjoint_transform` takes it first.
     fn transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,

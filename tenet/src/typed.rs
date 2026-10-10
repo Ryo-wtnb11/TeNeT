@@ -425,10 +425,10 @@ mod reduction_ops;
 mod restrict;
 mod transform_ops;
 mod twist_flip;
-use transform_ops::map_spectrum_dtype;
 pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
+use transform_ops::{lazy_adjoint_of_transformed_parent, map_spectrum_dtype};
 
 /// In-module gates on the typed facade's private state.
 ///
