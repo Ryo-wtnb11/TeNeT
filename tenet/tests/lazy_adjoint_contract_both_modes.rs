@@ -1,20 +1,27 @@
-//! A tree transform of a lazy adjoint is the lazy adjoint of the transformed
-//! parent in both admission modes (#1865).
+//! A lazy adjoint is a storage-conjugate operand of contraction and
+//! composition, and a tree transform of a lazy adjoint is the lazy adjoint
+//! of the transformed parent, in both admission modes (#1865).
 //!
-//! TensorKit `cfaa073e` defines `permute(t'::AdjointTensorMap, p) =
+//! TensorKit `cfaa073e`: `blas_contract!` (`src/tensors/tensoroperations.jl:383-450`)
+//! contracts `A'` either as `mul!` over `block(parent, c)'` (no copy) or,
+//! through `copyA`, as a `tensoradd!` from the adjoint's subblocks; `compose`
+//! is `mul!` (`src/tensors/linalg.jl:38, 330-`). `permute(t'::AdjointTensorMap, p) =
 //! adjoint(permute(parent(t'), adjointtensorindices(t', p)))`
 //! (`src/tensors/indexmanipulations.jl:260-264`), and `braid` (L343-352),
 //! `transpose` (L414-421) and `repartition` (through `transpose`) the same
-//! way, for every fusion style. QSpace has no lazy adjoint (`QSpace::Permute`
+//! way, for every fusion style. QSpace (`dd2cc7e1`) carries a conjugation
+//! flag into its grouped block contraction (`contractQS.cc:icFlags`,
+//! `wbarray.cc:3472-3482`) but has no lazy adjoint object (`QSpace::Permute`
 //! conjugates eagerly), so TensorKit semantics govern.
 //!
-//! Oracles, each independent of the transform route under test:
+//! Oracles, each independent of the route under test:
 //! - (i) reference steps: `copy(t')` (the uncached `materialize`), then the
-//!   same transform on the owned tensor;
+//!   same operation on owned operands;
 //! - (ii) cross-mode agreement: SU(2) admitted multiplicity-free
 //!   (`SU2FusionRule`) against checked Generic (`SUNFusionRule::new(2)`), two
 //!   coefficient engines on one input;
-//! - SU(3) (checked only) with outer multiplicity two (`8 ⊗ 8 → 8`) against (i).
+//! - SU(3) (checked only) with outer multiplicity two (`8 ⊗ 8 → 8`) and a
+//!   dual leg against (i).
 //!
 //! Host only: checked Generic has no device API (#1756); the multiplicity-free
 //! device lazy-adjoint gates live in `representation_gates/cuda.rs`.
@@ -26,7 +33,7 @@ use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, SUNFusionRule};
 use tenet::typed::__network::{network_reuse_class, NetworkReuseClass};
-use tenet::typed::{BlockFusionTrees, Complex64, GradedSpace, TensorMap};
+use tenet::typed::{BlockFusionTrees, Complex64, ContractSpec, GradedSpace, TensorMap};
 
 #[path = "../../tests/support/fixtures.rs"]
 mod fixtures;
@@ -86,34 +93,40 @@ fn assert_close(
     }
 }
 
+/// The subblock entries of an owned or lazy tensor, keyed by `key`.
+macro_rules! entries {
+    ($t:expr, $key:expr) => {{
+        let key = $key;
+        $t.subblocks()
+            .unwrap()
+            .map(|(trees, view)| {
+                let shape = view.shape().to_vec();
+                let len = shape.iter().product::<usize>();
+                let values = (0..len)
+                    .map(|mut linear| {
+                        let index: Vec<usize> = shape
+                            .iter()
+                            .map(|&extent| {
+                                let i = linear % extent;
+                                linear /= extent;
+                                i
+                            })
+                            .collect();
+                        Complex64::from(*view.get(&index).unwrap())
+                    })
+                    .collect();
+                (key(&trees), values)
+            })
+            .collect::<BTreeMap<String, Vec<Complex64>>>()
+    }};
+}
+
 /// The lazy adjoint of `$source` through every tree transform: each result
 /// stays a lazy adjoint, leaves its input lazy, and equals oracle (i).
 macro_rules! transform_rows {
     ($source:expr, $key:expr) => {{
         let key = $key;
-        let entries = |t: &TensorMap<_, _>| -> BTreeMap<String, Vec<Complex64>> {
-            t.subblocks()
-                .unwrap()
-                .map(|(trees, view)| {
-                    let shape = view.shape().to_vec();
-                    let len = shape.iter().product::<usize>();
-                    let values = (0..len)
-                        .map(|mut linear| {
-                            let index: Vec<usize> = shape
-                                .iter()
-                                .map(|&extent| {
-                                    let i = linear % extent;
-                                    linear /= extent;
-                                    i
-                                })
-                                .collect();
-                            Complex64::from(*view.get(&index).unwrap())
-                        })
-                        .collect();
-                    (key(&trees), values)
-                })
-                .collect()
-        };
+        let entries = |t: &TensorMap<_, _>| entries!(t, key);
         let lazy = $source.adjoint().unwrap();
         let eager = lazy.materialize().unwrap();
         let mut rows: Rows = Vec::new();
@@ -152,6 +165,70 @@ macro_rules! transform_rows {
         row!("braid", |t| t.braid(&[2, 0], &[1], &[17, 3, 11]));
         row!("transpose", |t| t.transpose(&[2, 1], &[0]));
         row!("repartition", |t| t.repartition(2));
+        rows
+    }};
+}
+
+/// Contractions and compositions with `$source`'s lazy adjoint `a` (on
+/// either side, both, and beside its own parent `t`), over the canonical
+/// core, a non-core contracted order and a permuted output: each equals
+/// oracle (i) and leaves its lazy inputs lazy.
+macro_rules! contract_rows {
+    ($source:expr, $key:expr) => {{
+        let key = $key;
+        let t = &$source;
+        let lazy = t.adjoint().unwrap();
+        let eager = lazy.materialize().unwrap();
+        let mut rows: Rows = Vec::new();
+        macro_rules! row {
+            ($name:expr, |$a:ident| $op:expr) => {{
+                let lazy_input = || {
+                    assert!(matches!(
+                        network_reuse_class(&lazy, false),
+                        NetworkReuseClass::LazyAdjoint
+                    ));
+                };
+                lazy_input();
+                let actual = {
+                    let $a = &lazy;
+                    $op.unwrap()
+                };
+                lazy_input();
+                let expected = {
+                    let $a = &eager;
+                    $op.unwrap()
+                };
+                let actual = entries!(actual, key);
+                assert!(!actual.is_empty(), "{}", $name);
+                assert_close($name, &actual, &entries!(expected, key));
+                rows.push(($name, actual));
+            }};
+        }
+        // `a = t'`: [V] <- [V, V], `t`: [V, V] <- [V].
+        let spec = |lhs, rhs, codomain, domain| ContractSpec {
+            lhs,
+            rhs,
+            codomain,
+            domain,
+        };
+        row!("a·t core (t'·t)", |a| a
+            .contract(t, &spec(&[1, 2], &[0, 1], &[0], &[1])));
+        row!("t·a core", |a| t
+            .contract(a, &spec(&[2], &[0], &[0, 1], &[2, 3])));
+        row!("a·a", |a| a
+            .contract(a, &spec(&[1], &[0], &[0, 1], &[2, 3])));
+        row!("a·t reversed contracted order", |a| a
+            .contract(t, &spec(&[2, 1], &[1, 0], &[0], &[1])));
+        row!("a·t permuted output", |a| a
+            .contract(t, &spec(&[1, 2], &[0, 1], &[], &[1, 0])));
+        row!("t·a permuted output", |a| t
+            .contract(a, &spec(&[2], &[0], &[3, 0], &[2, 1])));
+        row!("a·t mixed legs", |a| a
+            .contract(t, &spec(&[0, 1], &[2, 0], &[0], &[1])));
+        row!("t·a mixed legs", |a| t
+            .contract(a, &spec(&[2, 0], &[0, 1], &[1], &[0])));
+        row!("a∘t", |a| a.compose(t));
+        row!("t∘a", |a| t.compose(a));
         rows
     }};
 }
@@ -234,6 +311,73 @@ fn su3_adjoint_transforms_with_outer_multiplicity_stay_lazy() {
     .unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], |trees, index| {
+            value(&format!("{trees:?}"), index)
+        })
+        .unwrap();
+    let key = |t: &BlockFusionTrees<Vec<i64>>| format!("{t:?}");
+    let f64_rows = transform_rows!(source, key);
+    let c64 = source
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 2.0));
+    let c64_rows = transform_rows!(c64, key);
+    assert_eq!(f64_rows.len(), c64_rows.len());
+    assert!(f64_rows.iter().all(|(_, entries)| !entries.is_empty()));
+}
+
+#[test]
+fn su2_adjoint_operands_contract_and_agree_across_modes_f64() {
+    let (mf, checked) = su2_sources();
+    let mf = contract_rows!(mf, |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin));
+    let checked = contract_rows!(checked, |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin));
+    assert_modes_agree(mf, checked);
+}
+
+#[test]
+fn su2_adjoint_operands_contract_and_agree_across_modes_c64() {
+    let phase = Complex64::new(1.0, 2.0);
+    let (mf, checked) = su2_sources();
+    let (mf, checked) = (
+        mf.convert::<Complex64>().scale(phase),
+        checked.convert::<Complex64>().scale(phase),
+    );
+    let mf = contract_rows!(mf, |t: &BlockFusionTrees<SU2Irrep>| twice(t, su2_spin));
+    let checked = contract_rows!(checked, |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin));
+    assert_modes_agree(mf, checked);
+}
+
+#[test]
+fn su3_adjoint_operands_with_outer_multiplicity_contract() {
+    let runtime = host_runtime();
+    let v = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], |trees, index| {
+            value(&format!("{trees:?}"), index)
+        })
+        .unwrap();
+    let key = |t: &BlockFusionTrees<Vec<i64>>| format!("{t:?}");
+    let f64_rows = contract_rows!(source, key);
+    let c64 = source
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, 2.0));
+    let c64_rows = contract_rows!(c64, key);
+    assert_eq!(f64_rows.len(), c64_rows.len());
+}
+
+#[test]
+fn su3_adjoint_transforms_with_a_dual_leg_stay_lazy() {
+    let runtime = host_runtime();
+    let v = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![0i64, 0], 2), (vec![1, 1], 2), (vec![1, 0], 1)],
+    )
+    .unwrap();
+    let dual = v.try_dual().unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&v, &dual], [&v], |trees, index| {
             value(&format!("{trees:?}"), index)
         })
         .unwrap();

@@ -240,8 +240,10 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
   contraction, factorization, and general network execution are not supported
   or claimed.
 - Checked Generic typed execution is Host-only. Representative tested scope
-  includes construction, transforms, tensor products, owned composition and
-  trace, static N-ary networks, and explicit sliced execution. Operations
+  includes construction, transforms, tensor products, contraction and
+  composition (a lazy adjoint operand read through its parent's payload, as
+  in the multiplicity-free mode), trace, static N-ary networks, and explicit
+  sliced execution. Operations
   require the exact checked fusion, rigidity, pivotal, and symbol traits they
   use; borrowed or compact routes are only admitted where their direct owned
   contract says so. CUDA does not support Checked Generic providers.

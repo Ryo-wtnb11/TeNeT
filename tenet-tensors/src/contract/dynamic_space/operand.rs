@@ -380,8 +380,24 @@ impl<'a> FusionOperand<'a> {
     where
         R: tenet_core::FusionRule,
     {
-        let operand = Self::adjoint(storage_space);
         storage_space.validate_rule(rule)?;
+        Self::adjoint(storage_space).storage_ordered_layout()
+    }
+
+    /// This operand's layout in its parent's block order, read from the
+    /// stored keys alone: no provider is consulted, so a checked planner
+    /// may build it after its destination is staged (#2046). The caller
+    /// has checked the storage space against its rule.
+    pub(crate) fn storage_ordered_layout(self) -> Result<FusionOperandLayout<'a>, OperationError> {
+        let storage_space = self.storage_space;
+        if self.orientation() == FusionTreePairOrientation::Direct {
+            return Ok(FusionOperandLayout {
+                operand: self,
+                homspace: Cow::Borrowed(storage_space.homspace()),
+                projection: FusionOperandProjection::Direct,
+                basis_order: OrientedBasisOrder::Canonical,
+            });
+        }
         let structure = storage_space.structure();
         let mut logical_keys = Vec::with_capacity(structure.block_count());
         for index in 0..structure.block_count() {
@@ -398,8 +414,8 @@ impl<'a> FusionOperand<'a> {
             ));
         }
         Ok(FusionOperandLayout {
-            operand,
-            homspace: Cow::Owned(operand.oriented_homspace().materialize()),
+            operand: self,
+            homspace: Cow::Owned(self.oriented_homspace().materialize()),
             projection: FusionOperandProjection::Adjoint {
                 logical_keys: logical_keys.into(),
                 storage_indices: OnceLock::new(),

@@ -1094,13 +1094,13 @@ fn assert_compose_any_braiding<D>(
     let endomorphism = composed(&a, &b);
     let squared = endomorphism.compose(&endomorphism).unwrap();
     assert_compose_oracle(&endomorphism, &endomorphism, &squared);
-    // Composition is not a contraction over mismatched spaces, and a lazy
-    // adjoint operand stays outside this engine's direct-operand scope.
+    // Composition is not a contraction over mismatched spaces; a lazy
+    // adjoint operand composes as its materialization does (TensorKit
+    // `mul!` over `block(a, c)'`).
     assert!(matches!(a.compose(&a), Err(GenericTensorError::Plan(_))));
-    assert!(matches!(
-        a.adjoint().unwrap().compose(&a),
-        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
-    ));
+    let adjoint = a.adjoint().unwrap();
+    let got = adjoint.compose(&a).unwrap();
+    assert_compose_oracle(&adjoint.materialize().unwrap(), &a, &got);
 }
 
 #[test]

@@ -1437,8 +1437,10 @@ where
     .map(|((), facts)| Some(facts.total_materialized_elements()))
 }
 
-/// The `DynamicTree` candidate of two direct operands over Complete spaces,
-/// the destination derived from them by construction: the Complete scorer
+/// The `DynamicTree` candidate of two operands over Complete logical spaces,
+/// a lazy adjoint marked by `axes`' conjugation flags (its source is then
+/// never borrowable), the destination derived from them by construction:
+/// the Complete scorer
 /// of the selector ([`prepare_tensorcontract_fusion_plan_dyn_raw_canonical`]),
 /// over both orientations, with `twist` reading the core-right twist.
 pub(crate) fn select_complete_tensorcontract_fusion_plan<E>(
@@ -1460,8 +1462,8 @@ where
             lhs.rank(),
             rhs.rank(),
             candidate_axes,
-            false,
-            false,
+            axes.lhs_conjugate(),
+            axes.rhs_conjugate(),
         )?
         .orient(orientation);
         let facts = score_complete_fusion_contract_candidate(

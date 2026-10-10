@@ -1009,12 +1009,8 @@ mod checked_generic {
 
                     // Polar, whose factors are unique for a full-rank
                     // block and therefore compared pointwise. The null spaces
-                    // and the isometry laws are not asserted here: they need
-                    // an adjoint operand in a contraction, which the
-                    // checked-Generic path rejects ("checked Generic
-                    // contraction currently requires direct owned tensors") —
-                    // a pre-existing provider restriction, unrelated to the
-                    // payload dtype and covered at `f64` by
+                    // and the isometry laws are not asserted here: they are
+                    // unrelated to the payload dtype and covered at `f64` by
                     // `checked_generic_facade.rs`. The pointwise agreement
                     // with the widened oracle below pins `W` and `P` — both
                     // unique — completely, and the `f64` factors are the ones

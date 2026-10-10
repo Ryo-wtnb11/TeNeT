@@ -40,15 +40,16 @@ use tenet_operations::TreeTransformStructure;
 use crate::contract::{
     compile_checked_generic_core_plan_general, compile_contract_twist, compile_core_dst,
     compile_derived_core_plan, compile_fusion_block_contract_plan_prelowered_validated,
-    compile_prelowered_dynamic_tree, compile_transformed_source, contract_axes_require_twist,
+    compile_operand_core_plan_general, compile_prelowered_dynamic_tree,
+    compile_stored_dynamic_tree, compile_transformed_source, contract_axes_require_twist,
     core_homspace_matches, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
     rhs_contract_twist_factor_oriented, select_complete_tensorcontract_fusion_plan,
-    tree_transform_operation_axes, validate_fusion_contract_rule, CheckedAuthority,
-    CheckedContractTxn, DynamicFusionCoreDstEntry, DynamicFusionMapSpace,
-    DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact, FusionContractPlan,
-    FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
+    tree_transform_operation_axes, validate_checked_operand_relation,
+    validate_fusion_contract_rule, CheckedAuthority, CheckedContractTxn, DynamicFusionCoreDstEntry,
+    DynamicFusionMapSpace, DynamicFusionTransformedSourceEntry, DynamicTreeExecutionArtifact,
+    FusionContractPlan, FusionOperand, FusionOperandLayout, LayoutKeyBuilder, PlanTarget,
     PreparedCheckedGenericDynamicSpace, StorageContractResolution, ValidatedCoreContract,
-    CHECKED_CONTRACTION_REQUIRES_BOSONIC, CHECKED_REQUIRES_DIRECT_OPERANDS,
+    CHECKED_CONTRACTION_REQUIRES_BOSONIC,
 };
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated, lookup_bound, publishable,
@@ -57,10 +58,9 @@ use crate::tree_transform::{
     TransformerMode, TreeTransformPlanning, TreeTransformScope,
 };
 use crate::{
-    adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic_checked,
-    validate_oriented_fusion_layout, BoundDynamicFusionMapSpace, CheckedGenericPlanError,
-    DenseBlockScalar, OperationError, TensorTraceAxisSpec, TensorTraceFusionStructure,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic_checked, BoundDynamicFusionMapSpace,
+    CheckedGenericPlanError, DenseBlockScalar, OperationError, TensorTraceAxisSpec,
+    TensorTraceFusionStructure, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::fusion_replay::MatrixOp;
@@ -362,8 +362,10 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
     where
         Self::Scalar: DenseBlockScalar;
 
-    /// The `DynamicTree` candidate of two direct operands: TensorKit
-    /// `contract!`'s `_contract_memcost` selection (`tensoroperations.jl:314-378`).
+    /// The `DynamicTree` candidate of two stored operands (checked Generic:
+    /// also a lazy adjoint's logical space, its conjugation in `axes`):
+    /// TensorKit `contract!`'s `_contract_memcost` selection
+    /// (`tensoroperations.jl:314-378`).
     fn dynamic_tree_plan(
         rule: &R,
         authority: Self::SpaceAuthority<'_>,
@@ -1143,18 +1145,8 @@ where
                         }
                         .into());
                     }
-                    if source.nout() != storage_source.nin()
-                        || source.nin() != storage_source.nout()
-                        || source.homspace().codomain() != storage_source.homspace().domain()
-                        || source.homspace().domain() != storage_source.homspace().codomain()
-                    {
-                        return Err(OperationError::StructureMismatch {
-                            tensor: "checked adjoint relation",
-                        }
-                        .into());
-                    }
-                    validate_oriented_fusion_layout(
-                        source.structure(),
+                    validate_checked_operand_relation(
+                        source,
                         FusionOperand::adjoint(storage_source),
                     )?;
                 }
@@ -1284,8 +1276,11 @@ where
         Ok(true)
     }
 
-    /// The structure-only re-base of the stored tilings; checked operands
-    /// are direct, so no logical-key projection is needed.
+    /// The structure-only re-base of the stored tilings, a lazy adjoint
+    /// laid out in its parent's block order and read with
+    /// [`MatrixOp::Adjoint`]: the re-base gives every shared GEMM index one
+    /// tree order, so the logical order is not needed, and the stored keys
+    /// are read without the provider (#2046).
     fn irregular_core(
         _validated: ValidatedCoreContract<'_, R>,
         _authority: CheckedAuthority<'_, R>,
@@ -1293,17 +1288,10 @@ where
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
     ) -> Result<FusionBlockContractPlan<f64>, Self::Error> {
-        if lhs.storage_conjugate() || rhs.storage_conjugate() {
-            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
-        }
-        let (lhs, rhs) = (lhs.storage_space(), rhs.storage_space());
-        Ok(compile_checked_generic_core_plan_general(
-            dst.structure(),
-            dst.nout(),
-            lhs.structure(),
-            lhs.nout(),
-            rhs.structure(),
-            rhs.nout(),
+        Ok(compile_operand_core_plan_general(
+            dst,
+            &lhs.storage_ordered_layout()?,
+            &rhs.storage_ordered_layout()?,
         )?)
     }
 
@@ -1329,9 +1317,14 @@ where
         )
     }
 
-    /// An identity permutation borrows the source and derives nothing
-    /// (TensorKit `has_shared_permute`); any other stages its permuted
-    /// HomSpace under the authority, then its transformer.
+    /// A direct source under an identity permutation is borrowed and
+    /// derives nothing (TensorKit `has_shared_permute`). Any other
+    /// permutation stages its permuted HomSpace under the authority, then
+    /// its transformer. A lazy adjoint (`source` its logical space,
+    /// `source_structure` its parent's) is never borrowed: its storage is
+    /// the conjugate of the core operand, so even its identity is a
+    /// storage-mapped conjugating copy, TensorKit `copyA`'s `tensoradd!`
+    /// from the adjoint's subblocks.
     fn transformed_source(
         txn: &mut CheckedContractTxn,
         authority: CheckedAuthority<'_, R>,
@@ -1341,39 +1334,44 @@ where
         operation: &TreeTransformOperation,
         source_conjugate: bool,
     ) -> Result<DynamicFusionTransformedSourceEntry<f64>, Self::Error> {
-        if source_conjugate {
-            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
-        }
-        if operation.is_identity_for(source.nout(), source.nin()) {
+        let identity = operation.is_identity_for(source.nout(), source.nin());
+        if identity && !source_conjugate {
             return Ok(DynamicFusionTransformedSourceEntry {
                 space: Arc::new(source.clone()),
                 replay_structure: Arc::clone(source_structure),
                 transform_structure: None,
             });
         }
-        let prepared = authority
-            .binding
-            .prepare_final_homspace_generic_from_checked(rule, || {
-                source
-                    .homspace()
-                    .try_permute_generic_checked(
-                        rule,
-                        operation.codomain_permutation(),
-                        operation.domain_permutation(),
-                    )
-                    .map_err(CheckedGenericPlanError::from)
-            })?;
-        let space = txn.stage(prepared);
-        let transform_structure = Self::tree_structure(
-            txn,
-            rule,
-            operation,
-            space.structure(),
+        let space = if identity {
+            source.clone()
+        } else {
+            let prepared = authority
+                .binding
+                .prepare_final_homspace_generic_from_checked(rule, || {
+                    source
+                        .homspace()
+                        .try_permute_generic_checked(
+                            rule,
+                            operation.codomain_permutation(),
+                            operation.domain_permutation(),
+                        )
+                        .map_err(CheckedGenericPlanError::from)
+                })?;
+            txn.stage(prepared)
+        };
+        let transform_source = if source_conjugate {
+            TreeStructureSource::StorageMapped {
+                logical: source.structure(),
+                operand: authority.operand_of(source)?,
+            }
+        } else {
             TreeStructureSource::Stored {
                 structure: source_structure,
                 storage_conjugate: false,
-            },
-        )?;
+            }
+        };
+        let transform_structure =
+            Self::tree_structure(txn, rule, operation, space.structure(), transform_source)?;
         Ok(DynamicFusionTransformedSourceEntry {
             space: Arc::new(space),
             replay_structure: Arc::clone(source_structure),
@@ -1505,15 +1503,33 @@ where
         Ok(Arc::new(plan))
     }
 
-    /// Lazy checked adjoints are #1865.
+    /// The stored artifact compiler over the operands' logical spaces: the
+    /// plan is selected on them with the operands' conjugation, and a lazy
+    /// adjoint source is transformed through its parent's storage
+    /// ([`Self::transformed_source`]). Why not the multiplicity-free
+    /// prelowered layouts: their layout primer has no checked counterpart,
+    /// and the logical spaces are already in the authority.
     fn prelowered_dynamic_tree_artifact(
-        _txn: &mut CheckedContractTxn,
-        _target: PlanTarget<'_, R, CheckedAuthority<'_, R>>,
-        _lhs: FusionOperand<'_>,
-        _rhs: FusionOperand<'_>,
-        _axes: TensorContractSpec<'_>,
-        _profile: Option<&mut TensorContractFusionProfile>,
+        txn: &mut CheckedContractTxn,
+        target: PlanTarget<'_, R, CheckedAuthority<'_, R>>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        axes: TensorContractSpec<'_>,
+        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<DynamicTreeExecutionArtifact<f64>, Self::Error> {
-        Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into())
+        compile_stored_dynamic_tree::<Self, R>(
+            txn,
+            target,
+            (
+                target.authority.logical_of(lhs)?,
+                lhs.storage_space().structure(),
+            ),
+            (
+                target.authority.logical_of(rhs)?,
+                rhs.storage_space().structure(),
+            ),
+            axes,
+            profile,
+        )
     }
 }

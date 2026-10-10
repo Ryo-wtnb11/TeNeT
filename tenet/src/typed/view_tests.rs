@@ -325,24 +325,15 @@ fn checked_generic_su3_view_matches_owned_lazy_adjoint() {
                 TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 3).unwrap();
             shared_suite!(a, b, s, $alpha, $beta, $what);
 
-            // Checked-Generic contraction rejects any lazy operand today; the
-            // view gets the same error and does not materialize.
+            // Contraction and composition consume the view as the owned
+            // lazy adjoint (#1865); checked `contract_into` is #1870.
             let lazy = b.adjoint().unwrap();
-            let (view, entries) = probe(|| a.contract(b.adjoint_view(), &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2, 3] }));
-            assert_eq!(entries, 0);
-            assert_eq!(
-                view.err().unwrap().to_string(),
-                a.contract(&lazy, &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2, 3] })
-                    .err()
-                    .unwrap()
-                    .to_string()
-            );
-            let (view, entries) = probe(|| b.compose(b.adjoint_view()));
-            assert_eq!(entries, 0);
-            assert_eq!(
-                view.err().unwrap().to_string(),
-                b.compose(&lazy).err().unwrap().to_string()
-            );
+            let spec = ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2, 3] };
+            let (view, owned) =
+                direct!("contract", a.contract(b.adjoint_view(), &spec), a.contract(&lazy, &spec));
+            assert_same_tensor!(view, owned, format!("{}: contract", $what));
+            let (view, owned) = direct!("compose", b.compose(b.adjoint_view()), b.compose(&lazy));
+            assert_same_tensor!(view, owned, format!("{}: compose", $what));
         }};
     }
     su3_case!(f64, RE.0, RE.1, "SU3 f64");

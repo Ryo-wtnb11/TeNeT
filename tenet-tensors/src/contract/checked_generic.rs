@@ -9,6 +9,7 @@ use tenet_operations::{OutputAxisOrder, TensorContractSpec, TreeTransformBackend
 
 use crate::mode::{ContractRequest, ContractSide, ContractStaging, StagedContraction};
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
+use crate::validate_oriented_fusion_layout;
 use crate::{
     ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, ZeroBytes,
 };
@@ -37,24 +38,25 @@ pub(crate) const CHECKED_CONTRACTION_REQUIRES_BOSONIC: OperationError =
         message: "checked Generic contraction requires Bosonic braiding",
     };
 
-/// Checked operands are eager and direct; lazy checked adjoints are #1865.
-pub(crate) const CHECKED_REQUIRES_DIRECT_OPERANDS: OperationError =
-    OperationError::UnsupportedTensorContractScope {
-        message: "checked Generic contraction currently requires eager direct operands",
-    };
-
 /// What the checked planner derives spaces under (its
 /// `PlanningAlgebra::SpaceAuthority`): the left binding, whose provider
-/// admission stages every derived space, and the entry's answer to whether
-/// a contraction twist exists.
+/// admission stages every derived space, the entry's answer to whether a
+/// contraction twist exists, and each operand's logical space.
 ///
-/// Why the answer travels here rather than being read where the planner
-/// asks: a provider read inside the planner would follow the destination's
-/// staging (#2046).
+/// Why the answer and the logical spaces travel here rather than being
+/// derived where the planner asks: a provider read inside the planner would
+/// follow the destination's staging (#2046). A lazy adjoint's canonical
+/// logical layout is the space its view already holds; re-enumerating it
+/// needs the provider, and the multiplicity-free layout primer that derives
+/// it there has no checked counterpart.
 pub(crate) struct CheckedAuthority<'a, P> {
     pub(crate) binding: &'a BoundDynamicFusionMapSpace<P>,
     twist_free: bool,
+    sides: [CheckedSide<'a>; 2],
 }
+
+/// One operand of a checked request: its storage operand and logical space.
+pub(crate) type CheckedSide<'a> = (FusionOperand<'a>, &'a DynamicFusionMapSpace);
 
 // Why manual: a derive would bound `P: Copy`.
 impl<P> Clone for CheckedAuthority<'_, P> {
@@ -71,10 +73,14 @@ where
     /// Canonical composition (TensorKit `mul!`) crosses no legs, so it never
     /// asks the twist question and the authority holds no answer: asked, it
     /// fails closed.
-    pub(crate) fn composition(binding: &'a BoundDynamicFusionMapSpace<P>) -> Self {
+    pub(crate) fn composition(
+        binding: &'a BoundDynamicFusionMapSpace<P>,
+        sides: [CheckedSide<'a>; 2],
+    ) -> Self {
         Self {
             binding,
             twist_free: false,
+            sides,
         }
     }
 
@@ -84,6 +90,7 @@ where
     /// (U15), read once from the left provider.
     pub(crate) fn contraction(
         binding: &'a BoundDynamicFusionMapSpace<P>,
+        sides: [CheckedSide<'a>; 2],
     ) -> Result<Self, CheckedGenericPlanError<P::Error>> {
         if binding.provider().braiding_style() != BraidingStyleKind::Bosonic {
             return Err(CHECKED_CONTRACTION_REQUIRES_BOSONIC.into());
@@ -91,12 +98,47 @@ where
         Ok(Self {
             binding,
             twist_free: true,
+            sides,
         })
     }
 
     /// Whether the entry established that no contraction twist exists.
     pub(crate) fn twist_free(self) -> bool {
         self.twist_free
+    }
+
+    /// The logical space of a request operand. Both operands may be one
+    /// tensor; storage and orientation then name the same space.
+    pub(crate) fn logical_of(
+        self,
+        operand: FusionOperand<'_>,
+    ) -> Result<&'a DynamicFusionMapSpace, CheckedGenericPlanError<P::Error>> {
+        self.sides
+            .iter()
+            .find(|(side, _)| {
+                std::ptr::eq(side.storage_space(), operand.storage_space())
+                    && side.storage_conjugate() == operand.storage_conjugate()
+            })
+            .map(|&(_, logical)| logical)
+            .ok_or_else(|| unknown_operand().into())
+    }
+
+    /// The storage operand of a request operand's logical space.
+    pub(crate) fn operand_of(
+        self,
+        logical: &DynamicFusionMapSpace,
+    ) -> Result<FusionOperand<'a>, CheckedGenericPlanError<P::Error>> {
+        self.sides
+            .iter()
+            .find(|&&(_, side)| std::ptr::eq(side, logical))
+            .map(|&(operand, _)| operand)
+            .ok_or_else(|| unknown_operand().into())
+    }
+}
+
+fn unknown_operand() -> OperationError {
+    OperationError::StructureMismatch {
+        tensor: "checked contraction operand",
     }
 }
 
@@ -188,38 +230,57 @@ fn validate_source_structure<E>(
     Ok(())
 }
 
+/// That `logical` is the logical space of `operand`: the storage space
+/// itself, or for a lazy adjoint the swapped HomSpace whose every block maps
+/// onto a parent block of the transposed shape. Provider-free.
+pub(crate) fn validate_checked_operand_relation(
+    logical: &DynamicFusionMapSpace,
+    operand: FusionOperand<'_>,
+) -> Result<(), OperationError> {
+    let storage = operand.storage_space();
+    if !operand.storage_conjugate() {
+        return if std::ptr::eq(logical, storage) {
+            Ok(())
+        } else {
+            Err(OperationError::StructureMismatch {
+                tensor: "checked direct operand",
+            })
+        };
+    }
+    if logical.nout() != storage.nin()
+        || logical.nin() != storage.nout()
+        || logical.homspace().codomain() != storage.homspace().domain()
+        || logical.homspace().domain() != storage.homspace().codomain()
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "checked adjoint relation",
+        });
+    }
+    validate_oriented_fusion_layout(logical.structure(), operand)
+}
+
 fn validate_contract_local<P>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    lhs_len: usize,
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_len: usize,
+    (lhs, lhs_operand, lhs_len): ContractSide<'_, P>,
+    (rhs, rhs_operand, rhs_len): ContractSide<'_, P>,
     axes: TensorContractSpec<'_>,
     dst_nout: usize,
 ) -> Result<TensorContractAxisPlan, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
 {
-    if axes.lhs_conjugate() || axes.rhs_conjugate() {
-        return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
-    }
-    let output_rank = lhs_space
+    let output_rank = lhs
         .space()
         .rank()
         .checked_sub(axes.lhs_contracting_axes().len())
         .and_then(|rank| {
-            rhs_space
-                .space()
+            rhs.space()
                 .rank()
                 .checked_sub(axes.rhs_contracting_axes().len())
                 .and_then(|rhs| rank.checked_add(rhs))
         })
         .ok_or(OperationError::ElementCountOverflow)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.space().rank(),
-        rhs_space.space().rank(),
-        output_rank,
-        axes,
-    )?;
+    let axis_plan =
+        TensorContractAxisPlan::compile(lhs.space().rank(), rhs.space().rank(), output_rank, axes)?;
     if dst_nout > output_rank {
         return Err(CoreError::StructureRankMismatch {
             expected: output_rank,
@@ -227,8 +288,9 @@ where
         }
         .into());
     }
-    for (len, space) in [(lhs_len, lhs_space), (rhs_len, rhs_space)] {
-        let expected = space.space().required_len()?;
+    for (len, logical, operand) in [(lhs_len, lhs, lhs_operand), (rhs_len, rhs, rhs_operand)] {
+        let storage = operand.storage_space();
+        let expected = storage.required_len()?;
         if len != expected {
             return Err(OperationError::ElementCountMismatch {
                 expected,
@@ -236,15 +298,18 @@ where
             }
             .into());
         }
-        validate_source_structure::<P::Error>(space.space())?;
+        validate_source_structure::<P::Error>(storage)?;
+        validate_checked_operand_relation(logical.space(), operand)?;
     }
     Ok(axis_plan)
 }
 
-/// Checked operands are direct (`CHECKED_REQUIRES_DIRECT_OPERANDS`); the
-/// staging order is today's provider-event order: local validation, pair
-/// admission, the contraction's braiding check, then the staged
-/// destination, whose producer derives the HomSpace.
+/// A lazy adjoint is a storage-conjugate operand, as in the
+/// multiplicity-free mode; its relation to its logical space is checked
+/// locally. The staging order is the provider-event order: local
+/// validation, pair admission, the contraction's braiding check, then the
+/// staged destination, whose producer derives the HomSpace from the
+/// logical spaces.
 impl<P> ContractStaging<P> for CheckedGenericAdmissionMode
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
@@ -260,9 +325,6 @@ where
         StagedContraction<Self::ContractStage, CheckedAuthority<'a, P>, CheckedContractTxn>,
         CheckedGenericPlanError<P::Error>,
     > {
-        if lhs_operand.storage_conjugate() || rhs_operand.storage_conjugate() {
-            return Err(CHECKED_REQUIRES_DIRECT_OPERANDS.into());
-        }
         let compose_axes;
         let (axes, codomain_rank) = match request {
             ContractRequest::Contract {
@@ -281,11 +343,17 @@ where
                 )
             }
         };
-        let axis_plan = validate_contract_local(lhs, lhs_len, rhs, rhs_len, axes, codomain_rank)?;
+        let axis_plan = validate_contract_local(
+            (lhs, lhs_operand, lhs_len),
+            (rhs, rhs_operand, rhs_len),
+            axes,
+            codomain_rank,
+        )?;
         let provider = crate::admission::admit_checked_generic_pair(lhs, rhs)?;
+        let sides = [(lhs_operand, lhs.space()), (rhs_operand, rhs.space())];
         let authority = match request {
-            ContractRequest::Contract { .. } => CheckedAuthority::contraction(lhs)?,
-            ContractRequest::Compose => CheckedAuthority::composition(lhs),
+            ContractRequest::Contract { .. } => CheckedAuthority::contraction(lhs, sides)?,
+            ContractRequest::Compose => CheckedAuthority::composition(lhs, sides),
         };
         let destination = lhs.prepare_final_homspace_generic_from_checked(provider, || {
             FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
@@ -783,6 +851,53 @@ mod tests {
                 beta,
             )
         }
+
+        /// A lazy adjoint's parent is read through its `MatrixOp`, one batch
+        /// of jobs; they count and fail like the per-job GEMMs.
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_rank2_batch_with_ops_axpby_into_raw(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            dst_data: &mut [f64],
+            lhs_data: &[f64],
+            rhs_data: &[f64],
+            jobs: &[tenet_operations::fusion_replay::Rank2GemmBatchJob],
+            runs: &[usize],
+            lhs_op: tenet_operations::fusion_replay::MatrixOp,
+            rhs_op: tenet_operations::fusion_replay::MatrixOp,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            use tenet_operations::fusion_replay::MatrixOp;
+            if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+                return self.matmul_rank2_batch_axpby_into_raw(
+                    workspace, dst_data, lhs_data, rhs_data, jobs, runs, alpha, beta,
+                );
+            }
+            let first = self.jobs;
+            self.jobs += jobs.len();
+            if self
+                .fail_at
+                .is_some_and(|job| (first..self.jobs).contains(&job))
+            {
+                return Err(OperationError::StridedKernel {
+                    message: "injected checked Generic core failure".into(),
+                });
+            }
+            TensorContractBackend::<f64, f64>::matmul_rank2_batch_with_ops_axpby_into_raw(
+                &mut self.inner,
+                workspace,
+                dst_data,
+                lhs_data,
+                rhs_data,
+                jobs,
+                runs,
+                lhs_op,
+                rhs_op,
+                alpha,
+                beta,
+            )
+        }
     }
 
     type FailingContext = TensorContractFusionExecutionContext<
@@ -1067,8 +1182,8 @@ mod tests {
         }
     }
 
-    /// What: local request errors (axes, conjugation, rank, payload length)
-    /// are reported before any provider query.
+    /// What: local request errors (axes, adjoint relation, rank, payload
+    /// length) are reported before any provider query.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn checked_contraction_rejects_local_errors_before_provider_queries() {
@@ -1094,7 +1209,7 @@ mod tests {
                 1,
                 &rhs_data,
             ),
-            ("conjugate", adjoint, default(), 1, &rhs_data),
+            ("adjoint relation", adjoint, default(), 1, &rhs_data),
             ("rank", direct, default(), 3, &rhs_data),
             ("length", direct, default(), 1, &short),
         ];
@@ -1597,7 +1712,11 @@ mod tests {
         let (_left, lhs, _right, rhs) = bound_pair(2, 2);
         tenet_core::clear_structure_caches();
         let provider = lhs.provider();
-        let authority = CheckedAuthority::contraction(&lhs).unwrap();
+        let sides = [
+            (FusionOperand::direct(lhs.space()), lhs.space()),
+            (FusionOperand::direct(rhs.space()), rhs.space()),
+        ];
+        let authority = CheckedAuthority::contraction(&lhs, sides).unwrap();
         let (lhs_axes, rhs_axes, output) = ([2, 3], [0, 1], [1, 0, 2, 3]);
         let destination = lhs
             .prepare_final_homspace_generic_from_checked(provider, || {
@@ -1659,6 +1778,214 @@ mod tests {
             })
             .unwrap();
         assert!(resident(temporary));
+    }
+
+    /// One side of the checked entry: logical space, storage operand and
+    /// storage payload.
+    type Side<'a> = (&'a SpySpace, FusionOperand<'a>, &'a [f64]);
+
+    /// The lazy adjoint of `parent`: its logical space and `copy(parent')`,
+    /// the owned materialization through the eager storage-mapped transform
+    /// (its own oracles in `tree_transform_plan::checked_generic`), which no
+    /// contraction route reads.
+    fn adjoint_of(parent: &SpySpace, data: &[f64]) -> (SpySpace, SpySpace, Vec<f64>) {
+        let logical = crate::adjoint_bound_space_dyn_generic_checked(parent).unwrap();
+        let (nout, rank) = (logical.space().nout(), logical.space().rank());
+        let (owned, owned_data) =
+            crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+                .tree_transform_owned_checked_generic_in(
+                    &logical,
+                    Some(parent),
+                    data,
+                    &crate::TreeTransformOperation::permute(0..nout, nout..rank),
+                    1.0,
+                )
+                .unwrap();
+        (logical, owned, owned_data)
+    }
+
+    fn assert_close(what: &str, actual: (&SpySpace, &[f64]), expected: (&SpySpace, &[f64])) {
+        assert_eq!(actual.0.space(), expected.0.space(), "{what}");
+        assert_eq!(actual.1.len(), expected.1.len(), "{what}");
+        for (actual, expected) in actual.1.iter().zip(expected.1) {
+            assert!(
+                (actual - expected).abs() <= 1e-12,
+                "{what}: {actual} vs {expected}"
+            );
+        }
+    }
+
+    /// What: a lazy-adjoint operand (lhs, rhs or both) takes the fixture's
+    /// route — the canonical core over `MatrixOp::Adjoint`, CopyC, or the
+    /// `DynamicTree` artifact, whose adjoint source is a storage-mapped
+    /// conjugating copy never borrowed (so `lhs_only`, whose direct rhs is
+    /// borrowed, copies both adjoint sources). Core and CopyC
+    /// equal the contraction of the materialized adjoint; so does
+    /// composition. Why not `DynamicTree` values here: the spy's symbols are
+    /// not a category, so two valid candidates (the materialized operand may
+    /// select another) disagree; `tenet/tests/lazy_adjoint_contract_both_modes.rs`
+    /// checks them on SU(2) and SU(3).
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_adjoint_operands_take_every_route_and_match_the_materialized_parent() {
+        if !isolated("checked_adjoint_operands_take_every_route_and_match_the_materialized_parent")
+        {
+            return;
+        }
+        for (name, n, lhs_axes, rhs_axes, output, nout, route) in FIXTURES {
+            let (_left, lhs, _right, rhs) = bound_pair(n, n);
+            let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+            let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+            let (lhs_logical, lhs_owned, lhs_owned_data) = adjoint_of(&lhs, &lhs_data);
+            let (rhs_logical, rhs_owned, rhs_owned_data) = adjoint_of(&rhs, &rhs_data);
+            let axes = || fixture_axes(lhs_axes, rhs_axes, output);
+            let mut transformers = Vec::new();
+            for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let what = format!("{name} lazy lhs {lazy_lhs} rhs {lazy_rhs}");
+                let lhs_side: Side<'_> = if lazy_lhs {
+                    (&lhs_logical, FusionOperand::adjoint(lhs.space()), &lhs_data)
+                } else {
+                    direct_side(&lhs, &lhs_data)
+                };
+                let rhs_side: Side<'_> = if lazy_rhs {
+                    (&rhs_logical, FusionOperand::adjoint(rhs.space()), &rhs_data)
+                } else {
+                    direct_side(&rhs, &rhs_data)
+                };
+                let (lhs_oracle, rhs_oracle) = (
+                    if lazy_lhs {
+                        direct_side(&lhs_owned, &lhs_owned_data)
+                    } else {
+                        direct_side(&lhs, &lhs_data)
+                    },
+                    if lazy_rhs {
+                        direct_side(&rhs_owned, &rhs_owned_data)
+                    } else {
+                        direct_side(&rhs, &rhs_data)
+                    },
+                );
+                let mut context =
+                    TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+                crate::tree_transform::take_completed_transformer_activity();
+                let (space, data) = context
+                    .tensorcontract_checked_generic_in(lhs_side, rhs_side, entry_axes(axes()), nout)
+                    .unwrap();
+                let activity = crate::tree_transform::take_completed_transformer_activity();
+                transformers.push(activity.builds + activity.hits);
+                assert_eq!(last_route(&context), route, "{what}");
+                if route == Route::DynamicTree {
+                    continue;
+                }
+                let (expected_space, expected) = TensorContractFusionExecutionContext::<
+                    f64,
+                    RuleIdentity,
+                >::default()
+                .tensorcontract_checked_generic_in(lhs_oracle, rhs_oracle, entry_axes(axes()), nout)
+                .unwrap();
+                assert_close(&what, (&space, &data), (&expected_space, &expected));
+            }
+            if name == "lhs_only" {
+                assert_eq!(transformers[0], 1, "{name}: the rhs is borrowed");
+                assert_eq!(transformers[3], 2, "{name}: adjoint sources are copied");
+            }
+        }
+
+        let (_left, lhs, _right, rhs) = bound_pair(1, 1);
+        let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+        let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+        let (lhs_logical, lhs_owned, lhs_owned_data) = adjoint_of(&lhs, &lhs_data);
+        let lazy: Side<'_> = (&lhs_logical, FusionOperand::adjoint(lhs.space()), &lhs_data);
+        let owned = direct_side(&lhs_owned, &lhs_owned_data);
+        for (what, actual, expected) in [
+            (
+                "lazy∘rhs",
+                (lazy, direct_side(&rhs, &rhs_data)),
+                (owned, direct_side(&rhs, &rhs_data)),
+            ),
+            (
+                "rhs∘lazy",
+                (direct_side(&rhs, &rhs_data), lazy),
+                (direct_side(&rhs, &rhs_data), owned),
+            ),
+            (
+                "lazy∘lhs (t'∘t)",
+                (lazy, direct_side(&lhs, &lhs_data)),
+                (owned, direct_side(&lhs, &lhs_data)),
+            ),
+        ] {
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+            let (space, data) = context
+                .tensorcompose_checked_generic_in(actual.0, actual.1)
+                .unwrap();
+            assert_eq!(last_route(&context), Route::Core, "{what}");
+            let (expected_space, expected) =
+                TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
+                    .tensorcompose_checked_generic_in(expected.0, expected.1)
+                    .unwrap();
+            assert_close(what, (&space, &data), (&expected_space, &expected));
+        }
+    }
+
+    /// What (#2063): with a lazy-adjoint lhs, a replay failing on its first
+    /// GEMM publishes nothing on any route; a successful call commits, and
+    /// its warm repeat builds no transformer, stages nothing new and
+    /// returns the same bits.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_adjoint_operand_failure_publishes_nothing_and_a_warm_repeat_builds_nothing() {
+        if !isolated(
+            "checked_adjoint_operand_failure_publishes_nothing_and_a_warm_repeat_builds_nothing",
+        ) {
+            return;
+        }
+        for (name, n, lhs_axes, rhs_axes, output, nout, route) in FIXTURES {
+            let (_left, lhs, _right, rhs) = bound_pair(n, n);
+            let lhs_data = ramp(lhs.space().required_len().unwrap(), 0.25, -1.0);
+            let rhs_data = ramp(rhs.space().required_len().unwrap(), -0.5, 1.5);
+            tenet_core::clear_structure_caches();
+            let logical = crate::adjoint_bound_space_dyn_generic_checked(&lhs).unwrap();
+            let axes = || fixture_axes(lhs_axes, rhs_axes, output);
+            let run = |context: &mut FailingContext| {
+                context.tensorcontract_checked_generic_in(
+                    (&logical, FusionOperand::adjoint(lhs.space()), &lhs_data),
+                    direct_side(&rhs, &rhs_data),
+                    entry_axes(axes()),
+                    nout,
+                )
+            };
+            let resident = cache_entries();
+            let admissions = coefficient_admissions();
+            crate::tree_transform::take_completed_transformer_activity();
+            let mut context = failing_context(Some(0));
+            let error = run(&mut context).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+                ),
+                "{name}"
+            );
+            assert_eq!(last_route(&context), route, "{name}");
+            assert_eq!(cache_entries(), resident, "{name}");
+            assert_eq!(coefficient_admissions(), admissions, "{name}");
+            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!(transformers.publications, 0, "{name}");
+
+            context.contract_backend_mut().fail_at = None;
+            let (_, reference) = run(&mut context).unwrap();
+            let committed = cache_entries();
+            crate::tree_transform::take_completed_transformer_activity();
+            let (_, repeat) = run(&mut context).unwrap();
+            let warm = crate::tree_transform::take_completed_transformer_activity();
+            assert_eq!(warm.builds, 0, "{name}");
+            assert_eq!(cache_entries(), committed, "{name}");
+            assert_eq!(
+                repeat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
     }
 
     /// Resident `(cache 2, cache 3)` entries.

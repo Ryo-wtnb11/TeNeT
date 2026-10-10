@@ -663,19 +663,6 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    fn admit_operands(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<(), Self::FacadeError> {
-        if lhs.owned_body().is_none() || rhs.owned_body().is_none() {
-            return Err(Error::InvalidArgument(
-                "checked Generic contraction currently requires direct owned tensors".to_string(),
-            )
-            .into());
-        }
-        Ok(())
-    }
-
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
