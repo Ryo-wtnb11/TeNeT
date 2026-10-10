@@ -16,7 +16,7 @@ use tenet::typed::CheckedGenericStructureError;
 use tenet::typed::{
     BlockFusionTrees, CheckedGenericPlanError, GenericTensorError, GradedSpace, TensorMap,
 };
-use tenet::typed::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
+use tenet::typed::{Complex64, ContractSpec, Runtime, TensorScalar};
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
@@ -1089,7 +1089,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
 }
 
 #[test]
-fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_authority() {
+fn checked_generic_cache_modes_dtype_pools_and_lazy_operands_match_direct_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
@@ -1165,13 +1165,31 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
         },
     );
     let replay = planned.execute(&[&lazy, &b64], &mut Default::default());
+    // A checked lazy adjoint is a storage-conjugate operand (#1865): the
+    // replay and a conjugated network leg agree with the direct contraction
+    // and with the materialized adjoint, and the lazy input stays lazy.
+    let direct = direct.unwrap();
+    let expected = lazy
+        .materialize()
+        .unwrap()
+        .contract(
+            &b64,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    assert_eq!(direct.dense_data().unwrap(), expected.dense_data().unwrap());
+    assert_eq!(
+        replay.unwrap().dense_data().unwrap(),
+        direct.dense_data().unwrap()
+    );
     assert!(matches!(
-        direct,
-        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
-    ));
-    assert!(matches!(
-        replay,
-        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
+        tenet::typed::__network::network_reuse_class(&lazy, false),
+        tenet::typed::__network::NetworkReuseClass::LazyAdjoint
     ));
 
     let conjugated = Network::new(
@@ -1185,8 +1203,8 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     .plan(&[&a64, &b64], &GreedyDenseOptimizer)
     .unwrap()
     .execute(&[&a64, &b64], &mut Default::default());
-    assert!(matches!(
-        conjugated,
-        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
-    ));
+    assert_eq!(
+        conjugated.unwrap().dense_data().unwrap(),
+        direct.dense_data().unwrap()
+    );
 }
