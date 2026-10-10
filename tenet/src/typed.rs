@@ -423,7 +423,14 @@ mod network_seam;
 #[cfg(test)]
 use network_seam::NetworkDegeneracyRestriction;
 mod reduction_ops;
+#[doc(hidden)]
+pub use reduction_ops::ReduceExec;
 mod restrict;
+mod storage;
+#[doc(hidden)]
+pub use storage::TypedStorage;
+#[cfg(feature = "cuda")]
+mod cuda_storage;
 mod transform_ops;
 mod twist_flip;
 pub use transform_ops::TypedTensorUnitDispatch;
