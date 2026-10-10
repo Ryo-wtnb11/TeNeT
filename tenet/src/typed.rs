@@ -276,8 +276,7 @@ pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
     tensorcontract_oriented_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free_into_slice,
-    tensorcontract_owned_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
+    tensorcontract_oriented_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
     OrientedContractionKind,
 };
@@ -323,12 +322,13 @@ pub(crate) use block_layout::CAT_PLAN_DECLINES_ORIENTED;
 pub(crate) use block_layout::{
     apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan, flip_block_factor,
     flip_toggled_homspace, logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
-    map_checked_unit_layout_error, oplus_sector_legs, reject_unbraided_nonunit_legs,
-    scale_blocks_impl, twist_block_factor, twist_factor_with_inverse,
+    map_checked_unit_layout_error, oplus_sector_legs, scale_blocks_impl, twist_factor_with_inverse,
     twist_is_identity_over_blocks, with_planar_axes, CatOperandData, CatOperandLayout, Fill,
     PlanarRequestKind,
 };
 use block_layout::{fuse_sector_content, uncoupled_sector_of_leg};
+#[cfg(feature = "cuda")]
+pub(crate) use block_layout::{reject_unbraided_nonunit_legs, twist_block_factor};
 pub use block_layout::{Direction, Duality, Side};
 #[cfg(feature = "cuda")]
 mod cuda_factor;
@@ -403,6 +403,7 @@ use tensor_repr::{
 };
 pub use tensor_repr::{PayloadConversion, PhysicalDense, TensorMap, TensorRef};
 mod cat;
+mod compact_arms;
 mod construction;
 mod contract_ops;
 pub use contract_ops::ContractSpec;

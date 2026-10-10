@@ -912,6 +912,7 @@ pub(super) fn uncoupled_sector_of_leg(
     }
 }
 
+#[cfg(feature = "cuda")]
 /// Rejects twist/flip requests whose coefficients do not exist for an
 /// unbraided provider before querying that provider.
 pub(crate) fn reject_unbraided_nonunit_legs<R>(
@@ -957,6 +958,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "cuda")]
 /// TensorKit-compatible product of ribbon-twist eigenvalues on one block.
 pub(crate) fn twist_block_factor<R>(
     rule: &R,
@@ -1008,23 +1010,19 @@ where
     })
 }
 
-/// TensorKit-compatible Z-isomorphism phase for sequential flip occurrences.
-pub(crate) fn flip_block_factor<R>(
-    rule: &R,
+/// TensorKit-compatible Z-isomorphism phase for sequential flip occurrences,
+/// reading each uncoupled sector's (χ, θ) from `values`.
+pub(crate) fn flip_block_factor(
+    values: &impl Fn(SectorId) -> (f64, f64),
     key: &FusionTreePairKey,
     nout: usize,
     occurrences: &[(usize, bool)],
     inverse: bool,
-) -> f64
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
-{
+) -> f64 {
     occurrences
         .iter()
         .map(|&(leg, dual)| {
-            let sector = uncoupled_sector_of_leg(key, nout, leg);
-            let chi = rule.frobenius_schur_phase_scalar(sector);
-            let theta = rule.twist_scalar(sector);
+            let (chi, theta) = values(uncoupled_sector_of_leg(key, nout, leg));
             if leg < nout {
                 if dual {
                     if inverse {

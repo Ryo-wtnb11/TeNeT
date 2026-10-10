@@ -17,6 +17,11 @@ where
     #[doc(hidden)]
     fn fusion_style(provider: &R) -> tenet_core::FusionStyleKind;
 
+    /// The provider's braiding style, which admits contraction and selects
+    /// the twist/flip early returns.
+    #[doc(hidden)]
+    fn braiding_style(provider: &R) -> tenet_core::BraidingStyleKind;
+
     /// Lowers a facade error to [`Error`] for the provider-neutral
     /// [`TensorRef`] adjoint constructor.
     #[doc(hidden)]
@@ -96,49 +101,115 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Executes one admitted permutation, braid, or planar transpose.
-    fn tree_transform(
+    /// A compact-diagonal result without densifying, or `None` to take the
+    /// dense route. Deleted by #1866, which makes the compact arms mode-free.
+    fn try_compact_transform(
+        _tensor: &TensorMap<R, D>,
+        _operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        Ok(None)
+    }
+
+    /// The lazy adjoint of the transformed parent, or `None` to transform the
+    /// conjugated storage directly. The method is where a mode discharges
+    /// [`TypedAdjointSpace`]; #1865 implements it for checked Generic.
+    fn try_lazy_adjoint_transform(
+        _tensor: &TensorMap<R, D>,
+        _operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        Ok(None)
+    }
+
+    /// Transforms the dense payload of `tensor` (a compact diagonal
+    /// densified, a lazy adjoint read through its conjugated parent) into a
+    /// fresh destination payload.
+    fn transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 }
 
-pub(super) trait MultiplicityFreeTransformExecution<R, C>: TensorScalar {
-    fn execute(
+pub(super) trait MultiplicityFreeTransformExecution<R, C>: TensorScalar
+where
+    R: TypedSectorAdmission,
+{
+    fn try_compact(
+        _tensor: &TensorMap<R, Self>,
+        _operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        Ok(None)
+    }
+
+    fn try_lazy_adjoint(
+        _tensor: &TensorMap<R, Self>,
+        _operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        Ok(None)
+    }
+
+    fn transform(
         tensor: &TensorMap<R, Self>,
         operation: TreeTransformOperation,
-    ) -> Result<TensorMap<R, Self>, Error>
-    where
-        R: TypedSectorAdmission;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
 }
 
 pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
     TensorScalar
 {
+    fn try_compact_contract(
+        _lhs: &TensorMap<R, Self>,
+        _rhs: &TensorMap<R, Self>,
+        _spec: &ContractSpec<'_>,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        Ok(None)
+    }
+
+    fn try_compact_compose(
+        _lhs: &TensorMap<R, Self>,
+        _rhs: &TensorMap<R, Self>,
+    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+        Ok(None)
+    }
+
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
         spec: &ContractSpec<'_>,
-    ) -> Result<TensorMap<R, Self>, Error>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
 
     fn compose(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
-    ) -> Result<TensorMap<R, Self>, Error>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
 }
 
 /// Ribbon-twist execution selected by the admitted provider mode.
 #[doc(hidden)]
-pub trait TypedTensorTwistDispatch<R, D>: TypedTensorModeDispatch<R>
+pub trait TypedTensorTwistDispatch<R, D>: TypedSpaceModeDispatch<R>
 where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    fn twist(
-        tensor: &TensorMap<R, D>,
+    /// The twist of a compact diagonal kept compact, or `None` to take the
+    /// dense route. Deleted by #1866.
+    fn try_compact_twist(
+        _tensor: &TensorMap<R, D>,
+        _legs: &[usize],
+        _inverse: bool,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        Ok(None)
+    }
+
+    /// θ of every sector that `legs` carry in `structure`'s fusion-tree
+    /// blocks, or `None` when every one of them is one. Every fallible
+    /// provider query happens here, so scaling by the returned values never
+    /// fails on the provider.
+    fn twist_values<'a>(
+        provider: &'a R,
+        structure: &tenet_core::BlockStructure,
+        codomain_rank: usize,
         legs: &[usize],
-        inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    ) -> Result<Option<impl Fn(SectorId) -> f64 + 'a>, Self::FacadeError>;
 }
 
 /// Z-isomorphism execution selected by the admitted provider mode.
@@ -148,11 +219,20 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    fn flip(
-        tensor: &TensorMap<R, D>,
-        legs: &[usize],
-        inverse: bool,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    /// The admitted space of `homspace`, bound to `space`'s provider.
+    fn root(
+        space: &BoundDynamicFusionMapSpace<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
+
+    /// (χ, θ) of every sector the flip `occurrences` carry in `structure`'s
+    /// fusion-tree blocks, with every fallible provider query made here.
+    fn pivotal_values<'a>(
+        provider: &'a R,
+        structure: &tenet_core::BlockStructure,
+        codomain_rank: usize,
+        occurrences: &[(usize, bool)],
+    ) -> Result<impl Fn(SectorId) -> (f64, f64) + 'a, Self::FacadeError>;
 }
 
 /// Tensor-product execution selected by a provider-owned mode.
@@ -162,11 +242,13 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Executes the F-only product while preserving the left provider.
-    fn tensor_product(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    /// Executes the F-only product of two owned dense payloads.
+    fn product(
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 }
 
 /// Contraction execution selected by a provider-owned mode.
@@ -176,16 +258,47 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    /// A compact-diagonal contraction, or `None` to take the dense route.
+    /// Deleted by #1866.
+    fn try_compact_contract(
+        _lhs: &TensorMap<R, D>,
+        _rhs: &TensorMap<R, D>,
+        _spec: &ContractSpec<'_>,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        Ok(None)
+    }
+
+    /// A compact-diagonal composition, or `None` to take the dense route.
+    /// Deleted by #1866.
+    fn try_compact_compose(
+        _lhs: &TensorMap<R, D>,
+        _rhs: &TensorMap<R, D>,
+    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+        Ok(None)
+    }
+
+    /// Representations the mode cannot yet contract. Deleted by #1865.
+    fn admit_operands(
+        _lhs: &TensorMap<R, D>,
+        _rhs: &TensorMap<R, D>,
+    ) -> Result<(), Self::FacadeError> {
+        Ok(())
+    }
+
+    /// Contracts the dense payloads of two admitted operands into a fresh
+    /// destination payload.
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         spec: &ContractSpec<'_>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 
+    /// Composes the dense payloads of two admitted operands into a fresh
+    /// destination payload.
     fn compose(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
 }
 
 /// Partial categorical trace execution selected by provider-owned mode.
