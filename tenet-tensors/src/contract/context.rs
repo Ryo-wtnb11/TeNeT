@@ -3,9 +3,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTensorMapSpace, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement, TensorMap,
-    TensorStorage,
+    BlockStructure, CheckedFusionAlgebra, CoreError, FusionTensorMapSpace, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement,
+    TensorMap, TensorStorage,
 };
 
 use super::route_host::Stage;
@@ -17,10 +17,11 @@ use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{TreeTransformPlanning, TreeTransformRuleCacheKey};
 use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
-    OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
+    OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend, ZeroBytes,
 };
 use tenet_operations::{
-    ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned, TreeTransformWorkspace,
+    ContractDestinationInit, OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned,
+    TreeTransformWorkspace,
 };
 
 use super::backend::TensorContractBackend;
@@ -1162,6 +1163,148 @@ where
             alpha,
             init,
         )
+    }
+
+    /// The existing-destination form of the multiplicity-free composition:
+    /// `dst = alpha · (lhs ∘ rhs) + init(dst)`, the composition sibling of
+    /// [`Self::tensorcontract_planned_into`].
+    #[doc(hidden)]
+    pub fn tensorcompose_planned_into<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        (lhs, lhs_data): (FusionOperand<'_>, &[D]),
+        (rhs, rhs_data): (FusionOperand<'_>, &[D]),
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        self.tensorcompose_fusion_dyn_into_with_init(
+            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, alpha, init,
+        )
+    }
+
+    /// The owned multiplicity-free contraction `lhs·rhs` into a fresh
+    /// payload, split after its first `codomain_rank` output axes. Each
+    /// operand is its logical space, its storage operand (a lazy adjoint is
+    /// storage-conjugate) and its storage payload.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn tensorcontract_multiplicity_free_in<R>(
+        &mut self,
+        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (lhs_axes, rhs_axes, output_order): (&[usize], &[usize], OutputAxisOrder<'_>),
+        codomain_rank: usize,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
+    {
+        let destination = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+                lhs_authority,
+                rhs_authority,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                codomain_rank,
+            )?
+        } else {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+                lhs_authority,
+                lhs,
+                rhs_authority,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                Some(codomain_rank),
+            )?
+        };
+        let mut data = crate::zeroed_payload(destination.space().required_len()?);
+        self.tensorcontract_fusion_dyn_prelowered_into_with_init(
+            &destination,
+            &mut data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                lhs.storage_conjugate(),
+                rhs.storage_conjugate(),
+            ),
+            D::one(),
+            ContractDestinationInit::Zeroed,
+        )?;
+        Ok((destination, data))
+    }
+
+    /// The owned multiplicity-free composition `lhs ∘ rhs` (TensorKit
+    /// `mul!`) into a fresh payload; operands as in
+    /// [`Self::tensorcontract_multiplicity_free_in`].
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn tensorcompose_multiplicity_free_in<R>(
+        &mut self,
+        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
+    {
+        let lhs_space = lhs_authority.space();
+        let lhs_axes = (lhs_space.nout()..lhs_space.rank()).collect::<Vec<_>>();
+        let rhs_axes = (0..rhs_authority.space().nout()).collect::<Vec<_>>();
+        let destination = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                lhs_authority,
+                rhs_authority,
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::identity(),
+            )?
+        } else {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+                lhs_authority,
+                lhs,
+                rhs_authority,
+                rhs,
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::identity(),
+                None,
+            )?
+        };
+        let mut data = crate::zeroed_payload(destination.space().required_len()?);
+        self.tensorcompose_fusion_dyn_into_with_init(
+            &destination,
+            &mut data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            D::one(),
+            ContractDestinationInit::Zeroed,
+        )?;
+        Ok((destination, data))
     }
 
     /// The contraction planner: TensorKit `contract!`

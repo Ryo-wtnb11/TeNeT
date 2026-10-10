@@ -54,9 +54,8 @@ pub use contract::{
 };
 #[doc(hidden)]
 pub use contract::{
-    plan_compose, tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
-    HostContractMembersWorkspace, StorageContractResolution,
+    plan_compose, try_compile_storage_contract_core_route, HostContractMembersWorkspace,
+    StorageContractResolution,
 };
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,

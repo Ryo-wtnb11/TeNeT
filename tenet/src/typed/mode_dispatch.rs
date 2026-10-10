@@ -682,19 +682,21 @@ where
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
         let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
         let mut lease = lhs.runtime.lease_context()?;
-        Ok(tensorcontract_owned_checked_generic_in_context(
-            lease.context().generic_lane::<D>()?,
-            &lhs_body.space,
-            lhs_body.materialized_dense_data().as_ref(),
-            &rhs_body.space,
-            rhs_body.materialized_dense_data().as_ref(),
-            TensorContractSpec::new(
-                spec.lhs,
-                spec.rhs,
-                OutputAxisOrder::from_axes(&spec.output_axes()),
-            ),
-            spec.codomain.len(),
-        )?)
+        Ok(lease
+            .context()
+            .generic_lane::<D>()?
+            .tensorcontract_checked_generic_in(
+                &lhs_body.space,
+                lhs_body.materialized_dense_data().as_ref(),
+                &rhs_body.space,
+                rhs_body.materialized_dense_data().as_ref(),
+                TensorContractSpec::new(
+                    spec.lhs,
+                    spec.rhs,
+                    OutputAxisOrder::from_axes(&spec.output_axes()),
+                ),
+                spec.codomain.len(),
+            )?)
     }
 
     fn compose(
@@ -703,13 +705,15 @@ where
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
         let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
         let mut lease = lhs.runtime.lease_context()?;
-        Ok(tensorcompose_owned_checked_generic_in_context(
-            lease.context().generic_lane::<D>()?,
-            &lhs_body.space,
-            lhs_body.materialized_dense_data().as_ref(),
-            &rhs_body.space,
-            rhs_body.materialized_dense_data().as_ref(),
-        )?)
+        Ok(lease
+            .context()
+            .generic_lane::<D>()?
+            .tensorcompose_checked_generic_in(
+                &lhs_body.space,
+                lhs_body.materialized_dense_data().as_ref(),
+                &rhs_body.space,
+                rhs_body.materialized_dense_data().as_ref(),
+            )?)
     }
 }
 

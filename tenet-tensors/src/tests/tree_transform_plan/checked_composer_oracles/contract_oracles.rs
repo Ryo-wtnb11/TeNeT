@@ -15,11 +15,7 @@
 //!   form, compose, permute the output) and must equal the contraction.
 
 use super::*;
-use crate::contract::{
-    tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
-    TensorContractFusionExecutionContext,
-};
+use crate::contract::{BoundDynamicFusionMapSpace, TensorContractFusionExecutionContext};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 type Leg = Vec<(SectorId, usize)>;
@@ -298,20 +294,20 @@ where
     let (lhs_data, rhs_data) = (payload::<D>(&lhs, 0.0), payload::<D>(&rhs, 0.5));
     let mut context = TensorContractFusionExecutionContext::<D, RuleIdentity>::default();
     crate::tree_transform::take_completed_transformer_activity();
-    let (output, data) = tensorcontract_owned_checked_generic_in_context(
-        &mut context,
-        &lhs,
-        &lhs_data,
-        &rhs,
-        &rhs_data,
-        TensorContractSpec::new(
-            case.lhs_axes,
-            case.rhs_axes,
-            OutputAxisOrder::Axes(case.output),
-        ),
-        case.codomain_rank,
-    )
-    .unwrap();
+    let (output, data) = context
+        .tensorcontract_checked_generic_in(
+            &lhs,
+            &lhs_data,
+            &rhs,
+            &rhs_data,
+            TensorContractSpec::new(
+                case.lhs_axes,
+                case.rhs_axes,
+                OutputAxisOrder::Axes(case.output),
+            ),
+            case.codomain_rank,
+        )
+        .unwrap();
     let route = if context.last_resolution_is_core() {
         Route::Core
     } else if context.last_resolution_orientation().is_some() {
@@ -556,16 +552,16 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
         let rhs_data = payload::<Complex64>(&rhs, 0.5);
         let mut context =
             TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
-        let (output_space, data) = tensorcontract_owned_checked_generic_in_context(
-            &mut context,
-            &lhs,
-            &lhs_data,
-            &rhs,
-            &rhs_data,
-            TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::Axes(output)),
-            codomain_rank,
-        )
-        .unwrap();
+        let (output_space, data) = context
+            .tensorcontract_checked_generic_in(
+                &lhs,
+                &lhs_data,
+                &rhs,
+                &rhs_data,
+                TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::Axes(output)),
+                codomain_rank,
+            )
+            .unwrap();
 
         let open = |rank: usize, axes: &[usize]| {
             (0..rank)
@@ -601,14 +597,9 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
             one,
         )
         .unwrap();
-        let (core, core_data) = tensorcompose_owned_checked_generic_in_context(
-            &mut context,
-            &lhs_core,
-            &lhs_core_data,
-            &rhs_core,
-            &rhs_core_data,
-        )
-        .unwrap();
+        let (core, core_data) = context
+            .tensorcompose_checked_generic_in(&lhs_core, &lhs_core_data, &rhs_core, &rhs_core_data)
+            .unwrap();
         let (codomain, domain) = output.split_at(codomain_rank);
         let (expected_space, expected) = crate::TreeTransformExecutionContext::<
             Complex64,

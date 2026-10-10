@@ -1,10 +1,6 @@
 mod api;
 mod backend;
 mod checked_generic;
-#[doc(hidden)]
-pub use checked_generic::{
-    tensorcompose_owned_checked_generic_in_context, tensorcontract_owned_checked_generic_in_context,
-};
 pub(crate) use checked_generic::{
     CheckedAuthority, CheckedContractTxn, CHECKED_CONTRACTION_REQUIRES_BOSONIC,
     CHECKED_REQUIRES_DIRECT_OPERANDS,

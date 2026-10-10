@@ -198,11 +198,9 @@ use tenet_operations::scale_value;
 #[cfg(feature = "cuda")]
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
-    expand_physical_host, project_physical_host, tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
-    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    ValidatedDynamicFusionLayout,
+    expand_physical_host, project_physical_host, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
+    DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
+    TreeTransformOperation, TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
 use crate::sector::{

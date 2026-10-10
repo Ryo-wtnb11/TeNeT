@@ -1019,14 +1019,9 @@ fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     for (lhs_name, (lhs_space, lhs_data)) in &tilings {
         for (rhs_name, (rhs_space, rhs_data)) in &tilings {
-            let (space, product) = crate::tensorcompose_owned_checked_generic_in_context(
-                &mut context,
-                lhs_space,
-                lhs_data,
-                rhs_space,
-                rhs_data,
-            )
-            .unwrap();
+            let (space, product) = context
+                .tensorcompose_checked_generic_in(lhs_space, lhs_data, rhs_space, rhs_data)
+                .unwrap();
             let actual = entries(space.space().structure(), &product);
             assert_eq!(
                 actual.keys().collect::<Vec<_>>(),

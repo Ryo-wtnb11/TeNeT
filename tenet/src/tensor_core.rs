@@ -19,8 +19,6 @@ use tenet_tensors::{
 
 use crate::error::Error;
 use crate::runtime::CoefficientCtx;
-#[cfg(test)]
-use crate::runtime::Ctx;
 use crate::typed::ScalarOps;
 
 /// Converts an internal coupled-layout invariant violation into the stable
@@ -528,72 +526,6 @@ pub(crate) fn observe_tree_transform_seam_call() {
             observation.set(Some(calls + 1));
         }
     });
-}
-
-#[cfg(test)]
-pub(crate) fn tensorcontract_owned_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
-{
-    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-        lhs.space(),
-        rhs.space(),
-        lhs_axes,
-        rhs_axes,
-        output_order,
-    )?;
-    let data = tensorcontract_owned_multiplicity_free_into(
-        context,
-        &destination,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-    )?;
-    Ok((destination, data))
-}
-
-/// Owned multiplicity-free contraction into a `destination` the caller
-/// already derived with `contracted_multiplicity_free_ordered`.
-#[cfg(test)]
-pub(crate) fn tensorcontract_owned_multiplicity_free_into<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
-    destination: &BoundDynamicFusionMapSpace<R>,
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-) -> Result<Vec<D>, tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
-{
-    let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_oriented_multiplicity_free_into_slice(
-        context,
-        destination,
-        &mut data,
-        FusionOperand::direct(lhs.space().space()),
-        lhs.data(),
-        FusionOperand::direct(rhs.space().space()),
-        rhs.data(),
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        OrientedContractionKind::Contract,
-        ContractDestinationInit::Zeroed,
-    )?;
-    Ok(data)
 }
 
 pub(crate) enum OrientedContractionKind {
@@ -1355,14 +1287,13 @@ mod tests {
         RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
     };
     use tenet_tensors::{
-        BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+        BoundDynamicFusionMapSpace, FusionOperand, OutputAxisOrder, TreeTransformOperation,
     };
 
     use super::{
-        scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
-        tensorproduct_owned_checked_generic, try_braid_rank_one_diagonal_data,
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        scatter_tensor_product_block, tensorproduct_owned_checked_generic,
+        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -2092,18 +2023,29 @@ mod tests {
             7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
         ];
 
-        let lhs = BoundDynamicTensorRef::try_new(&lhs, &lhs_data).unwrap();
-        let rhs = BoundDynamicTensorRef::try_new(&rhs, &rhs_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
-        let (destination, data) = tensorcontract_owned_multiplicity_free(
-            &mut context,
-            lhs,
-            rhs,
+        let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &lhs,
+            &rhs,
             &[1],
             &[0],
             OutputAxisOrder::from_axes(&[1, 0]),
         )
         .unwrap();
+        let mut data = vec![0.0; destination.space().required_len().unwrap()];
+        context
+            .tensorcontract_planned_into(
+                &destination,
+                &mut data,
+                (FusionOperand::direct(lhs.space()), &lhs_data),
+                (FusionOperand::direct(rhs.space()), &rhs_data),
+                &[1],
+                &[0],
+                &[1, 0],
+                1.0,
+                tenet_tensors::ContractDestinationInit::Zeroed,
+            )
+            .unwrap();
 
         let expected_destination = tenet_core::FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(SectorId::new(0), 4)], true)]),
