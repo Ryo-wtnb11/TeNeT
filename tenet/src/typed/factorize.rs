@@ -507,8 +507,9 @@ where
     }
 }
 
-/// The storage kernels of the compact factorizations: one typed body per
-/// operation, with each storage supplying only its execution (#1756).
+/// The storage kernels of the factorizations with a device route
+/// (`qr_compact`, `svd_compact`, `eigh_full`): one typed body per operation,
+/// with each storage supplying only its execution (#1756).
 ///
 /// Each kernel factors the matrix view the body's leg roles selected, in
 /// whatever representation it holds; a representation the storage cannot
@@ -537,6 +538,12 @@ where
     fn svd_compact(
         t: &TensorMap<R, D, Self>,
     ) -> Result<Svd<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+
+    /// Hermitian eigendecomposition of `t`'s current split.
+    fn eigh_full(
+        t: &TensorMap<R, D, Self>,
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
 }
 
 impl<R, D> FactorExec<R, D> for Vec<D>
@@ -561,5 +568,12 @@ where
 
     fn svd_compact(t: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, TypedFacadeError<R>> {
         t.factor_svd_compact()
+    }
+
+    fn eigh_full(
+        t: &TensorMap<R, D>,
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<TensorMap<R, D>>, TypedFacadeError<R>> {
+        t.factor_eigh_full(hermitian_tol)
     }
 }
