@@ -546,3 +546,207 @@ fn symmetric_unique_direct_braid_matches_artin_replay_exactly() {
         permutation[pivot + 1..].reverse();
     }
 }
+
+/// Z3×Z3 with trivial F and the alternating bicharacter
+/// `R(a, b) = ω^{a₁b₂ − a₂b₁}`, `ω = e^{2πi/3}`: a symmetric braiding
+/// (`R(a,b)·R(b,a) = 1`, twist `R(a,a) = 1`) that truthfully certifies the
+/// trivial associator gauge yet has `R(a,b) ≠ R(b,a)`. Sector id
+/// `a₁ + 3·a₂`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AlternatingZ3SquaredRule;
+
+impl AlternatingZ3SquaredRule {
+    fn components(sector: SectorId) -> (usize, usize) {
+        assert!(sector.id() < 9, "Z3×Z3 fixture sector must be in 0..9");
+        (sector.id() % 3, sector.id() / 3)
+    }
+
+    fn sector(first: usize, second: usize) -> SectorId {
+        SectorId::new(first % 3 + 3 * (second % 3))
+    }
+
+    /// `a₁b₂ − a₂b₁ mod 3`, the exponent of `ω` in `R(a, b)`.
+    fn exponent(left: SectorId, right: SectorId) -> usize {
+        let (a1, a2) = Self::components(left);
+        let (b1, b2) = Self::components(right);
+        (a1 * b2 + 2 * a2 * b1) % 3
+    }
+
+    fn omega_power(exponent: usize) -> Complex64 {
+        Complex64::from_polar(
+            1.0,
+            2.0 * std::f64::consts::PI * (exponent % 3) as f64 / 3.0,
+        )
+    }
+}
+
+impl FusionRule for AlternatingZ3SquaredRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let (a1, a2) = Self::components(sector);
+        Self::sector(3 - a1, 3 - a2)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let (a1, a2) = Self::components(left);
+        let (b1, b2) = Self::components(right);
+        smallvec![Self::sector(a1 + b1, a2 + b2)]
+    }
+}
+
+impl MultiplicityFreeFusionRule for AlternatingZ3SquaredRule {}
+
+impl MultiplicityFreeFusionSymbols for AlternatingZ3SquaredRule {
+    type Scalar = Complex64;
+
+    fn has_trivial_associator_gauge(&self) -> bool {
+        true
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
+        Self::omega_power(Self::exponent(left, right))
+    }
+}
+
+fn alternating_z3_squared_tree(uncoupled: &[SectorId], is_dual: &[bool]) -> FusionTreeKey {
+    let rule = AlternatingZ3SquaredRule;
+    let mut running = uncoupled[0];
+    let mut innerlines = Vec::new();
+    for (offset, &next) in uncoupled[1..].iter().enumerate() {
+        running = rule.fusion_channels(running, next)[0];
+        if offset + 2 < uncoupled.len() {
+            innerlines.push(running);
+        }
+    }
+    FusionTreeKey::try_new_for_rule(
+        &rule,
+        uncoupled.iter().copied(),
+        running,
+        is_dual.iter().copied(),
+        innerlines,
+        std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len() - 1),
+    )
+    .unwrap()
+}
+
+#[test]
+fn alternating_bicharacter_r_symbol_is_not_symmetric() {
+    // What: the fixture is a genuine witness: the trace sectors (1,2), (1,1)
+    // have R(v,w) = ω² and R(w,v) = ω, while the braiding stays symmetric.
+    let v = AlternatingZ3SquaredRule::sector(1, 2);
+    let w = AlternatingZ3SquaredRule::sector(1, 1);
+    let rule = AlternatingZ3SquaredRule;
+    let c = rule.fusion_channels(v, w)[0];
+    let omega = AlternatingZ3SquaredRule::omega_power(1);
+    assert!((rule.r_symbol_scalar(v, w, c) - omega * omega).norm() < 1.0e-15);
+    assert!((rule.r_symbol_scalar(w, v, c) - omega).norm() < 1.0e-15);
+    assert!(
+        (rule.r_symbol_scalar(v, w, c) * rule.r_symbol_scalar(w, v, c) - Complex64::new(1.0, 0.0))
+            .norm()
+            < 1.0e-15
+    );
+}
+
+#[test]
+fn certified_trivial_gauge_direct_braid_matches_artin_and_hand_oracle() {
+    // What: for a certifying symmetric rule with non-symmetric R, the direct
+    // shortcut equals the Artin composition (TensorKit's `braid` definition)
+    // and the hand product of R(source-left, source-right) over every inverted
+    // source pair, for every permutation of ranks 2..=4 and every level tuple
+    // (both braid directions), including a vacuum leg.
+    let rule = AlternatingZ3SquaredRule;
+    let s = AlternatingZ3SquaredRule::sector;
+    let pool = [s(1, 2), s(1, 1), s(2, 1), s(0, 0)];
+    for rank in 2..=4 {
+        let uncoupled = &pool[..rank];
+        let is_dual = (0..rank).map(|axis| axis % 2 == 1).collect::<Vec<_>>();
+        let tree = alternating_z3_squared_tree(uncoupled, &is_dual);
+        let level_tuples = all_level_tuples(rank);
+        for permutation in all_permutations(rank) {
+            let mut exponent = 0;
+            for first in 0..rank {
+                for second in first + 1..rank {
+                    let first_out = permutation.iter().position(|&a| a == first).unwrap();
+                    let second_out = permutation.iter().position(|&a| a == second).unwrap();
+                    if first_out > second_out {
+                        exponent +=
+                            AlternatingZ3SquaredRule::exponent(uncoupled[first], uncoupled[second]);
+                    }
+                }
+            }
+            let hand = AlternatingZ3SquaredRule::omega_power(exponent);
+            let permuted = permutation
+                .iter()
+                .map(|&a| uncoupled[a])
+                .collect::<Vec<_>>();
+            let permuted_dual = permutation.iter().map(|&a| is_dual[a]).collect::<Vec<_>>();
+            let hand_tree = alternating_z3_squared_tree(&permuted, &permuted_dual);
+
+            for levels in &level_tuples {
+                let terms =
+                    multiplicity_free_braid_tree(&rule, &tree, &permutation, levels).unwrap();
+                assert_eq!(terms.len(), 1);
+                let (direct_tree, direct) = terms.into_iter().next().unwrap();
+
+                let mut replay_tree = UnhashedFusionTree::from(tree.clone());
+                let mut replay = Complex64::new(1.0, 0.0);
+                for (index, inverse) in tensorkit_artin_steps(&permutation, levels) {
+                    replay *= apply_unique_artin_braid_at_with_inverse(
+                        &rule,
+                        &mut replay_tree,
+                        index,
+                        inverse,
+                    )
+                    .unwrap();
+                }
+
+                let context = format!("{permutation:?} {levels:?}");
+                assert_eq!(direct_tree, replay_tree.freeze(), "{context}");
+                assert_eq!(direct_tree, hand_tree, "{context}");
+                assert!(
+                    (direct - replay).norm() < 1.0e-13,
+                    "{context}: {direct} vs {replay}"
+                );
+                assert!(
+                    (direct - hand).norm() < 1.0e-13,
+                    "{context}: {direct} vs {hand}"
+                );
+            }
+
+            let (permuted_tree, permuted_coefficient) =
+                unique_permute_tree(&rule, &tree, &permutation).unwrap();
+            assert_eq!(permuted_tree, hand_tree, "{permutation:?}");
+            assert!(
+                (permuted_coefficient - hand).norm() < 1.0e-13,
+                "{permutation:?}"
+            );
+        }
+    }
+}
