@@ -15,7 +15,10 @@
 //! through their rebuilt product, and through the norm of `s`/`r`, which an
 //! isometric outer factor preserves. `eigh_full` runs on the Hermitian
 //! fixture `h_c[i,j] = e_c[i,j] + conj(e_c[j,i])` and is checked through
-//! `v d v^H` and the norm of `d`.
+//! `v d v^H` and the norm of `d`. `twist` runs on fermion parity (the U(1)
+//! and SU(2) fixtures are bosonic, where it is the identity) and is checked
+//! through `inner(t, twist(t))` against `Σ θ |t|²`, with θ = −1 for each
+//! listed leg whose uncoupled sector is odd.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
@@ -24,6 +27,9 @@
 //!   lazy source: `UnsupportedOnDevice`, asserted below (#1874).
 //! - CUDA `svd_compact`/`qr_compact`/`eigh_full` of a lazy adjoint operand:
 //!   `UnsupportedOnDevice`, asserted below.
+//! - Fibonacci and SU(2)_k have complex twists (`Scalar = Complex64`), so
+//!   they have no CUDA methods (compile-time absent); every device-admitted
+//!   twist is ±1.
 //! - CUDA compact storage does not exist (`to_cuda` densifies), so the
 //!   compact column is Host-only.
 //! - Checked Generic and complex-coefficient rules have no CUDA methods
@@ -32,10 +38,12 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::sector::{
+    FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+};
 use tenet::typed::{
-    Eigh, Error, GradedSpace, HermitianTol, OperationError, Qr, Runtime, SectorSpectrum, Svd,
-    TensorMap,
+    Direction, Eigh, Error, GradedSpace, HermitianTol, OperationError, Qr, Runtime, SectorSpectrum,
+    Svd, TensorMap,
 };
 
 const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
@@ -638,4 +646,166 @@ fn cuda_rows_match_host() {
         complex,
         device_rows
     );
+}
+
+fn fz2_leg() -> GradedSpace<FermionParityFusionRule> {
+    GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+    )
+    .unwrap()
+}
+
+const TWIST_LEGS: [&[usize]; 5] = [&[0], &[1], &[2], &[0, 2], &[0, 1, 1]];
+
+/// `twist` Host rows on fZ2 `[V, V*] <- [V]`: dense, lazy adjoint and compact
+/// operands in both directions against `Σ θ |t|²`, plus the admission rows.
+fn twist_rows<D>(runtime: &Runtime, conv: fn(Complex64) -> D)
+where
+    D: tenet::typed::TensorScalar + Into<Complex64>,
+{
+    let leg = fz2_leg();
+    let dual = leg.try_dual().unwrap();
+    // Per written entry: |x|² and the oddness of each leg's uncoupled sector.
+    let mut entries: Vec<(f64, [bool; 3])> = Vec::new();
+    let a = TensorMap::<_, D>::from_subblock_fn(runtime, [&leg, &dual], [&leg], |trees, ix| {
+        let odd = |s: &Z2Irrep| *s == Z2Irrep::ODD;
+        let (co, dom) = (trees.codomain_uncoupled(), trees.domain_uncoupled());
+        let x = conv(entry(0.7, ix[0] + 2 * ix[1], ix[1], ix[2]));
+        let weight = Into::<Complex64>::into(x).norm_sqr();
+        entries.push((weight, [odd(&co[0]), odd(&co[1]), odd(&dom[0])]));
+        x
+    })
+    .unwrap();
+    let oracle = |legs: &[usize], parity: &dyn Fn(usize) -> usize| -> f64 {
+        entries
+            .iter()
+            .map(|(weight, odd)| {
+                let flips = legs.iter().filter(|&&l| odd[parity(l)]).count();
+                if flips % 2 == 0 {
+                    *weight
+                } else {
+                    -weight
+                }
+            })
+            .sum()
+    };
+    let lazy = a.adjoint().unwrap();
+    // `a^H` is `[V] <- [V, V*]`: logical leg 0 is parent leg 2, 1 and 2 are 0, 1.
+    let to_parent = |l: usize| [2, 0, 1][l];
+    for legs in TWIST_LEGS {
+        let expected = oracle(legs, &|l| l);
+        let expected_lazy = oracle(legs, &to_parent);
+        assert!(
+            expected.abs() < oracle(&[], &|l| l) - 1e-9,
+            "{legs:?}: a block is negated"
+        );
+        for direction in [Direction::Forward, Direction::Inverse] {
+            let twisted = a.twist(legs, direction).unwrap();
+            assert!(close_c(a.inner(&twisted).unwrap().into(), expected.into()));
+            let twisted = lazy.twist(legs, direction).unwrap();
+            assert!(close_c(
+                lazy.inner(&twisted).unwrap().into(),
+                expected_lazy.into()
+            ));
+        }
+    }
+    // Compact: θ(c)^|legs| per sector, so an even leg count is the identity.
+    let mut weights = Vec::new();
+    let spectra: Vec<_> = leg
+        .sectors()
+        .unwrap()
+        .into_iter()
+        .map(|sector| {
+            let sign = if sector == Z2Irrep::ODD { -1.0 } else { 1.0 };
+            let values: Vec<D> = (0..leg.degeneracy(&sector).unwrap())
+                .map(|i| conv(entry(0.3, i, i, i)))
+                .collect();
+            weights.extend(
+                values
+                    .iter()
+                    .map(|&x| (sign, Into::<Complex64>::into(x).norm_sqr())),
+            );
+            tenet::typed::SectorSpectrum { sector, values }
+        })
+        .collect();
+    let compact = TensorMap::<_, D>::diagonal(runtime, &leg, spectra).unwrap();
+    for (legs, odd) in [(&[0usize][..], true), (&[1], true), (&[0, 1], false)] {
+        let expected: f64 = weights
+            .iter()
+            .map(|&(sign, w)| if odd { sign * w } else { w })
+            .sum();
+        let twisted = compact.twist(legs, Direction::Forward).unwrap();
+        assert!(twisted.dense_data().is_err(), "compact stays compact");
+        assert!(close_c(
+            compact.inner(&twisted).unwrap().into(),
+            expected.into()
+        ));
+    }
+    // Admission: the range check precedes the empty-list short circuit.
+    assert!(matches!(
+        a.twist(&[3], Direction::Forward),
+        Err(Error::InvalidArgument(message)) if message == "twist leg 3 out of range for rank 3"
+    ));
+    assert!(matches!(
+        lazy.twist(&[5], Direction::Inverse),
+        Err(Error::InvalidArgument(message)) if message == "inverse twist leg 5 out of range for rank 3"
+    ));
+    let same = a.twist(&[], Direction::Forward).unwrap();
+    assert!(close_c(
+        a.inner(&same).unwrap().into(),
+        oracle(&[], &|l| l).into()
+    ));
+}
+
+#[test]
+fn twist_host_rows_match_the_hand_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    twist_rows::<f64>(&runtime, |x| x.re);
+    twist_rows::<Complex64>(&runtime, |x| x);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn twist_cuda_rows_match_host() {
+    fn rows<D>(runtime: &Runtime, conv: fn(Complex64) -> D)
+    where
+        D: tenet::typed::CudaPayload + Into<Complex64> + std::fmt::Debug,
+    {
+        let leg = fz2_leg();
+        let dual = leg.try_dual().unwrap();
+        let a = TensorMap::<_, D>::from_subblock_fn(runtime, [&leg, &dual], [&leg], |_, ix| {
+            conv(entry(0.7, ix[0] + 2 * ix[1], ix[1], ix[2]))
+        })
+        .unwrap();
+        let a_dev = a.to_cuda().unwrap();
+        for legs in TWIST_LEGS {
+            for direction in [Direction::Forward, Direction::Inverse] {
+                for (host, device) in [
+                    (a.clone(), a_dev.clone()),
+                    (a.adjoint().unwrap(), a_dev.adjoint().unwrap()),
+                ] {
+                    let device = device.twist(legs, direction).unwrap().to_host().unwrap();
+                    let host = host.twist(legs, direction).unwrap();
+                    let (device, host) =
+                        (device.materialize().unwrap(), host.materialize().unwrap());
+                    assert_eq!(device.codomain(), host.codomain(), "{legs:?}");
+                    assert_eq!(device.domain(), host.domain(), "{legs:?}");
+                    assert_eq!(
+                        device.dense_data().unwrap(),
+                        host.dense_data().unwrap(),
+                        "{legs:?} {direction:?}: every device twist is ±1, so exact"
+                    );
+                }
+            }
+        }
+        assert!(matches!(
+            a_dev.twist(&[3], Direction::Forward),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    rows::<f64>(&runtime, |x| x.re);
+    rows::<Complex64>(&runtime, |x| x);
 }

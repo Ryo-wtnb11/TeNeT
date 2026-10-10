@@ -354,6 +354,7 @@ const TYPED: &[&str] = &[
     "Truncation",
     "TruncationError",
     "TruncationSpace",
+    "TwistExec",
     "TypedPersistenceCodec",
     "TypedAdjointSpace",
     "BondOutput",

@@ -921,3 +921,224 @@ fn typed_cuda_into_rejects_a_foreign_device_destination_untouched() {
         t.axpby_into(d, 1.0, 0.5)
     });
 }
+
+/// The device twist lowering (`cuda_twist_regions` fed by the body's
+/// `twist_block_factor`) against the Host θ authority, without a device: one
+/// region per block on that block's geometry, and per block the factor
+/// `Π θ(uncoupled sector)` of the mode's `twist_values` (conjugated for the
+/// inverse), which is also the ratio the Host `twist` applies to that block.
+/// A lazy input lowers onto its parent with the inverse direction.
+#[cfg(feature = "cuda")]
+fn assert_cuda_twist_lowering_matches_host<R, D>(
+    t: &TensorMap<R, D>,
+    legs: &[usize],
+    direction: Direction,
+) -> usize
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload + std::fmt::Debug,
+{
+    let what = format!("{legs:?} {direction:?}");
+    let expected = t.twist(legs, direction).unwrap();
+    let (source, twisted, legs, inverse) = match (&t.repr, &expected.repr) {
+        (TypedTensorRepr::Adjoint(view), TypedTensorRepr::Adjoint(result)) => (
+            t.parent_of(view),
+            expected.parent_of(result),
+            logical_adjoint_axes_to_parent(
+                view.parent.space.space().nout(),
+                view.parent.space.space().nin(),
+                legs,
+            ),
+            !direction.is_inverse(),
+        ),
+        (TypedTensorRepr::Owned(_), TypedTensorRepr::Owned(_)) => (
+            t.clone(),
+            expected.clone(),
+            legs.to_vec(),
+            direction.is_inverse(),
+        ),
+        _ => panic!("{what}: twist keeps the representation"),
+    };
+    let space = source.logical_space();
+    let provider = space.provider();
+    let nout = source.codomain_rank();
+    let theta = <MultiplicityFreeAdmissionMode as TypedTensorTwistDispatch<R, D>>::twist_values(
+        provider,
+        space.space().structure(),
+        nout,
+        &legs,
+    )
+    .unwrap()
+    .unwrap_or_else(|| panic!("{what}: fixture is not the identity"));
+    let lowered = super::super::cuda_transform::cuda_twist_regions::<D>(
+        space.space(),
+        &super::super::twist_flip::twist_block_factor(&theta, nout, &legs, inverse),
+        "twist",
+    )
+    .unwrap();
+    let structure = space.space().structure();
+    assert_eq!(
+        lowered.len(),
+        structure.block_count(),
+        "{what}: one region per block"
+    );
+    let (before, after) = (source.dense_data().unwrap(), twisted.dense_data().unwrap());
+    let mut negated = 0;
+    for (index, (region, factor)) in lowered.iter().enumerate() {
+        let block = structure.block(index).unwrap();
+        assert_eq!(region.dims(), block.shape(), "{what}: block {index} shape");
+        assert_eq!(
+            region.strides(),
+            block.strides(),
+            "{what}: block {index} strides"
+        );
+        assert_eq!(
+            region.offset(),
+            block.offset(),
+            "{what}: block {index} offset"
+        );
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("{what}: fusion-tree block");
+        };
+        let theta_product: f64 = legs
+            .iter()
+            .map(|&leg| provider.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)))
+            .product();
+        assert_eq!(
+            *factor,
+            D::from_real(theta_product),
+            "{what}: block {index} θ"
+        );
+        negated += usize::from(theta_product == -1.0);
+        let mut offsets = vec![block.offset()];
+        for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+            offsets = offsets
+                .iter()
+                .flat_map(|&base| (0..extent).map(move |i| base + i * stride))
+                .collect();
+        }
+        for offset in offsets {
+            assert_eq!(
+                after[offset],
+                before[offset] * *factor,
+                "{what}: block {index} element {offset} is the Host twist"
+            );
+        }
+    }
+    negated
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn typed_cuda_twist_lowering_is_the_host_theta_authority() {
+    fn fill<S>(_: &crate::typed::BlockFusionTrees<S>, ix: &[usize]) -> f64 {
+        ix.iter().enumerate().fold(0.37, |value, (axis, &i)| {
+            value * 1.7 + (i as f64 + 1.0) * (axis as f64 + 2.0)
+        })
+    }
+    fn complex_fill<S>(trees: &crate::typed::BlockFusionTrees<S>, ix: &[usize]) -> Complex64 {
+        let re = fill(trees, ix);
+        Complex64::new(re, 0.25 - 0.5 * re)
+    }
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let directions = [Direction::Forward, Direction::Inverse];
+
+    // fZ2 with a dual codomain leg: both sides, both dualities, repeated legs.
+    let fz2 = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
+    )
+    .unwrap();
+    let dual = fz2.try_dual().unwrap();
+    let real: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&fz2, &dual], [&fz2, &fz2], fill).unwrap();
+    let complex: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&fz2, &dual], [&fz2, &fz2], complex_fill).unwrap();
+    for legs in [
+        &[0usize][..],
+        &[1],
+        &[3],
+        &[0, 3],
+        &[1, 2, 3],
+        &[0, 1, 1, 3],
+    ] {
+        for direction in directions {
+            assert!(assert_cuda_twist_lowering_matches_host(&real, legs, direction) > 0);
+            assert!(assert_cuda_twist_lowering_matches_host(&complex, legs, direction) > 0);
+        }
+    }
+
+    // A lazy adjoint input lowers onto its parent with the inverse direction.
+    let lazy =
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&fz2, &dual], [&fz2], complex_fill)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+    for legs in [&[0usize][..], &[1], &[2], &[0, 1]] {
+        for direction in directions {
+            assert!(assert_cuda_twist_lowering_matches_host(&lazy, legs, direction) > 0);
+        }
+    }
+
+    // Fermionic products: fZ2 x U(1), and fZ2 x SU(2) with non-Abelian
+    // degeneracies.
+    let fu1 = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 1),
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1),
+        ],
+    )
+    .unwrap();
+    let t: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&fu1, &fu1], [&fu1, &fu1], fill).unwrap();
+    for legs in [&[1usize][..], &[2], &[0, 2]] {
+        for direction in directions {
+            assert!(assert_cuda_twist_lowering_matches_host(&t, legs, direction) > 0);
+        }
+    }
+    let fsu2 = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
+        [
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(0)),
+                2,
+            ),
+            (
+                product_sector(Z2Irrep::ODD, SU2Irrep::from_twice_spin(1)),
+                1,
+            ),
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(2)),
+                1,
+            ),
+        ],
+    )
+    .unwrap();
+    let t: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&fsu2, &fsu2], [&fsu2, &fsu2], complex_fill)
+            .unwrap();
+    for legs in [&[0usize][..], &[3], &[1, 3]] {
+        for direction in directions {
+            assert!(assert_cuda_twist_lowering_matches_host(&t, legs, direction) > 0);
+        }
+    }
+
+    // A bosonic provider is the identity before any block walk: no lowering.
+    let su2 = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    let t: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2], fill).unwrap();
+    let twisted = t.twist(&[0, 2], Direction::Forward).unwrap();
+    assert!(Arc::ptr_eq(
+        &t.owned_body().unwrap().data,
+        &twisted.owned_body().unwrap().data
+    ));
+}
