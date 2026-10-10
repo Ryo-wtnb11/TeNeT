@@ -288,18 +288,23 @@ where
     ///   then a placeholder is created and dropped, which forgets that key's
     ///   ghost (recently evicted) record. Rare and harmless: no value is
     ///   charged or retained.
-    pub(crate) fn add_charge(&self, key: &K, value: &Arc<V>, bytes: u64) {
+    ///
+    /// Returns whether it charged: `value` was the resident entry of `key`.
+    pub(crate) fn add_charge(&self, key: &K, value: &Arc<V>, bytes: u64) -> bool {
         if !self.entries.contains_key(key) {
-            return;
+            return false;
         }
-        let _ = self
-            .entries
-            .entry(key, Some(std::time::Duration::ZERO), |_, charged| {
-                if Arc::ptr_eq(&charged.value, value) {
-                    charged.bytes = charged.bytes.saturating_add(bytes);
-                }
-                EntryAction::Retain(())
-            });
+        matches!(
+            self.entries
+                .entry(key, Some(std::time::Duration::ZERO), |_, charged| {
+                    let resident = Arc::ptr_eq(&charged.value, value);
+                    if resident {
+                        charged.bytes = charged.bytes.saturating_add(bytes);
+                    }
+                    EntryAction::Retain(resident)
+                }),
+            quick_cache::sync::EntryResult::Retained(true)
+        )
     }
 
     /// The entry for `key`, built by `build` on a miss. Concurrent misses of

@@ -1046,6 +1046,74 @@ impl FusionTreeHomSpace {
             .map_err(E::from)
     }
 
+    /// The complete checked Generic structure of `self` permuted by
+    /// `(codomain_axes, domain_axes)`, where `source` is the structure stored
+    /// over `self`. Order: reset epoch, one identity read, `admit`; then, if
+    /// `source`'s resident cache entry memoizes this permutation and the
+    /// destination's own entry is resident, that hit with no further
+    /// provider query ([`Permuted::Memo`]); otherwise `before_derive`, the
+    /// provider derivation and the usual cache-1/cache-2 tail
+    /// ([`Permuted::Derived`], whose ticket publishes after the caller's
+    /// commit).
+    ///
+    /// Why the memo hit skips cache 1: the destination's sector admission was
+    /// proven when the memo was published, which required its complete entry.
+    #[doc(hidden)]
+    pub fn prepare_complete_permuted_generic_checked<R, E>(
+        &self,
+        source: &BlockStructure,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        admit: impl FnOnce(&RuleIdentity) -> Result<(), E>,
+        before_derive: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(PreparedBlockStructure, Self, Permuted), E>
+    where
+        R: CheckedGenericFusion,
+        E: From<CheckedGenericStructureError<R::Error>>,
+    {
+        let epoch = core_reset_epoch();
+        let rule_identity = rule.rule_identity();
+        admit(&rule_identity)?;
+        let mut axes = SmallVec::<[usize; 9]>::new();
+        axes.push(codomain_axes.len());
+        axes.extend_from_slice(codomain_axes);
+        axes.extend_from_slice(domain_axes);
+        let entry = source.complete_entry();
+        if let Some(id) = entry
+            .as_ref()
+            .and_then(|entry| entry.permuted(&rule_identity, self, &axes))
+        {
+            let destination = Self {
+                content: Arc::clone(&id.content),
+                id: OnceLock::from(id),
+            };
+            let key =
+                CompleteHomSpaceStructureCacheKey::generic(rule_identity.clone(), &destination);
+            if let Some(resident) = complete_hom_space_structure_cached(&key) {
+                #[cfg(test)]
+                PERMUTED_MEMO_HITS.set(PERMUTED_MEMO_HITS.get() + 1);
+                let prepared = PreparedBlockStructure::complete_hit(
+                    destination.clone(),
+                    resident.homspace_id(),
+                    resident.structure(),
+                );
+                return Ok((prepared, destination, Permuted::Memo));
+            }
+        }
+        before_derive()?;
+        let destination = self.try_permute_generic_checked(rule, codomain_axes, domain_axes)?;
+        let prepared = destination
+            .clone()
+            .prepare_complete_coupled_subblock_structure_generic_checked_at(
+                rule,
+                rule_identity,
+                epoch,
+            )?;
+        let ticket = PermutedMemoTicket { entry, axes, epoch };
+        Ok((prepared, destination, Permuted::Derived(ticket)))
+    }
+
     fn prepare_complete_coupled_subblock_structure_generic_checked_at<R>(
         self,
         rule: &R,

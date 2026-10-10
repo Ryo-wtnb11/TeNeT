@@ -62,6 +62,10 @@ where
 /// Warm allocation calls and bytes of one public checked call.
 struct Warm {
     permute: (u64, u64),
+    /// Recoupling groups `G_t` of the permute: composed-coefficient lookups
+    /// of its cold call, one per source fusion-tree group (at least its
+    /// multi-term groups).
+    permute_groups: u64,
     contract: (u64, u64),
     /// Output blocks `P` of the contraction.
     out_blocks: usize,
@@ -119,8 +123,10 @@ where
     };
 
     use tenet::cache::StructureCacheKind::{CompletedTreeTransformer, TreeTransformCoefficients};
+    let fresh = lookups(TreeTransformCoefficients);
     drop(lhs.permute(codomain, domain).unwrap());
     let cold = lookups(TreeTransformCoefficients);
+    let permute_groups = cold - fresh;
     let out_blocks = lhs.contract(&rhs, &spec).unwrap().subblock_count();
     let groups = lookups(TreeTransformCoefficients) - cold;
     let (out, permute) = counting_alloc::measure(|| lhs.permute(codomain, domain).unwrap());
@@ -140,6 +146,7 @@ where
         .unwrap();
     Warm {
         permute: (permute.calls, permute.bytes),
+        permute_groups,
         contract: (contract.calls, contract.bytes),
         out_blocks,
         core_blocks: core.subblock_count(),
@@ -153,9 +160,10 @@ where
 impl Warm {
     fn describe(&self, case: &str, rank: usize) -> String {
         format!(
-            "{case} rank {rank}: permute {:?} contract {:?} P={} P_c={} P_in={} S={} G={} \
+            "{case} rank {rank}: permute {:?} G_t={} contract {:?} P={} P_c={} P_in={} S={} G={} \
              cache-3 hits={}",
             self.permute,
+            self.permute_groups,
             self.contract,
             self.out_blocks,
             self.core_blocks,
@@ -164,6 +172,16 @@ impl Warm {
             self.groups,
             self.transformer_hits
         )
+    }
+
+    /// #2154: a warm permute hits its source's destination memo and its
+    /// completed transformer, so it re-admits nothing and derives nothing:
+    /// `calls ≤ 2·G_t + 8`, independent of `P_in` and the source sectors.
+    /// The `G_t` term is the dense backend's per-recoupling-group scratch
+    /// (Tenferro); the constant is the owned output, the committed space and
+    /// the preview keys. Base was 195 calls at SU(3) rank 4 (`G_t = 12`).
+    fn assert_permute_bound(&self, what: &str) {
+        assert!(self.permute.0 <= 2 * self.permute_groups + 8, "{what}");
     }
 
     /// #2063: a warm contraction binds its completed transformers and
@@ -181,8 +199,8 @@ impl Warm {
     }
 }
 
-/// Permute: head calls per rank; base was one `Arc` (1 call, 32 bytes) per
-/// staged destination higher (#2050). Contract: base 114 / 2,552 / 389,907
+/// Permute: the #2154 bound (before it, a warm permute re-admitted its
+/// source; base was 7 / 12 / 51 calls at rank 2 / 4 / 6). Contract: base 114 / 2,552 / 389,907
 /// calls at rank 2 / 4 / 6 before #2129's region core plan, then 18 / 421 /
 /// 70,915 (debug) before #2063 committed the intermediates. Bounds, not
 /// equalities: platform allocators and the toy provider may shift
@@ -194,19 +212,18 @@ fn warm_staged_checked_plans_lend_the_canonical_structure() {
         [(GenericLabel::Vacuum, 1), (GenericLabel::X, 2)],
     )
     .unwrap();
-    let permute_bound = [(2usize, 7u64), (4, 12), (6, 51)];
-    for (rank, permute_calls) in permute_bound {
+    for rank in [2, 4, 6] {
         let w = warm(&leg, rank);
         let what = w.describe("GenericToy", rank);
         eprintln!("{what}");
-        assert!(w.permute.0 <= permute_calls, "{what}");
+        w.assert_permute_bound(&what);
         w.assert_contract_bounds(&what);
     }
 }
 
-/// The same contraction bound for the racah SU(N) providers (SU(2) and
-/// SU(3), whose adjoint carries outer multiplicity). SU(3) stops at rank 4:
-/// its rank-6 cold build exceeds ten minutes in a debug test.
+/// The same permute and contraction bounds for the racah SU(N) providers
+/// (SU(2) and SU(3), whose adjoint carries outer multiplicity). SU(3) stops
+/// at rank 4: its rank-6 cold build exceeds ten minutes in a debug test.
 #[cfg(feature = "racah-generated")]
 #[test]
 fn warm_racah_checked_contraction_is_bounded_by_sectors_and_groups() {
@@ -223,6 +240,7 @@ fn warm_racah_checked_contraction_is_bounded_by_sectors_and_groups() {
             let w = warm(leg, rank);
             let what = w.describe(case, rank);
             eprintln!("{what}");
+            w.assert_permute_bound(&what);
             w.assert_contract_bounds(&what);
         }
     }

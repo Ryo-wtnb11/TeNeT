@@ -2214,4 +2214,162 @@ mod tests {
         assert_eq!((transformers.hits, transformers.builds), (0, 3));
         assert_eq!(rebuilt, reference);
     }
+
+    /// Bits of a payload with ±0 folded (platform-portable).
+    fn folded_bits(data: &[f64]) -> Vec<u64> {
+        data.iter()
+            .map(|&value| if value == 0.0 { 0 } else { value.to_bits() })
+            .collect()
+    }
+
+    /// One owned checked transform on a fresh default context.
+    fn transform(
+        logical: &SpySpace,
+        adjoint_of: Option<&SpySpace>,
+        data: &[f64],
+        operation: &crate::TreeTransformOperation,
+    ) -> Result<(SpySpace, Vec<f64>), CheckedGenericPlanError<SpyError>> {
+        crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+            .tree_transform_owned_checked_generic_in(logical, adjoint_of, data, operation, 1.0)
+    }
+
+    /// What (#2154): a warm owned checked permute, braid or transpose, of a
+    /// direct source or of a lazy adjoint, takes its destination from the
+    /// source's memo and its transformer from the completed cache: its
+    /// provider events are the identity read, the admission style and the
+    /// commit style, with no algebra query, and its payload is the cold
+    /// call's. The cold ledger is the base revision's.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_warm_checked_transform_reads_only_its_identity_and_styles() {
+        if !isolated("a_warm_checked_transform_reads_only_its_identity_and_styles") {
+            return;
+        }
+        use crate::TreeTransformOperation;
+        // Cold ledgers, pinned on base 907b7b00: per-query counts in `Query`
+        // order, then the event count.
+        let operations = [
+            (
+                "permute",
+                TreeTransformOperation::permute([1, 0], [2, 3]),
+                [34, 10, 103, 14, 3, 76, 257],
+            ),
+            (
+                "braid",
+                TreeTransformOperation::braid([2, 0], [1, 3], [0, 1], [2, 3]),
+                [33, 21, 267, 26, 27, 73, 480],
+            ),
+            (
+                "transpose",
+                TreeTransformOperation::transpose([0, 1, 3], [2]),
+                [13, 14, 47, 5, 0, 25, 113],
+            ),
+        ];
+        for adjoint in [false, true] {
+            for (name, operation, pinned) in &operations {
+                let what = format!("{name} adjoint={adjoint}");
+                tenet_core::clear_structure_caches();
+                let (provider, parent, _, _) = bound_pair(2, 2);
+                let data = ramp(parent.space().required_len().unwrap(), 0.5, -1.0);
+                let lazy = adjoint
+                    .then(|| crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap());
+                let (logical, adjoint_of) = match &lazy {
+                    Some(lazy) => (lazy, Some(&parent)),
+                    None => (&parent, None),
+                };
+                let run = || {
+                    provider.reset();
+                    let (space, out) = transform(logical, adjoint_of, &data, operation).unwrap();
+                    (space, out, provider.events.borrow().clone())
+                };
+                let (cold_space, cold_data, cold_events) = run();
+                let ledger: [usize; Query::COUNT + 1] = std::array::from_fn(|index| {
+                    if index == Query::COUNT {
+                        cold_events.len()
+                    } else {
+                        provider.calls.get()[index]
+                    }
+                });
+                assert_eq!(ledger, *pinned, "{what} cold");
+                for call in 0..3 {
+                    let (space, out, events) = run();
+                    assert_eq!(events, [Identity, Style, Style], "{what} warm {call}");
+                    assert_eq!(provider.algebra_calls(), 0, "{what} warm {call}");
+                    assert_eq!(space.space(), cold_space.space(), "{what} warm {call}");
+                    assert_eq!(folded_bits(&out), folded_bits(&cold_data), "{what} {call}");
+                }
+            }
+        }
+    }
+
+    /// What (#2154): a memo hit whose operation has no completed transformer
+    /// yet (a permute after a braid on the same axes) runs the source
+    /// preflight inside the structure build. Its ledger is the derived
+    /// path's without the destination's `Dual` queries, its payload is
+    /// equal, and a non-symmetric braiding fails at the same event with the
+    /// same error. Oracle: a space admitted before a reset retains no entry,
+    /// so it neither publishes nor reads a memo.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_memo_hit_with_a_new_operation_runs_the_preflight_in_the_build() {
+        if !isolated("a_memo_hit_with_a_new_operation_runs_the_preflight_in_the_build") {
+            return;
+        }
+        use crate::TreeTransformOperation;
+        // Legs cross between codomain and domain, so the derivation dualizes.
+        let braid = TreeTransformOperation::braid([2, 0], [1, 3], [0, 1], [2, 3]);
+        let permute = TreeTransformOperation::permute([2, 0], [1, 3]);
+        for braiding in [BraidingStyleKind::Bosonic, BraidingStyleKind::Anyonic] {
+            let [derived, memo] = [false, true].map(|memo| {
+                if memo {
+                    tenet_core::clear_structure_caches();
+                }
+                let (provider, space, _, _) = bound_pair(2, 2);
+                if !memo {
+                    tenet_core::clear_structure_caches();
+                }
+                provider.braiding.set(braiding);
+                let data = ramp(space.space().required_len().unwrap(), 0.5, -1.0);
+                transform(&space, None, &data, &braid).unwrap();
+                provider.reset();
+                let result = transform(&space, None, &data, &permute)
+                    .map(|(space, out)| (space.space().clone(), folded_bits(&out)));
+                let events = provider.events.borrow().clone();
+                (result, events)
+            });
+            // The derived ledger is the memo's with one run of `Dual`
+            // queries (the destination's derivation) where they diverge.
+            let split = derived
+                .1
+                .iter()
+                .zip(&memo.1)
+                .take_while(|(derived, memo)| derived == memo)
+                .count();
+            let dropped = derived.1[split..]
+                .iter()
+                .take_while(|&&event| event == Event::Query(Query::Dual))
+                .count();
+            assert_eq!(derived.1[..split], memo.1[..split], "{braiding:?}");
+            assert_eq!(
+                derived.1[split + dropped..],
+                memo.1[split..],
+                "{braiding:?}"
+            );
+            match (derived.0, memo.0) {
+                (Ok(derived), Ok(memo)) => {
+                    assert_eq!(braiding, BraidingStyleKind::Bosonic);
+                    assert!(dropped > 0);
+                    assert_eq!(derived, memo);
+                }
+                (Err(derived), Err(memo)) => {
+                    assert_eq!(braiding, BraidingStyleKind::Anyonic);
+                    assert_eq!(dropped, 0);
+                    let derived = format!("{derived:?}");
+                    assert!(derived.contains("UnsupportedBraidingStyle"), "{derived}");
+                    assert_eq!(derived, format!("{memo:?}"));
+                }
+                (derived, memo) => panic!("{braiding:?}: {derived:?} vs {memo:?}"),
+            }
+        }
+    }
 }
