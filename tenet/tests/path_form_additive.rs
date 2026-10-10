@@ -19,4 +19,13 @@ fn unified_methods_resolve_in_path_form() {
     // L1 reductions.
     assert_eq!(TensorMap::norm(&t, f64::INFINITY).unwrap(), 1.0);
     assert_eq!(TensorMap::inner(&t, &t).unwrap(), 2.0);
+
+    // L2 elementwise.
+    let twice = TensorMap::scale(&t, 2.0).unwrap();
+    let sum = TensorMap::axpby(&t, 1.0, &t, 1.0).unwrap();
+    assert_eq!(sum.dense_data().unwrap(), twice.dense_data().unwrap());
+    let mut zero = TensorMap::zeros_like(&t).unwrap();
+    assert_eq!(TensorMap::norm(&zero, 2.0).unwrap(), 0.0);
+    TensorMap::axpby_into(&t, &mut zero, 2.0, 0.0).unwrap();
+    assert_eq!(zero.dense_data().unwrap(), twice.dense_data().unwrap());
 }

@@ -90,7 +90,7 @@ where
         }
         let braiding = self.provider().braiding_style();
         let Some(source) = trace_source(self, braiding, pairs)? else {
-            return host_axpby_into(self, destination, alpha, beta);
+            return axpby_into_checked(self, destination, alpha, beta);
         };
         let destination_codomain_rank = source.axes.destination_codomain_rank;
         let source_space = &source.body.space;

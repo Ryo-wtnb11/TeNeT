@@ -1076,6 +1076,20 @@ fn every_device_into_leaves_a_rejected_destination_bit_identical() {
         Error::UnsupportedOnDevice(_),
         |d: &mut _| lazy.axpby_into(d, 1.0, 0.5)
     );
+    // The destination checks run before that capability (TensorKit checks
+    // the destination space before the kernel; #1756 L2).
+    rejects!(
+        device_snap,
+        "device axpby_into lazy source, shared dst",
+        sentinel!(&rt, like).to_cuda().unwrap(),
+        Error::DestinationShared,
+        |d: &mut _| {
+            let clone = d.clone();
+            let result = lazy.axpby_into(d, 1.0, 0.5);
+            drop(clone);
+            result
+        }
+    );
 
     // A lazy-adjoint device destination: its parent's bytes are its own.
     let square = TensorMap::<_, f64>::rand_with_seed(&rt, [&v], [&v], 2).unwrap();

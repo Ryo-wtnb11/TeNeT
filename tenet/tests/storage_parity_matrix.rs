@@ -7,11 +7,16 @@
 //! Oracles are hand sums over the entries the fixtures write
 //! (`norm(t, p) = (Σ_c dim(c) Σ_ij |t_c[i,j]|^p)^(1/p)`, `norm(t, Inf) = max`,
 //! `inner(a, b) = Σ_c dim(c) Σ_ij conj(a_c[i,j]) b_c[i,j]`), never read back
-//! from a TeNeT result.
+//! from a TeNeT result. Elementwise results (`scale`, `zeros_like`, `axpby`,
+//! `axpby_into`) are checked through `norm` and the linear functional
+//! `inner(c, ·)` against the entrywise combination of the written entries;
+//! fixtures on one space are written in one order, so their entries align.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
 //!   operand: `UnsupportedOnDevice`, asserted below.
+//! - CUDA `axpby` of one lazy and one owned operand, and `axpby_into` from a
+//!   lazy source: `UnsupportedOnDevice`, asserted below (#1874).
 //! - CUDA compact storage does not exist (`to_cuda` densifies), so the
 //!   compact column is Host-only.
 //! - Checked Generic and complex-coefficient rules have no CUDA methods
@@ -60,10 +65,24 @@ fn entry(seed: f64, coupled: usize, i: usize, j: usize) -> Complex64 {
     )
 }
 
+/// `alpha * x + beta * y` entrywise.
+fn combo(
+    alpha: Complex64,
+    x: &[(f64, Complex64)],
+    beta: Complex64,
+    y: &[(f64, Complex64)],
+) -> Vec<(f64, Complex64)> {
+    x.iter()
+        .zip(y)
+        .map(|((d, x), (_, y))| (*d, alpha * x + beta * y))
+        .collect()
+}
+
 /// Host rows for one rule and payload: dense, lazy adjoint and compact
-/// operands of every reduction against the hand oracle, plus the admission
-/// errors. The CUDA rows reuse the same fixtures through `$cuda`.
-macro_rules! reduction_rows {
+/// operands of every reduction and elementwise operation against the hand
+/// oracle, plus the admission errors. The CUDA rows reuse the same fixtures
+/// through `$cuda`.
+macro_rules! storage_rows {
     ($runtime:expr, $leg:expr, $coupled:expr, $dim:expr, $D:ty, $conv:expr, $cuda:expr) => {{
         let runtime: &Runtime = $runtime;
         let leg = $leg;
@@ -141,11 +160,79 @@ macro_rules! reduction_rows {
             Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
         ));
 
-        $cuda(&a, &b, &lazy_a);
+        // Elementwise. `c` is on `a`'s space, `lazy_c` on its adjoint space;
+        // for `t = e^H`, `<c^H, e^H> = conj(<c, e>)` and `norm(t) = norm(e)`.
+        let (c, c_entries) = build(0.3);
+        let lazy_c = c.adjoint().unwrap();
+        let (alpha, beta) = (
+            conv(Complex64::new(0.7, -0.3)),
+            conv(Complex64::new(-1.1, 0.4)),
+        );
+        let (wa, wb) = (Complex64::from(alpha), Complex64::from(beta));
+        let zero = Complex64::new(0.0, 0.0);
+        let check = |what: &str, t: &TensorMap<_, $D>, e: &[(f64, Complex64)]| {
+            let functional = Complex64::from(c.inner(t).unwrap());
+            assert!(close_c(functional, inner_oracle(&c_entries, e)), "{what}");
+            assert!(close(t.norm(2.0).unwrap(), norm_oracle(e, 2.0)), "{what} norm");
+        };
+        let check_lazy = |what: &str, t: &TensorMap<_, $D>, e: &[(f64, Complex64)]| {
+            let functional = Complex64::from(lazy_c.inner(t).unwrap());
+            assert!(close_c(functional, inner_oracle(&c_entries, e).conj()), "{what}");
+            assert!(close(t.norm(2.0).unwrap(), norm_oracle(e, 2.0)), "{what} norm");
+        };
+        let ab = combo(wa, &a_entries, wb, &b_entries);
+        let zeros = combo(zero, &a_entries, zero, &b_entries);
+        check("scale", &a.scale(alpha).unwrap(), &combo(wa, &a_entries, zero, &b_entries));
+        check("axpby", &a.axpby(alpha, &b, beta).unwrap(), &ab);
+        check("zeros_like", &a.zeros_like().unwrap(), &zeros);
+        let (mut destination, _) = build(-0.4);
+        a.axpby_into(&mut destination, alpha, beta).unwrap();
+        check("axpby_into", &destination, &ab);
+
+        // Lazy adjoints: `alpha A^H + beta B^H = (conj(alpha) A + conj(beta) B)^H`.
+        let lazy_ab = combo(wa.conj(), &a_entries, wb.conj(), &b_entries);
+        let lazy_scaled = lazy_a.scale(alpha).unwrap();
+        check_lazy("lazy scale", &lazy_scaled, &combo(wa.conj(), &a_entries, zero, &b_entries));
+        let lazy_sum = lazy_a.axpby(alpha, &lazy_b, beta).unwrap();
+        check_lazy("lazy + lazy", &lazy_sum, &lazy_ab);
+        // Both stay lazy adjoints (A10): the payload is the parents'.
+        for lazy in [&lazy_scaled, &lazy_sum] {
+            assert!(matches!(lazy.dense_data(), Err(Error::Unsupported { .. })));
+        }
+        let owned_b = lazy_b.materialize().unwrap();
+        check_lazy("lazy + owned", &lazy_a.axpby(alpha, &owned_b, beta).unwrap(), &lazy_ab);
+        let zero_lazy = lazy_a.zeros_like().unwrap();
+        check_lazy("lazy zeros_like", &zero_lazy, &zeros);
+        assert!(matches!(zero_lazy.dense_data(), Err(Error::Unsupported { .. })));
+        let mut destination = lazy_b.materialize().unwrap();
+        lazy_a.axpby_into(&mut destination, alpha, beta).unwrap();
+        check_lazy("lazy axpby_into", &destination, &lazy_ab);
+
+        // Compact: scale and compact + compact stay compact.
+        let (wide_alpha, wide_beta) = (Complex64::from(alpha), Complex64::from(beta));
+        let diag_scaled: Vec<_> = diag_entries.iter().map(|(d, x)| (*d, wide_alpha * x)).collect();
+        assert!(close(compact.scale(alpha).unwrap().norm(2.0).unwrap(), norm_oracle(&diag_scaled, 2.0)));
+        let diag_sum = combo(wide_alpha, &diag_entries, wide_beta, &diag_entries);
+        let compact_sum = compact.axpby(alpha, &compact, beta).unwrap();
+        assert!(close(compact_sum.norm(2.0).unwrap(), norm_oracle(&diag_sum, 2.0)));
+        assert!(close(compact.zeros_like().unwrap().norm(2.0).unwrap(), 0.0));
+
+        // Admission: a foreign space, before any write.
+        assert!(matches!(
+            a.axpby(alpha, &wider, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+        let mut foreign = wider.clone();
+        assert!(matches!(
+            a.axpby_into(&mut foreign, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+
+        $cuda(&a, &b, &lazy_a, alpha, beta);
     }};
 }
 
-fn no_cuda<T>(_: &T, _: &T, _: &T) {}
+fn no_cuda<T, D>(_: &T, _: &T, _: &T, _: D, _: D) {}
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -180,14 +267,14 @@ fn su2_coupled(c: &SU2Irrep) -> usize {
 }
 
 #[test]
-fn host_reductions_match_the_hand_oracle() {
+fn host_rows_match_the_hand_oracle() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let real = |x: Complex64| x.re;
     let complex = |x: Complex64| x;
     let one = |_: usize| 1.0;
     let su2_dim = |twice: usize| (twice + 1) as f64;
-    reduction_rows!(&runtime, u1_leg(), u1_coupled, one, f64, real, no_cuda);
-    reduction_rows!(
+    storage_rows!(&runtime, u1_leg(), u1_coupled, one, f64, real, no_cuda);
+    storage_rows!(
         &runtime,
         u1_leg(),
         u1_coupled,
@@ -196,7 +283,7 @@ fn host_reductions_match_the_hand_oracle() {
         complex,
         no_cuda
     );
-    reduction_rows!(
+    storage_rows!(
         &runtime,
         su2_leg(),
         su2_coupled,
@@ -205,7 +292,7 @@ fn host_reductions_match_the_hand_oracle() {
         real,
         no_cuda
     );
-    reduction_rows!(
+    storage_rows!(
         &runtime,
         su2_leg(),
         su2_coupled,
@@ -219,12 +306,17 @@ fn host_reductions_match_the_hand_oracle() {
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn cuda_reductions_match_host() {
+fn cuda_rows_match_host() {
     use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-    use tenet::typed::CudaPayload;
+    use tenet::typed::{CudaPayload, CudaStorage};
 
-    fn device_rows<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>, lazy_a: &TensorMap<R, D>)
-    where
+    fn device_rows<R, D>(
+        a: &TensorMap<R, D>,
+        b: &TensorMap<R, D>,
+        lazy_a: &TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
         D: CudaPayload + Into<Complex64> + std::fmt::Debug,
     {
@@ -250,6 +342,81 @@ fn cuda_reductions_match_host() {
             Error::UnsupportedOnDevice("inner does not support lazy adjoint CUDA operands".into())
         );
         assert!(matches!(a_dev.norm(-1.0), Err(Error::InvalidArgument(_))));
+
+        // Elementwise: the device result equals the Host result.
+        let same = |what: &str, device: TensorMap<R, D, CudaStorage<D>>, host: TensorMap<R, D>| {
+            let device = device.to_host().unwrap().materialize().unwrap();
+            let host = host.materialize().unwrap();
+            assert_eq!(device.codomain(), host.codomain(), "{what}");
+            assert_eq!(device.domain(), host.domain(), "{what}");
+            let (device, host) = (device.dense_data().unwrap(), host.dense_data().unwrap());
+            assert_eq!(device.len(), host.len(), "{what}");
+            for (&x, &y) in device.iter().zip(host) {
+                assert!(close_c(x.into(), y.into()), "{what}");
+            }
+        };
+        let lazy_dev = a_dev.adjoint().unwrap();
+        let lazy_b = b.adjoint().unwrap();
+        let lazy_b_dev = b_dev.adjoint().unwrap();
+        same(
+            "scale",
+            a_dev.scale(alpha).unwrap(),
+            a.scale(alpha).unwrap(),
+        );
+        same(
+            "axpby",
+            a_dev.axpby(alpha, &b_dev, beta).unwrap(),
+            a.axpby(alpha, b, beta).unwrap(),
+        );
+        same(
+            "zeros_like",
+            a_dev.zeros_like().unwrap(),
+            a.zeros_like().unwrap(),
+        );
+        let mut destination = b_dev.materialize().unwrap();
+        a_dev.axpby_into(&mut destination, alpha, beta).unwrap();
+        let mut expected = b.materialize().unwrap();
+        a.axpby_into(&mut expected, alpha, beta).unwrap();
+        same("axpby_into", destination, expected);
+        same(
+            "lazy scale",
+            lazy_dev.scale(alpha).unwrap(),
+            lazy_a.scale(alpha).unwrap(),
+        );
+        same(
+            "lazy + lazy",
+            lazy_dev.axpby(alpha, &lazy_b_dev, beta).unwrap(),
+            lazy_a.axpby(alpha, &lazy_b, beta).unwrap(),
+        );
+        same(
+            "lazy zeros_like",
+            lazy_dev.zeros_like().unwrap(),
+            lazy_a.zeros_like().unwrap(),
+        );
+        let owned_b = lazy_b.materialize().unwrap().to_cuda().unwrap();
+        assert_eq!(
+            lazy_dev.axpby(alpha, &owned_b, beta).unwrap_err(),
+            Error::UnsupportedOnDevice(
+                "axpby does not support mixed owned/lazy CUDA operands".into()
+            )
+        );
+        let lazy_source = "axpby_into does not support lazy adjoint CUDA operands";
+        let mut destination = lazy_b.materialize().unwrap().to_cuda().unwrap();
+        assert_eq!(
+            lazy_dev
+                .axpby_into(&mut destination, alpha, beta)
+                .unwrap_err(),
+            Error::UnsupportedOnDevice(lazy_source.into())
+        );
+        // The destination checks run before the storage capability (#1756 L2).
+        let shared = destination.clone();
+        assert_eq!(
+            lazy_dev
+                .axpby_into(&mut destination, alpha, beta)
+                .unwrap_err(),
+            Error::DestinationShared
+        );
+        drop(shared);
     }
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
@@ -257,8 +424,8 @@ fn cuda_reductions_match_host() {
     let complex = |x: Complex64| x;
     let one = |_: usize| 1.0;
     let su2_dim = |twice: usize| (twice + 1) as f64;
-    reduction_rows!(&runtime, u1_leg(), u1_coupled, one, f64, real, device_rows);
-    reduction_rows!(
+    storage_rows!(&runtime, u1_leg(), u1_coupled, one, f64, real, device_rows);
+    storage_rows!(
         &runtime,
         u1_leg(),
         u1_coupled,
@@ -267,7 +434,7 @@ fn cuda_reductions_match_host() {
         complex,
         device_rows
     );
-    reduction_rows!(
+    storage_rows!(
         &runtime,
         su2_leg(),
         su2_coupled,
@@ -276,7 +443,7 @@ fn cuda_reductions_match_host() {
         real,
         device_rows
     );
-    reduction_rows!(
+    storage_rows!(
         &runtime,
         su2_leg(),
         su2_coupled,

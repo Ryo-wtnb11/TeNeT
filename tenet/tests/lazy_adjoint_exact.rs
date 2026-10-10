@@ -8,8 +8,9 @@
 //! the domain axes first, and the value is conjugated. The `add` oracle spells
 //! out the documented update order: `alpha = 1, beta = 0` is a copy, never
 //! `1 * x`, so complex `inf + 0i` and signed zeros survive bit for bit.
-//! Copies (`(1, 0)`, `(0, 1)`, `(0, 0)`) compare bit for bit; a scaled update
-//! is arithmetic, so its finite entries compare under the workspace tolerance
+//! Copies (`(1, 0)`, `(0, 1)`, `(0, 0)`) compare bit for bit; a scaled update,
+//! and any update of two lazy operands (the lazy adjoint of the parents' owned
+//! update, A10), is arithmetic, so its finite entries compare under the workspace tolerance
 //! rule (`docs/testing_numerics.md`) and its nonfinite entries by class.
 
 use std::hash::{Hash, Hasher};
@@ -170,6 +171,15 @@ fn updated<D: Exact>(alpha: D, beta: D, lhs: D, rhs: D) -> D {
     value
 }
 
+/// `add` of two lazy adjoints, `(conj(alpha) A + conj(beta) B)^H`, per
+/// logical element: the owned update `scale(x, a) + scale(y, b)` on the
+/// parents' (conjugated) entries, with VectorInterface's strong zero and a
+/// multiply at an exact one.
+fn parent_updated<D: Exact>(alpha: D, beta: D, lhs: D, rhs: D) -> D {
+    let scale = |a: D, x: D| if a == D::ZERO { D::ZERO * a } else { a * x };
+    (scale(alpha.conj(), lhs.conj()) + scale(beta.conj(), rhs.conj())).conj()
+}
+
 fn bits<D: Exact>(data: &[D]) -> Vec<(u64, u64)> {
     data.iter().map(|value| value.bits()).collect()
 }
@@ -273,11 +283,23 @@ macro_rules! assert_exact_adjoint {
                         adjoint_entry::<$dtype, _>(trees, indices, salt)
                     }
                 };
+                let both_lazy = rhs_salt == 1;
                 let expected = on_adjoint_space(&|trees, indices| {
-                    updated(a, b, value(lhs_salt, trees, indices), value(rhs_salt, trees, indices))
+                    let (x, y) = (value(lhs_salt, trees, indices), value(rhs_salt, trees, indices));
+                    if both_lazy {
+                        parent_updated(a, b, x, y)
+                    } else {
+                        updated(a, b, x, y)
+                    }
                 });
-                let sum = lhs.axpby(a, rhs, b).unwrap();
-                let copy = [(one, zero), (zero, one), (zero, zero)].contains(&(a, b));
+                // Two lazy operands give a lazy adjoint (A10); its
+                // materialization is the logical sum.
+                let sum = lhs.axpby(a, rhs, b).unwrap().materialize().unwrap();
+                // Two lazy operands are the lazy adjoint of their parents'
+                // owned update (A10), which multiplies by an exact one: an
+                // arithmetic update, not a copy.
+                let copy =
+                    [(one, zero), (zero, one), (zero, zero)].contains(&(a, b)) && !both_lazy;
                 if copy {
                     assert_eq!(
                         bits(sum.dense_data().unwrap()),

@@ -812,8 +812,14 @@ where
         .all(|(&actual, &expected)| {
             (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
         }));
+    // Two lazy adjoints stay lazy (A10, #1874): the parents are combined.
     let add_both = lazy.axpby(alpha, &lazy, beta).unwrap();
+    let TypedTensorRepr::Adjoint(_) = &add_both.repr else {
+        panic!("adding two lazy adjoints must remain parent-backed");
+    };
     assert!(add_both
+        .materialize()
+        .unwrap()
         .dense_data()
         .unwrap()
         .iter()

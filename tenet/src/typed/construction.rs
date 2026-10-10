@@ -345,22 +345,21 @@ where
     }
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
+    S: ElementwiseExec<R, D>,
 {
-    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
-    /// `zerovector`). Dense and compact payloads are freshly initialized to
-    /// exact positive zero, independently of non-finite source values. A lazy
-    /// adjoint zeros its canonical parent and stays a lazy adjoint.
+    /// A zero tensor on the same spaces, dtype and storage as `self`
+    /// (TensorKit `zerovector`). Dense and compact payloads are freshly
+    /// initialized to exact positive zero, independently of non-finite source
+    /// values. A lazy adjoint zeros its canonical parent and stays a lazy
+    /// adjoint.
     pub fn zeros_like(&self) -> Result<Self, TypedFacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent.zeros_like()?.adjoint();
+            let parent = self.parent_of(view).zeros_like()?;
+            return parent.lazy_adjoint_on(&view.logical_space);
         }
         if let Some(spectrum) = self.spectrum() {
             return Ok(self.with_spectrum(
@@ -373,13 +372,6 @@ where
                     .collect(),
             ));
         }
-        Ok(self.with_data(vec![
-            D::from_real(0.0);
-            self.owned_body()
-                .expect("owned zero input")
-                .materialized_dense_data()
-                .as_ref()
-                .len()
-        ]))
+        S::zeros(self)
     }
 }

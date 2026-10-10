@@ -8,7 +8,15 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
+    const NOUN: &'static str = "CUDA";
+
     fn as_host(_: &TensorMap<R, D, Self>) -> Option<&TensorMap<R, D>> {
         None
+    }
+
+    fn from_host(_: TensorMap<R, D>) -> Result<TensorMap<R, D, Self>, Error> {
+        Err(Error::UnsupportedOnDevice(
+            "compact diagonal storage is host-only".to_string(),
+        ))
     }
 }
