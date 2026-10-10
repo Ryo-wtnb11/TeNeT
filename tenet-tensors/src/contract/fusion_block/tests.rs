@@ -501,14 +501,19 @@ fn generic_multiplicity_grid_uses_canonical_region_gemm() {
     let dst = space();
 
     reset_layout_lookups();
-    let plan = compile_fusion_block_contract_plan_generic::<_, f64>(
-        &rule,
-        &dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]),
+    // The checked core rung of `lhs[2, 3] . rhs[0, 1]` (core form).
+    let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops_generic(
+        dst.structure(),
+        dst.nout(),
+        lhs.structure(),
+        lhs.nout(),
+        rhs.structure(),
+        rhs.nout(),
+        MatrixOp::Identity,
+        MatrixOp::Identity,
     )
-    .unwrap();
+    .unwrap()
+    .expect("the multiplicity grid is canonically aligned");
     assert_eq!(layout_compiles(), 0);
 
     let mut output = vec![0.0; 4];
