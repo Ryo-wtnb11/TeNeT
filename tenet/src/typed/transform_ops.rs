@@ -671,20 +671,14 @@ where
     }
 
     /// The one body of every admitted permutation, braid and planar
-    /// transpose: the mode's compact and lazy-adjoint arms, else one dense
-    /// transform published as an owned tensor.
+    /// transpose: the compact rank-(1,1) arm and the mode's lazy-adjoint arm,
+    /// else one dense transform published as an owned tensor.
     pub(super) fn tree_transform(
         &self,
         operation: TreeTransformOperation,
     ) -> Result<Self, TypedFacadeError<R>> {
-        if self.spectrum().is_some() {
-            if let Some(compact) =
-                <R::Mode as TypedTensorTransformDispatch<R, D>>::try_compact_transform(
-                    self, &operation,
-                )?
-            {
-                return Ok(compact);
-            }
+        if let Some(compact) = compact_arms::transform_rank_one_diagonal(self, &operation)? {
+            return Ok(compact);
         }
         if let TypedTensorRepr::Adjoint(_) = &self.repr {
             if let Some(lazy) =
@@ -740,6 +734,61 @@ where
         )?)
 }
 
+/// The multiplicity-free [`TypedTensorTransformDispatch::transform_bond_spectrum`]
+/// of either coefficient lane.
+#[allow(private_bounds)]
+fn transform_bond_spectrum_multiplicity_free<R, D>(
+    tensor: &TensorMap<R, D>,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    operation: &TreeTransformOperation,
+    require_representable: bool,
+) -> Result<BondTransform<R, D>, Error>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + crate::runtime::MultiplicityFreeCoefficientLane<
+            <R as MultiplicityFreeFusionSymbols>::Scalar,
+        >,
+{
+    let source = tensor.logical_space();
+    let mut lease = tensor.runtime.lease_context()?;
+    let (destination, outcome) = D::lane(lease.context())?
+        .tree_context_mut()
+        .tree_transform_structure_multiplicity_free_in(
+            source,
+            operation,
+            |structure, preview| {
+                crate::tensor_core::bond_spectrum(
+                    source.space().structure(),
+                    preview,
+                    structure,
+                    spectrum,
+                    require_representable,
+                )
+            },
+            || tenet_matrixalgebra::seam::diagonal_bond_data(source.space(), spectrum, &|v| v),
+        )?;
+    Ok(BondTransform::from_outcome(destination, outcome))
+}
+
+impl<R, D> BondTransform<R, D> {
+    pub(super) fn from_outcome(
+        destination: BoundDynamicFusionMapSpace<R>,
+        outcome: tenet_tensors::StructureOutcome<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, D>,
+    ) -> Self {
+        let output = match outcome {
+            tenet_tensors::StructureOutcome::Read(spectrum) => BondOutput::Spectrum(spectrum),
+            tenet_tensors::StructureOutcome::Replayed(data) => BondOutput::Dense(data),
+        };
+        Self {
+            destination,
+            output,
+        }
+    }
+}
+
 /// TensorKit `permute(t') = adjoint(permute(parent, adjointtensorindices(..)))`
 /// and its `braid`/`transpose`/`repartition` twins: the lazy adjoint of the
 /// parent's owned transform, one body for every mode. `None` unless `tensor`
@@ -776,11 +825,18 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn try_compact(
+    fn transform_bond_spectrum(
         tensor: &TensorMap<R, Self>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<Self>],
         operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
-        compact_arms::transform_rank_one_diagonal(tensor, operation)
+        require_representable: bool,
+    ) -> Result<BondTransform<R, Self>, Error> {
+        transform_bond_spectrum_multiplicity_free(
+            tensor,
+            spectrum,
+            operation,
+            require_representable,
+        )
     }
 
     fn try_lazy_adjoint(
@@ -804,6 +860,20 @@ where
         + CheckedFusionAlgebra
         + SectorCodec,
 {
+    fn transform_bond_spectrum(
+        tensor: &TensorMap<R, Self>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<Self>],
+        operation: &TreeTransformOperation,
+        require_representable: bool,
+    ) -> Result<BondTransform<R, Self>, Error> {
+        transform_bond_spectrum_multiplicity_free(
+            tensor,
+            spectrum,
+            operation,
+            require_representable,
+        )
+    }
+
     fn transform(
         tensor: &TensorMap<R, Self>,
         operation: TreeTransformOperation,

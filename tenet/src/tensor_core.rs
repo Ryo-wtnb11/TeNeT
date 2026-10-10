@@ -5,15 +5,14 @@ use tenet_core::{
     CanonicalUnitFusionRule, CategoricalScalar, CheckedFusionAlgebra, CheckedFusionSpaceError,
     CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
     CheckedGenericSymbolError, CoreError, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation,
-    RuleIdentity,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, MultiplicityIndex, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_operations::TreeTransformBlock;
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace,
-    RecouplingCoefficientAction, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey, TreeTransformStructure,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, RecouplingCoefficientAction,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
+    TreeTransformStructure,
 };
 
 use crate::error::Error;
@@ -121,151 +120,10 @@ fn map_checked_tensor_product_symbol_error<E>(
     }
 }
 
-/// Transforms a compact diagonal spectrum through a rank-(1,1) leg swap
-/// without ever building the `Σ_c k_c²` dense payload — TensorKit 0.17
-/// `src/tensors/diagonal.jl:215-242`, where `permute`/`transpose` of a
-/// `DiagonalTensorMap` re-labels the stored diagonal instead of materializing
-/// it.
-///
-/// The geometry this accepts is rank `(1, 1)`, codomain permutation `[1]`,
-/// domain permutation `[0]`, and a `Permute` or `Transpose` operation — see
-/// [`is_rank_one_diagonal_swap`], which the typed facade asks before calling
-/// this. Under it every source block
-/// lowers to a **single** destination term, so the whole transform is one real
-/// coefficient per sector applied to that sector's stored values. The
-/// single-term property is asserted here rather than assumed: zero or several
-/// terms is an engine invariant break, not a caller mistake, and is reported as
-/// one.
-///
-/// Why the guard is not widened: an explicit braid, a higher rank, or a Generic
-/// (non-multiplicity-free) fusion rule can lower one source block to a *sum* of
-/// destination terms, which is no longer a per-sector scaling of a diagonal and
-/// has no compact single-term predicate proved for it. Those keep the dense
-/// fallback.
-///
-/// `V` is the stored value type and is only ever acted on by the real
-/// coefficient, so the `f64`, `Complex64` and real-valued-`Complex64` storages
-/// all share this one body. The bound is the crate's own
-/// [`RecouplingCoefficientAction`] rather than a bare `Mul<f64>`: it is the
-/// seam every other recoupling coefficient in the engine acts through, and it
-/// is already a supertrait of the typed facade's payload scalar, so the facade
-/// does not widen a public bound to reach this helper.
-pub(crate) fn transform_rank_one_diagonal_spectrum<R, V>(
-    rule: &R,
-    source: &DynamicFusionMapSpace,
-    destination: &DynamicFusionMapSpace,
-    operation: &TreeTransformOperation,
-    spectrum: &[SectorSpectrum<V>],
-) -> Result<Vec<SectorSpectrum<V>>, crate::error::Error>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    V: RecouplingCoefficientAction<f64>,
-{
-    let source_structure = source.structure();
-    if source_structure.block_count() != spectrum.len() {
-        return Err(internal_layout_error(
-            "compact diagonal spectrum does not cover its rank-one block structure",
-        ));
-    }
-    let spectrum_by_sector = spectrum
-        .iter()
-        .map(|entry| (entry.sector, entry))
-        .collect::<HashMap<_, _>>();
-    let mut output_by_sector = HashMap::with_capacity(spectrum.len());
-    let prepared = match operation.kind() {
-        TreeTransformOperationKind::Permute => PreparedTreePairOperation::prepare_permute(
-            rule,
-            1,
-            1,
-            operation.codomain_permutation(),
-            operation.domain_permutation(),
-        )?,
-        TreeTransformOperationKind::Transpose => PreparedTreePairOperation::prepare_transpose(
-            1,
-            1,
-            operation.codomain_permutation(),
-            operation.domain_permutation(),
-        )?,
-        TreeTransformOperationKind::Braid => {
-            return Err(internal_layout_error(
-                "compact diagonal swap does not accept an explicit braid",
-            ));
-        }
-    };
-
-    for index in 0..source_structure.block_count() {
-        let block = source_structure.block(index)?;
-        let BlockKey::FusionTree(source) = block.key() else {
-            return Err(internal_layout_error(
-                "compact diagonal storage requires fusion-tree blocks",
-            ));
-        };
-        let source_sector = source.codomain_tree().coupled();
-        let entry = spectrum_by_sector.get(&source_sector).ok_or_else(|| {
-            internal_layout_error("compact diagonal spectrum is missing a rank-one block sector")
-        })?;
-        let rows = prepared.execute_multiplicity_free(rule, source)?;
-        let mut rows = rows.into_iter();
-        let (destination, coefficient) = rows.next().ok_or_else(|| {
-            internal_layout_error("rank-one diagonal swap produced no destination term")
-        })?;
-        if rows.next().is_some() {
-            return Err(internal_layout_error(
-                "rank-one diagonal swap produced multiple destination terms",
-            ));
-        }
-        let entry = SectorSpectrum {
-            sector: destination.codomain_tree().coupled(),
-            values: entry
-                .values
-                .iter()
-                .copied()
-                .map(|value| value.scale_by_coefficient(coefficient))
-                .collect(),
-        };
-        if output_by_sector.insert(entry.sector, entry).is_some() {
-            return Err(internal_layout_error(
-                "rank-one diagonal swap produced duplicate destination sectors",
-            ));
-        }
-    }
-
-    let destination_structure = destination.structure();
-    let mut output = Vec::with_capacity(spectrum.len());
-    for index in 0..destination_structure.block_count() {
-        let block = destination_structure.block(index)?;
-        let BlockKey::FusionTree(destination) = block.key() else {
-            return Err(internal_layout_error(
-                "compact diagonal destination requires fusion-tree blocks",
-            ));
-        };
-        let sector = destination.codomain_tree().coupled();
-        let entry = output_by_sector.remove(&sector).ok_or_else(|| {
-            internal_layout_error("rank-one diagonal swap is missing a destination block sector")
-        })?;
-        let [rows, columns] = block.shape() else {
-            return Err(internal_layout_error(
-                "compact diagonal destination block is not a matrix",
-            ));
-        };
-        if rows != columns || entry.values.len() != *rows {
-            return Err(internal_layout_error(
-                "rank-one diagonal spectrum does not match its destination block shape",
-            ));
-        }
-        output.push(entry);
-    }
-    if !output_by_sector.is_empty() || output.len() != spectrum.len() {
-        return Err(internal_layout_error(
-            "rank-one diagonal swap destination does not cover its compact spectrum",
-        ));
-    }
-    Ok(output)
-}
-
 /// Whether `operation` on a tensor of these ranks is the rank-(1,1) leg swap
-/// [`transform_rank_one_diagonal_spectrum`] is proved for. Shared so the two
-/// facades cannot drift on which geometries take the compact route.
+/// (TensorKit `permute`/`transpose` of a `DiagonalTensorMap`,
+/// `src/tensors/diagonal.jl:215-273`) whose compact result [`bond_spectrum`]
+/// reads.
 pub(crate) fn is_rank_one_diagonal_swap(
     codomain_rank: usize,
     domain_rank: usize,
@@ -281,7 +139,8 @@ pub(crate) fn is_rank_one_diagonal_swap(
         )
 }
 
-/// Candidate geometry for the compact source braid admission below.
+/// Whether `operation` is the rank-(1,1) braid whose dense result
+/// [`bond_spectrum`] lets the compact arm read from the spectrum.
 pub(crate) fn is_rank_one_diagonal_braid(
     codomain_rank: usize,
     domain_rank: usize,
@@ -328,20 +187,29 @@ fn nonempty_block_at_sorted_offset(
         .map(|(index, _)| index)
 }
 
-/// Returns a dense result only when the compiled braid proves a one-to-one
-/// map between all square bond blocks. A provider that declines this proof
-/// stays on the general dense replay path.
-pub(crate) fn try_braid_rank_one_diagonal_data<D>(
-    source: &DynamicFusionMapSpace,
-    destination: &DynamicFusionMapSpace,
-    compiled: &TreeTransformStructure<f64>,
+/// The compact spectrum carried through a resolved rank-(1,1) transform, or
+/// `None` unless `compiled` proves a one-to-one, single-term map between all
+/// square bond blocks with equal shapes. Each destination entry is its source
+/// entry scaled by the same compiled coefficient, through the same
+/// [`RecouplingCoefficientAction::scale_by_coefficient`], that dense replay of
+/// this structure applies, so the result is the dense route's diagonal by
+/// construction. With `require_representable`, a coefficient that is not a
+/// finite non-zero value of `D` also declines, so the dense replay's
+/// off-diagonal `0 · c` products (NaN for an infinite `c`) are kept.
+///
+/// The output is in destination block order, which is the compact payload
+/// order of the destination space.
+pub(crate) fn bond_spectrum<C, D>(
+    sources: &tenet_core::BlockStructure,
+    destinations: &tenet_core::BlockStructure,
+    compiled: &TreeTransformStructure<C>,
     spectrum: &[SectorSpectrum<D>],
-) -> Option<Vec<D>>
+    require_representable: bool,
+) -> Option<Vec<SectorSpectrum<D>>>
 where
-    D: ScalarOps,
+    C: Copy,
+    D: ScalarOps + RecouplingCoefficientAction<C>,
 {
-    let sources = source.structure();
-    let destinations = destination.structure();
     if sources.block_count() != spectrum.len()
         || sources.block_count() != destinations.block_count()
         || compiled.blocks().len() != sources.block_count()
@@ -366,7 +234,9 @@ where
     let mut source_offsets = None;
     let mut destination_sorted = None;
     let mut seen_source = smallvec::SmallVec::<[bool; 16]>::from_elem(false, sources.block_count());
-    let mut writes = smallvec::SmallVec::<[(usize, usize, usize, f64); 16]>::new();
+    let mut seen_destination =
+        smallvec::SmallVec::<[bool; 16]>::from_elem(false, destinations.block_count());
+    let mut writes = smallvec::SmallVec::<[(usize, usize, C); 16]>::new();
     let layouts = compiled.layouts();
     for prepared in compiled.blocks() {
         let TreeTransformBlock::Single {
@@ -417,27 +287,26 @@ where
         let [rows, cols] = source_block.shape() else {
             return None;
         };
-        if src.element_count != rows.checked_mul(*cols)? || dst.element_count != src.element_count {
-            return None;
-        }
-        let coefficient = compiled.single_coefficient(*coefficient)?;
-        let converted_coefficient = D::coefficient_as_data(coefficient);
-        if !coefficient.is_finite()
-            || coefficient == 0.0
-            || converted_coefficient == D::from_real(0.0)
-            || !converted_coefficient.abs_value().is_finite()
+        // Zero degeneracy is an absent sector, so a bond block is never
+        // empty; an empty one is not a bond and has no offset identity.
+        if src.element_count != rows.checked_mul(*cols)?
+            || dst.element_count != src.element_count
+            || dst.element_count == 0
         {
             return None;
         }
-        if dst.element_count == 0 {
-            continue;
+        let coefficient = compiled.single_coefficient(*coefficient)?;
+        if require_representable {
+            let converted = D::coefficient_as_data(coefficient);
+            if converted == D::from_real(0.0) || !converted.abs_value().is_finite() {
+                return None;
+            }
         }
         // The destination block's geometry comes from the destination
         // structure, not the compiled table: a completed transform retains only
         // its normalized replay roles, whose axis order and rank need not be
         // the block's. A non-empty block is identified by its offset, because
-        // compilation rejects aliased destinations; empty blocks may share
-        // offsets and are skipped above.
+        // compilation rejects aliased destinations.
         //
         // Why the source-axis order needs no proof here: the compiled Single
         // maps a square source block onto a destination block of the same
@@ -445,18 +314,15 @@ where
         let destination_index = destinations
             .block(source_index)
             .ok()
-            .filter(|block| {
-                block.shape().iter().product::<usize>() != 0
-                    && isize::try_from(block.offset()).ok() == Some(dst.offset)
-            })
+            .filter(|block| isize::try_from(block.offset()).ok() == Some(dst.offset))
             .map(|_| source_index);
         let destination_index = if let Some(index) = destination_index {
             index
         } else {
-            // A braid sends sector c to its dual, which sits at another
-            // ordinal whenever the sector set is not self-dual, so this path
-            // is common. Canonical structures store blocks in offset order,
-            // where a binary search finds the block without allocating.
+            // A braid or swap sends sector c to its dual, which sits at
+            // another ordinal whenever the sector set is not self-dual, so
+            // this path is common. Canonical structures store blocks in offset
+            // order, where a binary search finds the block without allocating.
             //
             // Why decline instead of indexing an unordered (expert) layout:
             // the typed caller always passes canonical layouts, and the
@@ -468,30 +334,35 @@ where
             }
             nonempty_block_at_sorted_offset(destinations, usize::try_from(dst.offset).ok()?)?
         };
-        let destination_block = destinations.block(destination_index).ok()?;
-        let [row_stride, column_stride] = destination_block.strides() else {
-            return None;
-        };
-        if destination_block.shape() != source_block.shape() {
+        if std::mem::replace(&mut seen_destination[destination_index], true)
+            || destinations.block(destination_index).ok()?.shape() != source_block.shape()
+        {
             return None;
         }
-        let step = row_stride.checked_add(*column_stride)?;
-        writes.push((destination_block.offset(), step, source_index, coefficient));
+        writes.push((destination_index, source_index, coefficient));
     }
-    // Compilation rejects duplicate destination owners; one Single per
-    // destination block proves exact destination coverage here.
     if seen_source.iter().any(|&covered| !covered) {
         return None;
     }
-    let mut output = vec![D::from_real(0.0); destination.required_len().ok()?];
-    for (start, step, source_index, coefficient) in writes {
-        let entry = &spectrum[source_index];
-        for (position, &value) in entry.values.iter().enumerate() {
-            let offset = start.checked_add(position.checked_mul(step)?)?;
-            *output.get_mut(offset)? = value.scale_by_coefficient(coefficient);
-        }
-    }
-    Some(output)
+    writes.sort_unstable_by_key(|&(destination_index, ..)| destination_index);
+    writes
+        .into_iter()
+        .map(|(destination_index, source_index, coefficient)| {
+            let destination = destinations.block(destination_index).ok()?;
+            Some(SectorSpectrum {
+                sector: destination
+                    .key()
+                    .as_fusion_tree_pair()?
+                    .codomain_tree()
+                    .coupled(),
+                values: spectrum[source_index]
+                    .values
+                    .iter()
+                    .map(|&value| value.scale_by_coefficient(coefficient))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 // Test-only observability at the two multiplicity-free execution seams: the
@@ -1103,8 +974,8 @@ mod tests {
 
     use super::{
         scatter_tensor_product_block, tensorproduct_owned_checked_generic,
-        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
-        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
+        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -1473,6 +1344,24 @@ mod tests {
     /// route, and checks value i of each spectrum entry at offset +
     /// i * (row stride + column stride) of that destination block. Returns
     /// whether some destination sits at another ordinal than its source.
+    /// The compact braid's dense result: [`super::bond_spectrum`] with
+    /// representability required, densified on the destination.
+    fn braid_bond_data<D: crate::typed::ScalarOps>(
+        source: &tenet_tensors::DynamicFusionMapSpace,
+        destination: &tenet_tensors::DynamicFusionMapSpace,
+        compiled: &tenet_tensors::TreeTransformStructure<f64>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Option<Vec<D>> {
+        let carried = super::bond_spectrum(
+            source.structure(),
+            destination.structure(),
+            compiled,
+            spectrum,
+            true,
+        )?;
+        Some(tenet_matrixalgebra::seam::diagonal_bond_data(destination, &carried, &|v| v).unwrap())
+    }
+
     macro_rules! check_compact_braid_diagonal {
         ($provider:expr, $sectors:expr) => {{
             let provider = Arc::new($provider);
@@ -1523,13 +1412,9 @@ mod tests {
             )
             .unwrap();
 
-            let actual = try_braid_rank_one_diagonal_data::<f64>(
-                source.space(),
-                destination.space(),
-                &compiled,
-                &spectrum,
-            )
-            .expect("a square diagonal braid takes the compact route");
+            let actual =
+                braid_bond_data::<f64>(source.space(), destination.space(), &compiled, &spectrum)
+                    .expect("a square diagonal braid takes the compact route");
 
             let mut expected = vec![0.0; destinations.required_len().unwrap()];
             for (index, entry) in spectrum.iter().enumerate() {
@@ -1654,13 +1539,7 @@ mod tests {
             values: (0..n).map(|i| 1.0 + i as f64).collect::<Vec<f64>>(),
         });
 
-        assert!(try_braid_rank_one_diagonal_data::<f64>(
-            source.space(),
-            &expert,
-            &compiled,
-            &spectrum,
-        )
-        .is_none());
+        assert!(braid_bond_data::<f64>(source.space(), &expert, &compiled, &spectrum,).is_none());
 
         let mut source_data = vec![0.0; sources.required_len().unwrap()];
         let mut expected = vec![0.0; destinations.required_len().unwrap()];
@@ -1716,7 +1595,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(try_braid_rank_one_diagonal_data::<f32>(
+        assert!(braid_bond_data::<f32>(
             source.space(),
             destination.space(),
             &compiled,
@@ -1727,7 +1606,7 @@ mod tests {
             sector: SectorId::new(1),
             values: vec![1.0f64, 2.0],
         }];
-        assert!(try_braid_rank_one_diagonal_data::<f64>(
+        assert!(braid_bond_data::<f64>(
             source.space(),
             destination.space(),
             &compiled,
@@ -1753,7 +1632,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(try_braid_rank_one_diagonal_data::<f32>(
+        assert!(braid_bond_data::<f32>(
             underflow_source.space(),
             underflow_destination.space(),
             &underflow_compiled,

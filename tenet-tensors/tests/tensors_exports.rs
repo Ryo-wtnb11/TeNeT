@@ -344,6 +344,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "TensorTraceStructureTerm",
         // tree_context
         "CoefficientAlgebra",
+        "StructureOutcome",
         "TreeTransformExecutionContext",
         // tree_transform
         "build_all_codomain_tree_transform_group_plan",

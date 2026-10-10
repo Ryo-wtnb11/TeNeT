@@ -648,8 +648,10 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     assert_eq!(calls.of(Kernel::QR), 0);
     assert_eq!(calls.total(), 0);
 
-    // Swapped leg roles: checked `permute` publishes a dense `V' <- V'`
-    // view, so QR/LQ keep the dense route and its nondual W.
+    // Swapped leg roles: the swap of a compact diagonal stays compact on
+    // TensorKit's `dual(d.domain)` (#1866), so it is a dual diagonal whose
+    // QR/LQ take the compact route above, and the swapped-role factorization
+    // of the source runs that same route with no dense QR.
     let nondual: TensorMap<_, Complex64> = TensorMap::diagonal(
         &runtime,
         &u1,
@@ -658,22 +660,25 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     .unwrap();
     let swapped = nondual.permute(&[1], &[0]).unwrap();
     assert!(
-        tenet::typed::__network::network_reuse_class(&swapped, false)
-            == NetworkReuseClass::OwnedDense
+        tenet::typed::__network::network_reuse_class(&swapped, false) == NetworkReuseClass::Compact
     );
+    assert_eq!(swapped.codomain()[0], u1_dual);
+    assert_eq!(swapped.domain()[0], u1_dual);
+    assert_dual_diagonal_qr_lq!(runtime, swapped, calls);
     let Qr { q, r } = nondual.qr_compact(&[1], &[0]).unwrap();
     let Lq { l, q: lq_q } = nondual.lq_compact(&[1], &[0]).unwrap();
-    assert_eq!(calls.of(Kernel::QR), 4);
-    assert!(
-        tenet::typed::__network::network_reuse_class(&r, false) == NetworkReuseClass::OwnedDense
-    );
-    assert!(!r.codomain()[0].is_dual());
-    assert!(!l.domain()[0].is_dual());
+    assert_eq!(calls.of(Kernel::QR), 0);
+    for factor in [&q, &r, &l, &lq_q] {
+        assert!(
+            tenet::typed::__network::network_reuse_class(factor, false)
+                == NetworkReuseClass::Compact
+        );
+    }
     for rebuilt in [q.compose(&r).unwrap(), l.compose(&lq_q).unwrap()] {
         numerics::assert_slices_close(
-            "swapped-role dense QR/LQ reconstruction",
-            rebuilt.dense_data().unwrap(),
-            swapped.dense_data().unwrap(),
+            "swapped-role compact QR/LQ reconstruction",
+            rebuilt.materialize().unwrap().dense_data().unwrap(),
+            swapped.materialize().unwrap().dense_data().unwrap(),
             2,
         );
     }

@@ -353,13 +353,14 @@ use tenet_matrixalgebra::seam::{compact_factor_routes, CompactFactorPlan, Compac
 mod generic_error;
 pub use generic_error::GenericTensorError;
 mod dispatch;
-use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 pub use dispatch::{
-    TypedAdjointSpace, TypedSpaceModeDispatch, TypedTensorConstructionDispatch,
-    TypedTensorContractDispatch, TypedTensorFlipDispatch, TypedTensorModeDispatch,
-    TypedTensorProductDispatch, TypedTensorRootDispatch, TypedTensorTraceDispatch,
-    TypedTensorTransformDispatch, TypedTensorTwistDispatch, TypedTruncationDispatch,
+    BondOutput, BondTransform, TypedAdjointSpace, TypedSpaceModeDispatch,
+    TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorFlipDispatch,
+    TypedTensorModeDispatch, TypedTensorProductDispatch, TypedTensorRootDispatch,
+    TypedTensorTraceDispatch, TypedTensorTransformDispatch, TypedTensorTwistDispatch,
+    TypedTruncationDispatch,
 };
+use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 mod factorize;
 pub use factorize::FusionMode;
 mod checked_generic_contract;

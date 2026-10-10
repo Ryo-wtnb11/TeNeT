@@ -209,11 +209,35 @@ where
         )
     }
 
-    /// The one owned eager tree transform of both modes: stage the
-    /// destination (checked: admit and preflight the source), resolve the
-    /// structure with the staging's proof, write it through the built-in
-    /// overwrite writer or else zero-fill and replay, then commit and
-    /// publish.
+    /// The owned multiplicity-free `operation` of a direct source in one
+    /// staging: `read` answers from the resolved structure and the
+    /// destination preview, or else `dense_source` is replayed through that
+    /// same structure; the destination is committed once either way.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn tree_transform_structure_multiplicity_free_in<R, T>(
+        &mut self,
+        logical: &BoundDynamicFusionMapSpace<R>,
+        operation: &TreeTransformOperation,
+        read: impl FnOnce(&TreeTransformStructure<C>, &BlockStructure) -> Option<T>,
+        dense_source: impl FnOnce() -> Result<Vec<D>, OperationError>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, StructureOutcome<T, D>), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        self.tree_transform_structure_in::<MultiplicityFreeAdmissionMode, R, T>(
+            logical,
+            operation,
+            read,
+            dense_source,
+        )
+    }
+
+    /// The one owned eager tree transform of both modes: stage and resolve,
+    /// replay, then commit and publish.
     fn tree_transform_owned_in<M, R>(
         &mut self,
         logical: &BoundDynamicFusionMapSpace<R>,
@@ -225,12 +249,64 @@ where
     where
         M: PlanningAlgebra<R, Scalar = C>,
     {
+        let resolved =
+            self.stage_resolve::<M, R>(logical, adjoint_of, src_data.len(), operation)?;
+        let data = self.replay_owned(&resolved, src_data, alpha)?;
+        let destination = M::commit_transform(logical, resolved.stage, resolved.preview)?;
+        Ok((destination, data))
+    }
+
+    /// [`Self::tree_transform_owned_in`] with the replay replaced by `read`
+    /// when it answers. A decline replays `dense_source` with the same
+    /// structure, so every path stages, resolves and commits exactly once
+    /// and a decline costs the dense route's provider calls and errors.
+    #[allow(clippy::type_complexity)]
+    fn tree_transform_structure_in<M, R, T>(
+        &mut self,
+        logical: &BoundDynamicFusionMapSpace<R>,
+        operation: &TreeTransformOperation,
+        read: impl FnOnce(&TreeTransformStructure<C>, &BlockStructure) -> Option<T>,
+        dense_source: impl FnOnce() -> Result<Vec<D>, OperationError>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, StructureOutcome<T, D>), M::Error>
+    where
+        M: PlanningAlgebra<R, Scalar = C>,
+    {
+        // Why the logical length: the caller holds a compact payload whose
+        // dense image has exactly this length, and replays only that image.
+        let src_len = logical
+            .space()
+            .required_len()
+            .map_err(OperationError::from)?;
+        let resolved = self.stage_resolve::<M, R>(logical, None, src_len, operation)?;
+        let outcome = match read(&resolved.structure, &resolved.preview) {
+            Some(value) => StructureOutcome::Read(value),
+            None => {
+                let src_data = dense_source()?;
+                StructureOutcome::Replayed(self.replay_owned(&resolved, &src_data, D::one())?)
+            }
+        };
+        let destination = M::commit_transform(logical, resolved.stage, resolved.preview)?;
+        Ok((destination, outcome))
+    }
+
+    /// Stages the destination (checked: admit and preflight the source) and
+    /// resolves the structure with the staging's proof.
+    fn stage_resolve<'a, M, R>(
+        &mut self,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
+        operation: &TreeTransformOperation,
+    ) -> Result<ResolvedTransform<'a, M::TransformStage, C>, M::Error>
+    where
+        M: PlanningAlgebra<R, Scalar = C>,
+    {
         let StagedTransform {
             preview,
             nout,
             mut stage,
             proof,
-        } = M::stage_transform(logical, adjoint_of, src_data.len(), operation)?;
+        } = M::stage_transform(logical, adjoint_of, src_len, operation)?;
         let (source, src_structure) = match adjoint_of {
             None => {
                 let structure = logical.space().structure();
@@ -258,36 +334,76 @@ where
             source,
             Some(&proof),
         )?;
-        let data = match self
+        Ok(ResolvedTransform {
+            preview,
+            nout,
+            stage,
+            structure,
+            src_structure,
+        })
+    }
+
+    /// Writes `alpha · structure(src_data)` into a fresh payload through the
+    /// built-in overwrite writer, or else zero-fills and replays.
+    fn replay_owned<S>(
+        &mut self,
+        resolved: &ResolvedTransform<'_, S, C>,
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<Vec<D>, OperationError> {
+        let ResolvedTransform {
+            preview,
+            nout,
+            structure,
+            src_structure,
+            ..
+        } = resolved;
+        if let Some(data) = self
             .backend
             .try_tree_transform_structure_overwrite_owned_raw(
                 &mut self.workspace,
-                &structure,
-                &preview,
+                structure,
+                preview,
                 src_structure,
-                nout,
+                *nout,
                 src_data,
                 alpha,
-            )? {
-            Some(data) => data,
-            None => {
-                let mut data =
-                    vec![D::zero(); preview.required_len().map_err(OperationError::from)?];
-                self.tree_transform_structure_into_raw(
-                    &structure,
-                    &preview,
-                    src_structure,
-                    &mut data,
-                    src_data,
-                    alpha,
-                    D::zero(),
-                )?;
-                data
-            }
-        };
-        let destination = M::commit_transform(logical, stage, preview)?;
-        Ok((destination, data))
+            )?
+        {
+            return Ok(data);
+        }
+        let mut data = vec![D::zero(); preview.required_len().map_err(OperationError::from)?];
+        self.tree_transform_structure_into_raw(
+            structure,
+            preview,
+            src_structure,
+            &mut data,
+            src_data,
+            alpha,
+            D::zero(),
+        )?;
+        Ok(data)
     }
+}
+
+/// A staged destination with its resolved structure, between staging and
+/// commit.
+struct ResolvedTransform<'a, S, C> {
+    preview: Arc<BlockStructure>,
+    nout: usize,
+    stage: S,
+    structure: TreeTransformStructure<C>,
+    src_structure: &'a Arc<BlockStructure>,
+}
+
+/// What a structure-reading transform produced: the reader's answer, or the
+/// dense replay of the declined source.
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+pub enum StructureOutcome<T, D> {
+    Read(T),
+    Replayed(Vec<D>),
 }
 
 impl<D>
@@ -327,6 +443,36 @@ where
     {
         self.tree_transform_owned_in::<CheckedGenericAdmissionMode, R>(
             logical, adjoint_of, src_data, operation, alpha,
+        )
+    }
+
+    /// The checked Generic twin of
+    /// [`Self::tree_transform_structure_multiplicity_free_in`]: one admission,
+    /// staging, structure resolution and commit, whether `read` answers or
+    /// `dense_source` is replayed.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn tree_transform_structure_checked_generic_in<R, T>(
+        &mut self,
+        logical: &BoundDynamicFusionMapSpace<R>,
+        operation: &TreeTransformOperation,
+        read: impl FnOnce(&TreeTransformStructure<f64>, &BlockStructure) -> Option<T>,
+        dense_source: impl FnOnce() -> Result<Vec<D>, OperationError>,
+    ) -> Result<
+        (BoundDynamicFusionMapSpace<R>, StructureOutcome<T, D>),
+        CheckedGenericPlanError<R::Error>,
+    >
+    where
+        R: CheckedGenericRigidSymbols<Scalar = f64>,
+    {
+        self.tree_transform_structure_in::<CheckedGenericAdmissionMode, R, T>(
+            logical,
+            operation,
+            read,
+            dense_source,
         )
     }
 }

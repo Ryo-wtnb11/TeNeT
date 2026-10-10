@@ -50,8 +50,10 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
 
+    // Changed leg roles permute first; the swap keeps the diagonal compact
+    // (#1866), so the stored spectrum is read without a solver call.
     let swapped = input.eigh_vals(&[1], &[0], HermitianTol::DEFAULT).unwrap();
-    assert_eq!(calls.total(), 2);
+    assert_eq!(calls.total(), 0);
     let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
     assert_eq!(
         swapped,
@@ -335,8 +337,9 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
     assert_same_complex_multisets(&got, &dense.eig_vals(&[0], &[1]).unwrap(), 1e-12);
     calls.reset();
 
+    // The swap keeps the diagonal compact (#1866): no solver call.
     let swapped = input.eig_vals(&[1], &[0]).unwrap();
-    assert_eq!(calls.total(), 2);
+    assert_eq!(calls.total(), 0);
     let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
     assert_same_complex_multisets(
         &swapped,
@@ -987,11 +990,13 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
             .unwrap();
             assert_eq!(v.dense_data().unwrap(), expected.dense_data().unwrap());
 
-            // The counters observe the dense route: changed leg roles
-            // materialize and run one EIG per sector and no eigenvector SVD.
+            // Changed leg roles permute first, and the swap keeps the
+            // diagonal compact (#1866): no materialization and no EIG, as in
+            // the multiplicity-free mode.
             DIAGONAL_MATERIALIZATIONS.set(0);
             input.eig_full(&[1], &[0]).unwrap();
-            assert_eq!(calls.of(EIG_FULL), 2);
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(calls.of(EIG_FULL), 0);
             assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 0);
         }};
     }

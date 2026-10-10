@@ -345,11 +345,13 @@ where
     D: TensorScalar
         + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
-    fn try_compact_transform(
+    fn transform_bond_spectrum(
         tensor: &TensorMap<R, D>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
         operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
-        D::try_compact(tensor, operation)
+        require_representable: bool,
+    ) -> Result<BondTransform<R, D>, Error> {
+        D::transform_bond_spectrum(tensor, spectrum, operation, require_representable)
     }
 
     fn try_lazy_adjoint_transform(
@@ -375,6 +377,35 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
+    fn transform_bond_spectrum(
+        tensor: &TensorMap<R, D>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        operation: &TreeTransformOperation,
+        require_representable: bool,
+    ) -> Result<BondTransform<R, D>, Self::FacadeError> {
+        let source = tensor.logical_space();
+        let mut lease = tensor.runtime.lease_context()?;
+        let (destination, outcome) = lease
+            .context()
+            .generic_lane::<D>()?
+            .tree_context_mut()
+            .tree_transform_structure_checked_generic_in(
+                source,
+                operation,
+                |structure, preview| {
+                    crate::tensor_core::bond_spectrum(
+                        source.space().structure(),
+                        preview,
+                        structure,
+                        spectrum,
+                        require_representable,
+                    )
+                },
+                || tenet_matrixalgebra::seam::diagonal_bond_data(source.space(), spectrum, &|v| v),
+            )?;
+        Ok(BondTransform::from_outcome(destination, outcome))
+    }
+
     fn try_lazy_adjoint_transform(
         tensor: &TensorMap<R, D>,
         operation: &TreeTransformOperation,
