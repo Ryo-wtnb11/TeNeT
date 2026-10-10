@@ -166,8 +166,10 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     };
     // Consumers take the owned compact form as they take `s` itself.
     let Qr { q, r } = adjoint.qr_compact(&[0], &[1]).unwrap();
+    let qr = q.compose(&r).unwrap();
+    assert!(qr.dense_data().is_err(), "D * D stays compact");
     assert_close(
-        q.compose(&r).unwrap().dense_data().unwrap(),
+        qr.materialize().unwrap().dense_data().unwrap(),
         adjoint.materialize().unwrap().dense_data().unwrap(),
         "qr",
     );
@@ -201,9 +203,20 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
         ],
     )
     .unwrap();
+    // D * D stays compact (TensorKit `compose_dest(::Diagonal, ::Diagonal)`).
     assert_close(
-        gram.dense_data().unwrap(),
-        expected_gram.materialize().unwrap().dense_data().unwrap(),
+        &tenet::expert::diagonal_spectrum(&gram)
+            .unwrap()
+            .expect("compact")
+            .into_iter()
+            .flat_map(|entry| entry.values)
+            .collect::<Vec<_>>(),
+        &tenet::expert::diagonal_spectrum(&expected_gram)
+            .unwrap()
+            .expect("compact")
+            .into_iter()
+            .flat_map(|entry| entry.values)
+            .collect::<Vec<_>>(),
         "s^† s",
     );
 

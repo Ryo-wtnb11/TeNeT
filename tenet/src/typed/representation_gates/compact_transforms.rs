@@ -714,6 +714,42 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compose_and_contract_arms_never_densify_their_spectrum_operand() {
+    // What (#1866): checked Generic takes the same compose and contract arms,
+    // so a compact operand is read as a spectrum there too.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(tenet_core::SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 1], 3)]).unwrap();
+    let tensor: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            1.0 + index[0] as f64 - 0.25 * index[1] as f64
+        })
+        .unwrap();
+    let Svd { u, s: d, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+
+    let _ = d.compose(&d).unwrap();
+    let _ = u.compose(&d).unwrap();
+    let _ = d.compose(&vh).unwrap();
+    for (lhs, rhs, codomain, domain) in [
+        (&u, &d, &[0][..], &[1][..]),
+        (&u, &d, &[1][..], &[0][..]),
+        (&d, &vh, &[0][..], &[1][..]),
+        (&d, &d, &[0][..], &[1][..]),
+    ] {
+        let spec = ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain,
+            domain,
+        };
+        let _ = lhs.contract(rhs, &spec).unwrap();
+    }
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
 #[test]
 fn compact_braid_off_diagonal_zeros_are_numerically_zero() {
     // This finite witness exercises the one-term admission; structural zeros

@@ -652,6 +652,9 @@ fn assert_same_checked_generic_layout_and_close<R, D>(
         assert_eq!(actual_block.shape(), expected_block.shape());
         assert_eq!(actual_block.strides(), expected_block.strides());
     }
+    // A compact result (a product of compact factors) is compared through its
+    // dense image; the layout checks above already cover its blocks.
+    let actual = actual.materialize().unwrap();
     assert_eq!(
         actual.dense_data().unwrap().len(),
         expected.materialize().unwrap().dense_data().unwrap().len()

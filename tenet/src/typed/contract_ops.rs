@@ -518,6 +518,16 @@ where
     /// supertrace twist on a dual contracted leg of `other` would also decline,
     /// and cannot currently arise — see `try_contract_diagonal`.
     ///
+    /// Both admission modes take these arms. The reordering permute is the
+    /// mode's own tree transform, so in checked Generic mode a provider
+    /// failure there is reported as [`GenericTensorError::Plan`] from that
+    /// permute staging, in place of the contraction planning the dense route
+    /// would have run. Two outcomes are storage-dependent, because the arm
+    /// answers what TensorKit computes where the dense route is unsupported:
+    /// a checked Generic fermionic provider (dense checked contraction
+    /// requires Bosonic braiding), and a symmetric rule with complex symbols
+    /// (no in-tree rule reaches an arm; #1870).
+    ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
     /// operands must agree on
@@ -587,10 +597,16 @@ where
             self.provider(),
         ))
         .map_err(Error::from)?;
-        if let Some(compact) =
-            <R::Mode as TypedTensorContractDispatch<R, D>>::try_compact_contract(self, other, spec)?
-        {
-            return Ok(compact);
+        if self.spectrum().is_some() || other.spectrum().is_some() {
+            if let Some(compact) = self.try_contract_diagonal(
+                other,
+                spec.lhs,
+                spec.rhs,
+                &spec.output_axes(),
+                spec.codomain.len(),
+            )? {
+                return Ok(compact);
+            }
         }
         let (space, data) =
             <R::Mode as TypedTensorContractDispatch<R, D>>::contract(self, other, spec)?;
@@ -725,9 +741,9 @@ where
     /// dispatches to scaling, with no braiding or recoupling. The result is the
     /// same tensor the dense route computes, so this is a cost question only,
     /// and any operand or destination that does not fit falls through to the
-    /// dense path rather than being refused. That path, and every
-    /// checked-Generic composition, densifies a compact operand into an
-    /// operation-local buffer first.
+    /// dense path rather than being refused. That path densifies a compact
+    /// operand into an operation-local buffer first. Both admission modes and
+    /// both coefficient lanes take these arms.
     ///
     /// # Errors
     ///
@@ -759,10 +775,10 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        if let Some(compact) =
-            <R::Mode as TypedTensorContractDispatch<R, D>>::try_compact_compose(self, other)?
-        {
-            return Ok(compact);
+        if self.spectrum().is_some() || other.spectrum().is_some() {
+            if let Some(compact) = self.compose_compact(other)? {
+                return Ok(compact);
+            }
         }
         let (space, data) = <R::Mode as TypedTensorContractDispatch<R, D>>::compose(self, other)?;
         Ok(self.published(space, data))

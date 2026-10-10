@@ -637,8 +637,10 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
         assert_eq!(root.codomain(), s.codomain());
         assert_eq!(root.domain(), s.domain());
         assert!(tenet::typed::__network::runtime_identity(root.runtime()).matches(s.runtime()));
-        assert!(root
-            .compose(&root)
+        let square = root.compose(&root).unwrap();
+        assert!(square.dense_data().is_err(), "D * D stays compact");
+        assert!(square
+            .materialize()
             .unwrap()
             .dense_data()
             .unwrap()
