@@ -137,10 +137,12 @@ pub(crate) use svd::*;
 // glob.
 pub use bound::BoundDynFactor;
 pub use compact_plan::CheckedGenericFactorPlanError;
+pub use dense_stage::in_linalg_scope;
 pub use eig::{
     ascending_eigh_order, eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source,
-    eigh_full_dyn, eigh_full_from_source, eigh_vals_dyn, eigh_vals_from_source,
-    validate_hermitian_regions, EigFullDyn, EighFullDyn, HermitianTol, EIGH_EIGENVALUE_CHECK,
+    eigh_full_dyn, eigh_full_from_source, eigh_sector_into, eigh_vals_dyn, eigh_vals_from_source,
+    require_finite_eigh_input, validate_hermitian_regions, EigFullDyn, EighFullDyn, EighScratch,
+    HermitianTol, EIGH_EIGENVALUE_CHECK,
 };
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,

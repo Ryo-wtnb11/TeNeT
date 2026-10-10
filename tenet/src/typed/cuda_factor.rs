@@ -502,9 +502,7 @@ pub(crate) fn fill_diagonal_values<D: CudaPayload>(
 pub(super) fn executed_routes(
     plan: &CompactFactorPlan,
 ) -> impl Iterator<Item = (&CompactFactorRoute, usize, usize)> {
-    plan.routes()
-        .iter()
-        .filter_map(|route| Some((route, route.left_region()?, route.right_region()?)))
+    plan.executed_routes()
 }
 
 #[cfg(feature = "cuda")]

@@ -24,6 +24,13 @@ pub trait FactorScalar: DenseRecouplingScalar {
     /// Real spectrum output (singular values, Hermitian eigenvalues) widened
     /// to `f64` for the host-side truncation policies.
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError>;
+    /// [`Self::real_spectrum`] into `out` (cleared first), reusing its
+    /// capacity. Custom scalar implementations keep the allocating route.
+    fn real_spectrum_into(tensor: &DenseTensor, out: &mut Vec<f64>) -> Result<(), DenseError> {
+        out.clear();
+        out.extend(Self::real_spectrum(tensor)?);
+        Ok(())
+    }
     fn from_real(value: f64) -> Self;
     /// Widens to `Complex64` (general eigenvalue bookkeeping).
     fn widen_complex(self) -> Complex64;
@@ -69,6 +76,13 @@ impl FactorScalar for f32 {
             .collect())
     }
 
+    fn real_spectrum_into(tensor: &DenseTensor, out: &mut Vec<f64>) -> Result<(), DenseError> {
+        let values = tensor.as_f32_slice()?;
+        out.clear();
+        out.extend(values.iter().map(|&value| value as f64));
+        Ok(())
+    }
+
     fn from_real(value: f64) -> Self {
         value as f32
     }
@@ -112,6 +126,13 @@ impl FactorScalar for f64 {
 
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
         Ok(tensor.as_f64_slice()?.to_vec())
+    }
+
+    fn real_spectrum_into(tensor: &DenseTensor, out: &mut Vec<f64>) -> Result<(), DenseError> {
+        let values = tensor.as_f64_slice()?;
+        out.clear();
+        out.extend_from_slice(values);
+        Ok(())
     }
 
     fn from_real(value: f64) -> Self {
@@ -163,6 +184,13 @@ impl FactorScalar for num_complex::Complex32 {
             .collect())
     }
 
+    fn real_spectrum_into(tensor: &DenseTensor, out: &mut Vec<f64>) -> Result<(), DenseError> {
+        let values = tensor.as_f32_slice()?;
+        out.clear();
+        out.extend(values.iter().map(|&value| value as f64));
+        Ok(())
+    }
+
     fn from_real(value: f64) -> Self {
         num_complex::Complex32::new(value as f32, 0.0)
     }
@@ -206,6 +234,13 @@ impl FactorScalar for Complex64 {
 
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
         Ok(tensor.as_f64_slice()?.to_vec())
+    }
+
+    fn real_spectrum_into(tensor: &DenseTensor, out: &mut Vec<f64>) -> Result<(), DenseError> {
+        let values = tensor.as_f64_slice()?;
+        out.clear();
+        out.extend_from_slice(values);
+        Ok(())
     }
 
     fn from_real(value: f64) -> Self {

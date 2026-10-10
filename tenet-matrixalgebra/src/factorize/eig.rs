@@ -970,26 +970,59 @@ where
     eig_vals_spectra(dense, &matricizations)
 }
 
-/// Reorder scratch for [`eigh_sector_stage`], sized for the largest sector.
-struct EighScratch<D> {
+/// Reorder scratch for [`eigh_sector_stage`] and [`eigh_sector_into`], sized
+/// for the largest sector.
+#[doc(hidden)]
+pub struct EighScratch<D: FactorScalar> {
     order: Vec<usize>,
     visited: Vec<bool>,
     column: Vec<D>,
+    /// The solver's values of [`eigh_sector_into`], in its order.
+    real: Vec<f64>,
 }
 
 impl<D: FactorScalar> EighScratch<D> {
-    fn for_order(max_n: usize) -> Self {
+    pub fn for_order(max_n: usize) -> Self {
         Self {
             order: Vec::with_capacity(max_n),
             visited: vec![false; max_n],
             column: vec![D::zero(); max_n],
+            real: Vec::with_capacity(max_n),
         }
     }
 }
 
+/// Orders one solved sector: validates the solver's `real_values`, reorders
+/// the `n x n` eigenvectors to [`ascending_eigh_order`] (only when the
+/// solver's order is not already ascending) and phase-gauges them. Returns
+/// whether `scratch.order` holds a reordering.
+#[inline]
+fn order_eigh_sector<D: FactorScalar>(
+    real_values: &[f64],
+    vectors: &mut [D],
+    n: usize,
+    scratch: &mut EighScratch<D>,
+) -> Result<bool, OperationError> {
+    validate_real_eigenvalues(real_values)?;
+    let EighScratch {
+        order,
+        visited,
+        column,
+        ..
+    } = scratch;
+    order.clear();
+    order.resize(n, 0);
+    let reordered = ascending_eigh_order(real_values, order);
+    if reordered {
+        reorder_columns_in_place(vectors, n, order, visited, column);
+    }
+    eigenvector_gauge(vectors, n, n, n);
+    Ok(reordered)
+}
+
 /// Hermitian eigendecomposition of one `n x n` coupled-sector matrix: values
-/// in [`ascending_eigh_order`], eigenvectors reordered to match (only when
-/// the solver's order is not already ascending) and phase-gauged.
+/// in [`ascending_eigh_order`], eigenvectors reordered to match and
+/// phase-gauged ([`order_eigh_sector`]).
 #[inline]
 fn eigh_sector_stage<E, D>(
     dense: &mut E,
@@ -1002,22 +1035,64 @@ where
     D: FactorScalar,
 {
     let (real_values, mut vectors) = compact_eigh_owned(dense, matrix, n)?;
-    validate_real_eigenvalues(&real_values)?;
-    let EighScratch {
-        order,
-        visited,
-        column,
-    } = scratch;
-    order.clear();
-    order.resize(n, 0);
-    let sorted_values = if ascending_eigh_order(&real_values, order) {
-        reorder_columns_in_place(&mut vectors, n, order, visited, column);
-        order.iter().map(|&index| real_values[index]).collect()
+    let sorted_values = if order_eigh_sector(&real_values, &mut vectors, n, scratch)? {
+        scratch
+            .order
+            .iter()
+            .map(|&index| real_values[index])
+            .collect()
     } else {
         real_values
     };
-    eigenvector_gauge(&mut vectors, n, n, n);
     Ok((sorted_values, vectors))
+}
+
+/// [`eigh_sector_stage`] for a prepared caller: the ascending values land in
+/// `values` (length `n`) and the ordered, gauge-fixed eigenvectors
+/// (column-major `n x n`) are returned in the solver's own output buffer for
+/// the caller to place. Same solver, order and gauge as eager, and no
+/// allocation beyond the executor's outputs. The input must already be
+/// admitted (endomorphism stacking, finite, Hermitian).
+///
+/// Why not the executor's `eigh_into`: its default copies the owned outputs
+/// into the destinations through a strided kernel that allocates per call,
+/// more than the one contiguous copy the caller makes.
+#[doc(hidden)]
+pub fn eigh_sector_into<E, D>(
+    dense: &mut E,
+    matrix: &[D],
+    n: usize,
+    scratch: &mut EighScratch<D>,
+    values: &mut [f64],
+) -> Result<Vec<D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let (values_tensor, vectors_tensor) = compact_eigh_outputs(dense, matrix, n)?;
+    let mut real = std::mem::take(&mut scratch.real);
+    let result = (|| {
+        D::real_spectrum_into(&values_tensor, &mut real).map_err(OperationError::Dense)?;
+        check_contiguous_output("eigh_into", real.len(), values_tensor.shape(), &[n])
+            .map_err(OperationError::Dense)?;
+        let mut vectors = compact_factor_output_owned::<D>(vectors_tensor, &[n, n], "eigh_into")?;
+        if order_eigh_sector(&real, &mut vectors, n, scratch)? {
+            for (slot, &index) in values.iter_mut().zip(&scratch.order) {
+                *slot = real[index];
+            }
+        } else {
+            values.copy_from_slice(&real);
+        }
+        Ok(vectors)
+    })();
+    scratch.real = real;
+    result
+}
+
+/// The finite-input admission of [`eigh_full_dyn`], for a prepared caller.
+#[doc(hidden)]
+pub fn require_finite_eigh_input<D: FactorScalar>(data: &[D]) -> Result<(), OperationError> {
+    require_finite_factor_input(data.iter().copied(), FactorFamily::Eigh)
 }
 
 /// General eigendecomposition of one `n x n` endomorphism sector, shared by
@@ -1153,22 +1228,32 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
+    let (values, vectors) = compact_eigh_outputs(dense, input, order)?;
+    let values = compact_real_spectrum_owned::<D>(values, &[order], "eigh_into")?;
+    let vectors = compact_factor_output_owned::<D>(vectors, &[order, order], "eigh_into")?;
+    Ok((values, vectors))
+}
+
+/// The executor's `(values, vectors)` of one `order x order` Hermitian
+/// matrix, arity checked.
+fn compact_eigh_outputs<E, D>(
+    dense: &mut E,
+    input: &[D],
+    order: usize,
+) -> Result<(DenseTensor, DenseTensor), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
     let shape = [order, order];
     let strides = [1usize, order];
     let input = DenseView::new(input, &shape, &strides, 0).map_err(OperationError::Dense)?;
-    let mut outputs = dense
+    let outputs = dense
         .eigh(D::dense_read(input))
         .map_err(OperationError::Dense)?;
-    if outputs.len() != 2 {
-        return Err(OperationError::Dense(arity_mismatch(
-            "eigh_into",
-            2,
-            outputs.len(),
-        )));
-    }
-    let values = compact_real_spectrum_owned::<D>(outputs.remove(0), &[order], "eigh_into")?;
-    let vectors =
-        compact_factor_output_owned::<D>(outputs.remove(0), &[order, order], "eigh_into")?;
+    let [values, vectors]: [DenseTensor; 2] = outputs.try_into().map_err(|outputs: Vec<_>| {
+        OperationError::Dense(arity_mismatch("eigh_into", 2, outputs.len()))
+    })?;
     Ok((values, vectors))
 }
 

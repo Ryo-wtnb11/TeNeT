@@ -4,7 +4,8 @@ use super::*;
 /// linear-algebra scope: the backend admits the call once, while the loop
 /// still holds only one block's input and output at a time. Batching through
 /// `factorize_batch` would instead hold every block's factors at once.
-pub(super) fn in_linalg_scope<E, T>(
+#[doc(hidden)]
+pub fn in_linalg_scope<E, T>(
     dense: &mut E,
     body: impl FnOnce(&mut dyn DenseExecutor) -> Result<T, OperationError> + Send,
 ) -> Result<T, OperationError>

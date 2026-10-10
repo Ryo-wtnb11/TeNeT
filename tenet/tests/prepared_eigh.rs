@@ -504,3 +504,69 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
     assert_equals_eager("after take_output", &plan, &mut ws, &good, &stack(&good));
     assert_equals_eager("B change", &plan, &mut ws, &good[..2], &stack(&good[..2]));
 }
+
+/// Bit-identity pin for #1744: through one workspace, at `B = 1, 2, 17, 1`
+/// (buffers reallocated on every change of `B`), every member's `d`, `v` and
+/// spectra equal Host eager `eigh_full` of that member exactly, over
+/// U(1), SU(2) and fZ2xU(1).
+fn bitwise_across_member_counts<R>(label: &str, leg: GradedSpace<R>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R::Sector: Debug,
+{
+    let runtime = Runtime::builder().build().unwrap();
+    let all = hermitian_members(&runtime, &[&leg, &leg], 17, 21);
+    let stack = StackedTensorMap::pack(&all[..1]).unwrap();
+    let plan = EighFullPlan::new(&stack, &[0, 1], &[2, 3], HermitianTol::DEFAULT).unwrap();
+    let mut ws = plan.workspace().unwrap();
+    for count in [1, 2, 17, 1] {
+        let inputs = &all[..count];
+        let output = plan
+            .execute(&StackedTensorMap::pack(inputs).unwrap(), &mut ws)
+            .unwrap();
+        for (member, input) in inputs.iter().enumerate() {
+            let what = format!("{label} B={count} member {member}");
+            let Eigh { d, v } = input
+                .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+                .unwrap();
+            let d = d.materialize().unwrap();
+            let got_d = output.d.member(member).unwrap();
+            assert!(
+                got_d.dense_data().unwrap() == d.dense_data().unwrap(),
+                "{what}: d"
+            );
+            assert!(
+                output.v.member(member).unwrap().dense_data().unwrap() == v.dense_data().unwrap(),
+                "{what}: v"
+            );
+            // The spectra are `d`'s diagonal: equal nonzero bit patterns as
+            // multisets (`d` has no other nonzero entry), each ascending.
+            let mut spectra: Vec<u64> = output.spectra[member]
+                .iter()
+                .inspect(|entry| {
+                    assert!(entry.values.is_sorted(), "{what}: ascending");
+                })
+                .flat_map(|entry| entry.values.iter())
+                .filter(|value| **value != 0.0)
+                .map(|value| value.to_bits())
+                .collect();
+            let mut diagonal: Vec<u64> = d
+                .dense_data()
+                .unwrap()
+                .iter()
+                .filter(|value| **value != 0.0)
+                .map(|value| value.to_bits())
+                .collect();
+            spectra.sort_unstable();
+            diagonal.sort_unstable();
+            assert!(spectra == diagonal, "{what}: spectra");
+        }
+    }
+}
+
+#[test]
+fn members_equal_eager_bitwise_across_member_counts() {
+    bitwise_across_member_counts("u1", u1_legs().0);
+    bitwise_across_member_counts("su2", su2_legs().0);
+    bitwise_across_member_counts("fz2u1", fz2u1_legs().0);
+}
