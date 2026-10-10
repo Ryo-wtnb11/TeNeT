@@ -320,11 +320,11 @@ where
     /// mode's own tree transform, so in checked Generic mode a provider
     /// failure there is reported as [`GenericTensorError::Plan`] from that
     /// permute staging, in place of the contraction planning the dense route
-    /// would have run. Two outcomes are storage-dependent, because the arm
+    /// would have run. One outcome is storage-dependent, because the arm
     /// answers what TensorKit computes where the dense route is unsupported:
     /// a checked Generic fermionic provider (dense checked contraction
-    /// requires Bosonic braiding), and a symmetric rule with complex symbols
-    /// (no in-tree rule reaches an arm; #1870).
+    /// requires Bosonic braiding). A symmetric rule with complex symbols
+    /// takes both routes, like a real-symbol one.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two

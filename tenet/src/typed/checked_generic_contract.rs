@@ -262,6 +262,68 @@ where
     )
 }
 
+/// The owned multiplicity-free contraction, one body for every coefficient
+/// lane: the complex-symbol lane runs the same staging, plan and replay as
+/// the real one (TensorKit `tensorcontract!` has no symbol-type dispatch).
+#[allow(private_bounds)]
+fn contract_multiplicity_free<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    spec: &ContractSpec<'_>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+{
+    let output_axes = spec.output_axes();
+    let mut lease = lhs.runtime.lease_context()?;
+    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+    #[cfg(test)]
+    crate::tensor_core::observe_contract_seam_call();
+    Ok(
+        D::lane(lease.context())?.tensorcontract_multiplicity_free_in(
+            (lhs.logical_space(), lhs_operand, &lhs_data),
+            (rhs.logical_space(), rhs_operand, &rhs_data),
+            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
+            spec.codomain.len(),
+        )?,
+    )
+}
+
+/// [`contract_multiplicity_free`] written into an existing destination.
+#[allow(private_bounds)]
+fn contract_into_multiplicity_free<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    spec: &ContractSpec<'_>,
+    destination: &mut TensorMap<R, D>,
+    alpha: D,
+    beta: D,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+{
+    let output_axes = spec.output_axes();
+    let mut lease = lhs.runtime.lease_context()?;
+    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+    let destination_space = destination.logical_space().space().clone();
+    D::lane(lease.context())?.tensorcontract_into_multiplicity_free_in(
+        (lhs.logical_space(), lhs_operand, &lhs_data),
+        (rhs.logical_space(), rhs_operand, &rhs_data),
+        (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
+        spec.codomain.len(),
+        &destination_space,
+        || destination_slice(destination),
+        alpha,
+        beta,
+    )
+}
+
 impl<R, D> MultiplicityFreeContractExecution<R, f64> for D
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -272,19 +334,7 @@ where
         rhs: &TensorMap<R, Self>,
         spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
-        let output_axes = spec.output_axes();
-        let mut lease = lhs.runtime.lease_context()?;
-        let context = lease.context().multiplicity_free_lane::<Self>()?;
-        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        #[cfg(test)]
-        crate::tensor_core::observe_contract_seam_call();
-        Ok(context.tensorcontract_multiplicity_free_in(
-            (lhs.logical_space(), lhs_operand, &lhs_data),
-            (rhs.logical_space(), rhs_operand, &rhs_data),
-            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-            spec.codomain.len(),
-        )?)
+        contract_multiplicity_free(lhs, rhs, spec)
     }
 
     fn contract_into(
@@ -295,22 +345,7 @@ where
         alpha: Self,
         beta: Self,
     ) -> Result<(), Error> {
-        let output_axes = spec.output_axes();
-        let mut lease = lhs.runtime.lease_context()?;
-        let context = lease.context().multiplicity_free_lane::<Self>()?;
-        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        let destination_space = destination.logical_space().space().clone();
-        context.tensorcontract_into_multiplicity_free_in(
-            (lhs.logical_space(), lhs_operand, &lhs_data),
-            (rhs.logical_space(), rhs_operand, &rhs_data),
-            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-            spec.codomain.len(),
-            &destination_space,
-            || destination_slice(destination),
-            alpha,
-            beta,
-        )
+        contract_into_multiplicity_free(lhs, rhs, spec, destination, alpha, beta)
     }
 
     fn compose(
@@ -326,30 +361,22 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = Complex64> + CheckedFusionAlgebra + SectorCodec,
 {
     fn contract(
-        _lhs: &TensorMap<R, Self>,
-        _rhs: &TensorMap<R, Self>,
-        _spec: &ContractSpec<'_>,
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        spec: &ContractSpec<'_>,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
-        Err(
-            tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                message: "ordinary complex-coefficient contraction is outside the admitted scope",
-            }
-            .into(),
-        )
+        contract_multiplicity_free(lhs, rhs, spec)
     }
 
-    /// The complex-symbol lane's eager contraction is unsupported (#1870
-    /// leaf B2 admits both together), so its `_into` is too.
     fn contract_into(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
         spec: &ContractSpec<'_>,
-        _destination: &mut TensorMap<R, Self>,
-        _alpha: Self,
-        _beta: Self,
+        destination: &mut TensorMap<R, Self>,
+        alpha: Self,
+        beta: Self,
     ) -> Result<(), Error> {
-        <Self as MultiplicityFreeContractExecution<R, Complex64>>::contract(lhs, rhs, spec)
-            .map(drop)
+        contract_into_multiplicity_free(lhs, rhs, spec, destination, alpha, beta)
     }
 
     fn compose(
