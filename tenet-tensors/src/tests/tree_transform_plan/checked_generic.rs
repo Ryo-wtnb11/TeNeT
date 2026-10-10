@@ -22,7 +22,10 @@ fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
                 let operation = operation.clone();
                 let data = &data;
                 scope.spawn(move || {
-                    crate::tree_transform_dyn_owned_checked_generic(operation, &source, data, 1.0)
+                    crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+                        .tree_transform_owned_checked_generic_in(
+                            &source, None, data, &operation, 1.0,
+                        )
                         .unwrap()
                 })
             })
@@ -69,28 +72,18 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
     owner_activity();
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
-    let first = crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        operation.clone(),
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap();
+    let first = context
+        .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+        .unwrap();
     let cold = owner_activity();
     assert_eq!((cold.hits, cold.publications), (0, 1), "{cold:?}");
     assert!(provider.call_count(CheckedPlanCall::F) > 0);
     assert!(provider.call_count(CheckedPlanCall::R) > 0);
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
-    let repeated = crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        operation,
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap();
+    let repeated = context
+        .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+        .unwrap();
     let warm = owner_activity();
 
     assert_eq!((warm.hits, warm.builds), (1, 0));
@@ -103,14 +96,15 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
 
     owner_activity();
     *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
-    let identity_error = crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        TreeTransformOperation::permute([1, 0], [2]),
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap_err();
+    let identity_error = context
+        .tree_transform_owned_checked_generic_in(
+            &source,
+            None,
+            &data,
+            &TreeTransformOperation::permute([1, 0], [2]),
+            1.0,
+        )
+        .unwrap_err();
     assert!(matches!(
         identity_error,
         CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
@@ -120,14 +114,15 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     provider.fail.set(Some((CheckedPlanCall::F, 1)));
-    let late_error = crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        TreeTransformOperation::transpose([0], [2, 1]),
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap_err();
+    let late_error = context
+        .tree_transform_owned_checked_generic_in(
+            &source,
+            None,
+            &data,
+            &TreeTransformOperation::transpose([0], [2, 1]),
+            1.0,
+        )
+        .unwrap_err();
     assert!(matches!(
         late_error,
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
@@ -156,13 +151,15 @@ fn checked_generic_adjoint_storage_matches_literal_dense_braid() {
     let mut context =
         crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
 
-    let actual = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation,
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &parent_data),
-        alpha,
-    )
-    .unwrap();
+    let actual = context
+        .tree_transform_owned_checked_generic_in(
+            &logical,
+            Some(&parent),
+            &parent_data,
+            &operation,
+            alpha,
+        )
+        .unwrap();
 
     assert_eq!(
         actual.1,
@@ -240,13 +237,15 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
         crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
     owner_activity();
     let mut execute = |logical| {
-        crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-            &mut context,
-            operation.clone(),
-            crate::CheckedTreeTransformInput::adjoint(logical, &parent, &parent_data),
-            alpha,
-        )
-        .unwrap()
+        context
+            .tree_transform_owned_checked_generic_in(
+                logical,
+                Some(&parent),
+                &parent_data,
+                &operation,
+                alpha,
+            )
+            .unwrap()
     };
 
     assert_eq!(execute(&canonical_logical).1, expected);
@@ -332,13 +331,15 @@ fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
     let alpha = Complex64::new(0.5, -1.25);
     let mut context =
         crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
-    let actual = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &padded_data),
-        alpha,
-    )
-    .unwrap();
+    let actual = context
+        .tree_transform_owned_checked_generic_in(
+            &logical,
+            Some(&parent),
+            &padded_data,
+            &TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+            alpha,
+        )
+        .unwrap();
 
     assert_eq!(
         actual.1,
@@ -365,24 +366,16 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
     let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
     owner_activity();
-    crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation.clone(),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
-        1.0,
-    )
-    .unwrap();
+    context
+        .tree_transform_owned_checked_generic_in(&logical, Some(&parent), &data, &operation, 1.0)
+        .unwrap();
     let first = owner_activity();
     assert_eq!(first.hits + first.publications, 1, "{first:?}");
 
     *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
-    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation.clone(),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
-        1.0,
-    )
-    .unwrap_err();
+    let error = context
+        .tree_transform_owned_checked_generic_in(&logical, Some(&parent), &data, &operation, 1.0)
+        .unwrap_err();
     assert!(matches!(
         error,
         CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
@@ -390,13 +383,15 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
     assert_owner_untouched(owner_activity());
 
     *provider.identity.borrow_mut() = None;
-    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation,
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data[..data.len() - 1]),
-        1.0,
-    )
-    .unwrap_err();
+    let error = context
+        .tree_transform_owned_checked_generic_in(
+            &logical,
+            Some(&parent),
+            &data[..data.len() - 1],
+            &operation,
+            1.0,
+        )
+        .unwrap_err();
     assert!(matches!(
         error,
         CheckedGenericPlanError::Operation(OperationError::ElementCountMismatch { .. })
@@ -423,13 +418,9 @@ fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_ca
     let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
     owner_activity();
-    crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation.clone(),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
-        1.0,
-    )
-    .unwrap();
+    context
+        .tree_transform_owned_checked_generic_in(&logical, Some(&parent), &data, &operation, 1.0)
+        .unwrap();
     let first = owner_activity();
     assert_eq!(first.hits + first.publications, 1, "{first:?}");
 
@@ -449,13 +440,15 @@ fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_ca
         logical.space().required_len().unwrap()
     );
 
-    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        operation,
-        crate::CheckedTreeTransformInput::adjoint(&wrong_logical, &parent, &data),
-        1.0,
-    )
-    .unwrap_err();
+    let error = context
+        .tree_transform_owned_checked_generic_in(
+            &wrong_logical,
+            Some(&parent),
+            &data,
+            &operation,
+            1.0,
+        )
+        .unwrap_err();
     assert!(matches!(
         error,
         CheckedGenericPlanError::Operation(OperationError::StructureMismatch {
@@ -478,14 +471,15 @@ fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection()
     let data = vec![1.0; source.space().required_len().unwrap()];
     crate::contract::reset_fusion_operand_projection_prepares();
 
-    crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
-        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap();
+    crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+        .tree_transform_owned_checked_generic_in(
+            &source,
+            None,
+            &data,
+            &TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+            1.0,
+        )
+        .unwrap();
 
     assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
 }
@@ -514,13 +508,15 @@ fn checked_generic_adjoint_storage_handles_empty_layouts() {
         TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
         TreeTransformOperation::transpose([2], [1, 0]),
     ] {
-        let output = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-            &mut context,
-            operation,
-            crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &[]),
-            Complex64::new(0.5, -1.25),
-        )
-        .unwrap();
+        let output = context
+            .tree_transform_owned_checked_generic_in(
+                &logical,
+                Some(&parent),
+                &[],
+                &operation,
+                Complex64::new(0.5, -1.25),
+            )
+            .unwrap();
         assert!(output.1.is_empty());
     }
 }
@@ -545,13 +541,15 @@ fn checked_generic_adjoint_storage_rejects_distinct_provider_allocation() {
     .unwrap();
     let data = vec![1.0; distinct_parent.space().required_len().unwrap()];
 
-    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
-        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &distinct_parent, &data),
-        1.0,
-    )
-    .unwrap_err();
+    let error = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+        .tree_transform_owned_checked_generic_in(
+            &logical,
+            Some(&distinct_parent),
+            &data,
+            &TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+            1.0,
+        )
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -585,14 +583,9 @@ fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
     provider
         .restyle_at
         .set(Some((CheckedPlanCall::R, FusionStyleKind::Unique)));
-    let error = crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        operation.clone(),
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap_err();
+    let error = context
+        .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -608,14 +601,9 @@ fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
     provider.restyle_at.set(None);
     provider.fusion_style.set(None);
     provider.calls.set([0; CheckedPlanCall::COUNT]);
-    crate::tree_transform_dyn_owned_checked_generic_in_context(
-        &mut context,
-        operation,
-        &source,
-        &data,
-        1.0,
-    )
-    .unwrap();
+    context
+        .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+        .unwrap();
     let committed = crate::tree_transform::take_coefficient_group_activity();
     assert_eq!(
         (committed.hits, committed.misses, committed.publications),
@@ -645,13 +633,15 @@ fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     provider.fail.set(Some((CheckedPlanCall::F, 1)));
 
-    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
-        &mut context,
-        TreeTransformOperation::transpose([0], [2, 1]),
-        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
-        1.0,
-    )
-    .unwrap_err();
+    let error = context
+        .tree_transform_owned_checked_generic_in(
+            &logical,
+            Some(&parent),
+            &data,
+            &TreeTransformOperation::transpose([0], [2, 1]),
+            1.0,
+        )
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -719,13 +709,9 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         owner_activity();
 
-        let error = crate::tree_transform_dyn_owned_checked_generic(
-            operation.clone(),
-            &test_space,
-            &src_data,
-            1.0,
-        )
-        .unwrap_err();
+        let error = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+            .tree_transform_owned_checked_generic_in(&test_space, None, &src_data, &operation, 1.0)
+            .unwrap_err();
         if style_mismatch {
             assert!(matches!(
                 error,
@@ -780,13 +766,9 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         owner_activity();
 
-        let error = crate::tree_transform_dyn_owned_checked_generic(
-            operation.clone(),
-            &bound_src,
-            &src_data,
-            1.0,
-        )
-        .unwrap_err();
+        let error = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+            .tree_transform_owned_checked_generic_in(&bound_src, None, &src_data, &operation, 1.0)
+            .unwrap_err();
         match failure {
             Err((call, _)) => assert!(matches!(
                 error,
@@ -839,13 +821,15 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     provider
         .fail
         .set(Some((CheckedPlanCall::FrobeniusSchur, 1)));
-    let error = crate::tree_transform_dyn_owned_checked_generic(
-        TreeTransformOperation::permute([1, 0], [2]),
-        &dense_space,
-        &dense_data,
-        1.0,
-    )
-    .unwrap_err();
+    let error = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+        .tree_transform_owned_checked_generic_in(
+            &dense_space,
+            None,
+            &dense_data,
+            &TreeTransformOperation::permute([1, 0], [2]),
+            1.0,
+        )
+        .unwrap_err();
     assert!(matches!(
         error,
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::FrobeniusSchur))

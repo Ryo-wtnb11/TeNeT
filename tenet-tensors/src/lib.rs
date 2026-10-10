@@ -164,14 +164,7 @@ pub use tensortrace::{
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm, TracePreflight,
 };
 pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
-#[cfg(test)]
-pub(crate) use tree_context::{
-    tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
-};
-pub use tree_context::{
-    tree_transform_dyn_owned_checked_generic_input_in_context, CheckedTreeTransformInput,
-    TreeTransformExecutionContext,
-};
+pub use tree_context::TreeTransformExecutionContext;
 #[doc(hidden)]
 pub use tree_transform::{
     admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, TreeTransformOperationView,

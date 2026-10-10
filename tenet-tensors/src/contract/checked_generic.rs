@@ -169,6 +169,13 @@ impl CheckedContractTxn {
         }
         self.coefficients.flush_committed(&committed);
     }
+
+    /// Publishes after an eager transform's destination commit
+    /// (`destination`: its preview and committed structures); a transform
+    /// stages no intermediate.
+    pub(crate) fn commit_transform(self, destination: (Arc<BlockStructure>, Arc<BlockStructure>)) {
+        self.coefficients.flush_committed(&[destination]);
+    }
 }
 
 fn validate_source_structure<E>(

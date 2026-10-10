@@ -725,11 +725,19 @@ where
     let body = tensor
         .owned_body()
         .ok_or_else(|| internal_layout_error("multiplicity-free transform input is owned"))?;
-    Ok(tree_transform_owned_multiplicity_free(
-        D::lane(lease.context())?,
-        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
-        operation,
-    )?)
+    let context = D::lane(lease.context())?;
+    let data = body.materialized_dense_data();
+    let input = BoundDynamicTensorRef::try_new(&body.space, data.as_ref())?;
+    #[cfg(test)]
+    crate::tensor_core::observe_tree_transform_seam_call();
+    Ok(context
+        .tree_context_mut()
+        .tree_transform_owned_multiplicity_free_in(
+            input.space(),
+            input.data(),
+            &operation,
+            D::from_real(1.0),
+        )?)
 }
 
 impl<R, D> MultiplicityFreeTransformExecution<R, f64> for D

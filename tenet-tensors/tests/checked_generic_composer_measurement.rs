@@ -15,8 +15,7 @@ use tenet_core::{
     SectorLeg,
 };
 use tenet_tensors::{
-    tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
-    CheckedTreeTransformInput, RuleIdentity, TreeTransformExecutionContext, TreeTransformOperation,
+    BoundDynamicFusionMapSpace, RuleIdentity, TreeTransformExecutionContext, TreeTransformOperation,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -76,13 +75,9 @@ fn public_cold(
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let started = std::time::Instant::now();
     let (output, allocs) = counting_alloc::measure(|| {
-        tree_transform_dyn_owned_checked_generic_input_in_context(
-            &mut context,
-            operation.clone(),
-            CheckedTreeTransformInput::direct(&source, &data),
-            1.0,
-        )
-        .unwrap()
+        context
+            .tree_transform_owned_checked_generic_in(&source, None, &data, operation, 1.0)
+            .unwrap()
     });
     let ns = started.elapsed().as_nanos();
     std::hint::black_box(output);

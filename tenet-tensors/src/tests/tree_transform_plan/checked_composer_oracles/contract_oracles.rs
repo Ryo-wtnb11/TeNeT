@@ -20,7 +20,6 @@ use crate::contract::{
     tensorcontract_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
     TensorContractFusionExecutionContext,
 };
-use crate::tree_context::tree_transform_dyn_owned_checked_generic;
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 type Leg = Vec<(SectorId, usize)>;
@@ -575,18 +574,30 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
         };
         let one = Complex64::new(1.0, 0.0);
         let lhs_open = open(lhs.space().rank(), lhs_axes);
-        let (lhs_core, lhs_core_data) = tree_transform_dyn_owned_checked_generic(
-            TreeTransformOperation::permute(lhs_open.iter().copied(), lhs_axes.iter().copied()),
+        let (lhs_core, lhs_core_data) = crate::TreeTransformExecutionContext::<
+            Complex64,
+            RuleIdentity,
+            f64,
+        >::default()
+        .tree_transform_owned_checked_generic_in(
             &lhs,
+            None,
             &lhs_data,
+            &TreeTransformOperation::permute(lhs_open.iter().copied(), lhs_axes.iter().copied()),
             one,
         )
         .unwrap();
         let rhs_open = open(rhs.space().rank(), rhs_axes);
-        let (rhs_core, rhs_core_data) = tree_transform_dyn_owned_checked_generic(
-            TreeTransformOperation::permute(rhs_axes.iter().copied(), rhs_open.iter().copied()),
+        let (rhs_core, rhs_core_data) = crate::TreeTransformExecutionContext::<
+            Complex64,
+            RuleIdentity,
+            f64,
+        >::default()
+        .tree_transform_owned_checked_generic_in(
             &rhs,
+            None,
             &rhs_data,
+            &TreeTransformOperation::permute(rhs_axes.iter().copied(), rhs_open.iter().copied()),
             one,
         )
         .unwrap();
@@ -599,10 +610,16 @@ fn checked_contraction_with_dual_legs_matches_reference_step_composition() {
         )
         .unwrap();
         let (codomain, domain) = output.split_at(codomain_rank);
-        let (expected_space, expected) = tree_transform_dyn_owned_checked_generic(
-            TreeTransformOperation::permute(codomain.iter().copied(), domain.iter().copied()),
+        let (expected_space, expected) = crate::TreeTransformExecutionContext::<
+            Complex64,
+            RuleIdentity,
+            f64,
+        >::default()
+        .tree_transform_owned_checked_generic_in(
             &core,
+            None,
             &core_data,
+            &TreeTransformOperation::permute(codomain.iter().copied(), domain.iter().copied()),
             one,
         )
         .unwrap();
