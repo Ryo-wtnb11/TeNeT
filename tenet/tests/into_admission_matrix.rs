@@ -40,6 +40,12 @@
 //! oracle contracts the materialized operands; reordered `D · D` is the row
 //! that proves `contract = permute(compose)` there (eager takes the dense
 //! route).
+//! Complex-symbol contraction rows (leaf B2): a `Complex64` embedding of U(1)
+//! equals the real-symbol lane (exactly, up to the sign of zero) on owned
+//! operands in every order, plus its compact arms and their decline; a
+//! Bosonic Z3 × Z3 with an alternating-bicharacter `R` matches a hand
+//! calculation of the braiding phase; Fibonacci `contract_into` is refused
+//! like eager.
 //!
 //! A compact cell's destination is dense: its off-diagonal entries are
 //! `β·dst₀` where the dense replay writes `α·(c·0) + β·dst₀`, so cells compare
@@ -1463,4 +1469,626 @@ fn compact_contract_into_allocates_no_dense_compact_operand_in_both_modes() {
         let b = GradedSpace::try_new(rule, [(vec![0i64], 128)]).unwrap();
         compact_contract_allocations!(&runtime, v, b, vec![0i64]);
     }
+}
+
+// ---- #1870 leaf B2: symmetric complex-symbol contraction ----
+//
+// TensorKit `tensorcontract!` has no symbol-type dispatch: a symmetric rule
+// with `Complex64` symbols contracts like a real-symbol one. No in-tree
+// complex-symbol rule is symmetric (Fibonacci is anyonic), so these two
+// test-only rules stand in for a user's.
+
+use tenet::sector::{
+    BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    RuleIdentity, SectorCodec, SectorId, SectorOrderKey, SectorVec,
+};
+use tenet::typed::FusionAlgebraError;
+
+/// `U1FusionRule` with every symbol embedded in `Complex64`: the same
+/// category, so its contractions equal the real-symbol lane's.
+#[derive(Clone, Copy)]
+struct ComplexU1;
+
+impl FusionRule for ComplexU1 {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        U1FusionRule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        U1FusionRule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        U1FusionRule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        U1FusionRule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        U1FusionRule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        U1FusionRule.nsymbol(left, right, coupled)
+    }
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        U1FusionRule.sector_order_key(sector)
+    }
+}
+
+impl MultiplicityFreeFusionRule for ComplexU1 {}
+
+impl MultiplicityFreeFusionSymbols for ComplexU1 {
+    type Scalar = Complex64;
+    fn has_trivial_associator_gauge(&self) -> bool {
+        U1FusionRule.has_trivial_associator_gauge()
+    }
+    fn f_symbol_scalar(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Complex64 {
+        U1FusionRule.f_symbol_scalar(a, b, c, d, e, f).into()
+    }
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Complex64 {
+        U1FusionRule.r_symbol_scalar(a, b, c).into()
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for ComplexU1 {
+    fn dim_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.dim_scalar(s).into()
+    }
+    fn inv_dim_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.inv_dim_scalar(s).into()
+    }
+    fn sqrt_dim_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.sqrt_dim_scalar(s).into()
+    }
+    fn inv_sqrt_dim_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.inv_sqrt_dim_scalar(s).into()
+    }
+    fn twist_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.twist_scalar(s).into()
+    }
+    fn frobenius_schur_phase_scalar(&self, s: SectorId) -> Complex64 {
+        U1FusionRule.frobenius_schur_phase_scalar(s).into()
+    }
+}
+
+impl CheckedFusionAlgebra for ComplexU1 {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        U1FusionRule.try_dual_sector(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        U1FusionRule.try_fusion_channels(left, right)
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        U1FusionRule.try_nsymbol(left, right, coupled)
+    }
+}
+
+impl SectorCodec for ComplexU1 {
+    type Sector = U1Irrep;
+    fn encode_sector(&self, value: &U1Irrep) -> Result<SectorId, FusionAlgebraError> {
+        U1FusionRule.encode_sector(value)
+    }
+    fn decode_sector(&self, id: SectorId) -> Result<U1Irrep, FusionAlgebraError> {
+        U1FusionRule.decode_sector(id)
+    }
+}
+
+/// Bosonic Z3 × Z3 with trivial `F` and the alternating bicharacter
+/// `R(a, b) = ω^{a₁b₂ − a₂b₁}`, `ω = e^{2πi/3}`: symmetric
+/// (`R(a, b)·R(b, a) = 1`) with `θ = R(a, a) = 1`, so a swap of two
+/// codomain legs is a phase a real-symbol lane cannot carry. Sector
+/// `(a₁, a₂)` has id `a₁ + 3a₂`.
+///
+/// Why not certify `has_trivial_associator_gauge`: that selects the direct
+/// Unique braid (`unique_braid.rs:unique_direct_braid`, TensorKit's
+/// `SymmetricBraiding` branch, `braiding_manipulations.jl:221-229`), which
+/// takes `R(b, a)` for `a` crossing `b`. That equals the Artin path's `R(a, b)`
+/// only for a real `R`; for this one it is the conjugate (reported with
+/// #1870 B2, outside the contraction lane).
+#[derive(Clone, Copy)]
+struct AlternatingZ3Squared;
+
+fn z3_squared(id: SectorId) -> (usize, usize) {
+    (id.id() % 3, id.id() / 3)
+}
+
+fn z3_squared_id((a1, a2): (usize, usize)) -> SectorId {
+    SectorId::new(a1 % 3 + 3 * (a2 % 3))
+}
+
+/// `R(a, b) = ω^{a₁b₂ − a₂b₁}`.
+fn alternating_r((a1, a2): (usize, usize), (b1, b2): (usize, usize)) -> Complex64 {
+    let exponent = (a1 * b2 + 2 * a2 * b1) % 3;
+    Complex64::from_polar(1.0, 2.0 * std::f64::consts::PI * exponent as f64 / 3.0)
+}
+
+impl FusionRule for AlternatingZ3Squared {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let ((a1, a2), (b1, b2)) = (z3_squared(left), z3_squared(right));
+        core::iter::once(z3_squared_id((a1 + b1, a2 + b2))).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for AlternatingZ3Squared {}
+
+impl MultiplicityFreeFusionSymbols for AlternatingZ3Squared {
+    type Scalar = Complex64;
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, _: SectorId) -> Complex64 {
+        alternating_r(z3_squared(a), z3_squared(b))
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AlternatingZ3Squared {
+    fn dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn twist_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+}
+
+impl CheckedFusionAlgebra for AlternatingZ3Squared {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        if sector.id() >= 9 {
+            return Err(FusionAlgebraError::InvalidSector { sector });
+        }
+        let (a1, a2) = z3_squared(sector);
+        Ok(z3_squared_id((3 - a1, 3 - a2)))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        for sector in [left, right] {
+            if sector.id() >= 9 {
+                return Err(FusionAlgebraError::InvalidSector { sector });
+            }
+        }
+        Ok(self.fusion_channels(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(usize::from(
+            self.try_fusion_channels(left, right)?[0] == coupled,
+        ))
+    }
+}
+
+impl SectorCodec for AlternatingZ3Squared {
+    type Sector = (u8, u8);
+    fn encode_sector(&self, &(a1, a2): &(u8, u8)) -> Result<SectorId, FusionAlgebraError> {
+        if a1 < 3 && a2 < 3 {
+            Ok(z3_squared_id((usize::from(a1), usize::from(a2))))
+        } else {
+            Err(FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: self.rule_identity(),
+                label: format!("Z3 x Z3 charge ({a1}, {a2})"),
+            })
+        }
+    }
+    fn decode_sector(&self, sector: SectorId) -> Result<(u8, u8), FusionAlgebraError> {
+        if sector.id() >= 9 {
+            return Err(FusionAlgebraError::InvalidSector { sector });
+        }
+        let (a1, a2) = z3_squared(sector);
+        Ok((a1 as u8, a2 as u8))
+    }
+}
+
+/// `x` with `-0` folded into `+0`, so two routes compare exactly.
+fn fold_zero(entries: BTreeMap<String, Vec<Complex64>>) -> BTreeMap<String, Vec<Complex64>> {
+    entries
+        .into_iter()
+        .map(|(key, values)| {
+            let values = values
+                .into_iter()
+                .map(|z| Complex64::new(z.re + 0.0, z.im + 0.0))
+                .collect();
+            (key, values)
+        })
+        .collect()
+}
+
+fn complex_value(key: &str, index: &[usize]) -> Complex64 {
+    Complex64::new(value(key, index), value(&format!("im{key}"), index))
+}
+
+#[test]
+fn symmetric_complex_symbol_contraction_equals_the_real_symbol_lane() {
+    // What: the complex-symbol lane contracts (eager and `_into`), and on
+    // the `Complex64` embedding of U(1) it is the real-symbol lane's value,
+    // exactly up to the sign of zero, in every output order and operand
+    // kind both lanes take (complex-symbol rules hold no lazy adjoint).
+    let runtime = host_runtime();
+    macro_rules! legs {
+        ($rule:expr) => {{
+            let rule = Arc::new($rule);
+            let v = GradedSpace::try_new(
+                Arc::clone(&rule),
+                [
+                    (U1Irrep::new(-1), 2),
+                    (U1Irrep::new(0), 3),
+                    (U1Irrep::new(2), 1),
+                ],
+            )
+            .unwrap();
+            let w = GradedSpace::try_new(rule, [(U1Irrep::new(1), 2), (U1Irrep::new(-1), 1)])
+                .unwrap()
+                .try_dual()
+                .unwrap();
+            (v, w)
+        }};
+    }
+    macro_rules! operands {
+        ($rule:expr) => {{
+            let (v, w) = legs!($rule);
+            let lhs: TensorMap<_, Complex64> =
+                TensorMap::from_subblock_fn(&runtime, [&v, &w], [&v, &w], |trees, index| {
+                    complex_value(&debug_key(trees), index)
+                })
+                .unwrap();
+            let rhs: TensorMap<_, Complex64> =
+                TensorMap::from_subblock_fn(&runtime, [&v, &w], [&v], |trees, index| {
+                    complex_value(&format!("rhs{}", debug_key(trees)), index)
+                })
+                .unwrap();
+            (lhs, rhs)
+        }};
+    }
+    let (lhs, rhs) = operands!(ComplexU1);
+    let (real_lhs, real_rhs) = operands!(U1FusionRule);
+    let key = debug_key::<U1Irrep>;
+    let mut rows: Rows = Vec::new();
+    for (order, codomain, domain) in CONTRACT_ORDERS {
+        let spec = ContractSpec {
+            lhs: &[2, 3],
+            rhs: &[0, 1],
+            codomain,
+            domain,
+        };
+        assert_eq!(
+            fold_zero(entries!(lhs.contract(&rhs, &spec).unwrap(), key)),
+            fold_zero(entries!(real_lhs.contract(&real_rhs, &spec).unwrap(), key)),
+            "{order}"
+        );
+        contract_cell!(
+            rows,
+            &runtime,
+            lhs,
+            rhs,
+            &rhs,
+            spec,
+            key,
+            Complex64,
+            format!("complex U(1) contract O·O {order}")
+        );
+    }
+
+    // The compact arms and their decline, against owned operands.
+    let (v, w) = legs!(ComplexU1);
+    let lift = |x: f64| Complex64::new(x, 0.5 - x);
+    let sectors = [
+        (U1Irrep::new(-1), 2),
+        (U1Irrep::new(0), 3),
+        (U1Irrep::new(2), 1),
+    ];
+    let d1 = bond!(
+        &runtime,
+        v,
+        sectors,
+        |s: &U1Irrep| format!("{s:?}"),
+        Complex64,
+        lift
+    );
+    let d2 = bond!(
+        &runtime,
+        v,
+        sectors,
+        |s: &U1Irrep| format!("{s:?}"),
+        Complex64,
+        |x: f64| { lift(0.5 - x) }
+    );
+    let fill = |prefix: &'static str| {
+        move |trees: &BlockFusionTrees<U1Irrep>, index: &[usize]| {
+            complex_value(&format!("{prefix}{}", debug_key(trees)), index)
+        }
+    };
+    let t: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&v, &w], [&v], fill("t")).unwrap();
+    let u: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&w], fill("u")).unwrap();
+    let x: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], fill("x")).unwrap();
+    for (pattern, codomain, domain) in [
+        ("own order", &[0usize, 1][..], &[2usize][..]),
+        ("reordered", &[2, 0][..], &[1][..]),
+    ] {
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain,
+            domain,
+        };
+        contract_cell!(
+            rows,
+            &runtime,
+            t,
+            d1,
+            &d1,
+            spec,
+            key,
+            Complex64,
+            format!("complex U(1) compact t·D {pattern}")
+        );
+        let spec = ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain,
+            domain,
+        };
+        contract_cell!(
+            rows,
+            &runtime,
+            d1,
+            u,
+            &u,
+            spec,
+            key,
+            Complex64,
+            format!("complex U(1) compact D·t {pattern}")
+        );
+    }
+    for (pattern, codomain, domain) in [
+        ("own order", &[0usize][..], &[1usize][..]),
+        ("swapped", &[1][..], &[0][..]),
+        ("(2, 0)", &[0, 1][..], &[][..]),
+    ] {
+        let spec = ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain,
+            domain,
+        };
+        contract_cell!(
+            rows,
+            &runtime,
+            d1,
+            d2,
+            &d2,
+            spec,
+            key,
+            Complex64,
+            format!("complex U(1) compact D·D {pattern}")
+        );
+    }
+    let spec = ContractSpec {
+        lhs: &[2, 1],
+        rhs: &[0, 1],
+        codomain: &[0],
+        domain: &[],
+    };
+    contract_cell!(
+        rows,
+        &runtime,
+        x,
+        d1,
+        &d1,
+        spec,
+        key,
+        Complex64,
+        "complex U(1) compact t·D two axes (declines)".to_string()
+    );
+    assert_eq!(rows.len(), (CONTRACT_ORDERS.len() + 8) * BETAS.len());
+}
+
+#[test]
+fn alternating_z3_squared_contraction_carries_the_braiding_phase() {
+    // What: `[v, w] ← [x]` contracted with `[x] ← [y]` over `x`, with the
+    // output codomain legs swapped, is TensorKit's `blas_contract!` followed
+    // by `artin_braid` on the codomain tree (`braiding_manipulations.jl:56`,
+    // `R(a, b, c)` for uncoupled `(a, b)`): by hand, with `c = v + w = x = y`,
+    // `C[(w, v); y][i_w, i_v, i_y] = R(v, w) Σ_{i_x} A[(v, w); x][i_v, i_w, i_x]
+    // · B[x; y][i_x, i_y]`. The core order is the same sum without `R`. An
+    // ignored or conjugated phase fails: `R(v, w)` and `R(w, v)` differ
+    // whenever `v₁w₂ ≠ v₂w₁ (mod 3)`.
+    let runtime = host_runtime();
+    {
+        let rule = Arc::new(AlternatingZ3Squared);
+        let v = GradedSpace::try_new(
+            Arc::clone(&rule),
+            [((0, 0), 2), ((1, 0), 1), ((0, 1), 2), ((1, 2), 1)],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new(
+            Arc::clone(&rule),
+            [((0, 0), 1), ((2, 1), 2), ((1, 1), 1), ((0, 2), 2)],
+        )
+        .unwrap();
+        let all = (0..9u8)
+            .map(|id| ((id % 3, id / 3), 1 + usize::from(id % 2)))
+            .collect::<Vec<_>>();
+        let x = GradedSpace::try_new(rule, all).unwrap();
+        let a_value = |v: (u8, u8), w: (u8, u8), x: (u8, u8), index: &[usize]| {
+            complex_value(&format!("A{v:?}{w:?}{x:?}"), index)
+        };
+        let b_value = |x: (u8, u8), index: &[usize]| complex_value(&format!("B{x:?}"), index);
+        let a: TensorMap<_, Complex64> =
+            TensorMap::from_subblock_fn(&runtime, [&v, &w], [&x], |trees, index| {
+                let (cod, dom) = (trees.codomain_uncoupled(), trees.domain_uncoupled());
+                a_value(cod[0], cod[1], dom[0], index)
+            })
+            .unwrap();
+        let b: TensorMap<_, Complex64> =
+            TensorMap::from_subblock_fn(&runtime, [&x], [&x], |trees, index| {
+                b_value(trees.domain_uncoupled()[0], index)
+            })
+            .unwrap();
+        let key = debug_key::<(u8, u8)>;
+        let mut rows: Rows = Vec::new();
+        for (order, codomain, swapped) in [
+            ("core", &[0usize, 1][..], false),
+            ("swapped", &[1, 0][..], true),
+        ] {
+            let spec = ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain,
+                domain: &[2],
+            };
+            let c = a.contract(&b, &spec).unwrap();
+            let mut blocks = 0;
+            for (trees, view) in c.subblocks().unwrap() {
+                let cod = trees.codomain_uncoupled();
+                let (v, w) = if swapped {
+                    (cod[1], cod[0])
+                } else {
+                    (cod[0], cod[1])
+                };
+                let y = trees.domain_uncoupled()[0];
+                let to = |s: (u8, u8)| (usize::from(s.0), usize::from(s.1));
+                let phase = if swapped {
+                    alternating_r(to(v), to(w))
+                } else {
+                    Complex64::new(1.0, 0.0)
+                };
+                let shape = view.shape().to_vec();
+                let dx = 1 + usize::from((y.0 + 3 * y.1) % 2);
+                for i0 in 0..shape[0] {
+                    for i1 in 0..shape[1] {
+                        for iy in 0..shape[2] {
+                            let (iv, iw) = if swapped { (i1, i0) } else { (i0, i1) };
+                            let sum: Complex64 = (0..dx)
+                                .map(|ix| a_value(v, w, y, &[iv, iw, ix]) * b_value(y, &[ix, iy]))
+                                .sum();
+                            let got = *view.get(&[i0, i1, iy]).unwrap();
+                            let want = phase * sum;
+                            assert!(
+                                close(got, want),
+                                "{order} {v:?} {w:?} [{i0}, {i1}, {iy}]: \
+                                 {got} vs {want}"
+                            );
+                        }
+                    }
+                }
+                blocks += 1;
+            }
+            assert!(blocks > 0, "{order}");
+            contract_cell!(
+                rows,
+                &runtime,
+                a,
+                b,
+                &b,
+                spec,
+                key,
+                Complex64,
+                format!("Z3 x Z3 {order}")
+            );
+        }
+        assert_eq!(rows.len(), 2 * BETAS.len());
+    }
+}
+
+#[test]
+fn anyonic_complex_symbol_contract_into_is_refused_like_eager() {
+    // Fibonacci stays outside `contract` (anyonic), and `_into` refuses it
+    // with eager's error, before touching the destination.
+    let runtime = host_runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(FibonacciFusionRule),
+        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+    )
+    .unwrap();
+    let key = debug_key::<FibonacciSector>;
+    let a: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index| {
+            complex_value(&key(trees), index)
+        })
+        .unwrap();
+    let spec = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    let eager = a.contract(&a, &spec).unwrap_err();
+    let mut destination: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index| {
+            complex_value(&format!("dst{}", key(trees)), index)
+        })
+        .unwrap();
+    let before = dense(&destination);
+    let into = a
+        .contract_into(
+            &a,
+            &spec,
+            &mut destination,
+            Complex64::alpha(),
+            Complex64::lift(0.5),
+        )
+        .unwrap_err();
+    assert_eq!(format!("{into}"), format!("{eager}"));
+    assert_eq!(dense(&destination), before);
 }
