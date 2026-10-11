@@ -347,19 +347,20 @@ where
 
 impl<R, D, S> TensorMap<R, D, S>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
     D: TensorScalar,
     S: ElementwiseExec<R, D>,
 {
     /// A zero tensor on the same spaces, dtype and storage as `self`
-    /// (TensorKit `zerovector`). Dense and compact payloads are freshly
-    /// initialized to exact positive zero, independently of non-finite source
-    /// values. A lazy adjoint zeros its canonical parent and stays a lazy
-    /// adjoint.
+    /// (TensorKit `zerovector`), for every fusion mode and symbol lane.
+    /// Dense and compact payloads are freshly initialized to exact positive
+    /// zero, independently of non-finite source values. A lazy adjoint zeros
+    /// its canonical parent and stays a lazy adjoint.
     pub fn zeros_like(&self) -> Result<Self, TypedFacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = self.parent_of(view).zeros_like()?;
-            return parent.lazy_adjoint_on(&view.logical_space);
+            return Ok(parent.lazy_adjoint_on(&view.logical_space)?);
         }
         if let Some(spectrum) = self.spectrum() {
             return Ok(self.with_spectrum(
@@ -372,6 +373,6 @@ where
                     .collect(),
             ));
         }
-        S::zeros(self)
+        Ok(S::zeros(self)?)
     }
 }
