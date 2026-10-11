@@ -372,7 +372,7 @@ where
     /// prepared transforms; beyond it a warm call rebuilds plans). The first
     /// call whose largest traced extent `prod t_k` exceeds the resident ones
     /// or scaled template grows it once (one upload each, reported by
-    /// [`crate::typed::CudaTreeTransformStats::context_scalar_operand_bytes`]).
+    /// `CudaTreeTransformStats::context_scalar_operand_bytes`).
     /// One submission per term with a non-zero coefficient, plus one device
     /// refill of the scaled template per distinct non-unit coefficient; FLOPs
     /// are the Host's `sum_terms |out| * prod t_k` multiply-adds.
