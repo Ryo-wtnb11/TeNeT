@@ -411,8 +411,7 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
 /// as in `contract_into`. That these are the exact
 /// Host strings is pinned without a device in `typed_transform_host_side.rs`.
 fn as_device_message(host: &str) -> String {
-    host.replace("ordinary dense host source", "ordinary dense CUDA source")
-        .replace("ordinary dense host storage", "ordinary dense CUDA storage")
+    host.replace("ordinary dense host storage", "ordinary dense CUDA storage")
 }
 
 /// The warm contract: no transfer in either direction and no device
@@ -535,6 +534,26 @@ fn a_warm_device_into_transfers_nothing_and_allocates_nothing() {
     let (_, warm) = delta(|| {
         source
             .transpose_into(&[1, 3], &[0, 2], &mut cyclic, 1.0, 0.0)
+            .unwrap()
+    });
+    assert_transfer_free(&warm);
+
+    // A lazy-adjoint source (#1870 leaf D) is read through its parent's
+    // device payload: warm, it materializes nothing and transfers nothing.
+    let lazy = source.adjoint().unwrap();
+    let mut from_lazy = fixture(&runtime)
+        .adjoint()
+        .unwrap()
+        .permute(&[2, 0], &[1, 3])
+        .unwrap()
+        .materialize()
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    lazy.permute_into(&[2, 0], &[1, 3], &mut from_lazy, 1.0, 0.0)
+        .unwrap();
+    let (_, warm) = delta(|| {
+        lazy.permute_into(&[2, 0], &[1, 3], &mut from_lazy, 1.0, 0.5)
             .unwrap()
     });
     assert_transfer_free(&warm);
@@ -689,19 +708,19 @@ fn device_into_rejections_happen_before_any_device_work() {
         assert_eq!(error, Error::RuleMismatch);
     }
 
-    // 3. A lazy-adjoint source is rejected, never lowered onto its parent —
-    //    and it is reported before a lazy-adjoint *destination*.
+    // 3. A lazy-adjoint source is admitted (read through its parent, #1870),
+    //    so with a lazy-adjoint destination the destination is reported.
     let lazy_parent = device_destination();
     let mut lazy_destination = lazy_parent.adjoint().unwrap();
     let mut host_lazy_destination = host_destination().adjoint().unwrap();
     let error = rejects_like_host!(
-        "the lazy-adjoint source precedes the lazy-adjoint destination",
+        "a lazy-adjoint source with a lazy-adjoint destination",
         host_lazy_source.permute_into(&[2, 0], &[1, 3], &mut host_lazy_destination, 1.0, 0.0),
         lazy_parent,
         lazy_source.permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
     );
     assert!(
-        error.to_string().contains("ordinary dense CUDA source"),
+        error.to_string().contains("ordinary dense CUDA storage"),
         "{error}"
     );
 
@@ -730,6 +749,21 @@ fn device_into_rejections_happen_before_any_device_work() {
             host.permute_into(&[0, 0], &[1, 3], &mut host_alias, 1.0, 0.0),
             witness,
             source.permute_into(&[0, 0], &[1, 3], &mut alias, 1.0, 0.0)
+        );
+        assert!(error.to_string().contains("must not alias"), "{error}");
+    }
+
+    // 5b. A lazy-adjoint source aliasing its parent's payload: the alias
+    //     check runs against the source's stored body (#1870 leaf D).
+    let mut parent_alias = source.clone();
+    let mut host_parent_alias = host.clone();
+    {
+        let witness = source.clone();
+        let error = rejects_like_host!(
+            "a lazy source aliasing its parent",
+            host_lazy_source.permute_into(&[2, 0], &[1, 3], &mut host_parent_alias, 1.0, 0.0),
+            witness,
+            lazy_source.permute_into(&[2, 0], &[1, 3], &mut parent_alias, 1.0, 0.0)
         );
         assert!(error.to_string().contains("must not alias"), "{error}");
     }

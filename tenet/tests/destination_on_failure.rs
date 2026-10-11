@@ -235,11 +235,11 @@ macro_rules! u1_suite {
         );
         rejects!(
             $snap,
-            // Host admits a lazy source (#1870 A2) and reports the space;
-            // the device lane rejects its kind until #1870 D.
+            // Both lanes admit a lazy source (#1870 A2 Host, D device) and
+            // report the space.
             format!("{op} lazy source, wrong space"),
             wrong(&permuted),
-            _,
+            SpaceMismatch,
             |d: &mut _| lazy.permute_into(&[2, 0], &[1, 3], d, 1.0, 0.5)
         );
         rejects!(
@@ -295,7 +295,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} lazy source, wrong space"),
             wrong(&braided),
-            _,
+            SpaceMismatch,
             |d: &mut _| lazy.braid_into(&[1, 0], &[3, 2], &levels, d, 1.0, 0.5)
         );
         rejects!(
@@ -371,7 +371,7 @@ macro_rules! u1_suite {
             $snap,
             format!("{op} lazy source, wrong space"),
             wrong(&repartitioned),
-            _,
+            SpaceMismatch,
             |d: &mut _| lazy.repartition_into(d, 1.0, 0.5)
         );
         rejects!(

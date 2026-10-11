@@ -940,6 +940,37 @@ where
         )
     }
 
+    /// [`Self::compile_tree_pair_structure`] for a lazy-adjoint source whose
+    /// `logical` blocks are read through the storage of `parent`: the same
+    /// multiplicity-free storage-mapped resolution the Host existing-destination
+    /// transform replays, for a non-host executor that honours each task's
+    /// storage conjugation.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn compile_tree_pair_structure_storage_mapped<R>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        logical: &Arc<BlockStructure>,
+        parent: &DynamicFusionMapSpace,
+    ) -> Result<TreeTransformStructure<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        self.tree_structure(
+            rule,
+            operation,
+            dst_structure,
+            TreeStructureSource::StorageMapped {
+                logical,
+                operand: FusionOperand::adjoint(parent),
+            },
+        )
+    }
+
     /// The one tree-structure resolution of the planner and the eager
     /// transform entries: the multiplicity-free
     /// [`PlanningAlgebra::tree_structure`] with this context's planning state.
