@@ -267,10 +267,21 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .unwrap()
         .iter()
         .all(|value| value.to_bits() == 0));
-    assert!(matches!(
-        lhs_lazy.axpby(alpha, &rhs_device, beta),
-        Err(tenet::typed::Error::UnsupportedOnDevice(_))
-    ));
+    // One lazy and one owned operand (#1874): the Host rule, an owned
+    // result on the receiver's provider.
+    let mixed = lhs_lazy.axpby(alpha, &rhs_device, beta).unwrap();
+    assert!(std::ptr::eq(mixed.provider(), lhs_provider));
+    let expected = lhs.adjoint().unwrap().axpby(alpha, &rhs, beta).unwrap();
+    for (device, host) in mixed
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+    {
+        assert!((device - host).abs() <= 1e-12 * (1.0 + host.abs()));
+    }
 
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..4)
@@ -553,8 +564,37 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             ELEMENTWISE_TERMS,
         );
     }
-    assert!(matches!(
-        lazy_a.axpby(alpha, &b_device, beta),
-        Err(tenet::typed::Error::UnsupportedOnDevice(_))
-    ));
+    // One lazy and one owned operand, both orders (#1874).
+    numerics::assert_slices_close(
+        "lazy_a .axpby(owned b)",
+        lazy_a
+            .axpby(alpha, &b_device, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        a.adjoint()
+            .unwrap()
+            .axpby(alpha, &b, beta)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        ELEMENTWISE_TERMS,
+    );
+    numerics::assert_slices_close(
+        "b .axpby(lazy_a)",
+        b_device
+            .axpby(alpha, &lazy_a, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        b.axpby(alpha, &a.adjoint().unwrap(), beta)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        ELEMENTWISE_TERMS,
+    );
 }

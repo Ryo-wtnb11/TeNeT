@@ -346,16 +346,62 @@ where
             let output = x.cuda_axpby_owned(required_len, (source, alpha), None)?;
             return Ok(x.with_owned_cuda_storage(output));
         };
-        if matches!(&x.repr, TypedTensorRepr::Adjoint(_))
-            || matches!(&y.repr, TypedTensorRepr::Adjoint(_))
+        if matches!(&x.repr, TypedTensorRepr::Owned(_))
+            && matches!(&y.repr, TypedTensorRepr::Owned(_))
         {
-            return Err(Error::UnsupportedOnDevice(
-                "axpby does not support mixed owned/lazy CUDA operands".to_string(),
-            ));
+            let lhs = x.direct_cuda_storage("axpby")?;
+            let rhs = y.direct_cuda_storage("axpby")?;
+            let output = x.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
+            return Ok(x.with_owned_cuda_storage(output));
         }
-        let lhs = x.direct_cuda_storage("axpby")?;
-        let rhs = y.direct_cuda_storage("axpby")?;
-        let output = x.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
+        // One lazy operand (two are redirected to their parents by the
+        // body): each nonzero-coefficient operand is read in its logical
+        // orientation, the lazy one through its parent's strided, conjugated
+        // blocks, the first overwriting and the second accumulating. A zero
+        // coefficient drops its operand, as on the Host.
+        let reads = [(x, alpha), (y, beta)]
+            .into_iter()
+            .filter(|(_, coefficient)| !coefficient.is_zero())
+            .map(|(t, coefficient)| Ok((t.cuda_oriented_read("axpby")?, coefficient)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
+        let mut lease = x.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        let expected = Placement::Cuda(cuda.device());
+        for (read, _) in &reads {
+            TensorMap::<R, D, Self>::validate_cuda_owned_metadata(
+                expected,
+                read.source.placement(),
+                required_len,
+                read.source.len(),
+            )?;
+        }
+        // ponytail: #740, as `cuda_axpby_owned`: the output is born zero
+        // by an upload until native device allocation wins a bench.
+        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        #[cfg(test)]
+        observe_cuda_arithmetic(1, 0, 0);
+        let mut mode = tenet_dense::CudaRegionBeta::Overwrite;
+        for (read, coefficient) in &reads {
+            for (source_region, output_region) in &read.moves {
+                tenet_dense::cuda_region_axpby::<D>(
+                    cuda,
+                    &read.source.0,
+                    source_region,
+                    read.conj,
+                    *coefficient,
+                    tenet_dense::CudaRegionCoefficient::One,
+                    mode,
+                    &mut output.0,
+                    output_region,
+                )
+                .map_err(dense_err)?;
+                #[cfg(test)]
+                observe_cuda_arithmetic(0, 0, 1);
+            }
+            mode = tenet_dense::CudaRegionBeta::Accumulate;
+        }
+        drop(lease);
         Ok(x.with_owned_cuda_storage(output))
     }
 
@@ -368,7 +414,8 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), Error> {
-        let source = x.direct_cuda_storage("axpby_into")?;
+        let read = x.cuda_oriented_read("axpby_into")?;
+        let source = read.source;
         let device = Placement::Cuda(x.runtime.cuda_device_ordinal_checked()?);
         let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
             return Err(internal_layout_error(
@@ -391,10 +438,10 @@ where
             return Ok(());
         }
         let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
-        let region = tenet_dense::CudaRegion::packed(&[len], 0).map_err(dense_err)?;
         let mut lease = x.runtime.lease_cuda()?;
         let cuda = &mut *lease;
         if alpha.is_zero() {
+            let region = tenet_dense::CudaRegion::packed(&[len], 0).map_err(dense_err)?;
             return tenet_dense::cuda_region_scale::<D>(
                 cuda,
                 &mut destination_data.0,
@@ -403,6 +450,11 @@ where
             )
             .map_err(dense_err);
         }
+        // A logical block with no parent block reads as zero: only `beta`.
+        for zero in &read.zeros {
+            tenet_dense::cuda_region_scale::<D>(cuda, &mut destination_data.0, zero, beta)
+                .map_err(dense_err)?;
+        }
         let beta = if beta.is_zero() {
             tenet_dense::CudaRegionBeta::Overwrite
         } else if beta == D::from_real(1.0) {
@@ -410,17 +462,78 @@ where
         } else {
             tenet_dense::CudaRegionBeta::Scale(beta)
         };
-        tenet_dense::cuda_region_axpby::<D>(
-            cuda,
-            &source.0,
-            &region,
+        for (source_region, destination_region) in &read.moves {
+            tenet_dense::cuda_region_axpby::<D>(
+                cuda,
+                &source.0,
+                source_region,
+                read.conj,
+                alpha,
+                tenet_dense::CudaRegionCoefficient::One,
+                beta,
+                &mut destination_data.0,
+                destination_region,
+            )
+            .map_err(dense_err)?;
+        }
+        Ok(())
+    }
+}
+
+/// A dense CUDA operand read in its logical orientation (#1874): its stored
+/// payload and the (stored region, logical region) moves that cover its
+/// logical layout, read conjugated when `conj`, plus the logical regions
+/// that read as zero.
+struct CudaOrientedRead<'a, D: CudaPayload> {
+    source: &'a CudaStorage<D>,
+    moves: Vec<(tenet_dense::CudaRegion, tenet_dense::CudaRegion)>,
+    conj: bool,
+    zeros: Vec<tenet_dense::CudaRegion>,
+}
+
+impl<R, D> TensorMap<R, D, CudaStorage<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    /// An owned payload is one packed move. A lazy adjoint is its parent's
+    /// blocks through the one [`tenet_tensors::AdjointBlockMap`] lowering
+    /// (`materialize` uses the same), conjugated in the strided read: the
+    /// Host oriented kernels' per-block `(f₁, f₂) → (f₂, f₁)` read, without
+    /// materializing the adjoint.
+    fn cuda_oriented_read(
+        &self,
+        operation: &'static str,
+    ) -> Result<CudaOrientedRead<'_, D>, Error> {
+        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
+        let TypedTensorRepr::Adjoint(view) = &self.repr else {
+            let source = self.direct_cuda_storage(operation)?;
+            let region = tenet_dense::CudaRegion::packed(&[TensorStorage::len(source)], 0)
+                .map_err(dense_err)?;
+            return Ok(CudaOrientedRead {
+                source,
+                moves: vec![(region.clone(), region)],
+                conj: false,
+                zeros: Vec::new(),
+            });
+        };
+        let TypedData::Dense(source) = view.parent.data.as_ref() else {
+            return Err(Error::UnsupportedOnDevice(format!(
+                "{operation} requires dense CUDA storage"
+            )));
+        };
+        let lowering = super::cuda_transfer::cuda_adjoint_lowering(
+            &tenet_tensors::AdjointBlockMap::new(
+                view.parent.space.space(),
+                view.logical_space.space(),
+            ),
             false,
-            alpha,
-            tenet_dense::CudaRegionCoefficient::One,
-            beta,
-            &mut destination_data.0,
-            &region,
-        )
-        .map_err(dense_err)
+        )?;
+        Ok(CudaOrientedRead {
+            source,
+            moves: lowering.copies,
+            conj: true,
+            zeros: lowering.zeros,
+        })
     }
 }
