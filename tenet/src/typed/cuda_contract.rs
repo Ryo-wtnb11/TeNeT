@@ -93,6 +93,13 @@ fn cuda_trace_source<R, D: CudaPayload>(
     }
 }
 
+/// The device lease a prepared stack replay holds from its output upload
+/// through its replay. Nominally public only to name
+/// [`ContractExec::MembersLease`]; it is not reachable outside the crate.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub struct CudaMembersLease<'r>(crate::runtime::CudaLease<'r>);
+
 /// The device contraction kernel: the route planned on the Host, replayed on
 /// the device. Every transform structure, core plan, borrow decision and the
 /// destination come from the one planner the Host uses, with the
@@ -104,6 +111,69 @@ where
     D: CudaPayload,
 {
     type Caps = tenet_tensors::DirectCoreExecutor;
+    type MembersLease<'r> = CudaMembersLease<'r>;
+
+    fn reserve_members(
+        plan: &ContractPlan<R, D, Self>,
+        workspace: &mut ContractWorkspace<R, D, Self>,
+    ) -> Result<(), Error> {
+        let entries = plan.resolution.admit_cuda_members()?;
+        workspace.reserved_plan_entries = plan
+            .runtime
+            .lease_cuda()?
+            .reserve_plan_entries(entries)
+            .map_err(tenet_operations::OperationError::Dense)?;
+        Ok(())
+    }
+
+    fn lease_members(runtime: &Runtime) -> Result<CudaMembersLease<'_>, Error> {
+        Ok(CudaMembersLease(runtime.lease_cuda()?))
+    }
+
+    fn zeroed_members(
+        lease: &CudaMembersLease<'_>,
+        total: usize,
+        member_len: usize,
+        members: usize,
+    ) -> Result<Self, Error> {
+        Ok(CudaStorage::upload_members(
+            &lease.0,
+            tenet_tensors::zeroed_payload(total),
+            member_len,
+            members,
+        )?)
+    }
+
+    fn contract_members(
+        plan: &ContractPlan<R, D, Self>,
+        workspace: &mut ContractWorkspace<R, D, Self>,
+        lease: &mut CudaMembersLease<'_>,
+        dst: &mut Self,
+        lhs: (&Arc<BlockStructure>, &Self),
+        rhs: (&Arc<BlockStructure>, &Self),
+        members: usize,
+        init: tenet_tensors::ContractDestinationInit<D>,
+    ) -> Result<(), Error> {
+        tenet_tensors::execute_storage_contract_members_cuda(
+            &mut lease.0,
+            &plan.resolution,
+            (plan.space.space().structure(), dst),
+            lhs,
+            rhs,
+            &mut workspace.members_cuda,
+            members,
+            init,
+        )?;
+        Ok(())
+    }
+
+    fn retained_scratch_bytes(workspace: &ContractWorkspace<R, D, Self>) -> usize {
+        workspace.members_cuda.retained_bytes()
+    }
+
+    fn retained_payload_bytes(_payload: &Self, len: usize) -> usize {
+        len.saturating_mul(std::mem::size_of::<D>())
+    }
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
         replay: ContractReplay<'_, D, C>,

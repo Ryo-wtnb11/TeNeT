@@ -1,6 +1,7 @@
 //! Restricted binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
+use crate::typed::ContractExec;
 use tenet_tensors::{HostContractMembersWorkspace, OutputAxisOrder, StorageContractResolution};
 
 #[cfg(test)]
@@ -12,12 +13,6 @@ mod copy_c;
 #[cfg(test)]
 #[path = "contract_batch_pins.rs"]
 mod member_pins;
-
-// Only the two owned-dense stack payloads have an execution implementation.
-trait ContractBatchStorage<D>: TensorStorage<D> {}
-impl<D> ContractBatchStorage<D> for Vec<D> {}
-#[cfg(feature = "cuda")]
-impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 
 /// Immutable contraction structure for owned-dense Host or CUDA stacks.
 ///
@@ -32,12 +27,12 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
 pub struct ContractPlan<R, D, S = Vec<D>> {
-    runtime: Runtime,
+    pub(in crate::typed) runtime: Runtime,
     lhs: StructureSignature,
     rhs: StructureSignature,
     output_signature: StructureSignature,
-    space: BoundDynamicFusionMapSpace<R>,
-    resolution: Arc<StorageContractResolution<f64>>,
+    pub(in crate::typed) space: BoundDynamicFusionMapSpace<R>,
+    pub(in crate::typed) resolution: Arc<StorageContractResolution<f64>>,
     member_len: usize,
     _payload: PhantomData<(D, S)>,
 }
@@ -64,20 +59,19 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     runtime: Runtime,
     binding: Arc<StorageContractResolution<f64>>,
     pub(super) output: OutputSlot<StackedTensorMap<R, D, S>>,
-    members: HostContractMembersWorkspace<D>,
+    pub(in crate::typed) members: HostContractMembersWorkspace<D>,
     #[cfg(feature = "cuda")]
-    members_cuda: tenet_tensors::CudaContractMembersWorkspace<S>,
+    pub(in crate::typed) members_cuda: tenet_tensors::CudaContractMembersWorkspace<S>,
     /// Plan entries this workspace holds in the device context's ledger.
     #[cfg(feature = "cuda")]
-    reserved_plan_entries: usize,
+    pub(in crate::typed) reserved_plan_entries: usize,
 }
 
-#[allow(private_bounds)]
 impl<R, D, S> ContractPlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
-    S: ContractBatchStorage<D>,
+    S: ContractExec<R, D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
     /// CUDA admits exact-sign direct Core/SwappedCore, nonzero Single CopyC,
@@ -266,16 +260,12 @@ where
         })?;
         Ok(total)
     }
-}
 
-impl<R, D> ContractPlan<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    /// Creates independent mutable state; member count can change later.
-    pub fn workspace(&self) -> Result<ContractWorkspace<R, D>, Error> {
-        Ok(ContractWorkspace {
+    /// Creates independent mutable state; member count can change later. On
+    /// CUDA it also reserves this workspace's device plan entries, which it
+    /// releases when dropped, even if this plan is dropped first.
+    pub fn workspace(&self) -> Result<ContractWorkspace<R, D, S>, Error> {
+        let mut workspace = ContractWorkspace {
             runtime: self.runtime.clone(),
             binding: Arc::clone(&self.resolution),
             output: OutputSlot::default(),
@@ -284,72 +274,58 @@ where
             members_cuda: Default::default(),
             #[cfg(feature = "cuda")]
             reserved_plan_entries: 0,
-        })
-    }
-
-    fn run(
-        &self,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        dst: &mut [D],
-        members: usize,
-        workspace: &mut ContractWorkspace<R, D>,
-        init: tenet_tensors::ContractDestinationInit<D>,
-    ) -> Result<(), Error> {
-        let mut lease = self.runtime.lease_context()?;
-        lease
-            .context()
-            .multiplicity_free_lane::<D>()?
-            .execute_storage_contract_members_host(
-                &self.resolution,
-                (self.space.space().structure(), dst),
-                (lhs.space.space().structure(), &lhs.storage),
-                (rhs.space.space().structure(), &rhs.storage),
-                &mut workspace.members,
-                members,
-                init,
-            )?;
-        Ok(())
+        };
+        S::reserve_members(self, &mut workspace)?;
+        Ok(workspace)
     }
 
     /// Overwrites the workspace-owned output and borrows it until the next
     /// call. Any error follows the batched module's failure rule. The
     /// output's inactive blocks are not rewritten: they are already zero
     /// (see [`ContractWorkspace`]).
+    ///
+    /// On CUDA a new member count uploads one zeroed output buffer (#740). A
+    /// reused buffer, including one kept after a failed call, transfers no
+    /// payload.
     pub fn execute<'a>(
         &self,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        workspace: &'a mut ContractWorkspace<R, D>,
-    ) -> Result<&'a StackedTensorMap<R, D>, Error> {
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+        workspace: &'a mut ContractWorkspace<R, D, S>,
+    ) -> Result<&'a StackedTensorMap<R, D, S>, Error> {
         self.check_workspace(workspace)?;
         let buffers = workspace.output.take();
-        let checked = self
-            .check(lhs, rhs)
-            .and_then(|members| Ok((members, self.total_len(self.member_len, members)?)));
-        let (members, total) = match checked {
-            Ok(checked) => checked,
+        let prepared = self.check(lhs, rhs).and_then(|members| {
+            let total = self.total_len(self.member_len, members)?;
+            Ok((members, total, S::lease_members(&self.runtime)?))
+        });
+        let (members, total, mut lease) = match prepared {
+            Ok(prepared) => prepared,
             Err(error) => return Err(workspace.output.fail(buffers, error)),
         };
-        let mut output = buffers
-            .filter(|output| output.members == members)
-            .unwrap_or_else(|| StackedTensorMap {
+        let mut output = match buffers.filter(|output| output.members == members) {
+            Some(output) => output,
+            None => StackedTensorMap {
                 runtime: self.runtime.clone(),
                 space: self.space.clone(),
                 signature: self.output_signature.clone(),
-                storage: zeroed_payload(total),
+                storage: S::zeroed_members(&lease, total, self.member_len, members)?,
                 members,
                 member_len: self.member_len,
                 _payload: PhantomData,
-            });
-        let result = self.run(
-            lhs,
-            rhs,
-            &mut output.storage,
-            members,
+            },
+        };
+        let result = S::contract_members(
+            self,
             workspace,
+            &mut lease,
+            &mut output.storage,
+            (lhs.space.space().structure(), &lhs.storage),
+            (rhs.space.space().structure(), &rhs.storage),
+            members,
             tenet_tensors::ContractDestinationInit::Zeroed,
         );
+        drop(lease);
         workspace.output.settle(output, result)
     }
 
@@ -357,22 +333,29 @@ where
     /// errors leave it unchanged; after a backend error its payload may be
     /// partially overwritten while its metadata stays valid. Any error
     /// follows the batched module's failure rule.
+    ///
+    /// On CUDA each inactive region is zeroed across all members; the first
+    /// such call at a new high-water member count reserves the context zero
+    /// template, and later calls transfer no payload.
     pub fn execute_into(
         &self,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        dst: &mut StackedTensorMap<R, D>,
-        workspace: &mut ContractWorkspace<R, D>,
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+        dst: &mut StackedTensorMap<R, D, S>,
+        workspace: &mut ContractWorkspace<R, D, S>,
     ) -> Result<(), Error> {
         self.check_workspace(workspace)?;
         let result = self.check(lhs, rhs).and_then(|members| {
             self.check_destination(dst, members)?;
-            self.run(
-                lhs,
-                rhs,
-                &mut dst.storage,
-                members,
+            let mut lease = S::lease_members(&self.runtime)?;
+            S::contract_members(
+                self,
                 workspace,
+                &mut lease,
+                &mut dst.storage,
+                (lhs.space.space().structure(), &lhs.storage),
+                (rhs.space.space().structure(), &rhs.storage),
+                members,
                 tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
             )
         });
@@ -442,12 +425,11 @@ where
 /// ```
 pub struct ComposePlan<R, D, S = Vec<D>>(ContractPlan<R, D, S>);
 
-#[allow(private_bounds)]
 impl<R, D, S> ComposePlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
-    S: ContractBatchStorage<D>,
+    S: ContractExec<R, D>,
 {
     /// Prepares the composition of stacks with `lhs`'s and `rhs`'s
     /// signatures. Their payloads are not read, and `B` is not fixed.
@@ -471,20 +453,17 @@ where
     pub fn output_signature(&self) -> &StructureSignature {
         self.0.output_signature()
     }
-}
 
-impl<R, D> ComposePlan<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    /// Creates independent mutable execution state for this plan.
-    pub fn workspace(&self) -> Result<ContractWorkspace<R, D>, Error> {
+    /// Creates independent mutable execution state for this plan; on CUDA,
+    /// the B-dependent output, zero-fill and plan resources.
+    pub fn workspace(&self) -> Result<ContractWorkspace<R, D, S>, Error> {
         self.0.workspace()
     }
 
     /// Composes every member pair into the workspace-owned output and borrows
-    /// it for the workspace borrow's lifetime; [`ContractPlan::execute`].
+    /// it for the workspace borrow's lifetime; [`ContractPlan::execute`]. On
+    /// CUDA: one batched GEMM per coupled sector, and no transfer on a warm
+    /// call.
     ///
     /// # Errors
     ///
@@ -494,10 +473,10 @@ where
     /// the batched module's failure rule.
     pub fn execute<'a>(
         &self,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        workspace: &'a mut ContractWorkspace<R, D>,
-    ) -> Result<&'a StackedTensorMap<R, D>, Error> {
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+        workspace: &'a mut ContractWorkspace<R, D, S>,
+    ) -> Result<&'a StackedTensorMap<R, D, S>, Error> {
         self.0.execute(lhs, rhs, workspace)
     }
 
@@ -505,7 +484,8 @@ where
     /// [`ContractPlan::execute_into`]. `dst` must carry
     /// [`Self::output_signature`] and the operands' member count. Its prior
     /// contents never reach the result: the blocks no GEMM writes are
-    /// zero-filled on every call.
+    /// zero-filled on every call (on CUDA, one zero fill per inactive block
+    /// per call over all members).
     ///
     /// # Errors
     ///
@@ -513,45 +493,10 @@ where
     /// any write; any error follows the batched module's failure rule.
     pub fn execute_into(
         &self,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        dst: &mut StackedTensorMap<R, D>,
-        workspace: &mut ContractWorkspace<R, D>,
-    ) -> Result<(), Error> {
-        self.0.execute_into(lhs, rhs, dst, workspace)
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<R, D> ComposePlan<R, D, CudaStorage<D>>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaPayload,
-{
-    /// Creates independent B-dependent output, zero-fill, and plan resources.
-    pub fn workspace(&self) -> Result<ContractWorkspace<R, D, CudaStorage<D>>, Error> {
-        self.0.workspace()
-    }
-
-    /// The device form of the Host [`ComposePlan::execute`]: one batched
-    /// GEMM per coupled sector, and no transfer on a warm call.
-    pub fn execute<'a>(
-        &self,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        workspace: &'a mut ContractWorkspace<R, D, CudaStorage<D>>,
-    ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
-        self.0.execute(lhs, rhs, workspace)
-    }
-
-    /// The device form of the Host [`ComposePlan::execute_into`]: one zero
-    /// fill per inactive block per call over all members.
-    pub fn execute_into(
-        &self,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        dst: &mut StackedTensorMap<R, D, CudaStorage<D>>,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+        dst: &mut StackedTensorMap<R, D, S>,
+        workspace: &mut ContractWorkspace<R, D, S>,
     ) -> Result<(), Error> {
         self.0.execute_into(lhs, rhs, dst, workspace)
     }
@@ -563,172 +508,24 @@ impl<R, D, S> ContractWorkspace<R, D, S> {
     pub fn take_output(&mut self) -> Option<StackedTensorMap<R, D, S>> {
         self.output.take_output()
     }
+}
 
-    fn retained_scratch_bytes(&self) -> usize {
+impl<R, D, S: ContractExec<R, D>> ContractWorkspace<R, D, S> {
+    /// Retained output payload and replay scratch (on CUDA, device payload
+    /// and Host layout scratch), excluding Runtime resources.
+    pub fn retained_bytes(&self) -> usize {
         self.members.retained_bytes()
-    }
-}
-
-impl<R, D> ContractWorkspace<R, D> {
-    /// Retained Host payload capacity and replay scratch, excluding Runtime resources.
-    pub fn retained_bytes(&self) -> usize {
-        self.retained_scratch_bytes()
+            + S::retained_scratch_bytes(self)
             + self
                 .output
                 .buffers()
                 .map(|output| {
-                    output
-                        .storage
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<D>())
+                    S::retained_payload_bytes(
+                        &output.storage,
+                        output.members.saturating_mul(output.member_len),
+                    )
                 })
                 .sum::<usize>()
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
-    /// Retained device payload and Host layout scratch, excluding Runtime resources.
-    pub fn retained_bytes(&self) -> usize {
-        self.retained_scratch_bytes()
-            + self.members_cuda.retained_bytes()
-            + self
-                .output
-                .buffers()
-                .map(|output| {
-                    output
-                        .members
-                        .saturating_mul(output.member_len)
-                        .saturating_mul(std::mem::size_of::<D>())
-                })
-                .sum::<usize>()
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<R, D> ContractPlan<R, D, CudaStorage<D>>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaPayload,
-{
-    /// Creates independent B-dependent output, zero-fill, and plan resources.
-    pub fn workspace(&self) -> Result<ContractWorkspace<R, D, CudaStorage<D>>, Error> {
-        let mut workspace = ContractWorkspace {
-            runtime: self.runtime.clone(),
-            binding: Arc::clone(&self.resolution),
-            output: OutputSlot::default(),
-            members: HostContractMembersWorkspace::default(),
-            members_cuda: Default::default(),
-            reserved_plan_entries: 0,
-        };
-        let entries = self.resolution.admit_cuda_members()?;
-        workspace.reserved_plan_entries = self
-            .runtime
-            .lease_cuda()?
-            .reserve_plan_entries(entries)
-            .map_err(tenet_operations::OperationError::Dense)?;
-        Ok(workspace)
-    }
-
-    /// Overwrites workspace-owned device output; any error follows the
-    /// batched module's failure rule. A new member count uploads one zeroed
-    /// output buffer (#740). A reused buffer, including one kept after a
-    /// failed call, transfers no payload, and no call fills its inactive
-    /// regions: they are already zero (see [`ContractWorkspace`]).
-    pub fn execute<'a>(
-        &self,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        workspace: &'a mut ContractWorkspace<R, D, CudaStorage<D>>,
-    ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
-        self.check_workspace(workspace)?;
-        let buffers = workspace.output.take();
-        let runtime = self.runtime.clone();
-        let prepared = self.check(lhs, rhs).and_then(|members| {
-            let total = self.total_len(self.member_len, members)?;
-            Ok((members, total, runtime.lease_cuda()?))
-        });
-        let (members, total, mut lease) = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => return Err(workspace.output.fail(buffers, error)),
-        };
-        let mut output = match buffers.filter(|output| output.members == members) {
-            Some(output) => output,
-            None => StackedTensorMap {
-                runtime: self.runtime.clone(),
-                space: self.space.clone(),
-                signature: self.output_signature.clone(),
-                storage: CudaStorage::upload_members(
-                    &lease,
-                    zeroed_payload(total),
-                    self.member_len,
-                    members,
-                )?,
-                members,
-                member_len: self.member_len,
-                _payload: PhantomData,
-            },
-        };
-        let result = self.run(
-            workspace,
-            &mut lease,
-            lhs,
-            rhs,
-            &mut output.storage,
-            tenet_tensors::ContractDestinationInit::Zeroed,
-        );
-        drop(lease);
-        workspace.output.settle(output, result)
-    }
-
-    /// Overwrites a checked caller device destination and zeroes each
-    /// inactive region across all members. The first such call at a new
-    /// high-water member count reserves the context zero template; later
-    /// calls transfer no payload.
-    pub fn execute_into(
-        &self,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        dst: &mut StackedTensorMap<R, D, CudaStorage<D>>,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
-    ) -> Result<(), Error> {
-        self.check_workspace(workspace)?;
-        let result = self.check(lhs, rhs).and_then(|members| {
-            self.check_destination(dst, members)?;
-            let runtime = self.runtime.clone();
-            let mut lease = runtime.lease_cuda()?;
-            self.run(
-                workspace,
-                &mut lease,
-                lhs,
-                rhs,
-                &mut dst.storage,
-                tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
-            )
-        });
-        result.map_err(|error| workspace.output.hide(error))
-    }
-
-    fn run(
-        &self,
-        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
-        ctx: &mut tenet_dense::CudaDenseContext,
-        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
-        dst: &mut CudaStorage<D>,
-        init: tenet_tensors::ContractDestinationInit<D>,
-    ) -> Result<(), Error> {
-        tenet_tensors::execute_storage_contract_members_cuda(
-            ctx,
-            &self.resolution,
-            (self.space.space().structure(), dst),
-            (lhs.space.space().structure(), &lhs.storage),
-            (rhs.space.space().structure(), &rhs.storage),
-            &mut workspace.members_cuda,
-            lhs.members,
-            init,
-        )?;
-        Ok(())
     }
 }
 
