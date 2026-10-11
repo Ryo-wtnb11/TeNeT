@@ -29,8 +29,6 @@
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
 //!   operand: `UnsupportedOnDevice`, asserted below.
-//! - CUDA `axpby` of one lazy and one owned operand, and `axpby_into` from a
-//!   lazy source: `UnsupportedOnDevice`, asserted below (#1874).
 //! - CUDA `svd_compact`/`qr_compact`/`eigh_full` of a lazy adjoint operand:
 //!   `UnsupportedOnDevice`, asserted below.
 //! - Fibonacci and SU(2)_k have complex twists (`Scalar = Complex64`), so
@@ -514,22 +512,26 @@ fn cuda_rows_match_host() {
             lazy_dev.zeros_like().unwrap(),
             lazy_a.zeros_like().unwrap(),
         );
-        let owned_b = lazy_b.materialize().unwrap().to_cuda().unwrap();
-        assert_eq!(
-            lazy_dev.axpby(alpha, &owned_b, beta).unwrap_err(),
-            Error::UnsupportedOnDevice(
-                "axpby does not support mixed owned/lazy CUDA operands".into()
-            )
+        // One lazy and one owned operand, both orders, and a lazy
+        // `axpby_into` source (#1874): the Host rule on the device.
+        let owned_b_host = lazy_b.materialize().unwrap();
+        let owned_b = owned_b_host.to_cuda().unwrap();
+        same(
+            "lazy + owned",
+            lazy_dev.axpby(alpha, &owned_b, beta).unwrap(),
+            lazy_a.axpby(alpha, &owned_b_host, beta).unwrap(),
         );
-        let lazy_source = "axpby_into does not support lazy adjoint CUDA operands";
-        let mut destination = lazy_b.materialize().unwrap().to_cuda().unwrap();
-        assert_eq!(
-            lazy_dev
-                .axpby_into(&mut destination, alpha, beta)
-                .unwrap_err(),
-            Error::UnsupportedOnDevice(lazy_source.into())
+        same(
+            "owned + lazy",
+            owned_b.axpby(alpha, &lazy_dev, beta).unwrap(),
+            owned_b_host.axpby(alpha, lazy_a, beta).unwrap(),
         );
-        // The destination checks run before the storage capability (#1756 L2).
+        let mut destination = owned_b_host.to_cuda().unwrap();
+        lazy_dev.axpby_into(&mut destination, alpha, beta).unwrap();
+        let mut expected = owned_b_host.materialize().unwrap();
+        lazy_a.axpby_into(&mut expected, alpha, beta).unwrap();
+        same("lazy axpby_into", destination.clone(), expected);
+        // The destination checks still run first (#1756 L2).
         let shared = destination.clone();
         assert_eq!(
             lazy_dev
@@ -1369,4 +1371,131 @@ fn transform_cuda_rows_match_host() {
     );
     transform_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
     transform_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
+}
+
+/// Mixed owned/lazy `axpby` (both orders) and a lazy `axpby_into` source on
+/// rank-3 `[V, V*] <- [V]` (U(1), fermion parity) and `[V, V] <- [V]` (SU(2),
+/// several fusion trees per coupled sector): the lazy operand's blocks are
+/// strided, permuted views of its parent. The device equals the Host rule at
+/// every coefficient pattern, including a zero `beta` over a NaN destination
+/// (the NaN must not survive) and a zero `alpha` (#1874).
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn mixed_lazy_axpby_cuda_rows_match_host() {
+    use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+    use tenet::typed::{CudaPayload, CudaStorage};
+
+    fn same<R, D>(what: &str, device: TensorMap<R, D, CudaStorage<D>>, host: TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaPayload + Into<Complex64>,
+    {
+        let device = device.to_host().unwrap();
+        assert!(device.dense_data().is_ok(), "{what}: owned dense result");
+        let host = host.materialize().unwrap();
+        assert_eq!(device.codomain(), host.codomain(), "{what}");
+        assert_eq!(device.domain(), host.domain(), "{what}");
+        let (device, host) = (device.dense_data().unwrap(), host.dense_data().unwrap());
+        assert_eq!(device.len(), host.len(), "{what}");
+        for (&x, &y) in device.iter().zip(host) {
+            let (x, y): (Complex64, Complex64) = (x.into(), y.into());
+            assert!(x.re.is_finite() && x.im.is_finite(), "{what}: {x}");
+            assert!(close_c(x, y), "{what}: {x} vs {y}");
+        }
+    }
+
+    fn rows<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>, coefficients: &[(D, D)], nan: D)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaPayload + Into<Complex64> + std::fmt::Debug,
+    {
+        let lazy = a.adjoint().unwrap();
+        let owned = b.adjoint().unwrap().materialize().unwrap();
+        let lazy_dev = a.to_cuda().unwrap().adjoint().unwrap();
+        let owned_dev = owned.to_cuda().unwrap();
+        let poisoned = owned.scale(nan).unwrap();
+        for &(alpha, beta) in coefficients {
+            let what = format!("alpha {alpha:?} beta {beta:?}");
+            same(
+                &format!("lazy + owned, {what}"),
+                lazy_dev.axpby(alpha, &owned_dev, beta).unwrap(),
+                lazy.axpby(alpha, &owned, beta).unwrap(),
+            );
+            same(
+                &format!("owned + lazy, {what}"),
+                owned_dev.axpby(alpha, &lazy_dev, beta).unwrap(),
+                owned.axpby(alpha, &lazy, beta).unwrap(),
+            );
+            // A zero `beta` overwrites a NaN destination on both storages.
+            let zero_beta = Into::<Complex64>::into(beta) == Complex64::new(0.0, 0.0);
+            let start = if zero_beta { &poisoned } else { &owned };
+            let mut device = start.to_cuda().unwrap();
+            lazy_dev.axpby_into(&mut device, alpha, beta).unwrap();
+            let mut host = start.materialize().unwrap();
+            lazy.axpby_into(&mut host, alpha, beta).unwrap();
+            same(&format!("lazy axpby_into, {what}"), device, host);
+        }
+    }
+
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    /// A value fixed by the block's trees and the local index, distinct
+    /// across blocks, so a wrong parent block cannot pass.
+    fn fill<S: std::fmt::Debug>(
+        trees: &tenet::typed::BlockFusionTrees<S>,
+        ix: &[usize],
+    ) -> Complex64 {
+        let key = format!(
+            "{:?}{:?}{:?}{:?}{:?}{ix:?}",
+            trees.codomain_uncoupled(),
+            trees.codomain_innerlines(),
+            trees.domain_uncoupled(),
+            trees.domain_innerlines(),
+            trees.coupled(),
+        );
+        let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Complex64::new(
+            ((hash % 2001) as f64 - 1000.0) / 257.0,
+            (((hash >> 20) % 2001) as f64 - 1000.0) / 311.0,
+        )
+    }
+    fn fill_b<S: std::fmt::Debug>(
+        trees: &tenet::typed::BlockFusionTrees<S>,
+        ix: &[usize],
+    ) -> Complex64 {
+        fill(trees, ix).conj() * Complex64::new(-0.6, 0.9) + Complex64::new(0.25, 0.0)
+    }
+    macro_rules! both_dtypes {
+        ($codomain:expr, $domain:expr) => {{
+            let real: Vec<(f64, f64)> = vec![(0.7, -1.1), (0.0, -1.1), (0.7, 0.0), (1.0, 1.0)];
+            let a: TensorMap<_, f64> =
+                TensorMap::from_subblock_fn(&runtime, $codomain, $domain, |t, ix| fill(t, ix).re)
+                    .unwrap();
+            let b: TensorMap<_, f64> =
+                TensorMap::from_subblock_fn(&runtime, $codomain, $domain, |t, ix| fill_b(t, ix).re)
+                    .unwrap();
+            rows(&a, &b, &real, f64::NAN);
+            let complex: Vec<(Complex64, Complex64)> = vec![
+                (Complex64::new(0.7, -0.3), Complex64::new(-1.1, 0.4)),
+                (Complex64::new(0.0, 0.0), Complex64::new(-1.1, 0.4)),
+                (Complex64::new(0.7, -0.3), Complex64::new(0.0, 0.0)),
+                (Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0)),
+            ];
+            let a: TensorMap<_, Complex64> =
+                TensorMap::from_subblock_fn(&runtime, $codomain, $domain, fill).unwrap();
+            let b: TensorMap<_, Complex64> =
+                TensorMap::from_subblock_fn(&runtime, $codomain, $domain, fill_b).unwrap();
+            rows(&a, &b, &complex, Complex64::new(f64::NAN, f64::NAN));
+        }};
+    }
+    let u1 = u1_leg();
+    let u1_dual = u1.try_dual().unwrap();
+    both_dtypes!([&u1, &u1_dual], [&u1]);
+    let su2 = su2_leg();
+    both_dtypes!([&su2, &su2], [&su2]);
+    let fz2 = fz2_leg();
+    let fz2_dual = fz2.try_dual().unwrap();
+    both_dtypes!([&fz2, &fz2_dual], [&fz2]);
 }

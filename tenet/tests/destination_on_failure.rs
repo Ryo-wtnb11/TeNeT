@@ -1341,20 +1341,12 @@ fn every_device_into_leaves_a_rejected_destination_bit_identical() {
     let lift = |x: &TensorMap<ZNFusionRule, f64>| x.to_cuda().unwrap();
     rule_suite!(&rt, lift, device_snap);
 
-    // Device capability boundary: a lazy-adjoint `axpby_into` source.
+    // A lazy-adjoint `axpby_into` source is admitted on the device (#1874);
+    // the destination checks still reject a shared destination untouched.
     let (v, w) = legs();
     let t = TensorMap::<_, f64>::rand_with_seed(&rt, [&v], [&v, &w], 1).unwrap();
     let lazy = t.to_cuda().unwrap().adjoint().unwrap();
     let like = t.adjoint().unwrap().materialize().unwrap();
-    rejects!(
-        device_snap,
-        "device axpby_into lazy source",
-        sentinel!(&rt, like).to_cuda().unwrap(),
-        Error::UnsupportedOnDevice(_),
-        |d: &mut _| lazy.axpby_into(d, 1.0, 0.5)
-    );
-    // The destination checks run before that capability (TensorKit checks
-    // the destination space before the kernel; #1756 L2).
     rejects!(
         device_snap,
         "device axpby_into lazy source, shared dst",

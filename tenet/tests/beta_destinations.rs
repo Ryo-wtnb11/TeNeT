@@ -761,19 +761,30 @@ macro_rules! device_suite {
                 2
             );
         }
-        // A lazy-adjoint axpby source is a device capability boundary, as for
-        // the returning device `axpby` with mixed operands.
-        let mut destination = t2
-            .adjoint()
-            .unwrap()
-            .materialize()
-            .unwrap()
-            .to_cuda()
-            .unwrap();
-        assert!(matches!(
-            dlazy.axpby_into(&mut destination, D::real(1.0), D::real(0.0)),
-            Err(Error::UnsupportedOnDevice(_))
-        ));
+        // A lazy-adjoint axpby source reads its parent's blocks on the device
+        // (#1874); a zero beta over a NaN destination does not let it through.
+        let prior = t2.adjoint().unwrap().materialize().unwrap();
+        let poisoned = prior.scale(nan).unwrap();
+        for (alpha, beta) in coefficients::<D>() {
+            same!(
+                &format!(
+                    "{} device lazy axpby_into alpha={alpha:?} beta={beta:?}",
+                    $label
+                ),
+                prior,
+                |d: &mut TensorMap<_, D>| lazy.axpby_into(d, alpha, beta),
+                |d: &mut TensorMap<_, D, _>| dlazy.axpby_into(d, alpha, beta),
+                2
+            );
+        }
+        same!(
+            &format!("{} device lazy axpby_into over NaN, beta=0", $label),
+            poisoned,
+            |d: &mut TensorMap<_, D>| lazy.axpby_into(d, D::beta(), D::real(0.0)),
+            |d: &mut TensorMap<_, D, _>| dlazy.axpby_into(d, D::beta(), D::real(0.0)),
+            2
+        );
+        let mut destination = prior.to_cuda().unwrap();
         let clone = destination.clone();
         assert_eq!(
             dlazy

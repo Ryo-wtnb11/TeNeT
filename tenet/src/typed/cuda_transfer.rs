@@ -151,13 +151,14 @@ where
         Ok(())
     }
 
+    /// An owned dense result on this operand's logical space.
     pub(super) fn with_owned_cuda_storage(&self, storage: CudaStorage<D>) -> Self {
-        let body = self
-            .owned_body()
-            .expect("CUDA arithmetic output authority must be owned");
         Self {
             runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(body.space.clone(), storage)),
+            repr: owned_repr(TypedTensorBody::dense(
+                self.logical_space().clone(),
+                storage,
+            )),
         }
     }
 }
@@ -175,7 +176,9 @@ where
     ) -> Result<Self, Error> {
         let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
         let required_len = t.logical_space().space().required_len()?;
-        let adjoint = map.map(cuda_adjoint_lowering::<D>).transpose()?;
+        let adjoint = map
+            .map(|map| cuda_adjoint_lowering(map, D::IS_COMPLEX))
+            .transpose()?;
 
         let mut lease = t.runtime.lease_cuda()?;
         let cuda = &mut *lease;
@@ -218,21 +221,24 @@ where
 }
 
 /// The device lowering of an [`tenet_tensors::AdjointBlockMap`], on the Host
-/// before the lease: the strided copies (real) or the element table
-/// (complex) that conjugate-transpose the parent, and the regions of blocks
-/// that read as zero.
+/// before the lease: the strided copies, or with `table` the element table,
+/// that transpose the parent (the caller conjugates), and the regions of
+/// blocks that read as zero. `materialize` takes the table for a complex
+/// payload (one gather and one `conj`); the elementwise kernels take the
+/// copies at every dtype and conjugate in the strided read itself (#1874).
 #[cfg(feature = "cuda")]
 pub(super) struct CudaAdjointLowering {
-    /// (parent region, output region) per block of a real payload.
+    /// (parent region, output region) per block, without `table`.
     pub(super) copies: Vec<(tenet_dense::CudaRegion, tenet_dense::CudaRegion)>,
-    /// The parent element of each output element of a complex payload.
+    /// The parent element of each output element, with `table`.
     pub(super) table: Vec<usize>,
     pub(super) zeros: Vec<tenet_dense::CudaRegion>,
 }
 
 #[cfg(feature = "cuda")]
-pub(super) fn cuda_adjoint_lowering<D: CudaPayload>(
+pub(super) fn cuda_adjoint_lowering(
     map: &tenet_tensors::AdjointBlockMap<'_>,
+    table: bool,
 ) -> Result<CudaAdjointLowering, Error> {
     let region = |dims: Vec<usize>, strides: Vec<usize>, offset: usize| {
         tenet_dense::CudaRegion::new(dims, strides, offset)
@@ -259,7 +265,7 @@ pub(super) fn cuda_adjoint_lowering<D: CudaPayload>(
         let destination = region(shape.to_vec(), block.strides().to_vec(), block.offset())?;
         let Some(source) = map.source(block)? else {
             zeros.push(destination);
-            if D::IS_COMPLEX {
+            if table {
                 walks.push((shape, block.strides(), block.offset(), None));
             }
             continue;
@@ -267,7 +273,7 @@ pub(super) fn cuda_adjoint_lowering<D: CudaPayload>(
         let source_strides = (0..shape.len())
             .map(|axis| source.stride(axis))
             .collect::<Result<Vec<_>, _>>()?;
-        if D::IS_COMPLEX {
+        if table {
             walks.push((
                 shape,
                 block.strides(),
@@ -290,27 +296,27 @@ pub(super) fn cuda_adjoint_lowering<D: CudaPayload>(
     // layout lays blocks out compactly in block order, so the walk visits
     // output positions 0, 1, 2, ... and each entry is pushed once; any other
     // order falls back to an indexed fill.
-    let mut table = Vec::with_capacity(if D::IS_COMPLEX { required_len } else { 0 });
+    let mut elements = Vec::with_capacity(if table { required_len } else { 0 });
     let mut sequential = true;
     for (shape, strides, offset, source) in &walks {
         for_each_block_element(shape, strides, *offset, source, |dst, src| {
-            sequential &= dst == table.len();
-            table.push(src);
+            sequential &= dst == elements.len();
+            elements.push(src);
         });
     }
     if !sequential {
         // ponytail: non-canonical output layouts only; zero-filled then
         // overwritten, as tiling was checked above.
-        table = vec![0; required_len];
+        elements = vec![0; required_len];
         for (shape, strides, offset, source) in &walks {
             for_each_block_element(shape, strides, *offset, source, |dst, src| {
-                table[dst] = src;
+                elements[dst] = src;
             });
         }
     }
     Ok(CudaAdjointLowering {
         copies,
-        table,
+        table: elements,
         zeros,
     })
 }

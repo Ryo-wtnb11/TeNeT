@@ -82,8 +82,11 @@ where
     ///
     /// # CUDA storage
     ///
-    /// One lazy and one owned operand return [`Error::UnsupportedOnDevice`]
-    /// (no device oriented kernel, #1874).
+    /// The same rule: one lazy and one owned operand give an owned dense
+    /// result, the lazy one read block by block from its parent through one
+    /// conjugating strided `dot_general` per block (#1874); nothing is
+    /// materialized and nothing crosses the host boundary except the output's
+    /// zero initialization (#740).
     ///
     /// ```compile_fail
     /// use tenet::sector::U1FusionRule;
@@ -182,9 +185,9 @@ where
     ///
     /// One `dot_general` over the whole payload with `alpha` as its
     /// descriptor scale and `beta` in its epilogue; nothing is uploaded or
-    /// allocated on a warm context. A lazy-adjoint `self` returns
-    /// [`Error::UnsupportedOnDevice`] after the destination checks (no device
-    /// oriented kernel, #1874), and a payload on another device
+    /// allocated on a warm context. A lazy-adjoint `self` is read from its
+    /// parent with one conjugating strided `dot_general` per block, likewise
+    /// upload-free (#1874). A payload on another device returns
     /// [`Error::PlacementMismatch`].
     ///
     /// # Errors

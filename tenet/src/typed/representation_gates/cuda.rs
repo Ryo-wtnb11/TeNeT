@@ -281,14 +281,31 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     for result in [&lazy_scale, &lazy_add, &lazy_zero] {
         assert!(matches!(result.repr, TypedTensorRepr::Adjoint(_)));
     }
-    assert!(matches!(
-        observed_arithmetic!(
-            lazy_device.axpby(2.0, &source_device, -3.0),
-            (0, 0, 0),
-            (0, 0, 0)
-        ),
-        Err(Error::UnsupportedOnDevice(_))
-    ));
+    // Mixed lazy/owned (#1874): one zero output upload, no coefficient
+    // upload, one strided read per lazy block plus one for the owned operand.
+    let blocks = lazy_device
+        .logical_space()
+        .space()
+        .structure()
+        .block_count();
+    let mixed = observed_arithmetic!(
+        lazy_device.axpby(2.0, &source_device, -3.0),
+        (1, 0, blocks + 1),
+        (0, 0, 0)
+    )
+    .unwrap();
+    assert!(matches!(mixed.repr, TypedTensorRepr::Owned(_)));
+    let expected_mixed = lazy.axpby(2.0, &source, -3.0).unwrap();
+    for (device, host) in mixed
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected_mixed.dense_data().unwrap())
+    {
+        assert!((device - host).abs() <= 1e-12 * (1.0 + host.abs()));
+    }
 
     assert!(matches!(
         lazy_device.inner(&lazy_device),
@@ -1198,10 +1215,10 @@ where
     } else {
         logical.clone()
     };
-    let lowering = super::super::cuda_transfer::cuda_adjoint_lowering::<D>(
-        &tenet_tensors::AdjointBlockMap::new(parent_space, &adjoint_space),
-    )
-    .unwrap();
+    let map = tenet_tensors::AdjointBlockMap::new(parent_space, &adjoint_space);
+    let lowering = super::super::cuda_transfer::cuda_adjoint_lowering(&map, D::IS_COMPLEX).unwrap();
+    // The elementwise kernels read every dtype through the copies (#1874).
+    let regions = super::super::cuda_transfer::cuda_adjoint_lowering(&map, false).unwrap();
 
     let (nout, nin) = (parent_space.nout(), parent_space.nin());
     let parent_structure = parent_space.structure();
@@ -1273,13 +1290,16 @@ where
         assert_eq!(lowering.table, table, "element table");
     } else {
         assert!(lowering.table.is_empty(), "real lowers to copies");
-        let lowered: Vec<_> = lowering
-            .copies
-            .iter()
-            .map(|(source, destination)| (geometry(source), geometry(destination)))
-            .collect();
-        assert_eq!(lowered, copies, "strided copies");
     }
+    assert!(regions.table.is_empty(), "copies only");
+    let lowered: Vec<_> = regions
+        .copies
+        .iter()
+        .map(|(source, destination)| (geometry(source), geometry(destination)))
+        .collect();
+    assert_eq!(lowered, copies, "strided copies");
+    let lowered_zeros: Vec<_> = regions.zeros.iter().map(geometry).collect();
+    assert_eq!(lowered_zeros, zeros, "zero regions without a table");
 
     // The lowering, run on the Host, is the Host materialization.
     let parent = t.dense_data().unwrap();
@@ -1393,8 +1413,9 @@ fn typed_cuda_materialize_lowers_the_host_adjoint_block_map() {
         complex.dense_data().unwrap(),
     );
     assert!(matches!(host, Err(OperationError::MissingBlockKey { .. })));
-    let device = super::super::cuda_transfer::cuda_adjoint_lowering::<Complex64>(
+    let device = super::super::cuda_transfer::cuda_adjoint_lowering(
         &tenet_tensors::AdjointBlockMap::new(&parent, logical),
+        true,
     );
     assert!(matches!(
         device,

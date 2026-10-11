@@ -41,7 +41,7 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{BlockFusionTrees, ContractSpec, Error, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{BlockFusionTrees, ContractSpec, GradedSpace, Runtime, TensorMap};
 
 mod common;
 
@@ -354,12 +354,39 @@ where
         "lazy adjoint scale",
     );
 
-    // Mixing a lazy and an owned operand stays the documented device scope at
-    // every dtype: the rejection order is unchanged by the payload.
-    assert!(matches!(
-        lazy_a.axpby(alpha, &device_b, beta),
-        Err(Error::UnsupportedOnDevice(_))
-    ));
+    // One lazy and one owned operand at every dtype, both orders (#1874).
+    assert_matches_host(
+        lazy_a
+            .axpby(alpha, &device_b, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        a.adjoint()
+            .unwrap()
+            .axpby(alpha, &b, beta)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        tolerance,
+        "lazy + owned",
+    );
+    assert_matches_host(
+        device_b
+            .axpby(alpha, &lazy_a, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        b.axpby(alpha, &a.adjoint().unwrap(), beta)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        tolerance,
+        "owned + lazy",
+    );
 }
 
 #[test]
