@@ -313,11 +313,12 @@ where
     /// space, body, or device allocation: the Host [`TensorMap::permute_into`].
     ///
     /// The admission sequence is the Host one plus the device's own placement
-    /// check: same Runtime, same rule identity, an owned dense device source
-    /// (a lazy adjoint is *rejected*, not lowered onto its parent, exactly as
-    /// on Host — the destination is the caller's, so there is no re-wrapping
-    /// to do), an owned dense device destination that does not alias the
-    /// source payload, the admitted tree-pair operation or else the
+    /// check: same Runtime, same rule identity, an owned dense device
+    /// destination that does not alias the source's stored payload (a lazy
+    /// adjoint source is read through its parent's storage, as on Host — it
+    /// is not lowered onto the parent, because the destination is the
+    /// caller's and there is no re-wrapping to do), the admitted tree-pair
+    /// operation (direct sources only) or else the
     /// transform's own fusion space and block layout, the exact destination
     /// length, and unique destination ownership ([`Error::DestinationShared`]).
     /// Every one of them, and the structure compilation, happens before the
@@ -590,26 +591,16 @@ where
         }
 
         // Same error kinds, wording and order as Host; only the storage noun
-        // names the placement, as in `contract_into`.
-        // A lazy adjoint source is rejected rather than lowered: Host rejects
-        // it here too, because lowering would produce a result shaped like the
-        // adjoint's parent, not like the caller's destination.
-        let (source_body, source_storage) =
-            match &self.repr {
-                TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                    TypedData::Dense(storage) => (body, storage),
-                    TypedData::Diagonal(_) => return Err(Error::InvalidArgument(
-                        "typed destination tree transform requires an ordinary dense CUDA source"
-                            .to_string(),
-                    )),
-                },
-                TypedTensorRepr::Adjoint(_) => {
-                    return Err(Error::InvalidArgument(
-                        "typed destination tree transform requires an ordinary dense CUDA source"
-                            .to_string(),
-                    ))
-                }
-            };
+        // names the placement, as in `contract_into`. A lazy adjoint source is
+        // read through its parent's storage (`adjoint_of`), as on Host; it is
+        // not lowered onto the parent, which would shape the result like the
+        // parent rather than like the caller's destination.
+        let (source_space, adjoint_of, source_body) = match &self.repr {
+            TypedTensorRepr::Owned(body) => (&body.space, None, body),
+            TypedTensorRepr::Adjoint(view) => {
+                (&view.logical_space, Some(&view.parent.space), &view.parent)
+            }
+        };
         let (destination_body, destination_storage) = match &destination.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Dense(storage) => (body, storage),
@@ -630,26 +621,36 @@ where
                 "destination storage must not alias an input".to_string(),
             ));
         }
+        // Host's compact-diagonal read is unreachable here — `to_cuda`
+        // densifies a diagonal — so a device tensor that somehow carried one is
+        // an explicit capability error, as in the returning transform.
+        let TypedData::Dense(source_storage) = source_body.data.as_ref() else {
+            return Err(Error::UnsupportedOnDevice(
+                "typed destination tree transform requires dense CUDA storage".to_string(),
+            ));
+        };
 
         // As on Host: a destination proved once to be this operation's
         // result space of this source hits the completed transformer
         // directly, without rebuilding the operation or the result space.
+        // Only for a direct source, as on Host: the memo is keyed by the
+        // stored source layout.
         let mut exact_layout_hit = None;
-        exact_layout_probe(self, destination, &mut |view| {
-            exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit(
-                &identity,
-                view,
-                &source_body.space,
-                &destination_body.space,
-            );
-        });
+        if adjoint_of.is_none() {
+            exact_layout_probe(self, destination, &mut |view| {
+                exact_layout_hit = crate::runtime::Runtime::exact_layout_tree_pair_hit_of::<R, f64>(
+                    &identity,
+                    view,
+                    source_space,
+                    &destination_body.space,
+                );
+            });
+        }
         let operation = match exact_layout_hit {
             Some(_) => None,
             None => {
                 let operation = operation(self, destination)?;
-                let expected = source_body
-                    .space
-                    .transformed_multiplicity_free(&operation)?;
+                let expected = source_space.transformed_multiplicity_free(&operation)?;
                 if destination_body.space.space() != expected.space() {
                     return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
                         message: "destination fusion space or block layout does not match the operation result",
@@ -683,16 +684,25 @@ where
             (Some(structure), _) => structure,
             (None, Some(operation)) => {
                 let mut lease = self.runtime.lease_context()?;
-                lease
+                let context = lease
                     .context()
                     .multiplicity_free_lane::<D>()?
-                    .tree_context_mut()
-                    .compile_tree_pair_structure(
+                    .tree_context_mut();
+                match adjoint_of {
+                    None => context.compile_tree_pair_structure(
                         destination_body.space.provider(),
                         operation,
                         &destination_structure,
                         &source_structure,
-                    )?
+                    )?,
+                    Some(parent) => context.compile_tree_pair_structure_storage_mapped(
+                        destination_body.space.provider(),
+                        operation,
+                        &destination_structure,
+                        source_space.space().structure(),
+                        parent.space(),
+                    )?,
+                }
             }
             (None, None) => unreachable!("a miss builds the operation"),
         };
@@ -733,12 +743,12 @@ where
                 CudaTreeTransformDestination::Axpby(beta),
             )?;
         }
-        if let Some(operation) = &operation {
+        if let (Some(operation), None) = (&operation, adjoint_of) {
             // Retention is an optimization: a lookup-only key keeps no proof.
-            let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout(
+            let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout_of::<R, f64>(
                 &identity,
                 operation,
-                &source_body.space,
+                source_space,
                 destination.logical_space(),
             );
         }

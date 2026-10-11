@@ -1485,3 +1485,132 @@ fn device_into_of_an_empty_tensor_succeeds() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_into_reads_a_lazy_source_through_its_parent_like_the_host() {
+    // #1870 leaf D: a lazy-adjoint source of the device `*_into` is read
+    // through its parent's device payload (storage-mapped structure, storage
+    // conjugation per task), as on Host. Each call is compared against the
+    // Host `*_into` of the same lazy source and against the reference steps
+    // `alpha * eager(materialize(source)) + beta * dst0`.
+    let runtime = runtime();
+    let a = u1_leg(&[(-1, 2), (0, 1), (1, 3)], false);
+    let b = u1_leg(&[(0, 2), (1, 1)], true);
+    let c = u1_leg(&[(-1, 1), (1, 2)], false);
+    let d = u1_leg(&[(-2, 2), (-1, 3), (0, 1), (1, 2), (2, 1)], false);
+    let u1: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&a, &b, &c], [&d], complex_fill).unwrap();
+    let su2 = su2_leg();
+    let su2_parent: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2], complex_fill).unwrap();
+    let fz2 = fz2_leg();
+    let fz2_parent: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&fz2, &fz2], [&fz2], real_fill).unwrap();
+    for (alpha, beta) in [
+        (Complex64::new(0.75, -0.25), Complex64::new(0.0, 0.0)),
+        (Complex64::new(-2.5, 0.0), Complex64::new(0.5, 0.25)),
+    ] {
+        assert_lazy_into_matches_host(&u1, alpha, beta, "U(1) c64 lazy into");
+        assert_lazy_into_matches_host(&su2_parent, alpha, beta, "SU(2) c64 lazy into");
+    }
+    for (alpha, beta) in [(1.0, 0.0), (-2.5, 0.5), (0.5, 1.0)] {
+        assert_lazy_into_matches_host(&fz2_parent, alpha, beta, "fZ2 f64 lazy into");
+    }
+}
+
+/// Runs permute/braid/transpose/repartition `*_into` of `parent.adjoint()`
+/// on Host and on device into the same `dst0` (NaN for `beta = 0`, which
+/// must never be read), and asserts device == Host == the reference steps.
+fn assert_lazy_into_matches_host<R, D>(parent: &TensorMap<R, D>, alpha: D, beta: D, what: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload + tenet::typed::CudaPayload,
+{
+    let host_lazy = parent.adjoint().unwrap();
+    let device_lazy = parent.to_cuda().unwrap().adjoint().unwrap();
+    let owned = host_lazy.materialize().unwrap();
+    let rank = host_lazy.rank();
+    let split = host_lazy.codomain_rank();
+    let mut axes: Vec<usize> = (0..rank).collect();
+    axes.rotate_left(1);
+    axes.swap(0, 1);
+    let (codomain_axes, domain_axes) = axes.split_at(split);
+    let levels: Vec<usize> = (0..rank).map(|axis| (axis * 7) % rank + 1).collect();
+    let (full_codomain, full_domain) = full_rotation!(host_lazy);
+    let new_split = if split > 1 { split - 1 } else { split + 1 };
+
+    macro_rules! case {
+        ($operation:expr, |$t:ident| $eager:expr, |$s:ident, $d:ident| $into:expr) => {{
+            let label = format!("{what} {} alpha={alpha:?} beta={beta:?}", $operation);
+            let oracle_eager = {
+                let $t = &owned;
+                $eager
+            }
+            .unwrap();
+            let model = oracle_eager.materialize().unwrap();
+            // Built afresh per use: a clone would share the payload and trip
+            // the unique-ownership check.
+            let dst0 = || {
+                if beta == D::zero() {
+                    poisoned_like(&model)
+                } else {
+                    model.scale(D::one() + D::one()).unwrap()
+                }
+            };
+            let mut host_destination = dst0();
+            {
+                let $s = &host_lazy;
+                let $d = &mut host_destination;
+                $into
+            }
+            .unwrap();
+            let mut device_destination = dst0().to_cuda().unwrap();
+            {
+                let $s = &device_lazy;
+                let $d = &mut device_destination;
+                $into
+            }
+            .unwrap();
+            let actual = device_destination.to_host().unwrap();
+            assert_payload_matches(
+                actual.dense_data().unwrap(),
+                host_destination.dense_data().unwrap(),
+                &label,
+            );
+            assert_eq!(layout(&actual), layout(&model), "{label}: layout");
+            let expected: Vec<D> = model
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(dst0().dense_data().unwrap())
+                .map(|(&value, &old)| {
+                    if beta == D::zero() {
+                        alpha * value
+                    } else {
+                        alpha * value + beta * old
+                    }
+                })
+                .collect();
+            assert_payload_close(actual.dense_data().unwrap(), &expected, &label);
+        }};
+    }
+
+    case!(
+        "permute",
+        |t| t.permute(codomain_axes, domain_axes),
+        |s, d| s.permute_into(codomain_axes, domain_axes, d, alpha, beta)
+    );
+    case!(
+        "braid",
+        |t| t.braid(codomain_axes, domain_axes, &levels),
+        |s, d| s.braid_into(codomain_axes, domain_axes, &levels, d, alpha, beta)
+    );
+    case!(
+        "transpose",
+        |t| t.transpose(&full_codomain, &full_domain),
+        |s, d| s.transpose_into(&full_codomain, &full_domain, d, alpha, beta)
+    );
+    case!("repartition", |t| t.repartition(new_split), |s, d| s
+        .repartition_into(d, alpha, beta));
+}

@@ -1143,28 +1143,6 @@ impl Runtime {
         }
     }
 
-    /// [`Self::exact_layout_tree_pair_hit_of`] of the real-coefficient lane.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn exact_layout_tree_pair_hit<R>(
-        rule: &RuleIdentity,
-        operation: tenet_tensors::TreeTransformOperationView<'_>,
-        source: &BoundDynamicFusionMapSpace<R>,
-        destination: &BoundDynamicFusionMapSpace<R>,
-    ) -> Option<tenet_tensors::TreeTransformStructure<f64>> {
-        Self::exact_layout_tree_pair_hit_of(rule, operation, source, destination)
-    }
-
-    /// [`Self::admit_exact_tree_pair_layout_of`] of the real-coefficient lane.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn admit_exact_tree_pair_layout<R>(
-        rule: &RuleIdentity,
-        operation: &TreeTransformOperation,
-        source: &BoundDynamicFusionMapSpace<R>,
-        destination: &BoundDynamicFusionMapSpace<R>,
-    ) -> bool {
-        Self::admit_exact_tree_pair_layout_of::<R, f64>(rule, operation, source, destination)
-    }
-
     /// The resolved transformer of a typed Host `*_into` request whose spaces
     /// were proved to match once before (the exact-layout memo on the
     /// process-global entry of coefficient type `C`); `None` takes the full
