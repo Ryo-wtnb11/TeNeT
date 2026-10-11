@@ -53,4 +53,28 @@ fn unified_methods_resolve_in_path_form() {
         t.compose(view).unwrap().dense_data().unwrap(),
         t.dense_data().unwrap()
     );
+
+    // L7 transforms. `t` is the rank-(1,1) identity, which every one of
+    // these leg motions maps to itself.
+    let swapped = TensorMap::permute(&t, &[1], &[0]).unwrap();
+    assert_eq!(swapped.dense_data().unwrap(), t.dense_data().unwrap());
+    let braided = TensorMap::braid(&t, &[1], &[0], &[0, 1]).unwrap();
+    assert_eq!(braided.dense_data().unwrap(), t.dense_data().unwrap());
+    let transposed = TensorMap::transpose(&t, &[1], &[0]).unwrap();
+    let back = TensorMap::repartition(&transposed, 1).unwrap();
+    assert_eq!(back.dense_data().unwrap(), transposed.dense_data().unwrap());
+    let mut into = TensorMap::zeros_like(&swapped).unwrap();
+    TensorMap::permute_into(&t, &[1], &[0], &mut into, 1.0, 0.0).unwrap();
+    TensorMap::braid_into(&t, &[1], &[0], &[0, 1], &mut into, 1.0, 1.0).unwrap();
+    assert_eq!(into.dense_data().unwrap(), twice.dense_data().unwrap());
+    let mut into = TensorMap::zeros_like(&transposed).unwrap();
+    TensorMap::transpose_into(&t, &[1], &[0], &mut into, 1.0, 0.0).unwrap();
+    TensorMap::repartition_into(&transposed, &mut into, 1.0, 1.0).unwrap();
+    assert_eq!(
+        into.dense_data().unwrap(),
+        TensorMap::scale(&transposed, 2.0)
+            .unwrap()
+            .dense_data()
+            .unwrap()
+    );
 }

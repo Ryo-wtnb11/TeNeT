@@ -772,14 +772,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    fn permute(
-        t: &TensorMap<R, D, Self>,
-        rows: &[usize],
-        cols: &[usize],
-    ) -> Result<TensorMap<R, D, Self>, Error> {
-        t.permute(rows, cols)
-    }
-
     fn qr_compact(t: &TensorMap<R, D, Self>) -> Result<Qr<TensorMap<R, D, Self>>, Error> {
         t.qr_compact_matrix()
     }

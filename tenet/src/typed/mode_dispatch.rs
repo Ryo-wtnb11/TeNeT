@@ -354,23 +354,23 @@ where
         D::transform_bond_spectrum(tensor, spectrum, operation, require_representable)
     }
 
-    fn try_lazy_adjoint_transform(
-        tensor: &TensorMap<R, D>,
+    fn try_lazy_adjoint_transform<S: TransformExec<R, D>>(
+        tensor: &TensorMap<R, D, S>,
         operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, D>>, Error> {
+    ) -> Result<Option<TensorMap<R, D, S>>, Error> {
         D::try_lazy_adjoint(tensor, operation)
     }
 
-    fn transform(
-        tensor: &TensorMap<R, D>,
+    fn transform<S: TransformExec<R, D>>(
+        tensor: &TensorMap<R, D, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         D::transform(tensor, operation)
     }
 
-    fn transform_into(
-        source: &TensorMap<R, D>,
-        destination: &mut TensorMap<R, D>,
+    fn transform_into<S: TransformExec<R, D>>(
+        source: &TensorMap<R, D, S>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
@@ -424,42 +424,43 @@ where
         Ok(BondTransform::from_outcome(destination, outcome))
     }
 
-    fn try_lazy_adjoint_transform(
-        tensor: &TensorMap<R, D>,
+    fn try_lazy_adjoint_transform<S: TransformExec<R, D>>(
+        tensor: &TensorMap<R, D, S>,
         operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+    ) -> Result<Option<TensorMap<R, D, S>>, Self::FacadeError> {
         lazy_adjoint_of_transformed_parent(tensor, operation)
     }
 
-    fn transform(
-        tensor: &TensorMap<R, D>,
+    fn transform<S: TransformExec<R, D>>(
+        tensor: &TensorMap<R, D, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError> {
         // Why owned: the facade routes every lazy adjoint through
         // `try_lazy_adjoint_transform` above.
         let body = tensor
             .owned_body()
             .ok_or_else(|| internal_layout_error("checked Generic transform input is owned"))?;
-        let data = body.materialized_dense_data();
+        let src_len = transform_source_len(body)?;
         let mut lease = tensor.runtime.lease_context()?;
-        Ok(lease
+        let staged = lease
             .context()
             .generic_lane::<D>()?
             .tree_context_mut()
-            .tree_transform_owned_checked_generic_in(
-                &body.space,
-                None,
-                data.as_ref(),
-                &operation,
-                D::from_real(1.0),
-            )?)
+            .stage_tree_transform_checked_generic_in(&body.space, None, src_len, &operation)?;
+        let data = S::replay_owned(
+            TreeReplay::staged::<CheckedGenericTreeLane, _, _>(&tensor.runtime, lease, &staged),
+            tensor,
+            D::from_real(1.0),
+        )
+        .map_err(checked_generic_exec_error)?;
+        Ok((staged.commit()?, data))
     }
 
     /// No exact-layout probe: its key family is multiplicity-free direct
     /// only, so a checked entry can never hit it.
-    fn transform_into(
-        source: &TensorMap<R, D>,
-        destination: &mut TensorMap<R, D>,
+    fn transform_into<S: TransformExec<R, D>>(
+        source: &TensorMap<R, D, S>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
@@ -467,26 +468,35 @@ where
     ) -> Result<(), Self::FacadeError> {
         let mut lease = source.runtime.lease_context()?;
         let operation = operation()?;
+        let adjoint_of = match &source.repr {
+            TypedTensorRepr::Owned(_) => None,
+            TypedTensorRepr::Adjoint(view) => Some(&view.parent.space),
+        };
         let destination_space = destination.logical_space().space().clone();
-        let context = lease.context().generic_lane::<D>()?.tree_context_mut();
-        with_transform_into_source(
-            source,
-            &operation,
-            alpha,
-            beta,
-            |logical, adjoint_of, input| {
-                context.tree_transform_into_checked_generic_in(
-                    logical,
-                    adjoint_of,
-                    input,
-                    &operation,
-                    &destination_space,
-                    || destination_slice(destination).map_err(Self::FacadeError::from),
-                    alpha,
-                    beta,
-                )
-            },
-        )
+        let staged = lease
+            .context()
+            .generic_lane::<D>()?
+            .tree_context_mut()
+            .stage_tree_transform_into_checked_generic_in::<R, Self::FacadeError>(
+                source.logical_space(),
+                adjoint_of,
+                transform_source_len(source.storage_body())?,
+                &operation,
+                &destination_space,
+            )?;
+        let destination_data = destination_storage_mut(destination)?;
+        with_transform_into_source(source, &operation, alpha, beta, |input| {
+            S::replay_into(
+                TreeReplay::staged::<CheckedGenericTreeLane, _, _>(&source.runtime, lease, &staged),
+                input,
+                destination_data,
+                alpha,
+                beta,
+            )
+        })
+        .map_err(checked_generic_exec_error)?;
+        staged.commit()?;
+        Ok(())
     }
 }
 

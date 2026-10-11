@@ -939,7 +939,15 @@ fn product_tree_transformers_are_shared_by_independent_resolutions() {
         resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap();
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let from_context = context
-        .compile_tree_pair_structure(&rule, &operation, dst.structure(), src.structure())
+        .tree_structure(
+            &rule,
+            &operation,
+            dst.structure(),
+            crate::mode::TreeStructureSource::Stored {
+                structure: src.structure(),
+                storage_conjugate: false,
+            },
+        )
         .unwrap();
 
     // What: fZ2 x U(1) x SU(2) transformers are process-global: independent

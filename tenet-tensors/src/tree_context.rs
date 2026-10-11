@@ -209,37 +209,55 @@ where
         )
     }
 
-    /// `dst = alpha · operation(src) + beta · dst` for a multiplicity-free
-    /// source and an existing destination: the owned entry's staging and
-    /// commit around a write into the caller's buffer. `adjoint_of` is `None`
-    /// for a source stored as `src`, or the parent whose storage
-    /// [`TreeTransformIntoSource::Stored`] holds when `src` is that parent's
-    /// lazy adjoint. `dst_space` is compared with the staged destination
-    /// before `dst_data` is asked for the buffer.
+    /// Stages and resolves the multiplicity-free permute, braid, transpose or
+    /// repartition of `logical` (stored as the parent `adjoint_of` when it is
+    /// that parent's lazy adjoint, `src_len` stored elements): the owned
+    /// entry's staging, with the replay left to the caller's storage and the
+    /// commit to [`StagedTreeTransform::commit`].
     ///
     /// This concrete cross-crate entrypoint is internal and unstable despite
     /// being public for `tenet`; downstream callers must not rely on it.
     #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tree_transform_into_multiplicity_free_in<'d, R, E>(
+    pub fn stage_tree_transform_multiplicity_free_in<'a, R>(
         &mut self,
-        src: &BoundDynamicFusionMapSpace<R>,
-        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
-        source: TreeTransformIntoSource<'_, D, C, E>,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
         operation: &TreeTransformOperation,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), E>
+    ) -> Result<StagedTreeTransform<'a, R, BoundDynamicFusionMapSpace<R>, C>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-        E: From<OperationError>,
-        D: 'd,
     {
-        self.tree_transform_into_in::<MultiplicityFreeAdmissionMode, R, E>(
-            src, adjoint_of, source, operation, dst_space, dst_data, alpha, beta,
-        )
+        let resolved = self.stage_resolve::<MultiplicityFreeAdmissionMode, R>(
+            logical, adjoint_of, src_len, operation,
+        )?;
+        Ok(StagedTreeTransform { logical, resolved })
+    }
+
+    /// [`Self::stage_tree_transform_multiplicity_free_in`] for an existing
+    /// destination `dst_space` (TensorKit `spacecheck_transform`): the
+    /// structure is resolved against `dst_space`'s own block structure, and a
+    /// `dst_space` that is not the staged destination is
+    /// [`OperationError::SpaceMismatch`].
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn stage_tree_transform_into_multiplicity_free_in<'a, R>(
+        &mut self,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
+        operation: &TreeTransformOperation,
+        dst_space: &'a DynamicFusionMapSpace,
+    ) -> Result<StagedTreeTransform<'a, R, BoundDynamicFusionMapSpace<R>, C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    {
+        let resolved = self.stage_into_in::<MultiplicityFreeAdmissionMode, R, OperationError>(
+            logical, adjoint_of, src_len, operation, dst_space,
+        )?;
+        Ok(StagedTreeTransform { logical, resolved })
     }
 
     /// The owned multiplicity-free `operation` of a direct source in one
@@ -289,80 +307,34 @@ where
         Ok((destination, data))
     }
 
-    /// [`Self::tree_transform_owned_in`] writing into an existing
-    /// destination: the same staging, then the space check against `dst_space`
-    /// before `dst_data` runs the caller's remaining checks, then
-    /// `alpha · operation(src) + beta · dst` and the same commit. A compact
-    /// bond source is read from the resolved structure when it can be, and
-    /// is otherwise densified and replayed through that same structure. Any
-    /// error before the write leaves the destination untouched; the commit
-    /// follows the write, so a failed write publishes nothing.
-    #[allow(clippy::too_many_arguments)]
-    fn tree_transform_into_in<'d, M, R, E>(
+    /// [`Self::stage_resolve`] for an existing destination `dst_space`, in
+    /// the mode's match/resolve order. A mismatch is the caller's argument
+    /// error in every mode, never a checked plan failure.
+    fn stage_into_in<'a, M, R, E>(
         &mut self,
-        logical: &BoundDynamicFusionMapSpace<R>,
-        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
-        source: TreeTransformIntoSource<'_, D, C, E>,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
         operation: &TreeTransformOperation,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), E>
+        dst_space: &'a DynamicFusionMapSpace,
+    ) -> Result<ResolvedTransform<'a, M::TransformStage, C>, E>
     where
         M: PlanningAlgebra<R, Scalar = C>,
         E: From<M::Error> + From<OperationError>,
-        D: 'd,
     {
-        let src_len = match &source {
-            TreeTransformIntoSource::Stored(data) => data.len(),
-            // The dense image of the compact payload, as for the owned read.
-            TreeTransformIntoSource::Bond { .. } => logical
-                .space()
-                .required_len()
-                .map_err(OperationError::from)?,
-        };
         let staged = M::stage_transform(logical, adjoint_of, src_len, operation)?;
-        let Some(resolved) = M::match_and_resolve(
+        M::match_and_resolve(
             staged,
             dst_space,
             |staged, dst| self.resolve_staged::<M, R>(logical, adjoint_of, operation, staged, dst),
             |resolved| &resolved.stage,
         )?
-        else {
-            // Why `E` directly: a destination mismatch is the caller's
-            // argument error in every mode, never a checked plan failure.
-            return Err(E::from(OperationError::SpaceMismatch {
+        .ok_or_else(|| {
+            E::from(OperationError::SpaceMismatch {
                 message:
                     "destination fusion space or block layout does not match the operation result",
-            }));
-        };
-        let dst = dst_data()?;
-        let replay_destination = resolved.replay_destination.unwrap_or(&resolved.preview);
-        let densified;
-        let src_data = match source {
-            TreeTransformIntoSource::Stored(data) => data,
-            TreeTransformIntoSource::Bond { read, dense_source } => {
-                if read(&resolved.structure, replay_destination, dst)? {
-                    M::commit_transform(logical, resolved.stage, resolved.preview)?;
-                    return Ok(());
-                }
-                densified = dense_source()?;
-                &densified[..]
-            }
-        };
-        self.tree_transform_structure_into_raw(
-            &resolved.structure,
-            replay_destination,
-            resolved.src_structure,
-            dst,
-            src_data,
-            alpha,
-            beta,
-        )
-        .map_err(M::Error::from)?;
-        M::commit_transform(logical, resolved.stage, resolved.preview)?;
-        Ok(())
+            })
+        })
     }
 
     /// [`Self::tree_transform_owned_in`] with the replay replaced by `read`
@@ -478,31 +450,51 @@ where
         src_data: &[D],
         alpha: D,
     ) -> Result<Vec<D>, OperationError> {
-        let ResolvedTransform {
-            preview,
-            nout,
-            structure,
-            src_structure,
-            ..
-        } = resolved;
+        self.replay_tree_transform_dyn_owned(
+            &resolved.structure,
+            &resolved.preview,
+            resolved.src_structure,
+            resolved.nout,
+            src_data,
+            alpha,
+        )
+    }
+
+    /// The owned replay of a staged transform:
+    /// `alpha · structure(src_data)` into a fresh `dst_structure` payload,
+    /// through the built-in overwrite writer, or else zero-filled and
+    /// replayed.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn replay_tree_transform_dyn_owned(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        nout: usize,
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<Vec<D>, OperationError> {
         if let Some(data) = self
             .backend
             .try_tree_transform_structure_overwrite_owned_raw(
                 &mut self.workspace,
                 structure,
-                preview,
+                dst_structure,
                 src_structure,
-                *nout,
+                nout,
                 src_data,
                 alpha,
             )?
         {
             return Ok(data);
         }
-        let mut data = vec![D::zero(); preview.required_len().map_err(OperationError::from)?];
+        let mut data = vec![D::zero(); dst_structure.required_len().map_err(OperationError::from)?];
         self.tree_transform_structure_into_raw(
             structure,
-            preview,
+            dst_structure,
             src_structure,
             &mut data,
             src_data,
@@ -536,27 +528,123 @@ pub enum StructureOutcome<T, D> {
     Replayed(Vec<D>),
 }
 
-/// The source of an existing-destination tree transform.
+/// One staged eager tree transform between its staging and its commit: the
+/// resolved structure and the block structures its replay maps between.
+/// It borrows only the source and destination spaces, never the context it
+/// was staged on, so a storage may release that context before replaying.
 ///
 /// Internal and unstable despite being public for `tenet`.
 #[doc(hidden)]
-#[allow(clippy::type_complexity)]
-pub enum TreeTransformIntoSource<'s, D, C, E> {
-    /// The stored payload: the source's own, or its lazy-adjoint parent's.
-    Stored(&'s [D]),
-    /// A compact bond. `read` either writes `alpha · operation(src) +
-    /// beta · dst` from the resolved structure and the destination structure
-    /// it was resolved against and returns `true`, or returns `false` with
-    /// `dst` untouched; `dense_source` then builds the dense image that
-    /// structure replays.
-    Bond {
-        read: &'s mut dyn FnMut(
-            &TreeTransformStructure<C>,
-            &BlockStructure,
-            &mut [D],
-        ) -> Result<bool, E>,
-        dense_source: &'s dyn Fn() -> Result<Vec<D>, OperationError>,
-    },
+pub struct StagedTreeTransform<'a, R, S, C> {
+    logical: &'a BoundDynamicFusionMapSpace<R>,
+    resolved: ResolvedTransform<'a, S, C>,
+}
+
+impl<R, S, C> StagedTreeTransform<'_, R, S, C> {
+    /// The completed transformer the replay runs.
+    #[inline]
+    pub fn structure(&self) -> &TreeTransformStructure<C> {
+        &self.resolved.structure
+    }
+
+    /// The destination block structure the replay writes: the existing
+    /// destination's, else the staged one.
+    #[inline]
+    pub fn destination_structure(&self) -> &Arc<BlockStructure> {
+        self.resolved
+            .replay_destination
+            .unwrap_or(&self.resolved.preview)
+    }
+
+    /// The stored source block structure the replay reads: the source's own,
+    /// or its lazy-adjoint parent's.
+    #[inline]
+    pub fn source_structure(&self) -> &Arc<BlockStructure> {
+        self.resolved.src_structure
+    }
+
+    /// The destination codomain rank.
+    #[inline]
+    pub fn nout(&self) -> usize {
+        self.resolved.nout
+    }
+}
+
+impl<R> StagedTreeTransform<'_, R, BoundDynamicFusionMapSpace<R>, R::Scalar>
+where
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Scalar:
+        'static + Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+{
+    /// Commits the staged multiplicity-free destination after the replay.
+    pub fn commit(self) -> Result<BoundDynamicFusionMapSpace<R>, OperationError> {
+        let ResolvedTransform { stage, preview, .. } = self.resolved;
+        <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::commit_transform(
+            self.logical,
+            stage,
+            preview,
+        )
+    }
+}
+
+/// A checked Generic transform's staged destination, its call transaction
+/// and its memo publication, held opaque until [`StagedTreeTransform::commit`].
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+pub struct CheckedTreeTransformStage(
+    (
+        crate::contract::PreparedCheckedGenericDynamicSpace,
+        crate::contract::CheckedContractTxn,
+        Option<tenet_core::PermutedMemoTicket>,
+    ),
+);
+
+impl<'a, R> StagedTreeTransform<'a, R, CheckedTreeTransformStage, f64>
+where
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    fn checked(
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        resolved: ResolvedTransform<
+            'a,
+            <CheckedGenericAdmissionMode as PlanningAlgebra<R>>::TransformStage,
+            f64,
+        >,
+    ) -> Self {
+        let ResolvedTransform {
+            preview,
+            replay_destination,
+            nout,
+            stage,
+            structure,
+            src_structure,
+        } = resolved;
+        Self {
+            logical,
+            resolved: ResolvedTransform {
+                preview,
+                replay_destination,
+                nout,
+                stage: CheckedTreeTransformStage(stage),
+                structure,
+                src_structure,
+            },
+        }
+    }
+
+    /// Commits the staged checked Generic destination after the replay, then
+    /// publishes what the transform staged.
+    pub fn commit(
+        self,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericPlanError<R::Error>> {
+        let ResolvedTransform { stage, preview, .. } = self.resolved;
+        <CheckedGenericAdmissionMode as PlanningAlgebra<R>>::commit_transform(
+            self.logical,
+            stage.0,
+            preview,
+        )
+    }
 }
 
 impl<D>
@@ -600,34 +688,56 @@ where
     }
 
     /// The checked Generic twin of
-    /// [`Self::tree_transform_into_multiplicity_free_in`]; `adjoint_of` as
-    /// for [`Self::tree_transform_owned_checked_generic_in`]. The staged
-    /// destination, coefficients and transformer publish only after the
-    /// write succeeds.
+    /// [`Self::stage_tree_transform_multiplicity_free_in`]: admits and
+    /// preflights the source and resolves against an uninterned destination
+    /// preview; nothing publishes before [`StagedTreeTransform::commit`].
     ///
     /// This concrete cross-crate entrypoint is internal and unstable despite
     /// being public for `tenet`; downstream callers must not rely on it.
     #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tree_transform_into_checked_generic_in<'d, R, E>(
+    #[allow(clippy::type_complexity)]
+    pub fn stage_tree_transform_checked_generic_in<'a, R>(
         &mut self,
-        logical: &BoundDynamicFusionMapSpace<R>,
-        adjoint_of: Option<&BoundDynamicFusionMapSpace<R>>,
-        source: TreeTransformIntoSource<'_, D, f64, E>,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
         operation: &TreeTransformOperation,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), E>
+    ) -> Result<
+        StagedTreeTransform<'a, R, CheckedTreeTransformStage, f64>,
+        CheckedGenericPlanError<R::Error>,
+    >
+    where
+        R: CheckedGenericRigidSymbols<Scalar = f64>,
+    {
+        let resolved = self.stage_resolve::<CheckedGenericAdmissionMode, R>(
+            logical, adjoint_of, src_len, operation,
+        )?;
+        Ok(StagedTreeTransform::checked(logical, resolved))
+    }
+
+    /// The checked Generic twin of
+    /// [`Self::stage_tree_transform_into_multiplicity_free_in`]: resolved
+    /// against the staged preview, then matched with `dst_space`.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn stage_tree_transform_into_checked_generic_in<'a, R, E>(
+        &mut self,
+        logical: &'a BoundDynamicFusionMapSpace<R>,
+        adjoint_of: Option<&'a BoundDynamicFusionMapSpace<R>>,
+        src_len: usize,
+        operation: &TreeTransformOperation,
+        dst_space: &'a DynamicFusionMapSpace,
+    ) -> Result<StagedTreeTransform<'a, R, CheckedTreeTransformStage, f64>, E>
     where
         R: CheckedGenericRigidSymbols<Scalar = f64>,
         E: From<CheckedGenericPlanError<R::Error>> + From<OperationError>,
-        D: 'd,
     {
-        self.tree_transform_into_in::<CheckedGenericAdmissionMode, R, E>(
-            logical, adjoint_of, source, operation, dst_space, dst_data, alpha, beta,
-        )
+        let resolved = self.stage_into_in::<CheckedGenericAdmissionMode, R, E>(
+            logical, adjoint_of, src_len, operation, dst_space,
+        )?;
+        Ok(StagedTreeTransform::checked(logical, resolved))
     }
 
     /// The checked Generic twin of
@@ -900,74 +1010,6 @@ where
             dst_data,
             src_data,
             alpha,
-        )
-    }
-
-    /// Resolves the completed [`TreeTransformStructure`] for one
-    /// multiplicity-free operation through the process-global cache, without
-    /// replaying it. The returned handle is cheap: a hit clones three `Arc`s.
-    ///
-    /// This is the seam a *non-host* executor needs: everything categorical
-    /// (validation, the group plan, F/R moves, the `RuleIdentity`-keyed cache)
-    /// happens here, on the host, and what comes back is layout-only. A device
-    /// replay compiles through this before it takes its device lease, so the
-    /// host caches and the device lock are never held at the same time.
-    ///
-    /// `storage_conjugate` is fixed to `false`: a lazy adjoint is lowered onto
-    /// its parent by the caller, exactly as the host facade does.
-    ///
-    /// This concrete cross-crate entrypoint is internal and unstable despite
-    /// being public for `tenet`; downstream callers must not rely on it.
-    #[doc(hidden)]
-    pub fn compile_tree_pair_structure<R>(
-        &mut self,
-        rule: &R,
-        operation: &TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-    ) -> Result<TreeTransformStructure<C>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    {
-        self.tree_structure(
-            rule,
-            operation,
-            dst_structure,
-            TreeStructureSource::Stored {
-                structure: src_structure,
-                storage_conjugate: false,
-            },
-        )
-    }
-
-    /// [`Self::compile_tree_pair_structure`] for a lazy-adjoint source whose
-    /// `logical` blocks are read through the storage of `parent`: the same
-    /// multiplicity-free storage-mapped resolution the Host existing-destination
-    /// transform replays, for a non-host executor that honours each task's
-    /// storage conjugation.
-    ///
-    /// This concrete cross-crate entrypoint is internal and unstable despite
-    /// being public for `tenet`; downstream callers must not rely on it.
-    #[doc(hidden)]
-    pub fn compile_tree_pair_structure_storage_mapped<R>(
-        &mut self,
-        rule: &R,
-        operation: &TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        logical: &Arc<BlockStructure>,
-        parent: &DynamicFusionMapSpace,
-    ) -> Result<TreeTransformStructure<C>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    {
-        self.tree_structure(
-            rule,
-            operation,
-            dst_structure,
-            TreeStructureSource::StorageMapped {
-                logical,
-                operand: FusionOperand::adjoint(parent),
-            },
         )
     }
 

@@ -304,7 +304,8 @@ use linear_ops::unique_dense_destination;
 #[doc(hidden)]
 pub use linear_ops::ElementwiseExec;
 use linear_ops::{
-    axpby_into_checked, destination_precheck, destination_slice, require_destination_space,
+    axpby_into_checked, destination_precheck, destination_slice, destination_storage_mut,
+    require_destination_space,
 };
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
@@ -442,12 +443,12 @@ mod cuda_storage;
 mod transform_ops;
 mod twist_flip;
 pub use transform_ops::TypedTensorUnitDispatch;
-#[cfg(feature = "cuda")]
-use transform_ops::{braid_operation, repartition_probe, tree_operation_view};
 use transform_ops::{
-    lazy_adjoint_of_transformed_parent, map_spectrum_dtype, scale_by_beta,
-    with_transform_into_source,
+    checked_generic_exec_error, lazy_adjoint_of_transformed_parent, map_spectrum_dtype,
+    scale_by_beta, transform_source_len, with_transform_into_source, CheckedGenericTreeLane,
 };
+#[doc(hidden)]
+pub use transform_ops::{TransformExec, TransformExecError, TransformIntoSource, TreeReplay};
 #[doc(hidden)]
 pub use twist_flip::TwistExec;
 

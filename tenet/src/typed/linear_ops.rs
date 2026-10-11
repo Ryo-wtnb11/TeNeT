@@ -664,10 +664,13 @@ where
 }
 
 /// [`destination_postcheck`] against the destination's own space, then the
-/// host payload to write.
-pub(super) fn destination_slice<R, D>(
-    destination: &mut TensorMap<R, D>,
-) -> Result<&mut [D], Error> {
+/// stored payload to write.
+pub(super) fn destination_storage_mut<R, D, S>(
+    destination: &mut TensorMap<R, D, S>,
+) -> Result<&mut S, Error>
+where
+    S: TensorStorage<D>,
+{
     destination_postcheck(
         destination,
         destination.logical_space().space().required_len()?,
@@ -676,11 +679,18 @@ pub(super) fn destination_slice<R, D>(
         return Err(internal_layout_error("ordinary destination checked above"));
     };
     match Arc::get_mut(body).and_then(|body| Arc::get_mut(&mut body.data)) {
-        Some(TypedData::Dense(data)) => Ok(data.as_mut_slice()),
+        Some(TypedData::Dense(data)) => Ok(data),
         _ => Err(internal_layout_error(
             "unique dense destination checked above",
         )),
     }
+}
+
+/// [`destination_storage_mut`] of a host destination, as a slice.
+pub(super) fn destination_slice<R, D>(
+    destination: &mut TensorMap<R, D>,
+) -> Result<&mut [D], Error> {
+    destination_storage_mut(destination).map(Vec::as_mut_slice)
 }
 
 /// The one body of [`TensorMap::axpby_into`], shared with the empty-pair

@@ -20,7 +20,11 @@
 //! through `inner(t, twist(t))` against `Σ θ |t|²`, with θ = −1 for each
 //! listed leg whose uncoupled sector is odd. `materialize` of a lazy
 //! adjoint is checked through `inner(a^H, b^H) = conj(inner(a, b))` over the
-//! written entries and the exact round trip `(a^H)^H = a`.
+//! written entries and the exact round trip `(a^H)^H = a`. The transforms
+//! (`permute`, `braid`, `transpose`, `repartition` and their `_into`) are
+//! unitary, so they are checked through `norm`, `inner(T a, T b) =
+//! inner(a, b)` and their inverse motion, and `_into` through
+//! `inner(T a, alpha T a + beta T b)`.
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
@@ -1005,4 +1009,351 @@ fn materialize_cuda_rows_match_host() {
     );
     materialize_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
     materialize_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
+}
+
+/// The leg motions of the transform rows on a `[V, V*] <- [V]` fixture:
+/// `(permute codomain, permute domain)` and its inverse.
+const PERMUTE: (&[usize], &[usize]) = (&[2, 0], &[1]);
+const PERMUTE_BACK: (&[usize], &[usize]) = (&[1, 2], &[0]);
+
+/// The planar order (codomain, then the domain reversed) of a
+/// `(codomain_rank, rank)` split rotated by `by`, as `transpose` axes on the
+/// same split.
+fn rotation(codomain_rank: usize, rank: usize, by: usize) -> (Vec<usize>, Vec<usize>) {
+    let planar: Vec<usize> = (0..codomain_rank)
+        .chain((codomain_rank..rank).rev())
+        .collect();
+    let rotated: Vec<usize> = (0..rank).map(|i| planar[(i + by) % rank]).collect();
+    let codomain = rotated[..codomain_rank].to_vec();
+    let domain = rotated[codomain_rank..].iter().rev().copied().collect();
+    (codomain, domain)
+}
+
+/// `permute`/`braid`/`transpose`/`repartition` and their `_into` Host rows
+/// on `[V, V*] <- [V]`: dense, lazy adjoint and compact operands. Every
+/// motion is unitary, so it is checked through `norm` and
+/// `inner(T a, T b) = inner(a, b)` against the hand oracle and through its
+/// inverse; `_into` through `inner(T a, alpha T a + beta T b)`. Braiding the
+/// leg-swap with levels is the permute for the symmetric braidings here.
+macro_rules! transform_rows {
+    ($runtime:expr, $leg:expr, $dim:expr, $D:ty, $conv:expr, $cuda:expr) => {{
+        let runtime: &Runtime = $runtime;
+        let leg = $leg;
+        let dual = leg.try_dual().unwrap();
+        let dim = $dim;
+        let conv = $conv;
+        let build = |seed: f64| {
+            let mut entries = Vec::new();
+            let t = TensorMap::<_, $D>::from_subblock_fn(
+                runtime,
+                [&leg, &dual],
+                [&leg],
+                |trees, ix| {
+                    let x: $D = conv(entry(seed, ix[0] + 2 * ix[1], ix[1], ix[2]));
+                    entries.push((dim(trees), Complex64::from(x)));
+                    x
+                },
+            )
+            .unwrap();
+            (t, entries)
+        };
+        let (a, a_entries) = build(0.9);
+        let (b, b_entries) = build(-0.4);
+        let (alpha, beta) = (conv(Complex64::new(2.0, 0.5)), conv(Complex64::new(-0.5, 0.25)));
+        let (alpha_c, beta_c) = (Complex64::from(alpha), Complex64::from(beta));
+        let a_norm = norm_oracle(&a_entries, 2.0);
+        let ab = inner_oracle(&a_entries, &b_entries);
+        let aa = inner_oracle(&a_entries, &a_entries);
+
+        let motions: [(&str, fn(&TensorMap<_, $D>) -> TensorMap<_, $D>, fn(&TensorMap<_, $D>) -> TensorMap<_, $D>); 4] = [
+            (
+                "permute",
+                |t| t.permute(PERMUTE.0, PERMUTE.1).unwrap(),
+                |t| t.permute(PERMUTE_BACK.0, PERMUTE_BACK.1).unwrap(),
+            ),
+            (
+                "braid",
+                |t| t.braid(PERMUTE.0, PERMUTE.1, &[0, 1, 2]).unwrap(),
+                |t| t.braid(PERMUTE_BACK.0, PERMUTE_BACK.1, &[0, 1, 2]).unwrap(),
+            ),
+            (
+                "transpose",
+                |t| {
+                    let (codomain, domain) = rotation(t.codomain_rank(), t.rank(), 1);
+                    t.transpose(&codomain, &domain).unwrap()
+                },
+                |t| {
+                    let (codomain, domain) = rotation(t.codomain_rank(), t.rank(), t.rank() - 1);
+                    t.transpose(&codomain, &domain).unwrap()
+                },
+            ),
+            (
+                "repartition",
+                |t| t.repartition(t.rank() - t.codomain_rank()).unwrap(),
+                |t| t.repartition(t.rank() - t.codomain_rank()).unwrap(),
+            ),
+        ];
+        let lazy_a = a.adjoint().unwrap();
+        let lazy_b = b.adjoint().unwrap();
+        for (name, forward, back) in motions {
+            let (ta, tb) = (forward(&a), forward(&b));
+            assert!(close(ta.norm(2.0).unwrap(), a_norm), "{name}: norm");
+            assert!(close_c(ta.inner(&tb).unwrap().into(), ab), "{name}: inner");
+            let round = back(&ta);
+            assert_eq!(round.codomain(), a.codomain(), "{name}: round trip");
+            assert!(close(round.norm(2.0).unwrap(), a_norm), "{name}: round trip");
+            assert!(close_c(round.inner(&a).unwrap().into(), aa), "{name}: round trip");
+
+            // Lazy adjoint: the transformed parent stays lazy.
+            let (la, lb) = (forward(&lazy_a), forward(&lazy_b));
+            assert!(la.dense_data().is_err(), "{name}: lazy stays lazy");
+            assert!(close(la.norm(2.0).unwrap(), a_norm), "{name}: lazy norm");
+            let (la, lb) = (la.materialize().unwrap(), lb.materialize().unwrap());
+            assert!(close_c(la.inner(&lb).unwrap().into(), ab.conj()), "{name}: lazy inner");
+        }
+
+        // `_into`: dst = alpha T a + beta T b, from an owned and from a lazy source.
+        let into = |source: &TensorMap<_, $D>, name: &str, destination: &mut TensorMap<_, $D>| match name {
+            "permute" => source.permute_into(PERMUTE.0, PERMUTE.1, destination, alpha, beta),
+            "braid" => source.braid_into(PERMUTE.0, PERMUTE.1, &[0, 1, 2], destination, alpha, beta),
+            "transpose" => {
+                let (codomain, domain) = rotation(source.codomain_rank(), source.rank(), 1);
+                source.transpose_into(&codomain, &domain, destination, alpha, beta)
+            }
+            _ => source.repartition_into(destination, alpha, beta),
+        };
+        for (name, forward, _) in motions {
+            let mut destination = forward(&b);
+            into(&a, name, &mut destination).unwrap();
+            let expected = alpha_c * aa + beta_c * ab;
+            assert!(close_c(forward(&a).inner(&destination).unwrap().into(), expected), "{name}_into");
+
+            let mut destination = forward(&lazy_b).materialize().unwrap();
+            into(&lazy_a, name, &mut destination).unwrap();
+            let expected = alpha_c * aa + beta_c * ab.conj();
+            assert!(
+                close_c(forward(&lazy_a).materialize().unwrap().inner(&destination).unwrap().into(), expected),
+                "{name}_into lazy"
+            );
+        }
+
+        // Compact rank-(1,1): the leg swap stays compact, and `_into` writes
+        // its transformed diagonal; both preserve the norm.
+        let spectra: Vec<_> = leg
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(s, sector)| SectorSpectrum {
+                sector,
+                values: (0..leg.degeneracy(&sector).unwrap())
+                    .map(|i| conv(entry(0.3, s, i, i)))
+                    .collect(),
+            })
+            .collect();
+        let compact = TensorMap::<_, $D>::diagonal(runtime, &leg, spectra).unwrap();
+        let swapped = compact.permute(&[1], &[0]).unwrap();
+        assert!(swapped.dense_data().is_err(), "compact swap stays compact");
+        let norm = compact.norm(2.0).unwrap();
+        assert!(close(swapped.norm(2.0).unwrap(), norm));
+        let mut destination = swapped.materialize().unwrap();
+        compact
+            .permute_into(&[1], &[0], &mut destination, conv(Complex64::new(1.0, 0.0)), conv(Complex64::new(1.0, 0.0)))
+            .unwrap();
+        assert!(close(destination.norm(2.0).unwrap(), 2.0 * norm));
+
+        // Admission: malformed axes, mis-lengthed levels, an aliasing, a
+        // mismatched and a shared destination.
+        assert!(matches!(
+            a.permute(&[0, 0], &[1]),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidPermutation { .. })
+        ));
+        assert!(matches!(
+            a.braid(PERMUTE.0, PERMUTE.1, &[0]),
+            Err(Error::InvalidArgument(message))
+                if message == "braid levels must list one level per source axis (expected 3, got 1)"
+        ));
+        let mut alias = a.clone();
+        assert!(matches!(
+            a.permute_into(PERMUTE.0, PERMUTE.1, &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(_))
+        ));
+        let mut mismatched = b.clone().materialize().unwrap();
+        assert!(matches!(
+            a.permute_into(PERMUTE.0, PERMUTE.1, &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+        let mut shared = b.permute(PERMUTE.0, PERMUTE.1).unwrap();
+        let _keep = shared.clone();
+        assert!(matches!(
+            a.permute_into(PERMUTE.0, PERMUTE.1, &mut shared, alpha, beta),
+            Err(Error::DestinationShared)
+        ));
+
+        $cuda(&a, &b, alpha, beta);
+    }};
+}
+
+fn no_cuda_transform<T, D>(_: &T, _: &T, _: D, _: D) {}
+
+#[test]
+fn transform_host_rows_match_the_hand_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    transform_rows!(&runtime, u1_leg(), one, f64, real, no_cuda_transform);
+    transform_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_transform
+    );
+    transform_rows!(&runtime, su2_leg(), su2_dim, f64, real, no_cuda_transform);
+    transform_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        no_cuda_transform
+    );
+    transform_rows!(&runtime, fz2_leg(), one, f64, real, no_cuda_transform);
+    transform_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_transform
+    );
+}
+
+/// Device results of the transform rows against Host: owned and lazy
+/// sources, eager and `_into`, within the executor's dtype tolerance (the
+/// recoupling GEMM sums in cuTENSOR's order), and the admission errors with
+/// the storage noun naming the placement.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn transform_cuda_rows_match_host() {
+    use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+
+    fn device_rows<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>, alpha: D, beta: D)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: tenet::typed::CudaPayload + Into<Complex64> + std::fmt::Debug,
+    {
+        let agree = |device: &[D], host: &[D], what: &str| {
+            assert_eq!(device.len(), host.len(), "{what}");
+            for (&x, &y) in device.iter().zip(host) {
+                let (x, y): (Complex64, Complex64) = (x.into(), y.into());
+                assert!(
+                    (x - y).norm() <= 1e-12 * (1.0 + y.norm()),
+                    "{what}: {x} != {y}"
+                );
+            }
+        };
+        let (a_dev, b_dev) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
+        for (host, device) in [
+            (a.clone(), a_dev.clone()),
+            (a.adjoint().unwrap(), a_dev.adjoint().unwrap()),
+        ] {
+            let rotated = rotation(host.codomain_rank(), host.rank(), 1);
+            let flipped = host.rank() - host.codomain_rank();
+            let pairs = [
+                (
+                    "permute",
+                    host.permute(PERMUTE.0, PERMUTE.1).unwrap(),
+                    device.permute(PERMUTE.0, PERMUTE.1).unwrap(),
+                ),
+                (
+                    "braid",
+                    host.braid(PERMUTE.0, PERMUTE.1, &[0, 1, 2]).unwrap(),
+                    device.braid(PERMUTE.0, PERMUTE.1, &[0, 1, 2]).unwrap(),
+                ),
+                (
+                    "transpose",
+                    host.transpose(&rotated.0, &rotated.1).unwrap(),
+                    device.transpose(&rotated.0, &rotated.1).unwrap(),
+                ),
+                (
+                    "repartition",
+                    host.repartition(flipped).unwrap(),
+                    device.repartition(flipped).unwrap(),
+                ),
+            ];
+            for (name, host, device) in pairs {
+                let (host, device) = (
+                    host.materialize().unwrap(),
+                    device.to_host().unwrap().materialize().unwrap(),
+                );
+                assert_eq!(device.codomain(), host.codomain(), "{name}");
+                assert_eq!(device.domain(), host.domain(), "{name}");
+                agree(
+                    device.dense_data().unwrap(),
+                    host.dense_data().unwrap(),
+                    name,
+                );
+            }
+            // `_into` from this source into `T b`.
+            let mut host_destination = b.permute(PERMUTE.0, PERMUTE.1).unwrap();
+            let mut device_destination = b_dev.permute(PERMUTE.0, PERMUTE.1).unwrap();
+            host.permute_into(PERMUTE.0, PERMUTE.1, &mut host_destination, alpha, beta)
+                .unwrap();
+            device
+                .permute_into(PERMUTE.0, PERMUTE.1, &mut device_destination, alpha, beta)
+                .unwrap();
+            agree(
+                device_destination.to_host().unwrap().dense_data().unwrap(),
+                host_destination.dense_data().unwrap(),
+                "permute_into",
+            );
+        }
+        // Admission, as on Host with the storage noun.
+        assert!(matches!(
+            a_dev.permute(&[0, 0], &[1]),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidPermutation { .. })
+        ));
+        let mut alias = a_dev.clone();
+        assert!(matches!(
+            a_dev.permute_into(PERMUTE.0, PERMUTE.1, &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination storage must not alias an input"
+        ));
+        let mut lazy_destination = b_dev
+            .permute(PERMUTE.0, PERMUTE.1)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert!(matches!(
+            a_dev.permute_into(PERMUTE.0, PERMUTE.1, &mut lazy_destination, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination must use ordinary dense CUDA storage"
+        ));
+        let mut mismatched = b_dev.clone();
+        assert!(matches!(
+            a_dev.permute_into(PERMUTE.0, PERMUTE.1, &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+    }
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    transform_rows!(&runtime, u1_leg(), one, f64, real, device_rows);
+    transform_rows!(&runtime, u1_leg(), one, Complex64, complex, device_rows);
+    transform_rows!(&runtime, su2_leg(), su2_dim, f64, real, device_rows);
+    transform_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        device_rows
+    );
+    transform_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
+    transform_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
 }
