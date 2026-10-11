@@ -82,11 +82,12 @@ where
     ///
     /// # CUDA storage
     ///
-    /// The same rule: one lazy and one owned operand give an owned dense
-    /// result, the lazy one read block by block from its parent through one
-    /// conjugating strided `dot_general` per block (#1874); nothing is
-    /// materialized and nothing crosses the host boundary except the output's
-    /// zero initialization (#740).
+    /// The same rule, through one body for every representation (#2187):
+    /// each nonzero-coefficient operand is read by one strided `dot_general`
+    /// per stored block, an owned operand as one packed block and a lazy one
+    /// from its parent's blocks, conjugating (#1874), with its coefficient as
+    /// the descriptor scale. Nothing is materialized and nothing crosses the
+    /// host boundary except the output's zero initialization (#740).
     ///
     /// ```compile_fail
     /// use tenet::sector::U1FusionRule;

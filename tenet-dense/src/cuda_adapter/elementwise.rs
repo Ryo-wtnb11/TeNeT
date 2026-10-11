@@ -101,10 +101,10 @@ pub(super) fn submit_region_axpby<D: CudaScalar>(
     };
     // The structural coefficient is the 1x1 *operand*, never the descriptor
     // alpha: a descriptor alpha of 0 lets CUDA skip the source read and erase
-    // NaN/Inf, where the host multiplies and propagates it (typed.rs
-    // `cuda_axpby_owned`). The caller's own scale rides the descriptor, and a
-    // caller whose scale is zero passes it as the zero *operand* instead
-    // ([`CudaRegionCoefficient::Zero`]) for the same reason.
+    // NaN/Inf, where the host multiplies and propagates it. The caller's own
+    // scale rides the descriptor, and a caller whose scale is zero passes it
+    // as the zero *operand* instead ([`CudaRegionCoefficient::Zero`]) for the
+    // same reason.
     let accumulation = DotGeneralAccumulation {
         lhs_conj: conj,
         rhs_conj: false,

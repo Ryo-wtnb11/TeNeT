@@ -7,9 +7,9 @@ thread_local! {
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
-    /// `(payload_zero_uploads, coefficient_uploads, kernels)`.
+    /// `(payload_zero_uploads, kernels)`.
     pub(super) static CUDA_ARITHMETIC_OBSERVATION:
-        std::cell::Cell<Option<(usize, usize, usize)>> = const {
+        std::cell::Cell<Option<(usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
     /// `(qr_calls, factor_copies, selector_uploads, output_uploads,
@@ -76,18 +76,10 @@ pub(super) fn observe_cuda_svd_final_storage_creation() {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-pub(super) fn observe_cuda_arithmetic(
-    zero_uploads: usize,
-    coefficient_uploads: usize,
-    kernels: usize,
-) {
+pub(super) fn observe_cuda_arithmetic(zero_uploads: usize, kernels: usize) {
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        if let Some((zeros, coefficients, calls)) = observation.get() {
-            observation.set(Some((
-                zeros + zero_uploads,
-                coefficients + coefficient_uploads,
-                calls + kernels,
-            )));
+        if let Some((zeros, calls)) = observation.get() {
+            observation.set(Some((zeros + zero_uploads, calls + kernels)));
         }
     });
 }
