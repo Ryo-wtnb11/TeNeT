@@ -535,6 +535,18 @@ where
         t: &TensorMap<R, D, Self>,
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+
+    /// [`EighFullPlan::execute`]'s solve of every member of `source` into
+    /// `buffers` (allocated when `None`) and `workspace`'s sorted spectra,
+    /// after the plan checked the workspace and the source signature.
+    fn eigh_full_stack(
+        plan: &EighFullPlan<R, D, Self>,
+        source: &StackedTensorMap<R, D, Self>,
+        buffers: &mut Option<super::batched::StackPair<R, D, Self>>,
+        workspace: &mut EighFullWorkspace<R, D, Self>,
+    ) -> Result<(), BatchError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec;
 }
 
 impl<R, D> FactorExec<R, D> for Vec<D>
@@ -558,5 +570,17 @@ where
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<TensorMap<R, D>>, TypedFacadeError<R>> {
         t.factor_eigh_full(hermitian_tol)
+    }
+
+    fn eigh_full_stack(
+        plan: &EighFullPlan<R, D>,
+        source: &StackedTensorMap<R, D>,
+        buffers: &mut Option<super::batched::StackPair<R, D, Self>>,
+        workspace: &mut EighFullWorkspace<R, D>,
+    ) -> Result<(), BatchError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        plan.run_host(source, buffers, &mut workspace.sorted)
     }
 }

@@ -786,4 +786,18 @@ where
     ) -> Result<Eigh<TensorMap<R, D, Self>>, Error> {
         t.eigh_full_matrix(hermitian_tol)
     }
+
+    fn eigh_full_stack(
+        plan: &EighFullPlan<R, D, Self>,
+        source: &StackedTensorMap<R, D, Self>,
+        buffers: &mut Option<super::batched::StackPair<R, D, Self>>,
+        workspace: &mut EighFullWorkspace<R, D, Self>,
+    ) -> Result<(), BatchError> {
+        plan.run_cuda(
+            source,
+            buffers,
+            &mut workspace.sorted,
+            &mut workspace.orders,
+        )
+    }
 }

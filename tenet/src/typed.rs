@@ -278,6 +278,8 @@ use crate::tensor_core::{
 };
 
 mod batched;
+#[doc(hidden)]
+pub use batched::StackExec;
 pub use batched::{
     BatchError, BatchMemberRepresentation, ComposePlan, ContractPlan, ContractWorkspace,
     EighFullPlan, EighFullWorkspace, EighStackOutput, MemberFault, SignatureField,
