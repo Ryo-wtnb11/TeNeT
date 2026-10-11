@@ -299,11 +299,12 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
+#[cfg(feature = "cuda")]
+use linear_ops::unique_dense_destination;
 #[doc(hidden)]
 pub use linear_ops::ElementwiseExec;
 use linear_ops::{
     axpby_into_checked, destination_precheck, destination_slice, require_destination_space,
-    unique_dense_destination,
 };
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
@@ -368,8 +369,10 @@ pub use factorize::FactorExec;
 pub use factorize::FusionMode;
 mod checked_generic_contract;
 mod mode_dispatch;
+#[cfg(feature = "cuda")]
+use checked_generic_contract::trace_source;
+use checked_generic_contract::write_identity_blocks_generic;
 pub(crate) use checked_generic_contract::TypedFacadeError;
-use checked_generic_contract::{trace_source, write_identity_blocks_generic};
 #[doc(hidden)]
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;

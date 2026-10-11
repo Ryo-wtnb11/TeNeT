@@ -2930,3 +2930,224 @@ fn compact_contract_into_is_alpha_eager_plus_beta_destination_in_every_mode() {
         contract_into_rows(&bond_fixture(&z2_leg(rule()), parity, complex), alpha);
     }
 }
+
+// ---- #1870 leaf C: trace `_into` ----
+
+/// The trace sources `_into` reads: a dense `[W, W] ← [W, W]` and its lazy
+/// adjoint (partial trace over `(0, 2)`), and a compact diagonal (full trace
+/// over `(0, 1)`), each on a fresh checked fZ2 rule `salt`.
+const TRACE_INTO_SOURCES: [&str; 3] = ["dense", "lazy", "compact"];
+
+fn trace_into_source(runtime: &Runtime, salt: u8, kind: &str) -> TensorMap<CheckedZ2, f64> {
+    if kind == "compact" {
+        return z2_diagonal(checked_fermionic(salt), |x: f64| x).0;
+    }
+    let leg = z2_leg(checked_fermionic(salt));
+    let dense = TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg, &leg], |_, index| {
+        index.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    if kind == "lazy" {
+        dense.adjoint().unwrap()
+    } else {
+        dense
+    }
+}
+
+fn trace_into_pairs(kind: &str) -> &'static [(usize, usize)] {
+    if kind == "compact" {
+        &[(0, 1)]
+    } else {
+        &[(0, 2)]
+    }
+}
+
+/// A destination for `kind`'s trace on rule `salt`, built without tracing
+/// that source: `[W] ← [W]` on the legs directly; the scalar one as the full
+/// trace of a differently shaped dense `[W₁] ← [W₁]`.
+fn trace_into_destination(runtime: &Runtime, salt: u8, kind: &str) -> TensorMap<CheckedZ2, f64> {
+    if kind == "compact" {
+        let leg = GradedSpace::try_new(
+            Arc::new(checked_fermionic(salt)),
+            [(Z2Irrep::new(0), 1), (Z2Irrep::new(1), 1)],
+        )
+        .unwrap();
+        return TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |_, _| 1.0)
+            .unwrap()
+            .trace_pairs(&[(0, 1)])
+            .unwrap();
+    }
+    let leg = z2_leg(checked_fermionic(salt));
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |_, _| 0.0).unwrap()
+}
+
+#[test]
+fn checked_trace_pairs_into_queries_the_provider_like_eager() {
+    // What: `trace_pairs_into` runs eager's staging and compiled terms (the
+    // compact read included) and compares the destination provider-free, so
+    // cold and warm provider queries equal eager's for every source kind.
+    let runtime = host_runtime();
+    let mut cold = Vec::new();
+    for (case, kind) in TRACE_INTO_SOURCES.into_iter().enumerate() {
+        let ledger = |salt: u8, into: bool| {
+            let source = trace_into_source(&runtime, salt, kind);
+            let mut destination = trace_into_destination(source.runtime(), salt, kind);
+            let pairs = trace_into_pairs(kind);
+            let provider = source.provider();
+            (0..2)
+                .map(|_| {
+                    provider.queries.store(0, Ordering::Relaxed);
+                    if into {
+                        source
+                            .trace_pairs_into(pairs, &mut destination, 1.0, 0.5)
+                            .unwrap();
+                    } else {
+                        drop(black_box(source.trace_pairs(pairs).unwrap()));
+                    }
+                    provider.queries.load(Ordering::Relaxed)
+                })
+                .collect::<Vec<_>>()
+        };
+        let salt = 0x40 + 2 * case as u8;
+        let eager = ledger(salt, false);
+        let into = ledger(salt + 1, true);
+        assert_eq!(into, eager, "{kind}");
+        cold.push(eager[0]);
+    }
+    // Not vacuous: every cold trace stages on the provider.
+    assert!(cold.iter().all(|&queries| queries > 0), "{cold:?}");
+}
+
+#[test]
+fn checked_trace_pairs_into_failure_is_typed_and_nonpublishing() {
+    // What: a provider failing in the staging of `trace_pairs_into` is the
+    // typed plan error, leaves the destination bit for bit and publishes
+    // nothing; so does a shared destination rejected after staging. The
+    // succeeding call after them publishes (#2063).
+    const ISOLATED: &str = "TENET_TRACE_INTO_PUBLICATION_ISOLATED";
+    const NAME: &str = "checked_trace_pairs_into_failure_is_typed_and_nonpublishing";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated publication test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed;"));
+        return;
+    }
+
+    use tenet::typed::{CheckedGenericPlanError, Error, GenericTensorError};
+    use tenet_core::{structure_cache_info, StructureCacheKind};
+    let runtime = host_runtime();
+    let bits = |t: &TensorMap<CheckedZ2, f64>| {
+        t.dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    };
+    for (case, kind) in TRACE_INTO_SOURCES.into_iter().enumerate() {
+        let salt = 0x50 + case as u8;
+        let source = trace_into_source(&runtime, salt, kind);
+        let mut destination = trace_into_destination(source.runtime(), salt, kind);
+        let pairs = trace_into_pairs(kind);
+        tenet_core::clear_structure_caches();
+        // What #2063 stages: the destination layout and the coefficients
+        // (the sector algebra the preflight reads is not staged, as for
+        // contraction).
+        let published = || {
+            [
+                StructureCacheKind::DegeneracyStructure,
+                StructureCacheKind::CompletedTreeTransformer,
+                StructureCacheKind::TreeTransformCoefficients,
+            ]
+            .map(|kind| {
+                let info = structure_cache_info(kind);
+                (info.admissions(), info.entries(), info.charged_bytes())
+            })
+        };
+        let provider = source.provider();
+        let (before, original) = (published(), bits(&destination));
+
+        provider.fail_queries.store(true, Ordering::Relaxed);
+        let result = source.trace_pairs_into(pairs, &mut destination, 1.0, 0.5);
+        provider.fail_queries.store(false, Ordering::Relaxed);
+        assert!(
+            matches!(
+                result,
+                Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+                    InvalidSector
+                )))
+            ),
+            "{kind}: {result:?}"
+        );
+        assert_eq!(bits(&destination), original, "{kind}: provider failure");
+        assert_eq!(published(), before, "{kind}: the failure published");
+
+        let shared = destination.clone();
+        let result = source.trace_pairs_into(pairs, &mut destination, 1.0, 0.5);
+        assert!(
+            matches!(
+                result,
+                Err(GenericTensorError::Facade(Error::DestinationShared))
+            ),
+            "{kind}: {result:?}"
+        );
+        drop(shared);
+        assert_eq!(bits(&destination), original, "{kind}: shared");
+        assert_eq!(published(), before, "{kind}: the shared call published");
+
+        source
+            .trace_pairs_into(pairs, &mut destination, 1.0, 0.5)
+            .unwrap();
+        assert_ne!(published(), before, "{kind}: the success published nothing");
+    }
+}
+
+#[test]
+fn checked_trace_pairs_into_reports_the_same_error_cold_and_warm() {
+    // What: the HomSpace comparison and the pair duality are staging, which
+    // runs in full on every call, so a non-dual pair reports eager's
+    // duality error (on the result's space) or the destination's space
+    // error (on a wrong one), cold and warm alike.
+    let runtime = host_runtime();
+    let leg = z2_leg(checked_fermionic(0x58));
+    let dual = leg.try_dual().unwrap();
+    // `(0, 2)` joins `W` with `W'`: the untraced legs are those of a valid
+    // trace, the pair is not dual.
+    let source = TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&dual, &leg], |_, index| {
+        index.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    let eager = source.trace_pairs(&[(0, 2)]).unwrap_err().to_string();
+    let mut right = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 0.0).unwrap();
+    let mut wrong =
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 0.0).unwrap();
+    let mut seen = Vec::new();
+    for pass in ["cold", "warm"] {
+        let right_error = source
+            .trace_pairs_into(&[(0, 2)], &mut right, 1.0, 0.5)
+            .unwrap_err()
+            .to_string();
+        let wrong_error = source
+            .trace_pairs_into(&[(0, 2)], &mut wrong, 1.0, 0.5)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(right_error, eager, "{pass}");
+        assert!(
+            wrong_error.contains("does not match"),
+            "{pass}: {wrong_error}"
+        );
+        seen.push((right_error, wrong_error));
+        // Warms the source's trace structures on a valid pair.
+        drop(black_box(source.trace_pairs(&[(1, 3)]).unwrap()));
+    }
+    assert_eq!(seen[0], seen[1]);
+}

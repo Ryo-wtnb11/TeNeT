@@ -766,17 +766,27 @@ fn host_capability_and_representation_rejections_leave_the_destination_bit_ident
         |d: &mut _| t.contract_into(&t, &unit, d, 1.0, 0.5)
     );
 
-    // A compact source where the operation has no compact arm.
+    // A compact source traced over its only pair is read from the compiled
+    // terms, as eager reads it (#1870 C): admitted, and its destination
+    // checks run. Its spectrum holds a NaN, so the value is eager's NaN.
     let s = compact();
-    // A rank-0 result has no leg to build a sentinel on; its own value is
-    // the reference.
-    let scalar = t.trace_pairs(&[(0, 1)]).unwrap().materialize().unwrap();
+    let mut scalar = t.trace_pairs(&[(0, 1)]).unwrap();
+    s.trace_pairs_into(&[(0, 1)], &mut scalar, 1.0, 0.5)
+        .unwrap();
+    assert!(s.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap().is_nan());
+    assert!(scalar.scalar().unwrap().is_nan());
+    assert!(s.diagview().is_ok(), "the compact source stays compact");
     rejects!(
         host_snap,
-        "trace_pairs_into compact source",
-        scalar,
-        Error::Unsupported { .. },
-        |d: &mut _| s.trace_pairs_into(&[(0, 1)], d, 1.0, 0.5)
+        "trace_pairs_into compact source, shared",
+        t.trace_pairs(&[(0, 1)]).unwrap(),
+        Error::DestinationShared,
+        |d: &mut TensorMap<_, f64>| {
+            let clone = d.clone();
+            let result = s.trace_pairs_into(&[(0, 1)], d, 1.0, 0.5);
+            drop(clone);
+            result
+        }
     );
     // A lazy-adjoint source is read through its parent's storage, so a
     // destination that is that parent aliases it (#1870 A2). The adjoint of
@@ -1070,6 +1080,133 @@ fn checked_contract_into_leaves_a_rejected_destination_bit_identical() {
             drop(clone);
             result
         }
+    );
+}
+
+/// The checked Generic `trace_pairs_into` rejects every misuse the
+/// multiplicity-free one does, in its order (runtime, rule, destination
+/// kind, alias including a lazy source's parent, then TensorKit's
+/// `space(tdst)` before the pair duality, space before sharing), the same
+/// `Error` in [`GenericTensorError::Facade`]; the duality is eager's own
+/// staging error.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_trace_pairs_into_leaves_a_rejected_destination_bit_identical() {
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::GenericTensorError;
+
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let other_rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2 = Arc::new(SUNFusionRule::new(2).unwrap());
+    let v = GradedSpace::try_new(Arc::clone(&su2), [(vec![0], 2), (vec![1], 1)]).unwrap();
+    let w = GradedSpace::try_new(Arc::clone(&su2), [(vec![0], 1), (vec![2], 2)]).unwrap();
+    let t = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &w], [&v], 1).unwrap();
+    // The same untraced leg, but the pair joins `v` with `w`.
+    let undual = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &w], [&w], 4).unwrap();
+    let traced = t.trace_pairs(&[(0, 2)]).unwrap();
+    let fresh = |rt: &Runtime| sentinel!(rt, traced);
+    let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
+    let su3_leg = GradedSpace::try_new(su3, [(vec![0, 0], 2), (vec![1, 0], 1)]).unwrap();
+    let foreign_rule = sentinel!(
+        &rt,
+        TensorMap::<_, f64>::rand_with_seed(&rt, [&su3_leg], [&su3_leg], 3).unwrap()
+    );
+    let wrong = sentinel!(
+        &rt,
+        TensorMap::<_, f64>::rand_with_seed(&rt, [&v], [&v], 5).unwrap()
+    );
+    let into = |d: &mut TensorMap<SUNFusionRule, f64>| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5);
+    let shared = |d: &mut TensorMap<SUNFusionRule, f64>| {
+        let clone = d.clone();
+        let result = into(d);
+        drop(clone);
+        result
+    };
+    let space = |error: &GenericTensorError<_>| {
+        matches!(error, GenericTensorError::Facade(Error::Operation(operation))
+            if matches!(**operation, tenet::typed::OperationError::SpaceMismatch { .. }))
+    };
+
+    t.trace_pairs_into(&[(0, 2)], &mut fresh(&rt), 1.0, 0.5)
+        .unwrap();
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into runtime",
+        fresh(&other_rt),
+        GenericTensorError::Facade(Error::RuntimeMismatch),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into rule",
+        foreign_rule,
+        GenericTensorError::Facade(Error::RuleMismatch),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into leg out of range",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::Operation(_)),
+        |d: &mut TensorMap<SUNFusionRule, f64>| t.trace_pairs_into(&[(0, 9)], d, 1.0, 0.5)
+    );
+    rejects!(
+        |d: &TensorMap<SUNFusionRule, f64>| host_snap(&d.materialize().unwrap()).0,
+        "checked trace_pairs_into lazy destination",
+        traced.adjoint().unwrap(),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into alias of a lazy source's parent",
+        sentinel!(&rt, t),
+        GenericTensorError::Facade(Error::InvalidArgument(_)),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let lazy = d.adjoint().unwrap();
+            lazy.trace_pairs_into(&[(0, 1)], d, 1.0, 0.5)
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into legs not dual",
+        fresh(&rt),
+        GenericTensorError::Plan(_),
+        |d: &mut TensorMap<SUNFusionRule, f64>| {
+            let into = undual.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5);
+            // Eager's own staging error, in the same wrapper.
+            let eager = undual.trace_pairs(&[(0, 2)]).unwrap_err();
+            assert_eq!(format!("{into:?}"), format!("{:?}", Err::<(), _>(eager)));
+            into
+        }
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into space before legs not dual",
+        wrong.clone(),
+        error if space(error),
+        |d: &mut TensorMap<SUNFusionRule, f64>| undual.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5)
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into space",
+        wrong.clone(),
+        error if space(error),
+        into
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into space before shared",
+        wrong,
+        error if space(error),
+        shared
+    );
+    rejects!(
+        host_snap,
+        "checked trace_pairs_into shared",
+        fresh(&rt),
+        GenericTensorError::Facade(Error::DestinationShared),
+        shared
     );
 }
 

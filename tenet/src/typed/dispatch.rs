@@ -346,6 +346,24 @@ where
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
     ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+
+    /// `destination = alpha · trace + beta · destination` for a
+    /// `destination` that passed [`destination_precheck`]:
+    /// [`Self::trace`]'s staging, the staged space against the
+    /// destination's (HomSpace before the pair duality, then the layout),
+    /// [`destination_slice`], the write — `read`'s scalar or the compiled
+    /// terms over `payload` — then the same commit.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_into<P: AsRef<[D]>>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
+        payload: impl FnOnce() -> P,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Self::FacadeError>;
 }
 
 mod typed_admission_private {

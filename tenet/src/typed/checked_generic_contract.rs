@@ -25,6 +25,30 @@ where
             D::from_real(1.0),
         )?)
     }
+
+    fn trace_into<P: AsRef<[D]>>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
+        payload: impl FnOnce() -> P,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        let destination_space = destination.logical_space().space().clone();
+        tenet_tensors::tensortrace_into_multiplicity_free_in(
+            space,
+            read,
+            payload,
+            axes,
+            dst_nout,
+            &destination_space,
+            || destination_slice(destination),
+            alpha,
+            beta,
+        )
+    }
 }
 
 impl<R, D> TypedTensorTraceDispatch<R, D> for CheckedGenericAdmissionMode
@@ -51,6 +75,30 @@ where
             axes,
             D::from_real(1.0),
         )?)
+    }
+
+    fn trace_into<P: AsRef<[D]>>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
+        payload: impl FnOnce() -> P,
+        axes: tenet_tensors::TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+        destination: &mut TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Self::FacadeError> {
+        let destination_space = destination.logical_space().space().clone();
+        tenet_tensors::tensortrace_into_checked_generic_in(
+            space,
+            read,
+            payload,
+            axes,
+            dst_nout,
+            &destination_space,
+            || destination_slice(destination).map_err(Self::FacadeError::from),
+            alpha,
+            beta,
+        )
     }
 }
 
@@ -238,6 +286,93 @@ where
             dst_nout,
         )?;
         Ok(self.published(space, data))
+    }
+
+    /// `destination = alpha * self.trace_pairs(pairs) + beta * destination`,
+    /// TensorKit `tensortrace!(C, A, p, q, false, α, β)`, in every admission
+    /// mode that has [`Self::trace_pairs`].
+    ///
+    /// TensorKit's `_trace_permute!` order: every destination layout becomes
+    /// `beta * destination` first (a strong zero for `beta = 0`, which never
+    /// reads the destination; nothing for `beta = 1`), then every trace term
+    /// adds `alpha * coefficient * trace(block)`. That `beta` pass is the
+    /// reference's own: several source blocks feed one destination block, so
+    /// no single term's write can carry it. Past the braiding gate, an empty
+    /// `pairs` is exactly [`Self::axpby_into`], with its rules and errors.
+    ///
+    /// It admits exactly the sources [`Self::trace_pairs`] admits, through
+    /// the same staging and compiled terms: a lazy adjoint is read through
+    /// its parent, and a compact (diagonal) source traced over its only pair
+    /// writes `alpha` times its spectrum's compiled trace without
+    /// materializing (`O(Σ_c k_c)`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`];
+    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for a
+    /// non-symmetric braiding, even with an empty `pairs`; the pair-list errors
+    /// of [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// that is not owned dense host storage or aliases the source's storage
+    /// (a lazy adjoint's parent included); then, in TensorKit
+    /// `trace_permute!`'s order, the staging errors of [`Self::trace_pairs`]
+    /// (checked Generic: provider and preflight errors), `SpaceMismatch` for
+    /// a destination whose HomSpace is not the result's, the duality error of
+    /// [`Self::trace_pairs`], and `SpaceMismatch` for a destination whose
+    /// layout is not the result's; then [`Error::InvalidArgument`] for the
+    /// wrong length and [`Error::DestinationShared`].
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write, and a checked trace
+    /// publishes its staged layout and coefficients only after the write
+    /// succeeds. On failure after validation (a backend or other execution
+    /// error) the destination's contents are unspecified, while its space and
+    /// block structure stay intact.
+    pub fn trace_pairs_into(
+        &self,
+        pairs: &[(usize, usize)],
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TypedFacadeError<R>> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        // The held admitted identities: provider-free, and the provider's
+        // own by #2046.
+        if self.logical_space().space().admission().rule_identity()
+            != destination
+                .logical_space()
+                .space()
+                .admission()
+                .rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        let braiding = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider());
+        let Some(source) = trace_source(self, braiding, pairs)? else {
+            return Ok(axpby_into_checked(self, destination, alpha, beta)?);
+        };
+        // Why the storage body: a lazy adjoint is read through its parent.
+        destination_precheck(destination, &source.body.data, "host")?;
+        let _host_pool = self.runtime.enter_host_pool();
+        let (space, axes) = (&source.body.space, source.spec());
+        let dst_nout = source.axes.destination_codomain_rank;
+        let read = |structure: &tenet_tensors::TensorTraceFusionStructure<f64>| {
+            let spectrum = self.spectrum()?;
+            compact_arms::full_trace_terms(structure, space.space().structure(), spectrum)
+        };
+        <R::Mode as TypedTensorTraceDispatch<R, D>>::trace_into(
+            space,
+            read,
+            || source.body.materialized_dense_data(),
+            axes,
+            dst_nout,
+            destination,
+            alpha,
+            beta,
+        )
     }
 }
 

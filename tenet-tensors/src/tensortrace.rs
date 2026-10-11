@@ -1420,13 +1420,35 @@ pub(crate) trait TraceStaging<R>: crate::PivotalCoefficientAlgebra<R> {
     /// built, published only after the commit.
     type TracePending;
 
+    /// The braiding, axes and selected HomSpace, the duality left open.
+    fn preflight_trace(
+        src: &BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<TracePreflight, Self::Error>;
+
+    /// The pair duality, then the destination of `preflight`.
+    fn stage_preflighted_trace<'a>(
+        src: &'a BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'a>,
+        preflight: TracePreflight,
+    ) -> Result<Self::TraceStage<'a>, Self::Error>;
+
+    /// Whether `dst` is the staged destination by value; provider-free and
+    /// allocation-free.
+    fn trace_destination_matches(stage: &Self::TraceStage<'_>, dst: &DynamicFusionMapSpace)
+        -> bool;
+
     /// Preflight, then the pair duality (with no destination it follows at
     /// once, TensorKit `trace_permute!`), then the destination.
     fn stage_trace<'a>(
         src: &'a BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'a>,
         dst_nout: usize,
-    ) -> Result<Self::TraceStage<'a>, Self::Error>;
+    ) -> Result<Self::TraceStage<'a>, Self::Error> {
+        let preflight = Self::preflight_trace(src, axes, dst_nout)?;
+        Self::stage_preflighted_trace(src, axes, preflight)
+    }
 
     /// Opened before the compile, so a checked reset during it leaves the
     /// built groups unpublished.
@@ -1459,12 +1481,19 @@ where
         R: 'a;
     type TracePending = ();
 
-    fn stage_trace<'a>(
+    fn preflight_trace(
+        src: &BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<TracePreflight, OperationError> {
+        tensortrace_fusion_dyn_preflight_checked(src, axes, dst_nout)
+    }
+
+    fn stage_preflighted_trace<'a>(
         src: &'a BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'a>,
-        dst_nout: usize,
+        preflight: TracePreflight,
     ) -> Result<TensorTraceStage<'a, R, BoundDynamicFusionMapSpace<R>>, OperationError> {
-        let preflight = tensortrace_fusion_dyn_preflight_checked(src, axes, dst_nout)?;
         preflight.require_dual_pairs()?;
         let destination = src.derive_from_final_homspace(preflight.into_selected_homspace())?;
         Ok(TensorTraceStage {
@@ -1472,6 +1501,13 @@ where
             src,
             axes,
         })
+    }
+
+    fn trace_destination_matches(
+        stage: &TensorTraceStage<'_, R, BoundDynamicFusionMapSpace<R>>,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        stage.destination.space() == dst
     }
 
     fn open_trace() {}
@@ -1521,15 +1557,22 @@ where
         R: 'a;
     type TracePending = CheckedPendingCoefficients;
 
-    fn stage_trace<'a>(
+    fn preflight_trace(
+        src: &BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'_>,
+        dst_nout: usize,
+    ) -> Result<TracePreflight, CheckedGenericPlanError<R::Error>> {
+        tensortrace_fusion_dyn_preflight_generic_checked(src, axes, dst_nout)
+    }
+
+    fn stage_preflighted_trace<'a>(
         src: &'a BoundDynamicFusionMapSpace<R>,
         axes: TensorTraceAxisSpec<'a>,
-        dst_nout: usize,
+        preflight: TracePreflight,
     ) -> Result<
         TensorTraceStage<'a, R, PreparedCheckedGenericDynamicSpace>,
         CheckedGenericPlanError<R::Error>,
     > {
-        let preflight = tensortrace_fusion_dyn_preflight_generic_checked(src, axes, dst_nout)?;
         preflight
             .require_dual_pairs()
             .map_err(CheckedGenericPlanError::Operation)?;
@@ -1544,6 +1587,13 @@ where
             src,
             axes,
         })
+    }
+
+    fn trace_destination_matches(
+        stage: &TensorTraceStage<'_, R, PreparedCheckedGenericDynamicSpace>,
+        dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        stage.destination.matches(dst)
     }
 
     fn open_trace() -> CheckedPendingCoefficients {
@@ -1632,23 +1682,134 @@ where
         + strided_kernel::MaybeSendSync,
     P: AsRef<[D]>,
 {
+    trace_staged_in::<M, R, D, _>(
+        stage,
+        src,
+        axes,
+        read,
+        |structure, value, nout| match value {
+            Some(value) => Ok(vec![value * alpha]),
+            None => trace_structure_owned_parts(
+                structure,
+                &structure.dst_structure,
+                nout,
+                src.space().structure(),
+                payload().as_ref(),
+                alpha,
+            ),
+        },
+    )
+}
+
+/// The skeleton every trace runs on a staged destination: open, compile,
+/// then `execute` (given `read`'s answer for a single-scalar, unconjugated
+/// destination), then commit — so the owned and the existing-destination
+/// traces stage, compile and publish identically, and a failed compile or
+/// execution commits nothing.
+fn trace_staged_in<M, R, D, T>(
+    stage: M::TraceStage<'_>,
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+    read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
+    execute: impl FnOnce(
+        &TensorTraceFusionStructure<M::Coeff>,
+        Option<D>,
+        usize,
+    ) -> Result<T, OperationError>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, T), M::Error>
+where
+    M: TraceStaging<R>,
+    M::Error: From<OperationError>,
+{
     let mut pending = M::open_trace();
     let structure = M::compile_trace(&stage, src, axes, &mut pending)?;
     let scalar = structure.dst_rank == 0
         && structure.dst_structure.block_count() == 1
         && !structure.descriptor().source_conjugate();
-    let data = match scalar.then(|| read(&structure)).flatten() {
-        Some(value) => vec![value * alpha],
-        None => trace_structure_owned_parts(
-            &structure,
-            &structure.dst_structure,
-            M::trace_nout(&stage),
-            src.space().structure(),
-            payload().as_ref(),
-            alpha,
-        )?,
+    let value = scalar.then(|| read(&structure)).flatten();
+    let out = execute(&structure, value, M::trace_nout(&stage))?;
+    Ok((M::commit_trace(src, stage, pending)?, out))
+}
+
+/// `dst = alpha · trace(src) + beta · dst` into an existing destination:
+/// the owned trace's staging, compile and commit around a write into the
+/// caller's buffer (TensorKit `trace_permute!` / `_trace_permute!`).
+///
+/// In TensorKit's order the staged HomSpace is compared with `dst_space`
+/// before the pair duality; the staged layout follows the duality. Both
+/// mismatches are the caller's `SpaceMismatch` in every mode, and come
+/// before `dst_data` is asked for the buffer and before any write. A
+/// `read` answer is written as `alpha · value + beta · dst` (a strong zero
+/// for `beta = 0`); otherwise the compiled terms replay `payload` with
+/// TensorKit's `beta` pass first. The checked commit follows the write
+/// (#2063).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn tensortrace_into_in<'d, M, R, D, P, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
+    payload: impl FnOnce() -> P,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+    alpha: D,
+    beta: D,
+) -> Result<(), E>
+where
+    M: TraceStaging<R>,
+    M::Error: From<OperationError>,
+    M::Coeff: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<M::Coeff>
+        + strided_kernel::MaybeSendSync
+        + 'd,
+    P: AsRef<[D]>,
+    E: From<M::Error> + From<OperationError>,
+{
+    // Why `E` directly: a destination mismatch is the caller's argument
+    // error in every mode, never a checked plan failure.
+    let mismatch = || {
+        E::from(OperationError::SpaceMismatch {
+            message: "destination fusion space or block layout does not match the operation result",
+        })
     };
-    Ok((M::commit_trace(src, stage, pending)?, data))
+    let preflight = M::preflight_trace(src, axes, dst_nout)?;
+    if preflight.selected_homspace() != dst_space.homspace() {
+        return Err(mismatch());
+    }
+    let stage = M::stage_preflighted_trace(src, axes, preflight)?;
+    if !M::trace_destination_matches(&stage, dst_space) {
+        return Err(mismatch());
+    }
+    let dst = dst_data()?;
+    trace_staged_in::<M, R, D, ()>(stage, src, axes, read, |structure, value, _| {
+        match (value, &mut *dst) {
+            (Some(value), [slot]) => {
+                *slot = if beta == D::zero() {
+                    value * alpha
+                } else {
+                    value * alpha + beta * *slot
+                };
+                Ok(())
+            }
+            _ => replay_fusion_trace_host(
+                structure,
+                &structure.dst_structure,
+                dst,
+                src.space().structure(),
+                payload().as_ref(),
+                alpha,
+                beta,
+            ),
+        }
+    })?;
+    Ok(())
 }
 
 /// A trace destination (`S`: derived and published for multiplicity-free,
@@ -1773,6 +1934,87 @@ where
 {
     tensortrace_owned_in::<CheckedGenericAdmissionMode, R, D, P>(
         stage, src, read, payload, axes, alpha,
+    )
+}
+
+/// [`tensortrace_multiplicity_free_in`] into an existing destination: the
+/// same staging and compile, `dst_space` compared with the staged
+/// destination (HomSpace before the pair duality, then the layout) before
+/// `dst_data` is asked for the buffer, then
+/// `dst = alpha · trace + beta · dst`.
+///
+/// This concrete cross-crate entrypoint is internal and unstable despite
+/// being public for `tenet`; downstream callers must not rely on it.
+#[doc(hidden)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn tensortrace_into_multiplicity_free_in<'d, R, D, P, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    payload: impl FnOnce() -> P,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+    alpha: D,
+    beta: D,
+) -> Result<(), E>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<f64>
+        + strided_kernel::MaybeSendSync
+        + 'd,
+    P: AsRef<[D]>,
+    E: From<OperationError>,
+{
+    tensortrace_into_in::<MultiplicityFreeAdmissionMode, R, D, P, E>(
+        src, read, payload, axes, dst_nout, dst_space, dst_data, alpha, beta,
+    )
+}
+
+/// [`tensortrace_checked_generic_in`] into an existing destination: the
+/// same staging and compile, `dst_space` compared with the prepared
+/// destination before `dst_data` is asked for the buffer, the write, then
+/// the same commit and publication (#2063).
+///
+/// This concrete cross-crate entrypoint is internal and unstable despite
+/// being public for `tenet`; downstream callers must not rely on it.
+#[doc(hidden)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn tensortrace_into_checked_generic_in<'d, R, D, P, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    payload: impl FnOnce() -> P,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
+    alpha: D,
+    beta: D,
+) -> Result<(), E>
+where
+    R: CheckedGenericPivotal<Scalar = f64>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<f64>
+        + strided_kernel::MaybeSendSync
+        + 'd,
+    P: AsRef<[D]>,
+    E: From<CheckedGenericPlanError<R::Error>> + From<OperationError>,
+{
+    tensortrace_into_in::<CheckedGenericAdmissionMode, R, D, P, E>(
+        src, read, payload, axes, dst_nout, dst_space, dst_data, alpha, beta,
     )
 }
 
