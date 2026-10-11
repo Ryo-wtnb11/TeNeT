@@ -36,85 +36,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    fn cuda_axpby_owned(
-        &self,
-        required_len: usize,
-        lhs: (&CudaStorage<D>, D),
-        rhs: Option<(&CudaStorage<D>, D)>,
-    ) -> Result<CudaStorage<D>, Error> {
-        let (lhs, alpha) = lhs;
-        let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
-        let expected = Placement::Cuda(cuda.device());
-        Self::validate_cuda_owned_metadata(expected, lhs.placement(), required_len, lhs.len())?;
-        if let Some((rhs, _)) = rhs {
-            Self::validate_cuda_owned_metadata(expected, rhs.placement(), required_len, rhs.len())?;
-        }
-
-        // ponytail: #740 keeps these proven Host uploads until native device
-        // allocation publishes cross-stream writes correctly and wins a bench.
-        let coefficient_values = match rhs {
-            Some((_, beta)) => vec![alpha, beta],
-            None => vec![alpha],
-        };
-        // Coefficients stay data operands so the descriptor scales stay 1/0.
-        // A zero coefficient skips its operand, VectorInterface's
-        // `scale(x, 0) = zero(x) * 0` as on the Host (#1442): the output is
-        // born zero. Arithmetic does not promise signed-zero bit parity
-        // across storage backends.
-        let coefficients = CudaStorage::upload_owned(cuda, coefficient_values)?;
-        #[cfg(test)]
-        observe_cuda_arithmetic(0, 1, 0);
-        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
-        #[cfg(test)]
-        observe_cuda_arithmetic(1, 0, 0);
-        if required_len != 0 && !alpha.is_zero() {
-            cuda_gemm_region_into::<D>(
-                cuda,
-                &mut output.0,
-                0,
-                required_len,
-                &lhs.0,
-                0,
-                required_len,
-                &coefficients.0,
-                0,
-                1,
-                required_len,
-                1,
-                1,
-                D::from_real(1.0),
-                D::from_real(0.0),
-            )
-            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
-            #[cfg(test)]
-            observe_cuda_arithmetic(0, 0, 1);
-        }
-        if let Some((rhs, _)) = rhs.filter(|(_, beta)| required_len != 0 && !beta.is_zero()) {
-            cuda_gemm_region_into::<D>(
-                cuda,
-                &mut output.0,
-                0,
-                required_len,
-                &rhs.0,
-                0,
-                required_len,
-                &coefficients.0,
-                1,
-                1,
-                required_len,
-                1,
-                1,
-                D::from_real(1.0),
-                D::from_real(1.0),
-            )
-            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
-            #[cfg(test)]
-            observe_cuda_arithmetic(0, 0, 1);
-        }
-        Ok(output)
-    }
-
     fn cuda_zeros_owned(
         &self,
         required_len: usize,
@@ -130,7 +51,7 @@ where
         )?;
         let output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
-        observe_cuda_arithmetic(1, 0, 0);
+        observe_cuda_arithmetic(1, 0);
         Ok(output)
     }
 
@@ -341,28 +262,18 @@ where
         y: Option<(&TensorMap<R, D, Self>, D)>,
     ) -> Result<TensorMap<R, D, Self>, Error> {
         let required_len = x.logical_space().space().required_len()?;
-        let Some((y, beta)) = y else {
-            let source = x.direct_cuda_storage("scale")?;
-            let output = x.cuda_axpby_owned(required_len, (source, alpha), None)?;
-            return Ok(x.with_owned_cuda_storage(output));
-        };
-        if matches!(&x.repr, TypedTensorRepr::Owned(_))
-            && matches!(&y.repr, TypedTensorRepr::Owned(_))
-        {
-            let lhs = x.direct_cuda_storage("axpby")?;
-            let rhs = y.direct_cuda_storage("axpby")?;
-            let output = x.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
-            return Ok(x.with_owned_cuda_storage(output));
-        }
-        // One lazy operand (two are redirected to their parents by the
-        // body): each nonzero-coefficient operand is read in its logical
-        // orientation, the lazy one through its parent's strided, conjugated
-        // blocks, the first overwriting and the second accumulating. A zero
-        // coefficient drops its operand, as on the Host.
-        let reads = [(x, alpha), (y, beta)]
-            .into_iter()
-            .filter(|(_, coefficient)| !coefficient.is_zero())
-            .map(|(t, coefficient)| Ok((t.cuda_oriented_read("axpby")?, coefficient)))
+        let operation = if y.is_some() { "axpby" } else { "scale" };
+        // Every representation takes one body (#2187), as TensorKit's
+        // blockwise `add!`: each nonzero-coefficient operand is read in its
+        // logical orientation (an owned one as one packed region, a lazy one
+        // through its parent's strided, conjugated blocks; two lazy operands
+        // never reach here), the first overwriting and the second
+        // accumulating, its coefficient as the descriptor scale. A zero
+        // coefficient drops its operand, as on the Host; every operand is
+        // still validated, whatever its coefficient.
+        let reads = std::iter::once((x, alpha))
+            .chain(y)
+            .map(|(t, coefficient)| Ok((t.cuda_oriented_read(operation)?, coefficient)))
             .collect::<Result<Vec<_>, Error>>()?;
         let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
         let mut lease = x.runtime.lease_cuda()?;
@@ -376,13 +287,14 @@ where
                 read.source.len(),
             )?;
         }
-        // ponytail: #740, as `cuda_axpby_owned`: the output is born zero
-        // by an upload until native device allocation wins a bench.
+        // ponytail: #740 keeps this proven Host upload (the output is born
+        // zero) until native device allocation publishes cross-stream writes
+        // correctly and wins a bench.
         let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
-        observe_cuda_arithmetic(1, 0, 0);
+        observe_cuda_arithmetic(1, 0);
         let mut mode = tenet_dense::CudaRegionBeta::Overwrite;
-        for (read, coefficient) in &reads {
+        for (read, coefficient) in reads.iter().filter(|(_, c)| !c.is_zero()) {
             for (source_region, output_region) in &read.moves {
                 tenet_dense::cuda_region_axpby::<D>(
                     cuda,
@@ -397,7 +309,9 @@ where
                 )
                 .map_err(dense_err)?;
                 #[cfg(test)]
-                observe_cuda_arithmetic(0, 0, 1);
+                if !source_region.is_empty() {
+                    observe_cuda_arithmetic(0, 1);
+                }
             }
             mode = tenet_dense::CudaRegionBeta::Accumulate;
         }

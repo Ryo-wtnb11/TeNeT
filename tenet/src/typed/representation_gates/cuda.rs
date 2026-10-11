@@ -221,11 +221,19 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     assert_eq!(observed, (1, sector_count.max(1), sector_count.max(1)));
     assert!(source.dense_data().unwrap().len() > sector_count.max(1));
 
+    // `$arithmetic` is `(zero uploads, kernels)`. The thread's transfer
+    // counters pin that the output's zero initialization is the only upload:
+    // no coefficient is uploaded (#2187) and nothing is downloaded.
     macro_rules! observed_arithmetic {
         ($expression:expr, $arithmetic:expr, $reduction:expr) => {{
-            CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+            CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0))));
             CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+            let before = tenet_dense::cuda_transfer_stats();
             let result = $expression;
+            let after = tenet_dense::cuda_transfer_stats();
+            let (zero_uploads, _): (usize, usize) = $arithmetic;
+            assert_eq!(after.h2d_calls - before.h2d_calls, zero_uploads as u64);
+            assert_eq!(after.d2h_calls, before.d2h_calls);
             CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
                 assert_eq!(observation.get(), Some($arithmetic));
                 observation.set(None);
@@ -250,7 +258,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
             empty_storage,
         )),
     };
-    let work_sentinel = (usize::MAX, usize::MAX, usize::MAX);
+    let work_sentinel = (usize::MAX, usize::MAX);
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(work_sentinel)));
     assert!(matches!(
         malformed_length.scale(2.0),
@@ -261,23 +269,37 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         observation.set(None);
     });
 
-    observed_arithmetic!(source_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
+    // One `combine` body for every representation (#2187): one zero upload,
+    // then one strided read per stored block of each nonzero-coefficient
+    // operand, an owned operand being one packed block. The first call
+    // uploads the context's shared `1` once per dtype; warm it outside the
+    // windows.
+    let owned_reads = 1;
+    source_device.scale(1.5).unwrap();
+    observed_arithmetic!(source_device.scale(-2.0), (1, owned_reads), (0, 0, 0)).unwrap();
     observed_arithmetic!(
         source_device.axpby(2.0, &source_device, -3.0),
-        (1, 1, 2),
+        (1, 2 * owned_reads),
         (0, 0, 0)
     )
     .unwrap();
-    observed_arithmetic!(source_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
+    observed_arithmetic!(
+        source_device.axpby(0.0, &source_device, -3.0),
+        (1, owned_reads),
+        (0, 0, 0)
+    )
+    .unwrap();
+    observed_arithmetic!(source_device.zeros_like(), (1, 0), (0, 0, 0)).unwrap();
 
-    let lazy_scale = observed_arithmetic!(lazy_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
+    let lazy_scale =
+        observed_arithmetic!(lazy_device.scale(-2.0), (1, owned_reads), (0, 0, 0)).unwrap();
     let lazy_add = observed_arithmetic!(
         lazy_device.axpby(2.0, &lazy_device, -3.0),
-        (1, 1, 2),
+        (1, 2 * owned_reads),
         (0, 0, 0)
     )
     .unwrap();
-    let lazy_zero = observed_arithmetic!(lazy_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
+    let lazy_zero = observed_arithmetic!(lazy_device.zeros_like(), (1, 0), (0, 0, 0)).unwrap();
     for result in [&lazy_scale, &lazy_add, &lazy_zero] {
         assert!(matches!(result.repr, TypedTensorRepr::Adjoint(_)));
     }
@@ -290,7 +312,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         .block_count();
     let mixed = observed_arithmetic!(
         lazy_device.axpby(2.0, &source_device, -3.0),
-        (1, 0, blocks + 1),
+        (1, blocks + owned_reads),
         (0, 0, 0)
     )
     .unwrap();
@@ -306,6 +328,16 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     {
         assert!((device - host).abs() <= 1e-12 * (1.0 + host.abs()));
     }
+    // A warm lazy-source `axpby_into` (#1874) reads the parent in place:
+    // no transfer in either direction and no device allocation.
+    let mut destination = mixed;
+    lazy_device.axpby_into(&mut destination, 2.0, 0.0).unwrap();
+    let before = tenet_dense::cuda_transfer_stats();
+    lazy_device.axpby_into(&mut destination, -1.5, 0.5).unwrap();
+    let after = tenet_dense::cuda_transfer_stats();
+    assert_eq!(after.h2d_calls, before.h2d_calls);
+    assert_eq!(after.d2h_calls, before.d2h_calls);
+    assert_eq!(after.device_allocs, before.device_allocs);
 
     assert!(matches!(
         lazy_device.inner(&lazy_device),
@@ -319,6 +351,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     let mut missing_context = lazy_device.clone();
     missing_context.runtime = Runtime::builder().build().unwrap();
     let preflight_sentinel = (usize::MAX, usize::MAX, usize::MAX);
+    let arithmetic_sentinel = (usize::MAX, usize::MAX);
     CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some(preflight_sentinel)));
     assert!(matches!(
         missing_context.norm(2.0),
@@ -328,13 +361,13 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         assert_eq!(observation.get(), Some(preflight_sentinel));
         observation.set(None);
     });
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(preflight_sentinel)));
+    CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(arithmetic_sentinel)));
     assert!(matches!(
         missing_context.zeros_like(),
         Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
     ));
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(preflight_sentinel));
+        assert_eq!(observation.get(), Some(arithmetic_sentinel));
         observation.set(None);
     });
     let device_clone = lazy_device.clone();
@@ -354,7 +387,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
 }
 
 /// #1268: a `Complex64` device payload must perform exactly the same
-/// number of device allocations, coefficient uploads, kernels, and
+/// number of device allocations, zero uploads, kernels, and
 /// reduction downloads as the `f64` payload on the same structure. Only
 /// the bytes per element change (covered in `tenet-dense`).
 #[cfg(feature = "cuda")]
@@ -380,8 +413,8 @@ fn typed_cuda_complex_payload_costs_the_same_device_calls_as_f64() {
         })
         .unwrap();
 
-    fn observe<T>(run: impl FnOnce() -> T) -> ((usize, usize, usize), (usize, usize, usize)) {
-        CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+    fn observe<T>(run: impl FnOnce() -> T) -> ((usize, usize), (usize, usize, usize)) {
+        CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0))));
         CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
         drop(run());
         let arithmetic = CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
@@ -425,7 +458,7 @@ fn typed_cuda_complex_payload_costs_the_same_device_calls_as_f64() {
     // the replay seam, which has no arithmetic/reduction hooks: both
     // dtypes must leave those counters untouched rather than falling back
     // to the axpby or reduction paths.
-    let untouched = ((0, 0, 0), (0, 0, 0));
+    let untouched = ((0, 0), (0, 0, 0));
     assert_eq!(
         observe(|| real_device
             .contract(
