@@ -62,11 +62,12 @@ pub(super) fn braid_operation(
     ))
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D>,
     D: TensorScalar,
+    S: TransformExec<R, D>,
 {
     /// `destination = alpha * self.permute(codomain_axes, domain_axes) +
     /// beta * destination`, TensorKit `permute!(tdst, tsrc, p, α, β)`, without
@@ -96,7 +97,40 @@ where
     /// not, and [`Error::DestinationShared`] when `destination` shares its
     /// storage with a clone. Checked Generic reports these in
     /// [`GenericTensorError::Facade`] and staging failures in
-    /// [`GenericTensorError::Plan`], as for [`Self::permute`].
+    /// [`GenericTensorError::Plan`], as for [`Self::permute`]. On CUDA the
+    /// storage noun names the placement, and a payload on another device is
+    /// [`Error::PlacementMismatch`], checked first under the device lease.
+    ///
+    /// # CUDA storage
+    ///
+    /// The admission, staging and exact-layout memo are the ones above; the
+    /// staging's context lease is released before the device lease, and
+    /// nothing under the device lease leases again.
+    ///
+    /// `beta` rides the `dot_general` epilogue of the move or scatter that
+    /// writes each destination layout, once per element; the layouts no move
+    /// writes become `beta * destination` through a zero-source move (zeros
+    /// for `beta = 0`, which never reads the destination; nothing for
+    /// `beta = 1`).
+    ///
+    /// A warm call transfers nothing in either direction and allocates no
+    /// device buffer: 0 H2D, 0 D2H, 0 device allocations. Unlike the returning
+    /// [`Self::permute`] it pays no output initialisation. The first call for
+    /// a given structure uploads that structure's coefficient payload once,
+    /// may grow the pack/scatter workspace once, and reserves the context zero
+    /// template; that warm contract holds only while this Runtime's Host
+    /// transform store admits the structure, as for [`Self::permute`].
+    /// `alpha == 0` writes `beta * destination` over every written layout
+    /// through the same context zero template, so the first zero-scale call on
+    /// a context whose template is still short pays one upload — once per
+    /// context, not per call.
+    ///
+    /// Numerics are [`Self::permute`]'s, with the caller scale applied as the
+    /// executor's rule: a Single block rounds as `alpha * (c * x)` where the
+    /// Host folds the scales and rounds as `(alpha * c) * x`; Multi blocks
+    /// agree in order with the Host (`alpha * (U x)`). `alpha == 0` — `-0.0`
+    /// included, by IEEE comparison — does not read the source, as on Host;
+    /// only the sign of an exact zero may differ.
     ///
     /// # Failure
     ///
@@ -284,9 +318,9 @@ where
         )
     }
 
-    /// The one admission boundary of every typed Host beta-accumulating tree
+    /// The one admission boundary of every typed beta-accumulating tree
     /// transform; the mode's [`TypedTensorTransformDispatch::transform_into`]
-    /// stages, checks the destination's space and writes.
+    /// stages, checks the destination's space and has the storage write.
     pub(super) fn tree_transform_into(
         &self,
         destination: &mut Self,
@@ -310,7 +344,7 @@ where
             return Err(Error::RuleMismatch.into());
         }
         // Why the storage body: a lazy-adjoint source aliases its parent.
-        destination_precheck(destination, &self.storage_body().data, "host")?;
+        destination_precheck(destination, &self.storage_body().data, S::NOUN)?;
         <R::Mode as TypedTensorTransformDispatch<R, D>>::transform_into(
             self,
             destination,
@@ -349,7 +383,45 @@ where
     /// Checked Generic providers report an axis misuse in
     /// [`GenericTensorError::Facade`] with the same [`Error`], and other
     /// failures in [`GenericTensorError::Plan`] with the concrete provider error
-    /// preserved as its source.
+    /// preserved as its source. On CUDA a payload on another device is
+    /// [`Error::PlacementMismatch`], before any device write.
+    ///
+    /// # CUDA storage
+    ///
+    /// Everything categorical is the Host's, unchanged: the same operation,
+    /// rule validation, staged destination, `RuleIdentity`-keyed transform
+    /// cache and completed transformer. Only the replay differs, so a device
+    /// result is the Host result up to dtype tolerance. The staging's context
+    /// lease is released before the device lease is taken, and nothing under
+    /// the device lease leases again: one device lease per replay.
+    ///
+    /// A warm call uploads no structure data and downloads nothing. Its only
+    /// transfer is the output initialisation (#740): exactly one H2D of
+    /// `required_len * size_of::<D>()` bytes, from one host `Vec` of that
+    /// size, and its only device allocation is the returned output. The first
+    /// call for a given structure additionally uploads that structure's
+    /// coefficient payload once and may grow the pack/scatter workspace once.
+    ///
+    /// On device the replay runs in overwrite mode, so it also zero-fills
+    /// every *inactive* destination layout on the device — redundant work over
+    /// an output that was just uploaded as zeros, costing one submission and
+    /// `Σ(inactive layout elements)` device writes per call. It is kept
+    /// because it is what makes the executor's destination mode independent of
+    /// what the destination held, which `*_into` with `beta = 0` relies on;
+    /// removing it here would need a second replay mode for no transfer saving.
+    ///
+    /// That warm contract holds only while this Runtime's Host transform store
+    /// admits the structure: with a tree-transform cache byte budget of zero,
+    /// or for a structure whose entry exceeds that budget, the store hands
+    /// back a fresh allocation per call and the device therefore re-uploads
+    /// its coefficients per call.
+    ///
+    /// Numerics are the device executor's: the block set written is the
+    /// Host's exactly; coefficient-`1` `f64` moves are bitwise, and everything
+    /// else agrees to dtype tolerance, with one rounding position moved for
+    /// Single blocks (`alpha * (c * x)` where the Host folds the scales and
+    /// rounds as `(alpha * c) * x`) and with the recoupling GEMM's summation
+    /// order that of cuTENSOR rather than the Host kernel.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -569,8 +641,10 @@ where
         &self,
         operation: TreeTransformOperation,
     ) -> Result<Self, TypedFacadeError<R>> {
-        if let Some(compact) = compact_arms::transform_rank_one_diagonal(self, &operation)? {
-            return Ok(compact);
+        if let Some(host) = S::as_host(self) {
+            if let Some(compact) = compact_arms::transform_rank_one_diagonal(host, &operation)? {
+                return Ok(S::from_host(compact)?);
+            }
         }
         if let TypedTensorRepr::Adjoint(_) = &self.repr {
             if let Some(lazy) =
@@ -583,49 +657,394 @@ where
         }
         let (space, data) =
             <R::Mode as TypedTensorTransformDispatch<R, D>>::transform(self, operation)?;
-        Ok(self.published(space, data))
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        })
     }
 }
 
-/// The source of a transform `_into` as the tenet-tensors entry reads it,
-/// handed to `run` with its logical space and, for a lazy adjoint, the parent
-/// whose storage it reads (TensorKit `add_transform_kernel!` reading
-/// `subblock(::AdjointTensorMap)` through the parent). A compact bond is read
-/// from the resolved structure when that structure is a single-term square
-/// bijection, as the owned compact arm reads it, and is otherwise densified
-/// once for the dense replay.
+/// The pooled tree-transform lane of payload `D` and coefficient `C`.
+type TreeLane<D, C> = tenet_tensors::TreeTransformExecutionContext<
+    D,
+    tenet_core::RuleIdentity,
+    C,
+    tenet_tensors::DenseTreeTransformOperations,
+>;
+
+/// Which pooled lane a mode stages and replays its transforms on.
+pub(super) trait HostTreeLane<D, C>
+where
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    fn lane(
+        context: &mut crate::runtime::TensorExecutionContext,
+    ) -> Result<&mut TreeLane<D, C>, Error>;
+}
+
+/// The multiplicity-free namespace's coefficient lane.
+pub(super) struct MultiplicityFreeTreeLane;
+
+impl<D, C> HostTreeLane<D, C> for MultiplicityFreeTreeLane
+where
+    D: crate::runtime::MultiplicityFreeCoefficientLane<C>
+        + tenet_tensors::DenseRecouplingScalar
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    fn lane(
+        context: &mut crate::runtime::TensorExecutionContext,
+    ) -> Result<&mut TreeLane<D, C>, Error> {
+        Ok(D::lane(context)?.tree_context_mut())
+    }
+}
+
+/// The checked Generic namespace's lane.
+pub(super) struct CheckedGenericTreeLane;
+
+impl<D> HostTreeLane<D, f64> for CheckedGenericTreeLane
+where
+    D: ScalarOps + tenet_tensors::DenseRecouplingScalar + tenet_tensors::ConjugateValue,
+{
+    fn lane(
+        context: &mut crate::runtime::TensorExecutionContext,
+    ) -> Result<&mut TreeLane<D, f64>, Error> {
+        Ok(context.generic_lane::<D>()?.tree_context_mut())
+    }
+}
+
+type OwnedReplay<D, C> = fn(
+    &mut crate::runtime::TensorExecutionContext,
+    &tenet_tensors::TreeTransformStructure<C>,
+    &Arc<BlockStructure>,
+    &Arc<BlockStructure>,
+    usize,
+    &[D],
+    D,
+) -> Result<Vec<D>, TransformExecError>;
+
+type IntoReplay<D, C> = fn(
+    &mut crate::runtime::TensorExecutionContext,
+    &tenet_tensors::TreeTransformStructure<C>,
+    &Arc<BlockStructure>,
+    &Arc<BlockStructure>,
+    &mut [D],
+    &[D],
+    D,
+    D,
+) -> Result<(), TransformExecError>;
+
+fn host_owned_replay<L, D, C>(
+    context: &mut crate::runtime::TensorExecutionContext,
+    structure: &tenet_tensors::TreeTransformStructure<C>,
+    destination: &Arc<BlockStructure>,
+    source: &Arc<BlockStructure>,
+    nout: usize,
+    data: &[D],
+    alpha: D,
+) -> Result<Vec<D>, TransformExecError>
+where
+    L: HostTreeLane<D, C>,
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    L::lane(context)?
+        .replay_tree_transform_dyn_owned(structure, destination, source, nout, data, alpha)
+        .map_err(TransformExecError::Replay)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn host_into_replay<L, D, C>(
+    context: &mut crate::runtime::TensorExecutionContext,
+    structure: &tenet_tensors::TreeTransformStructure<C>,
+    destination: &Arc<BlockStructure>,
+    source: &Arc<BlockStructure>,
+    destination_data: &mut [D],
+    data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), TransformExecError>
+where
+    L: HostTreeLane<D, C>,
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    L::lane(context)?
+        .replay_tree_transform_dyn_into(
+            structure,
+            destination,
+            source,
+            destination_data,
+            data,
+            alpha,
+            beta,
+        )
+        .map_err(TransformExecError::Replay)
+}
+
+/// One staged tree-transform replay, handed to the storage kernel by value:
+/// the pooled context lease the transform was staged under, the completed
+/// transformer, and the stored block structures it maps between.
+///
+/// Host replays under that lease, so a Host transform still takes one lease;
+/// CUDA releases it before taking the device lease. The Host replay of the
+/// staging mode's lane is bound here, where that lane's scalar bounds are
+/// proved.
+///
+/// Internal and unstable despite being public for [`TransformExec`].
+#[doc(hidden)]
+pub struct TreeReplay<'a, D, C> {
+    #[cfg_attr(
+        not(feature = "cuda"),
+        allow(dead_code, reason = "the device kernel takes its device lease here")
+    )]
+    pub(super) runtime: &'a Runtime,
+    pub(super) lease: crate::runtime::ContextLease<'a>,
+    owned: OwnedReplay<D, C>,
+    into: IntoReplay<D, C>,
+    pub(super) structure: &'a tenet_tensors::TreeTransformStructure<C>,
+    pub(super) destination: &'a Arc<BlockStructure>,
+    pub(super) source: &'a Arc<BlockStructure>,
+    pub(super) nout: usize,
+}
+
+impl<'a, D, C> TreeReplay<'a, D, C>
+where
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    /// A replay of `structure` on lane `L`, `destination <- source`.
+    pub(super) fn new<L: HostTreeLane<D, C>>(
+        runtime: &'a Runtime,
+        lease: crate::runtime::ContextLease<'a>,
+        structure: &'a tenet_tensors::TreeTransformStructure<C>,
+        destination: &'a Arc<BlockStructure>,
+        source: &'a Arc<BlockStructure>,
+        nout: usize,
+    ) -> Self {
+        Self {
+            runtime,
+            lease,
+            owned: host_owned_replay::<L, D, C>,
+            into: host_into_replay::<L, D, C>,
+            structure,
+            destination,
+            source,
+            nout,
+        }
+    }
+
+    /// The replay of a staged transform on lane `L`.
+    pub(super) fn staged<L: HostTreeLane<D, C>, R, T>(
+        runtime: &'a Runtime,
+        lease: crate::runtime::ContextLease<'a>,
+        staged: &'a tenet_tensors::StagedTreeTransform<'_, R, T, C>,
+    ) -> Self {
+        Self::new::<L>(
+            runtime,
+            lease,
+            staged.structure(),
+            staged.destination_structure(),
+            staged.source_structure(),
+            staged.nout(),
+        )
+    }
+}
+
+/// A storage kernel's failure. The replay's own error is kept apart so each
+/// mode classifies it exactly as its staging's errors.
+///
+/// Internal and unstable despite being public for [`TransformExec`].
+#[doc(hidden)]
+pub enum TransformExecError {
+    /// The replay failed.
+    Replay(OperationError),
+    /// A storage, placement or capability error.
+    Storage(Error),
+}
+
+impl From<Error> for TransformExecError {
+    fn from(error: Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<TransformExecError> for Error {
+    fn from(error: TransformExecError) -> Self {
+        match error {
+            TransformExecError::Replay(error) => error.into(),
+            TransformExecError::Storage(error) => error,
+        }
+    }
+}
+
+/// [`TransformExecError`] classified as the checked Generic staging
+/// classifies its own replay: a plan failure.
+pub(super) fn checked_generic_exec_error<E>(error: TransformExecError) -> GenericTensorError<E> {
+    match error {
+        TransformExecError::Replay(error) => CheckedGenericPlanError::<E>::from(error).into(),
+        TransformExecError::Storage(error) => error.into(),
+    }
+}
+
+/// The source a transform `_into` replays: the stored payload (its own, or a
+/// lazy adjoint's parent's, TensorKit `add_transform_kernel!` reading
+/// `subblock(::AdjointTensorMap)` through the parent), or a compact bond.
+/// `read` either writes `alpha · operation(src) + beta · dst` from the
+/// resolved structure and the destination structure it was resolved against
+/// and returns `true`, or returns `false` with `dst` untouched;
+/// `dense_source` then builds the dense image that structure replays.
+///
+/// Internal and unstable despite being public for [`TransformExec`].
+#[doc(hidden)]
 #[allow(clippy::type_complexity)]
-pub(super) fn with_transform_into_source<R, D, C, E, T>(
-    source: &TensorMap<R, D>,
+pub enum TransformIntoSource<'s, D, S, C> {
+    Stored(&'s S),
+    Bond {
+        read: &'s mut dyn FnMut(
+            &tenet_tensors::TreeTransformStructure<C>,
+            &BlockStructure,
+            &mut [D],
+        ) -> Result<bool, Error>,
+        dense_source: &'s dyn Fn() -> Result<Vec<D>, OperationError>,
+    },
+}
+
+/// The storage kernels of the one tree-transform body: everything before
+/// them — admission, staging, the destination checks — and the commit after
+/// them are shared.
+#[doc(hidden)]
+pub trait TransformExec<R, D>: TypedStorage<R, D> {
+    /// `alpha · structure(t)` into a fresh payload of `replay`'s destination
+    /// structure, for an owned `t` (Host densifies a compact diagonal).
+    fn replay_owned<C: Copy>(
+        replay: TreeReplay<'_, D, C>,
+        t: &TensorMap<R, D, Self>,
+        alpha: D,
+    ) -> Result<Self, TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>;
+
+    /// `destination = alpha · structure(source) + beta · destination` into a
+    /// destination that passed every admission check.
+    fn replay_into<C: Copy>(
+        replay: TreeReplay<'_, D, C>,
+        source: TransformIntoSource<'_, D, Self, C>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>;
+}
+
+impl<R, D: TensorScalar> TransformExec<R, D> for Vec<D> {
+    fn replay_owned<C: Copy>(
+        replay: TreeReplay<'_, D, C>,
+        t: &TensorMap<R, D>,
+        alpha: D,
+    ) -> Result<Self, TransformExecError> {
+        let data = t
+            .owned_body()
+            .ok_or_else(|| internal_layout_error("owned transform input"))?
+            .materialized_dense_data();
+        let TreeReplay {
+            mut lease,
+            owned,
+            structure,
+            destination,
+            source,
+            nout,
+            ..
+        } = replay;
+        owned(
+            lease.context(),
+            structure,
+            destination,
+            source,
+            nout,
+            &data,
+            alpha,
+        )
+    }
+
+    fn replay_into<C: Copy>(
+        replay: TreeReplay<'_, D, C>,
+        source: TransformIntoSource<'_, D, Self, C>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError> {
+        let TreeReplay {
+            mut lease,
+            into,
+            structure,
+            destination: destination_structure,
+            source: source_structure,
+            ..
+        } = replay;
+        let densified;
+        let source = match source {
+            TransformIntoSource::Stored(data) => data.as_slice(),
+            TransformIntoSource::Bond { read, dense_source } => {
+                if read(structure, destination_structure, destination.as_mut_slice())? {
+                    return Ok(());
+                }
+                densified = dense_source().map_err(Error::from)?;
+                &densified[..]
+            }
+        };
+        into(
+            lease.context(),
+            structure,
+            destination_structure,
+            source_structure,
+            destination.as_mut_slice(),
+            source,
+            alpha,
+            beta,
+        )
+    }
+}
+
+/// The stored element count a transform stages its source with; a compact
+/// diagonal stages its dense image.
+pub(super) fn transform_source_len<R, D, S: TensorStorage<D>>(
+    body: &TypedTensorBody<R, D, S>,
+) -> Result<usize, Error> {
+    Ok(match body.data.as_ref() {
+        TypedData::Dense(data) => TensorStorage::len(data),
+        TypedData::Diagonal(_) => body.space.space().required_len()?,
+    })
+}
+
+/// The source of a transform `_into` as its storage kernel replays it,
+/// handed to `run`. A compact bond is read from the resolved structure when
+/// that structure is a single-term square bijection, as the owned compact arm
+/// reads it, and is otherwise densified once for the dense replay.
+pub(super) fn with_transform_into_source<R, D, S, C, T>(
+    source: &TensorMap<R, D, S>,
     operation: &TreeTransformOperation,
     alpha: D,
     beta: D,
-    run: impl FnOnce(
-        &BoundDynamicFusionMapSpace<R>,
-        Option<&BoundDynamicFusionMapSpace<R>>,
-        tenet_tensors::TreeTransformIntoSource<'_, D, C, E>,
-    ) -> Result<T, E>,
-) -> Result<T, E>
+    run: impl FnOnce(TransformIntoSource<'_, D, S, C>) -> T,
+) -> T
 where
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<C>,
     C: Copy,
-    E: From<Error>,
 {
-    use tenet_tensors::TreeTransformIntoSource;
-    let body = match &source.repr {
-        TypedTensorRepr::Owned(body) => body,
-        TypedTensorRepr::Adjoint(view) => {
-            return run(
-                &view.logical_space,
-                Some(&view.parent.space),
-                TreeTransformIntoSource::Stored(view.parent_data()),
-            );
-        }
-    };
+    let body = source.storage_body();
     let spectrum = match body.data.as_ref() {
-        TypedData::Dense(data) => {
-            return run(&body.space, None, TreeTransformIntoSource::Stored(data));
-        }
+        TypedData::Dense(data) => return run(TransformIntoSource::Stored(data)),
         TypedData::Diagonal(spectrum) => spectrum,
     };
     let logical = &body.space;
@@ -639,7 +1058,7 @@ where
     let mut read = |structure: &tenet_tensors::TreeTransformStructure<C>,
                     destination: &tenet_core::BlockStructure,
                     data: &mut [D]|
-     -> Result<bool, E> {
+     -> Result<bool, Error> {
         let Some(diagonal) = crate::tensor_core::bond_spectrum(
             logical.space().structure(),
             destination,
@@ -654,14 +1073,10 @@ where
     };
     let dense_source =
         || tenet_matrixalgebra::seam::diagonal_bond_data(logical.space(), spectrum, &|v| v);
-    run(
-        logical,
-        None,
-        TreeTransformIntoSource::Bond {
-            read: &mut read,
-            dense_source: &dense_source,
-        },
-    )
+    run(TransformIntoSource::Bond {
+        read: &mut read,
+        dense_source: &dense_source,
+    })
 }
 
 /// `data = beta · data`: a strong zero for `beta == 0`, which never reads
@@ -706,12 +1121,13 @@ fn axpby_bond_diagonal<D: TensorScalar>(
 
 /// The multiplicity-free [`TypedTensorTransformDispatch::transform_into`] of
 /// either coefficient lane: the exact-layout hit replays its proved
-/// transformer; a miss runs the owned transform's staging into the caller's
-/// buffer and records the proof for the next call.
+/// transformer; a miss stages the owned transform against the caller's
+/// destination, the storage replays into it, and the proof is recorded for
+/// the next call.
 #[allow(private_bounds)]
-fn tree_transform_into_multiplicity_free<R, D>(
-    source: &TensorMap<R, D>,
-    destination: &mut TensorMap<R, D>,
+fn tree_transform_into_multiplicity_free<R, D, S>(
+    source: &TensorMap<R, D, S>,
+    destination: &mut TensorMap<R, D, S>,
     alpha: D,
     beta: D,
     operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
@@ -725,6 +1141,7 @@ where
         + crate::runtime::MultiplicityFreeCoefficientLane<
             <R as MultiplicityFreeFusionSymbols>::Scalar,
         >,
+    S: TransformExec<R, D>,
 {
     // Only an owned dense source keys the exact-layout proof: its key is a
     // direct, unconjugated source content, which neither a lazy adjoint's
@@ -736,13 +1153,13 @@ where
                 .space()
                 .admission()
                 .rule_identity()
-                .map(|identity| (identity, body, data.as_slice())),
+                .map(|identity| (identity, body, data)),
             TypedData::Diagonal(_) => None,
         },
         TypedTensorRepr::Adjoint(_) => None,
     };
     let mut lease = source.runtime.lease_context()?;
-    let context = D::lane(lease.context())?.tree_context_mut();
+    D::lane(lease.context())?;
     // A destination proved once to be this operation's result space of
     // this source hits the completed transformer directly: the owned
     // operation and the result space are not rebuilt.
@@ -759,37 +1176,49 @@ where
     }
     if let (Some(structure), Some((_, body, data))) = (exact_layout_hit, direct) {
         let destination_structure = Arc::clone(destination.logical_space().space().structure());
-        return Ok(context.replay_tree_transform_dyn_into(
+        let nout = destination.codomain_rank();
+        let replay = TreeReplay::new::<MultiplicityFreeTreeLane>(
+            &source.runtime,
+            lease,
             &structure,
             &destination_structure,
             body.space.space().structure(),
-            destination_slice(destination)?,
-            data,
+            nout,
+        );
+        return Ok(S::replay_into(
+            replay,
+            TransformIntoSource::Stored(data),
+            destination_storage_mut(destination)?,
             alpha,
             beta,
         )?);
     }
     let operation = operation()?;
+    let adjoint_of = match &source.repr {
+        TypedTensorRepr::Owned(_) => None,
+        TypedTensorRepr::Adjoint(view) => Some(&view.parent.space),
+    };
     let destination_space = destination.logical_space().space().clone();
-    with_transform_into_source(
-        source,
-        &operation,
-        alpha,
-        beta,
-        |logical, adjoint_of, input| {
-            context.tree_transform_into_multiplicity_free_in(
-                logical,
-                adjoint_of,
-                input,
-                &operation,
-                &destination_space,
-                || destination_slice(destination),
-                alpha,
-                beta,
-            )
-        },
-    )?;
-    drop(lease);
+    let staged = D::lane(lease.context())?
+        .tree_context_mut()
+        .stage_tree_transform_into_multiplicity_free_in(
+            source.logical_space(),
+            adjoint_of,
+            transform_source_len(source.storage_body())?,
+            &operation,
+            &destination_space,
+        )?;
+    let destination_data = destination_storage_mut(destination)?;
+    with_transform_into_source(source, &operation, alpha, beta, |input| {
+        S::replay_into(
+            TreeReplay::staged::<MultiplicityFreeTreeLane, _, _>(&source.runtime, lease, &staged),
+            input,
+            destination_data,
+            alpha,
+            beta,
+        )
+    })?;
+    staged.commit()?;
     if let Some((identity, body, _)) = direct {
         // Retention is an optimization: a lookup-only key keeps no proof.
         let _ = crate::runtime::Runtime::admit_exact_tree_pair_layout_of::<
@@ -806,12 +1235,12 @@ where
 }
 
 /// The owned multiplicity-free transform of either coefficient lane: one
-/// destination derivation and one replay (or overwrite) into a fresh payload.
+/// staging, the storage's replay into a fresh payload, and the commit.
 #[allow(private_bounds)]
-fn tree_transform_multiplicity_free_owned<R, D>(
-    tensor: &TensorMap<R, D>,
+fn tree_transform_multiplicity_free_owned<R, D, S>(
+    tensor: &TensorMap<R, D, S>,
     operation: TreeTransformOperation,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error>
+) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     <R as MultiplicityFreeFusionSymbols>::Scalar:
@@ -820,6 +1249,7 @@ where
         + crate::runtime::MultiplicityFreeCoefficientLane<
             <R as MultiplicityFreeFusionSymbols>::Scalar,
         >,
+    S: TransformExec<R, D>,
 {
     // Leasing rather than locking: independent operations on one runtime
     // must not serialize behind each other.
@@ -829,19 +1259,18 @@ where
     let body = tensor
         .owned_body()
         .ok_or_else(|| internal_layout_error("multiplicity-free transform input is owned"))?;
-    let context = D::lane(lease.context())?;
-    let data = body.materialized_dense_data();
-    let input = BoundDynamicTensorRef::try_new(&body.space, data.as_ref())?;
+    let src_len = transform_source_len(body)?;
     #[cfg(test)]
     crate::tensor_core::observe_tree_transform_seam_call();
-    Ok(context
+    let staged = D::lane(lease.context())?
         .tree_context_mut()
-        .tree_transform_owned_multiplicity_free_in(
-            input.space(),
-            input.data(),
-            &operation,
-            D::from_real(1.0),
-        )?)
+        .stage_tree_transform_multiplicity_free_in(&body.space, None, src_len, &operation)?;
+    let data = S::replay_owned(
+        TreeReplay::staged::<MultiplicityFreeTreeLane, _, _>(&tensor.runtime, lease, &staged),
+        tensor,
+        D::from_real(1.0),
+    )?;
+    Ok((staged.commit()?, data))
 }
 
 /// The multiplicity-free [`TypedTensorTransformDispatch::transform_bond_spectrum`]
@@ -903,14 +1332,15 @@ impl<R, D> BondTransform<R, D> {
 /// and its `braid`/`transpose`/`repartition` twins: the lazy adjoint of the
 /// parent's owned transform, one body for every mode. `None` unless `tensor`
 /// is a lazy adjoint.
-pub(super) fn lazy_adjoint_of_transformed_parent<R, D>(
-    tensor: &TensorMap<R, D>,
+pub(super) fn lazy_adjoint_of_transformed_parent<R, D, S>(
+    tensor: &TensorMap<R, D, S>,
     operation: &TreeTransformOperation,
-) -> Result<Option<TensorMap<R, D>>, TypedFacadeError<R>>
+) -> Result<Option<TensorMap<R, D, S>>, TypedFacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,
     D: TensorScalar,
+    S: TransformExec<R, D>,
 {
     let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
         return Ok(None);
@@ -949,23 +1379,23 @@ where
         )
     }
 
-    fn try_lazy_adjoint(
-        tensor: &TensorMap<R, Self>,
+    fn try_lazy_adjoint<S: TransformExec<R, Self>>(
+        tensor: &TensorMap<R, Self, S>,
         operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+    ) -> Result<Option<TensorMap<R, Self, S>>, Error> {
         lazy_adjoint_of_transformed_parent(tensor, operation)
     }
 
-    fn transform(
-        tensor: &TensorMap<R, Self>,
+    fn transform<S: TransformExec<R, Self>>(
+        tensor: &TensorMap<R, Self, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         tree_transform_multiplicity_free_owned(tensor, operation)
     }
 
-    fn transform_into(
-        source: &TensorMap<R, Self>,
-        destination: &mut TensorMap<R, Self>,
+    fn transform_into<S: TransformExec<R, Self>>(
+        source: &TensorMap<R, Self, S>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
@@ -1002,16 +1432,16 @@ where
         )
     }
 
-    fn transform(
-        tensor: &TensorMap<R, Self>,
+    fn transform<S: TransformExec<R, Self>>(
+        tensor: &TensorMap<R, Self, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         tree_transform_multiplicity_free_owned(tensor, operation)
     }
 
-    fn transform_into(
-        source: &TensorMap<R, Self>,
-        destination: &mut TensorMap<R, Self>,
+    fn transform_into<S: TransformExec<R, Self>>(
+        source: &TensorMap<R, Self, S>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,

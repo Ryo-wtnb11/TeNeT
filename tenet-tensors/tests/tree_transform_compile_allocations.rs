@@ -5,16 +5,69 @@ use std::sync::{
 
 use tenet_core::{
     BlockKey, BlockStructure, BraidingStyleKind, DegeneracyStructure, FusionProductSpace,
-    FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    MultiplicityIndex, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
-    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    SectorStructure, SectorVec, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    RuleIdentity, TreeTransformBlockSpec, TreeTransformExecutionContext, TreeTransformOperation,
-    TreeTransformStructure,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, RuleIdentity, TreeTransformBlockSpec,
+    TreeTransformExecutionContext, TreeTransformOperation, TreeTransformStructure,
 };
+
+/// `structure` over the all-codomain hom space of `legs`, bound to `rule`
+/// through the expert admission of an explicit layout: the source an eager
+/// transform stages.
+fn bound_source<R: MultiplicityFreeFusionRule, const N: usize>(
+    rule: Arc<R>,
+    legs: impl IntoIterator<Item = SectorLeg>,
+    structure: BlockStructure,
+) -> BoundDynamicFusionMapSpace<R> {
+    let homspace =
+        FusionTreeHomSpace::new(FusionProductSpace::new(legs), FusionProductSpace::new([]));
+    let space = FusionTensorMapSpace::<N, 0>::new_unbound(
+        TensorMapSpace::<N, 0>::from_dims([1; N], []).unwrap(),
+        homspace,
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule.as_ref())
+    .unwrap();
+    BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(&space),
+        rule,
+    )
+    .unwrap()
+}
+
+/// The eager staging of `operation` on `source`: destination derivation plus
+/// the completed-transformer resolution.
+fn stage<R>(
+    context: &mut TreeTransformExecutionContext<f64, RuleIdentity>,
+    source: &BoundDynamicFusionMapSpace<R>,
+    operation: &TreeTransformOperation,
+) -> TreeTransformStructure<f64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let src_len = source.space().required_len().unwrap();
+    context
+        .stage_tree_transform_multiplicity_free_in(source, None, src_len, operation)
+        .unwrap()
+        .structure()
+        .clone()
+}
+
+/// The destination derivation alone, which the staging runs before it
+/// resolves the structure.
+fn derive<R: MultiplicityFreeRigidSymbols>(
+    source: &BoundDynamicFusionMapSpace<R>,
+    operation: &TreeTransformOperation,
+) -> BoundDynamicFusionMapSpace<R> {
+    source.transformed_multiplicity_free(operation).unwrap()
+}
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;
@@ -156,7 +209,7 @@ impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
     }
 }
 
-fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
+fn rank_129_su2_vacuum_structure() -> BlockStructure {
     const RANK: usize = 129;
 
     let vacuum = SectorId::new(0);
@@ -172,17 +225,15 @@ fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
         .unwrap(),
         FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], vacuum, [], [], []).unwrap(),
     );
-    Arc::new(
-        BlockStructure::from_parts(
-            SectorStructure::from_keys(RANK, [BlockKey::from(key)]).unwrap(),
-            DegeneracyStructure::packed_column_major(RANK, [vec![1; RANK]]).unwrap(),
-        )
-        .unwrap(),
+    BlockStructure::from_parts(
+        SectorStructure::from_keys(RANK, [BlockKey::from(key)]).unwrap(),
+        DegeneracyStructure::packed_column_major(RANK, [vec![1; RANK]]).unwrap(),
     )
+    .unwrap()
 }
 
 #[test]
-fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_provider_work() {
+fn rank_129_second_exact_warm_staging_resolves_without_allocation_or_provider_work() {
     let _global_cache_guard = counting_alloc::serial();
     tenet_core::clear_structure_caches();
 
@@ -190,30 +241,42 @@ fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_p
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
     };
-    let structure = rank_129_su2_vacuum_structure();
+    let vacuum = SU2FusionRule.vacuum();
+    let source = bound_source::<_, 129>(
+        Arc::new(rule),
+        (0..129).map(|_| SectorLeg::new([(vacuum, 1)], false)),
+        rank_129_su2_vacuum_structure(),
+    );
     // A hand-built layout is lookup-only unless admitted; mark it canonical
     // so the exact key publishes.
-    tenet_core::testing::mark_structure_canonical(&structure);
+    tenet_core::testing::mark_structure_canonical(source.space().structure());
     let operation = TreeTransformOperation::permute(0..129, []);
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    let cold = context
-        .compile_tree_pair_structure(&rule, &operation, &structure, &structure)
-        .unwrap();
+    let cold = stage(&mut context, &source, &operation);
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
     counting_alloc::start();
-    let warm = context
-        .compile_tree_pair_structure(&rule, &operation, &structure, &structure)
-        .unwrap();
-    let allocs = counting_alloc::stop();
+    let warm = stage(&mut context, &source, &operation);
+    let staged = counting_alloc::stop();
+    let staged_calls = calls.swap(0, Ordering::Relaxed);
+    counting_alloc::start();
+    let derived = derive(&source, &operation);
+    let derivation = counting_alloc::stop();
+    let derivation_calls = calls.load(Ordering::Relaxed);
+    std::hint::black_box(derived);
 
-    // What: cloning the runtime-rank operation into the completed-transformer
-    // lookup key and binding the cached core to the caller's structures
-    // perform no allocation or provider work on an exact warm hit.
+    eprintln!(
+        "rank-129 warm staging: {} allocations, derivation alone {}",
+        staged.calls, derivation.calls
+    );
+    // What: on an exact warm hit the staging's structure resolution — the
+    // runtime-rank operation cloned into the completed-transformer lookup key
+    // and the cached core bound to the caller's structures — adds no
+    // allocation and no provider work to the destination derivation.
     assert!(Arc::ptr_eq(cold.replay_core(), warm.replay_core()));
-    assert_eq!(allocs.calls, 0);
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(staged.calls, derivation.calls);
+    assert_eq!(staged_calls, derivation_calls);
 }
 
 #[test]
@@ -254,99 +317,104 @@ fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
     assert!(allocs.calls <= 52, "allocations={}", allocs.calls);
 }
 
-fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 8, 0>) {
+/// Rank eight with `half_legs` spin-1/2 legs and vacuum legs elsewhere: the
+/// complete layout has one block per vacuum-coupled tree of the spin-1/2
+/// legs (1, 2, 5, 14 for 2, 4, 6, 8 of them).
+fn rank_eight_su2_layout(half_legs: usize) -> BoundDynamicFusionMapSpace<SU2FusionRule> {
     let half = SU2Irrep::from_twice_spin(1).sector_id();
-    let leg = || SectorLeg::new([(half, 1)], false);
+    let vacuum = SU2FusionRule.vacuum();
+    let legs = (0..8)
+        .map(|leg| SectorLeg::new([(if leg < half_legs { half } else { vacuum }, 1)], false))
+        .collect::<Vec<_>>();
     let hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new((0..8).map(|_| leg())),
+        FusionProductSpace::new(legs.clone()),
         FusionProductSpace::new([]),
     );
-    let keys = hom
-        .fusion_tree_keys(&SU2FusionRule)
-        .iter()
-        .take(count)
-        .cloned()
-        .map(BlockKey::from)
-        .collect::<Vec<_>>();
-    assert_eq!(keys.len(), count);
-    let structure = BlockStructure::from_parts(
-        SectorStructure::from_keys(8, keys).unwrap(),
-        DegeneracyStructure::packed_column_major(8, (0..count).map(|_| vec![1usize; 8])).unwrap(),
+    let count = hom.fusion_tree_keys(&SU2FusionRule).len();
+    BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        Arc::new(SU2FusionRule),
+        hom,
+        (0..count).map(|_| vec![1usize; 8]),
     )
-    .unwrap();
-    let space = TensorMapSpace::<8, 0>::from_dims([1; 8], []).unwrap();
-    let src =
-        TensorMap::from_vec_with_structure(vec![1.0; count], space.clone(), structure.clone())
-            .unwrap();
-    let dst = TensorMap::from_vec_with_structure(vec![0.0; count], space, structure).unwrap();
-    (dst, src)
+    .unwrap()
+}
+
+/// Cold allocation calls of the staging of `operation` on `source`, less
+/// those of its destination derivation alone, each from cleared caches.
+fn cold_resolution_allocations<R>(
+    source: &BoundDynamicFusionMapSpace<R>,
+    operation: &TreeTransformOperation,
+) -> (u64, u64, u64)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    tenet_core::clear_structure_caches();
+    counting_alloc::start();
+    std::hint::black_box(derive(source, operation));
+    let derivation = counting_alloc::stop();
+    tenet_core::clear_structure_caches();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    counting_alloc::start();
+    let structure = stage(&mut context, source, operation);
+    let staged = counting_alloc::stop();
+    std::hint::black_box(structure);
+    (
+        staged.calls - derivation.calls,
+        staged.bytes.saturating_sub(derivation.bytes),
+        staged.calls,
+    )
 }
 
 #[test]
-fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
+fn cold_ordered_tree_pair_staging_stays_within_allocation_envelopes() {
     let _global_cache_guard = counting_alloc::serial();
 
     // What: exact counts cover missing-position plan compilation after registry
     // capacity exists, independently of unrelated typed-cache test order.
-    tenet_core::clear_structure_caches();
-    let (dst, src) = rank_eight_su2_subset(1);
-    TreeTransformExecutionContext::<f64, RuleIdentity>::default()
-        .compile_tree_pair_structure(
-            &SU2FusionRule,
-            &TreeTransformOperation::permute(0..8, []),
-            dst.structure(),
-            src.structure(),
-        )
-        .unwrap();
-    tenet_core::clear_structure_caches();
+    let operation = TreeTransformOperation::permute(0..8, []);
+    cold_resolution_allocations(&rank_eight_su2_layout(2), &operation);
 
-    for (source_count, expected_allocations) in
-        [(1, 41), (2, 46), (4, 54), (5, 62), (8, 68), (9, 76)]
-    {
-        tenet_core::clear_structure_caches();
-        let (dst, src) = rank_eight_su2_subset(source_count);
-        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-        let operation = TreeTransformOperation::permute(0..8, []);
-        counting_alloc::start();
-        let plan = context
-            .compile_tree_pair_structure(
-                &SU2FusionRule,
-                &operation,
-                dst.structure(),
-                src.structure(),
-            )
-            .unwrap();
-        let allocs = counting_alloc::stop();
+    for half_legs in [2, 4, 6, 8] {
+        let source = rank_eight_su2_layout(half_legs);
+        let blocks = source.space().structure().block_count();
+        let (resolution, _, staged) = cold_resolution_allocations(&source, &operation);
+        eprintln!("blocks={blocks}: staging {staged}, resolution {resolution}");
 
-        // What: the ordered whole-block compiler stays within its prior cold
-        // envelope plus one bounded all-rank normalization workspace.
+        // What: the staging's ordered whole-block resolution stays within the
+        // prior cold compile envelope (41 one-block allocations, under five
+        // per further block, plus one bounded all-rank normalization
+        // workspace): it grows at most linearly in the source blocks.
         assert!(
-            (allocs.calls as usize) <= expected_allocations + 3,
-            "source_count={source_count}, allocations={}",
-            allocs.calls
+            resolution as usize <= 44 + 5 * (blocks - 1),
+            "blocks={blocks}, resolution allocations={resolution}"
         );
-        std::hint::black_box(plan);
     }
 }
 
 #[test]
 fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
     let _serial = counting_alloc::serial();
-    let structure = Arc::new(rank_nine_same_split_su2_groups());
+    let vacuum = SU2FusionRule.vacuum();
+    let leg =
+        |sectors: &[SectorId]| SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
+    let spins = [0usize, 1, 2].map(SectorId::new);
+    let source = bound_source::<_, 9>(
+        Arc::new(SU2FusionRule),
+        [leg(&spins), leg(&spins)]
+            .into_iter()
+            .chain((0..7).map(|_| leg(&[vacuum]))),
+        rank_nine_same_split_su2_groups(),
+    );
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    counting_alloc::start();
-    let compiled = context
-        .compile_tree_pair_structure(&SU2FusionRule, &operation, &structure, &structure)
-        .unwrap();
-    let allocs = counting_alloc::stop();
+    let (calls, bytes, staged) = cold_resolution_allocations(&source, &operation);
+    eprintln!("rank-9 groups: staging {staged}, resolution {calls} calls / {bytes} bytes");
 
     // What: three same-split groups do not regress beyond the prior compiled
     // allocation and byte envelopes.
-    assert_eq!(structure.fusion_tree_groups().len(), 3);
-    assert!(allocs.calls <= 217);
-    assert!(allocs.bytes < 56_500);
-    std::hint::black_box(compiled);
+    assert_eq!(source.space().structure().fusion_tree_groups().len(), 3);
+    assert!(calls <= 217, "resolution allocations={calls}");
+    assert!(bytes < 56_500, "resolution bytes={bytes}");
 }
 
 fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {

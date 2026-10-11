@@ -55,28 +55,29 @@ fn operation() -> TreeTransformOperation {
     TreeTransformOperation::permute([2, 0], [3, 1])
 }
 
-/// Resolves the fixture's completed transformer through one leased Runtime
-/// context (planning only: the dense backend is not entered on a pool
-/// worker).
+/// Stages the fixture's eager transform through one leased Runtime context
+/// and returns its completed transformer (planning only: the dense backend is
+/// not entered on a pool worker).
 fn resolve(
     runtime: &Runtime,
     source: &TensorMap<SU2FusionRule, f64>,
 ) -> TreeTransformStructure<f64> {
     let source = source.test_bound_space();
-    let destination = source.transformed_multiplicity_free(&operation()).unwrap();
     let mut lease = runtime.lease_context().unwrap();
     lease
         .context()
         .multiplicity_free_lane::<f64>()
         .unwrap()
         .tree_context_mut()
-        .compile_tree_pair_structure(
-            source.provider(),
+        .stage_tree_transform_multiplicity_free_in(
+            source,
+            None,
+            source.space().required_len().unwrap(),
             &operation(),
-            destination.space().structure(),
-            source.space().structure(),
         )
         .unwrap()
+        .structure()
+        .clone()
 }
 
 fn admissions() -> u64 {
@@ -193,7 +194,7 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
         let source = fixture(&runtime);
         let groups = source_groups(&source);
         let source = source.test_bound_space().clone();
-        let destination = source.transformed_multiplicity_free(&operation()).unwrap();
+        let src_len = source.space().required_len().unwrap();
         crate::cache::clear();
         let before = admissions();
         // Standalone contexts on Rayon's global pool: no Runtime pool,
@@ -209,13 +210,10 @@ fn cache_concurrency_ambient_pool_without_a_runtime() {
                     .backend_mut()
                     .set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
                 context
-                    .compile_tree_pair_structure(
-                        source.provider(),
-                        &operation(),
-                        destination.space().structure(),
-                        source.space().structure(),
-                    )
+                    .stage_tree_transform_multiplicity_free_in(&source, None, src_len, &operation())
                     .unwrap()
+                    .structure()
+                    .clone()
             })
             .collect::<Vec<_>>();
         assert_converged(&built, before, Some((1, groups)));

@@ -177,20 +177,6 @@ where
     D: FactorizationScalar,
     S: FactorExec<R, D>,
 {
-    /// Runs `op` on the matrix view `permute(self, rows, cols)`; the current
-    /// split borrows `self` without a transform or a clone.
-    fn factor_leg_roles<T>(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-        op: impl FnOnce(&Self) -> Result<T, TypedFacadeError<R>>,
-    ) -> Result<T, TypedFacadeError<R>> {
-        if self.axes_are_identity(rows, cols) {
-            return op(self);
-        }
-        op(&S::permute(self, rows, cols)?)
-    }
-
     /// Returns the compact QR factorization `self = q * r` as a [`Qr`].
     ///
     /// In coupled sector `c`, with block shape `m_c x n_c`, the bond dimension
@@ -267,7 +253,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        self.factor_leg_roles(rows, cols, S::qr_compact)
+        self.with_leg_roles(rows, cols, S::qr_compact)
     }
 
     /// Returns the compact singular-value decomposition
@@ -366,7 +352,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        self.factor_leg_roles(rows, cols, S::svd_compact)
+        self.with_leg_roles(rows, cols, S::svd_compact)
     }
 
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
@@ -468,7 +454,7 @@ where
         cols: &[usize],
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        self.factor_leg_roles(rows, cols, |t| S::eigh_full(t, hermitian_tol))
+        self.with_leg_roles(rows, cols, |t| S::eigh_full(t, hermitian_tol))
     }
 }
 

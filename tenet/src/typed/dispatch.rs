@@ -117,33 +117,33 @@ where
     /// else `None`. The method is where a mode discharges
     /// [`TypedAdjointSpace`]; the default `None` is for a mode that cannot
     /// hold a lazy adjoint.
-    fn try_lazy_adjoint_transform(
-        _tensor: &TensorMap<R, D>,
+    fn try_lazy_adjoint_transform<S: TransformExec<R, D>>(
+        _tensor: &TensorMap<R, D, S>,
         _operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, D>>, Self::FacadeError> {
+    ) -> Result<Option<TensorMap<R, D, S>>, Self::FacadeError> {
         Ok(None)
     }
 
     /// Transforms the owned dense payload of `tensor` (a compact diagonal
-    /// densified) into a fresh destination payload. A lazy adjoint never
-    /// reaches it: `try_lazy_adjoint_transform` takes it first.
-    fn transform(
-        tensor: &TensorMap<R, D>,
+    /// densified) into a fresh destination payload of its storage. A lazy
+    /// adjoint never reaches it: `try_lazy_adjoint_transform` takes it first.
+    fn transform<S: TransformExec<R, D>>(
+        tensor: &TensorMap<R, D, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError>;
 
     /// `destination = alpha · operation(source) + beta · destination` for a
     /// `source` of any representation (a lazy adjoint read through its
     /// parent's storage, a compact diagonal through its bond structure) and a
     /// `destination` that passed [`destination_precheck`]: one lease,
     /// [`Self::transform`]'s staging, the staged space against the
-    /// destination's, [`destination_slice`], the write, then the same commit.
-    /// A mode with an exact-layout memo offers it the borrowed request of an
-    /// owned dense source through `exact_layout_probe` before `operation`
-    /// builds the owned one.
-    fn transform_into(
-        source: &TensorMap<R, D>,
-        destination: &mut TensorMap<R, D>,
+    /// destination's, the destination's length and ownership, the storage's
+    /// write, then the same commit. A mode with an exact-layout memo offers it
+    /// the borrowed request of an owned dense source through
+    /// `exact_layout_probe` before `operation` builds the owned one.
+    fn transform_into<S: TransformExec<R, D>>(
+        source: &TensorMap<R, D, S>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
@@ -182,21 +182,21 @@ where
         require_representable: bool,
     ) -> Result<BondTransform<R, Self>, Error>;
 
-    fn try_lazy_adjoint(
-        _tensor: &TensorMap<R, Self>,
+    fn try_lazy_adjoint<S: TransformExec<R, Self>>(
+        _tensor: &TensorMap<R, Self, S>,
         _operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, Self>>, Error> {
+    ) -> Result<Option<TensorMap<R, Self, S>>, Error> {
         Ok(None)
     }
 
-    fn transform(
-        tensor: &TensorMap<R, Self>,
+    fn transform<S: TransformExec<R, Self>>(
+        tensor: &TensorMap<R, Self, S>,
         operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>;
 
-    fn transform_into(
-        source: &TensorMap<R, Self>,
-        destination: &mut TensorMap<R, Self>,
+    fn transform_into<S: TransformExec<R, Self>>(
+        source: &TensorMap<R, Self, S>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
