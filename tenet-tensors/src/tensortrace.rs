@@ -631,6 +631,13 @@ impl<C> TensorTraceFusionStructure<C> {
         &self.descriptor
     }
 
+    /// The destination block structure the terms were compiled for.
+    #[doc(hidden)]
+    #[inline]
+    pub fn dst_structure(&self) -> &Arc<BlockStructure> {
+        &self.dst_structure
+    }
+
     pub(crate) fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
@@ -1682,23 +1689,18 @@ where
         + strided_kernel::MaybeSendSync,
     P: AsRef<[D]>,
 {
-    trace_staged_in::<M, R, D, _>(
-        stage,
-        src,
-        axes,
-        read,
-        |structure, value, nout| match value {
-            Some(value) => Ok(vec![value * alpha]),
-            None => trace_structure_owned_parts(
+    trace_staged_in::<M, R, D, _, M::Error>(stage, src, axes, read, |structure, value, nout| {
+        Ok(match value {
+            Some(value) => vec![value * alpha],
+            None => tensortrace_fusion_structure_owned_host(
                 structure,
-                &structure.dst_structure,
                 nout,
                 src.space().structure(),
                 payload().as_ref(),
                 alpha,
-            ),
-        },
-    )
+            )?,
+        })
+    })
 }
 
 /// The skeleton every trace runs on a staged destination: open, compile,
@@ -1706,20 +1708,16 @@ where
 /// destination), then commit — so the owned and the existing-destination
 /// traces stage, compile and publish identically, and a failed compile or
 /// execution commits nothing.
-fn trace_staged_in<M, R, D, T>(
+fn trace_staged_in<M, R, D, T, E>(
     stage: M::TraceStage<'_>,
     src: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
     read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
-    execute: impl FnOnce(
-        &TensorTraceFusionStructure<M::Coeff>,
-        Option<D>,
-        usize,
-    ) -> Result<T, OperationError>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, T), M::Error>
+    execute: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>, Option<D>, usize) -> Result<T, E>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, T), E>
 where
     M: TraceStaging<R>,
-    M::Error: From<OperationError>,
+    E: From<M::Error>,
 {
     let mut pending = M::open_trace();
     let structure = M::compile_trace(&stage, src, axes, &mut pending)?;
@@ -1735,11 +1733,7 @@ where
 /// the owned trace's staging, compile and commit around a write into the
 /// caller's buffer (TensorKit `trace_permute!` / `_trace_permute!`).
 ///
-/// In TensorKit's order the staged HomSpace is compared with `dst_space`
-/// before the pair duality; the staged layout follows the duality. Both
-/// mismatches are the caller's `SpaceMismatch` in every mode, and come
-/// before `dst_data` is asked for the buffer and before any write. A
-/// `read` answer is written as `alpha · value + beta · dst` (a strong zero
+/// A `read` answer is written as `alpha · value + beta · dst` (a strong zero
 /// for `beta = 0`); otherwise the compiled terms replay `payload` with
 /// TensorKit's `beta` pass first. The checked commit follows the write
 /// (#2063).
@@ -1772,6 +1766,56 @@ where
     P: AsRef<[D]>,
     E: From<M::Error> + From<OperationError>,
 {
+    trace_into_staged_in::<M, R, D, _, E>(
+        src,
+        read,
+        axes,
+        dst_nout,
+        dst_space,
+        dst_data,
+        |structure, value, dst| {
+            match (value, &mut *dst) {
+                (Some(value), [slot]) => {
+                    *slot = if beta == D::zero() {
+                        value * alpha
+                    } else {
+                        value * alpha + beta * *slot
+                    };
+                }
+                _ => tensortrace_fusion_structure_into_host(
+                    structure,
+                    dst,
+                    src.space().structure(),
+                    payload().as_ref(),
+                    alpha,
+                    beta,
+                )
+                .map_err(|error| E::from(M::Error::from(error)))?,
+            }
+            Ok(())
+        },
+    )
+}
+
+/// The skeleton of every trace into an existing destination, on any
+/// storage: preflight, then in TensorKit's order the staged HomSpace against
+/// `dst_space` before the pair duality and the staged layout after it (both
+/// the caller's `SpaceMismatch` in every mode), then `dst` for the buffer,
+/// then [`trace_staged_in`] with `execute` writing into it — so the checked
+/// commit follows the write (#2063).
+fn trace_into_staged_in<M, R, D, X, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst: impl FnOnce() -> Result<X, E>,
+    execute: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>, Option<D>, X) -> Result<(), E>,
+) -> Result<(), E>
+where
+    M: TraceStaging<R>,
+    E: From<M::Error> + From<OperationError>,
+{
     // Why `E` directly: a destination mismatch is the caller's argument
     // error in every mode, never a checked plan failure.
     let mismatch = || {
@@ -1787,27 +1831,9 @@ where
     if !M::trace_destination_matches(&stage, dst_space) {
         return Err(mismatch());
     }
-    let dst = dst_data()?;
-    trace_staged_in::<M, R, D, ()>(stage, src, axes, read, |structure, value, _| {
-        match (value, &mut *dst) {
-            (Some(value), [slot]) => {
-                *slot = if beta == D::zero() {
-                    value * alpha
-                } else {
-                    value * alpha + beta * *slot
-                };
-                Ok(())
-            }
-            _ => replay_fusion_trace_host(
-                structure,
-                &structure.dst_structure,
-                dst,
-                src.space().structure(),
-                payload().as_ref(),
-                alpha,
-                beta,
-            ),
-        }
+    let dst = dst()?;
+    trace_staged_in::<M, R, D, (), E>(stage, src, axes, read, |structure, value, _| {
+        execute(structure, value, dst)
     })?;
     Ok(())
 }
@@ -2015,6 +2041,90 @@ where
 {
     tensortrace_into_in::<CheckedGenericAdmissionMode, R, D, P, E>(
         src, read, payload, axes, dst_nout, dst_space, dst_data, alpha, beta,
+    )
+}
+
+/// The owned multiplicity-free trace into a
+/// [`tensortrace_stage_multiplicity_free`] destination on any storage: the
+/// compile, then `execute` (given `read`'s answer for a single-scalar,
+/// unconjugated destination, and the destination codomain rank) writes the
+/// payload, then the commit.
+#[doc(hidden)]
+pub fn tensortrace_multiplicity_free_with<R, D, T, E>(
+    stage: TensorTraceStage<'_, R, BoundDynamicFusionMapSpace<R>>,
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    execute: impl FnOnce(&TensorTraceFusionStructure<f64>, Option<D>, usize) -> Result<T, E>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, T), E>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    E: From<OperationError>,
+{
+    trace_staged_in::<MultiplicityFreeAdmissionMode, R, D, T, E>(stage, src, axes, read, execute)
+}
+
+/// [`tensortrace_multiplicity_free_with`] for a
+/// [`tensortrace_stage_checked_generic`] destination, committed and
+/// published only after `execute` succeeds (#2063).
+#[doc(hidden)]
+pub fn tensortrace_checked_generic_with<R, D, T, E>(
+    stage: TensorTraceStage<'_, R, PreparedCheckedGenericDynamicSpace>,
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    execute: impl FnOnce(&TensorTraceFusionStructure<f64>, Option<D>, usize) -> Result<T, E>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, T), E>
+where
+    R: CheckedGenericPivotal<Scalar = f64>,
+    E: From<CheckedGenericPlanError<R::Error>>,
+{
+    trace_staged_in::<CheckedGenericAdmissionMode, R, D, T, E>(stage, src, axes, read, execute)
+}
+
+/// The multiplicity-free trace into an existing destination on any storage:
+/// staging, `dst_space` against the staged destination (HomSpace before the
+/// pair duality, then the layout), then `dst` for the destination, then
+/// `execute` writes `alpha · trace + beta · dst` into it.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_into_multiplicity_free_with<R, D, X, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst: impl FnOnce() -> Result<X, E>,
+    execute: impl FnOnce(&TensorTraceFusionStructure<f64>, Option<D>, X) -> Result<(), E>,
+) -> Result<(), E>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    E: From<OperationError>,
+{
+    trace_into_staged_in::<MultiplicityFreeAdmissionMode, R, D, X, E>(
+        src, read, axes, dst_nout, dst_space, dst, execute,
+    )
+}
+
+/// [`tensortrace_into_multiplicity_free_with`] in checked Generic: the same
+/// commit and publication after the write (#2063).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_into_checked_generic_with<R, D, X, E>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+    dst_space: &DynamicFusionMapSpace,
+    dst: impl FnOnce() -> Result<X, E>,
+    execute: impl FnOnce(&TensorTraceFusionStructure<f64>, Option<D>, X) -> Result<(), E>,
+) -> Result<(), E>
+where
+    R: CheckedGenericPivotal<Scalar = f64>,
+    E: From<CheckedGenericPlanError<R::Error>> + From<OperationError>,
+{
+    trace_into_staged_in::<CheckedGenericAdmissionMode, R, D, X, E>(
+        src, read, axes, dst_nout, dst_space, dst, execute,
     )
 }
 
@@ -2724,6 +2834,72 @@ where
         dst_space.structure(),
         dst_data,
         src_space.structure(),
+        src_data,
+        alpha,
+        beta,
+    )
+}
+
+/// The Host kernel of a staged owned trace: `alpha · trace(src)` into a new
+/// payload of the compiled destination (`dst_nout` its codomain rank).
+#[doc(hidden)]
+pub fn tensortrace_fusion_structure_owned_host<C, D>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_nout: usize,
+    src_structure: &Arc<BlockStructure>,
+    src_data: &[D],
+    alpha: D,
+) -> Result<Vec<D>, OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
+    trace_structure_owned_parts(
+        structure,
+        &structure.dst_structure,
+        dst_nout,
+        src_structure,
+        src_data,
+        alpha,
+    )
+}
+
+/// The Host kernel of a staged trace into an existing destination:
+/// `dst = alpha · trace(src) + beta · dst` over the compiled destination.
+#[doc(hidden)]
+pub fn tensortrace_fusion_structure_into_host<C, D>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_data: &mut [D],
+    src_structure: &Arc<BlockStructure>,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
+    replay_fusion_trace_host(
+        structure,
+        &structure.dst_structure,
+        dst_data,
+        src_structure,
         src_data,
         alpha,
         beta,

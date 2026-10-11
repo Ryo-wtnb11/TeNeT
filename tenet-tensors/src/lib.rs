@@ -156,12 +156,15 @@ pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
 pub use tensortrace::{
-    tensortrace_checked_generic_in, tensortrace_fusion_dyn_into_checked,
-    tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_owned_generic_checked,
-    tensortrace_fusion_dyn_preflight_checked, tensortrace_fusion_dyn_preflight_generic_checked,
-    tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
-    tensortrace_into_checked_generic_in, tensortrace_into_multiplicity_free_in,
-    tensortrace_multiplicity_free_in, tensortrace_stage_checked_generic,
+    tensortrace_checked_generic_in, tensortrace_checked_generic_with,
+    tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
+    tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_preflight_checked,
+    tensortrace_fusion_dyn_preflight_generic_checked, tensortrace_fusion_dyn_structure_into_raw,
+    tensortrace_fusion_dyn_structure_owned, tensortrace_fusion_structure_into_host,
+    tensortrace_fusion_structure_owned_host, tensortrace_into_checked_generic_in,
+    tensortrace_into_checked_generic_with, tensortrace_into_multiplicity_free_in,
+    tensortrace_into_multiplicity_free_with, tensortrace_multiplicity_free_in,
+    tensortrace_multiplicity_free_with, tensortrace_stage_checked_generic,
     tensortrace_stage_multiplicity_free, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStage, TensorTraceStructure,
     TensorTraceStructureTerm, TracePreflight,

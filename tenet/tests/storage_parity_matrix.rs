@@ -1795,3 +1795,335 @@ fn contract_cuda_rows_match_host() {
     contract_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
     contract_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
 }
+
+/// `trace_pairs`/`trace_pairs_into` rows on `a, b: [V, V] <- [V, V]`, owned
+/// and lazy `a^H`. The hand oracle sums the written entries whose codomain
+/// and domain basis states coincide, `Σ_c dim(c) Σ_k θ_k block(a, c)[k, k]`,
+/// where every traced pair contributes the twist `θ` of its codomain leg's
+/// sector (the supertrace: −1 for an odd fermion parity, else 1). The full
+/// trace over both pairs is that sum with both twists; the partial trace
+/// over `(0, 2)` has the sum with the first twist as its own `tr`; a lazy
+/// adjoint gives the conjugate; and `trace_pairs_into` gives
+/// `tr(alpha · trace(x) + beta · dst₀) = alpha tr(x) + beta tr(b)`.
+/// A compact source's arms are compared with the dense route of its
+/// materialized image. Admission pins the Host order: destination kind and
+/// alias before the destination space, so a destination that is both of the
+/// wrong kind (or aliases the source) and of the wrong space reports the
+/// kind (alias) error.
+macro_rules! trace_rows {
+    ($runtime:expr, $leg:expr, $dim:expr, $theta:expr, $D:ty, $conv:expr, $cuda:expr) => {{
+        let runtime: &Runtime = $runtime;
+        let leg = $leg;
+        let (dim, theta) = ($dim, $theta);
+        let conv = $conv;
+        let build = |seed: f64| {
+            let (mut partial, mut full) = (Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0));
+            let t = TensorMap::<_, $D>::from_subblock_fn(
+                runtime,
+                [&leg, &leg],
+                [&leg, &leg],
+                |trees, ix| {
+                    let x: $D = conv(entry(seed, ix[0] + 2 * ix[1], ix[2], ix[3]));
+                    if trees.codomain_uncoupled() == trees.domain_uncoupled()
+                        && trees.codomain_innerlines() == trees.domain_innerlines()
+                        && ix[0] == ix[2]
+                        && ix[1] == ix[3]
+                    {
+                        let co = trees.codomain_uncoupled();
+                        let x = dim(trees) * theta(&co[0]) * Complex64::from(x);
+                        partial += x;
+                        full += theta(&co[1]) * x;
+                    }
+                    x
+                },
+            )
+            .unwrap();
+            (t, partial, full)
+        };
+        let (a, a_partial, a_full) = build(0.9);
+        let (b, b_partial, _) = build(-0.4);
+        let (one, minus_one) = (conv(Complex64::new(1.0, 0.0)), conv(Complex64::new(-1.0, 0.0)));
+        let (alpha, beta) = (conv(Complex64::new(2.0, 0.5)), conv(Complex64::new(-0.5, 0.25)));
+        let (alpha_c, beta_c) = (Complex64::from(alpha), Complex64::from(beta));
+        let differ = |x: &TensorMap<_, $D>, y: &TensorMap<_, $D>| {
+            x.axpby(one, y, minus_one).unwrap().norm(2.0).unwrap()
+                <= 1e-12 * (1.0 + y.norm(2.0).unwrap())
+        };
+        let tr = |t: &TensorMap<_, $D>| -> Complex64 { t.tr().unwrap().into() };
+
+        for (name, x, (expected_partial, expected_full)) in [
+            ("owned", a.clone(), (a_partial, a_full)),
+            ("lazy", a.adjoint().unwrap(), (a_partial.conj(), a_full.conj())),
+        ] {
+            let partial = x.trace_pairs(&[(0, 2)]).unwrap();
+            assert_eq!(partial.codomain().len() + partial.domain().len(), 2, "{name}");
+            assert!(close_c(tr(&partial), expected_partial), "{name}: partial trace");
+            let full = x.trace_pairs(&[(0, 2), (1, 3)]).unwrap();
+            assert!(close_c(full.scalar().unwrap().into(), expected_full), "{name}: full trace");
+            let mut destination = b.trace_pairs(&[(0, 2)]).unwrap();
+            x.trace_pairs_into(&[(0, 2)], &mut destination, alpha, beta)
+                .unwrap();
+            let expected = alpha_c * expected_partial + beta_c * b_partial;
+            assert!(close_c(tr(&destination), expected), "{name}: trace_pairs_into");
+        }
+
+        // Compact rank-(1,1) source: the spectrum arm (full trace) and the
+        // materializing arm against the dense route of its materialized image.
+        let spectra: Vec<_> = leg
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(s, sector)| SectorSpectrum {
+                sector,
+                values: (0..leg.degeneracy(&sector).unwrap())
+                    .map(|i| conv(entry(0.3, s, i, i)))
+                    .collect(),
+            })
+            .collect();
+        let compact = TensorMap::<_, $D>::diagonal(runtime, &leg, spectra).unwrap();
+        let dense = compact.materialize().unwrap();
+        let value: Complex64 = dense.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap().into();
+        let compact_value: Complex64 =
+            compact.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap().into();
+        assert!(close_c(compact_value, value), "compact trace_pairs");
+        let mut destination = dense.trace_pairs(&[(0, 1)]).unwrap();
+        compact
+            .trace_pairs_into(&[(0, 1)], &mut destination, alpha, beta)
+            .unwrap();
+        let scalar: Complex64 = destination.scalar().unwrap().into();
+        assert!(close_c(scalar, (alpha_c + beta_c) * value), "compact trace_pairs_into");
+
+        // Admission, each rejected destination left untouched.
+        assert!(matches!(
+            a.trace_pairs(&[(0, 0)]),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidAxisSet { .. })
+        ));
+        // Doubly invalid: the source's own storage, of the wrong space.
+        let mut alias = a.clone();
+        assert!(matches!(
+            a.trace_pairs_into(&[(0, 2)], &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination storage must not alias an input"
+        ));
+        // Doubly invalid: a lazy adjoint, of the wrong space.
+        let mut lazy = b.adjoint().unwrap();
+        assert!(matches!(
+            a.trace_pairs_into(&[(0, 2)], &mut lazy, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination must use ordinary dense host storage"
+        ));
+        let mut mismatched = b.scale(one).unwrap();
+        assert!(matches!(
+            a.trace_pairs_into(&[(0, 2)], &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+        assert!(differ(&mismatched, &b), "a rejected destination is untouched");
+        let mut shared = b.trace_pairs(&[(0, 2)]).unwrap();
+        let keep = shared.clone();
+        assert!(matches!(
+            a.trace_pairs_into(&[(0, 2)], &mut shared, alpha, beta),
+            Err(Error::DestinationShared)
+        ));
+        assert!(differ(&keep, &b.trace_pairs(&[(0, 2)]).unwrap()), "a shared destination is untouched");
+
+        $cuda(&a, &b, alpha, beta);
+    }};
+}
+
+/// The twist of a fermion parity sector: −1 when odd.
+fn odd_twist(s: &Z2Irrep) -> f64 {
+    if *s == Z2Irrep::ODD {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+#[test]
+fn trace_host_rows_match_the_hand_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    trace_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        |_: &U1Irrep| 1.0,
+        f64,
+        real,
+        no_cuda_contract
+    );
+    trace_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        |_: &U1Irrep| 1.0,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+    trace_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        |_: &SU2Irrep| 1.0,
+        f64,
+        real,
+        no_cuda_contract
+    );
+    trace_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        |_: &SU2Irrep| 1.0,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+    trace_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        odd_twist,
+        f64,
+        real,
+        no_cuda_contract
+    );
+    trace_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        odd_twist,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+}
+
+/// Device results of the trace rows against Host: owned and lazy `a^H`,
+/// partial and full `trace_pairs`, `trace_pairs_into`, within the
+/// executor's dtype tolerance (cuTENSOR's sum order), and the admission
+/// order with the storage noun naming the placement: kind and alias before
+/// the destination space (#1870 C).
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn trace_cuda_rows_match_host() {
+    use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+
+    fn device_rows<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>, alpha: D, beta: D)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: tenet::typed::CudaPayload + Into<Complex64> + std::fmt::Debug,
+    {
+        let agree = |device: &TensorMap<R, D, tenet::typed::CudaStorage<D>>,
+                     host: &TensorMap<R, D>,
+                     what: &str| {
+            let (device, host) = (
+                device.to_host().unwrap().materialize().unwrap(),
+                host.materialize().unwrap(),
+            );
+            assert_eq!(device.codomain(), host.codomain(), "{what}");
+            assert_eq!(device.domain(), host.domain(), "{what}");
+            let (device, host) = (device.dense_data().unwrap(), host.dense_data().unwrap());
+            assert_eq!(device.len(), host.len(), "{what}");
+            for (&x, &y) in device.iter().zip(host) {
+                let (x, y): (Complex64, Complex64) = (x.into(), y.into());
+                assert!(
+                    (x - y).norm() <= 1e-12 * (1.0 + y.norm()),
+                    "{what}: {x} != {y}"
+                );
+            }
+        };
+        let (a_dev, b_dev) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
+        for (host, device) in [
+            (a.clone(), a_dev.clone()),
+            (a.adjoint().unwrap(), a_dev.adjoint().unwrap()),
+        ] {
+            for pairs in [&[(0, 2)][..], &[(0, 2), (1, 3)]] {
+                agree(
+                    &device.trace_pairs(pairs).unwrap(),
+                    &host.trace_pairs(pairs).unwrap(),
+                    "trace_pairs",
+                );
+            }
+            let mut host_destination = b.trace_pairs(&[(0, 2)]).unwrap();
+            let mut device_destination = b_dev.trace_pairs(&[(0, 2)]).unwrap();
+            host.trace_pairs_into(&[(0, 2)], &mut host_destination, alpha, beta)
+                .unwrap();
+            device
+                .trace_pairs_into(&[(0, 2)], &mut device_destination, alpha, beta)
+                .unwrap();
+            agree(&device_destination, &host_destination, "trace_pairs_into");
+        }
+        // Admission, as on Host with the storage noun.
+        let mut alias = a_dev.clone();
+        assert!(matches!(
+            a_dev.trace_pairs_into(&[(0, 2)], &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination storage must not alias an input"
+        ));
+        let mut lazy = b_dev.adjoint().unwrap();
+        assert!(matches!(
+            a_dev.trace_pairs_into(&[(0, 2)], &mut lazy, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination must use ordinary dense CUDA storage"
+        ));
+        let mut mismatched = b_dev.clone().to_host().unwrap().to_cuda().unwrap();
+        assert!(matches!(
+            a_dev.trace_pairs_into(&[(0, 2)], &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+        agree(&mismatched, b, "a rejected destination is untouched");
+    }
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    trace_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        |_: &U1Irrep| 1.0,
+        f64,
+        real,
+        device_rows
+    );
+    trace_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        |_: &U1Irrep| 1.0,
+        Complex64,
+        complex,
+        device_rows
+    );
+    trace_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        |_: &SU2Irrep| 1.0,
+        f64,
+        real,
+        device_rows
+    );
+    trace_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        |_: &SU2Irrep| 1.0,
+        Complex64,
+        complex,
+        device_rows
+    );
+    trace_rows!(&runtime, fz2_leg(), one, odd_twist, f64, real, device_rows);
+    trace_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        odd_twist,
+        Complex64,
+        complex,
+        device_rows
+    );
+}

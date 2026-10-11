@@ -325,6 +325,7 @@ const TYPED: &[&str] = &[
     "ContractPlan",
     "ContractReplay",
     "ContractWorkspace",
+    "TraceExec",
     "MultiplicityIndex",
     "NON_SYMMETRIC_CONTRACTION_UNSUPPORTED",
     "OpaqueBlockKey",
