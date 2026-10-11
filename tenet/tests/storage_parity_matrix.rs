@@ -24,7 +24,9 @@
 //! (`permute`, `braid`, `transpose`, `repartition` and their `_into`) are
 //! unitary, so they are checked through `norm`, `inner(T a, T b) =
 //! inner(a, b)` and their inverse motion, and `_into` through
-//! `inner(T a, alpha T a + beta T b)`.
+//! `inner(T a, alpha T a + beta T b)`. `contract`, `compose` and
+//! `contract_into` are checked through `tr(a^H ∘ b) = inner(a, b)` and the
+//! documented `compose`/`contract` twist relation (see `contract_rows`).
 //!
 //! Unsupported cells:
 //! - CUDA `norm(p)` for `p != 2`, and `inner` with a lazy adjoint CUDA
@@ -46,8 +48,8 @@ use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{
-    Direction, Eigh, Error, GradedSpace, HermitianTol, OperationError, Qr, Runtime, SectorSpectrum,
-    Svd, TensorMap,
+    ContractSpec, Direction, Eigh, Error, GradedSpace, HermitianTol, OperationError, Qr, Runtime,
+    SectorSpectrum, Svd, TensorMap,
 };
 
 const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
@@ -1498,4 +1500,298 @@ fn mixed_lazy_axpby_cuda_rows_match_host() {
     let fz2 = fz2_leg();
     let fz2_dual = fz2.try_dual().unwrap();
     both_dtypes!([&fz2, &fz2_dual], [&fz2]);
+}
+
+/// `contract`/`compose`/`contract_into` Host rows on `a, b: [V, V*] <- [V]`
+/// with `x = a^H` owned and lazy. Composition is checked against the hand
+/// oracle through `tr(a^H ∘ b) = inner(a, b)` (TensorKit `tr`/`dot`:
+/// `Σ_c dim(c) tr(block(a, c)^H block(b, c))`); `contract` through its
+/// documented relation `compose(x, y) = contract(x, twist(y, dual contracted
+/// legs))`, so `tr(contract(a^H, twist(b, [1]))) = inner(a, b)` on every
+/// braiding; a general output order through `contract` followed by
+/// `permute`; `contract_into` through `tr(alpha a^H b + beta a^H a) =
+/// alpha inner(a, b) + beta inner(a, a)`. A compact operand's arms are
+/// compared with the dense route of its materialized image.
+macro_rules! contract_rows {
+    ($runtime:expr, $leg:expr, $dim:expr, $D:ty, $conv:expr, $cuda:expr) => {{
+        let runtime: &Runtime = $runtime;
+        let leg = $leg;
+        let dual = leg.try_dual().unwrap();
+        let dim = $dim;
+        let conv = $conv;
+        let build = |seed: f64| {
+            let mut entries = Vec::new();
+            let t = TensorMap::<_, $D>::from_subblock_fn(
+                runtime,
+                [&leg, &dual],
+                [&leg],
+                |trees, ix| {
+                    let x: $D = conv(entry(seed, ix[0] + 2 * ix[1], ix[1], ix[2]));
+                    entries.push((dim(trees), Complex64::from(x)));
+                    x
+                },
+            )
+            .unwrap();
+            (t, entries)
+        };
+        let (a, a_entries) = build(0.9);
+        let (b, b_entries) = build(-0.4);
+        let (one, minus_one) = (conv(Complex64::new(1.0, 0.0)), conv(Complex64::new(-1.0, 0.0)));
+        let (alpha, beta) = (conv(Complex64::new(2.0, 0.5)), conv(Complex64::new(-0.5, 0.25)));
+        let (alpha_c, beta_c) = (Complex64::from(alpha), Complex64::from(beta));
+        let ab = inner_oracle(&a_entries, &b_entries);
+        let aa = inner_oracle(&a_entries, &a_entries);
+        let differ = |x: &TensorMap<_, $D>, y: &TensorMap<_, $D>| {
+            x.axpby(one, y, minus_one).unwrap().norm(2.0).unwrap()
+                <= 1e-12 * (1.0 + y.norm(2.0).unwrap())
+        };
+
+        let twisted_b = b.twist(&[1], Direction::Forward).unwrap();
+        for (name, x) in [
+            ("owned", a.adjoint().unwrap().materialize().unwrap()),
+            ("lazy", a.adjoint().unwrap()),
+        ] {
+            let composed = x.compose(&b).unwrap();
+            assert!(close_c(composed.tr().unwrap().into(), ab), "{name}: compose");
+            let contracted = x.contract(&twisted_b, &CANONICAL).unwrap();
+            assert!(close_c(contracted.tr().unwrap().into(), ab), "{name}: contract");
+            let flat = x.contract(&twisted_b, &FLAT).unwrap();
+            let permuted = contracted.permute(FLAT.codomain, FLAT.domain).unwrap();
+            assert_eq!(flat.codomain(), permuted.codomain(), "{name}: flat");
+            assert!(differ(&flat, &permuted), "{name}: flat = contract then permute");
+
+            let mut destination = x.compose(&a).unwrap();
+            x.contract_into(&twisted_b, &CANONICAL, &mut destination, alpha, beta)
+                .unwrap();
+            let expected = alpha_c * ab + beta_c * aa;
+            assert!(close_c(destination.tr().unwrap().into(), expected), "{name}: contract_into");
+        }
+
+        // Compact rank-(1,1) operand: the bond-scaling arms against the dense
+        // route of its materialized image.
+        let spectra: Vec<_> = leg
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(s, sector)| SectorSpectrum {
+                sector,
+                values: (0..leg.degeneracy(&sector).unwrap())
+                    .map(|i| conv(entry(0.3, s, i, i)))
+                    .collect(),
+            })
+            .collect();
+        let compact = TensorMap::<_, $D>::diagonal(runtime, &leg, spectra).unwrap();
+        let dense = compact.materialize().unwrap();
+        let scaled = b.contract(&dense, &SCALE).unwrap();
+        assert!(differ(&b.contract(&compact, &SCALE).unwrap(), &scaled), "compact contract");
+        assert!(differ(&b.compose(&compact).unwrap(), &b.compose(&dense).unwrap()), "compact compose");
+        let mut destination = b.contract(&dense, &SCALE).unwrap();
+        b.contract_into(&compact, &SCALE, &mut destination, alpha, beta)
+            .unwrap();
+        let expected = scaled.scale(conv(alpha_c + beta_c)).unwrap();
+        assert!(differ(&destination, &expected), "compact contract_into");
+
+        // Admission: malformed axes, an aliasing, a lazy, a mismatched and a
+        // shared destination, each leaving the destination untouched.
+        let x = a.adjoint().unwrap().materialize().unwrap();
+        let malformed = ContractSpec { lhs: &[1, 1], ..CANONICAL };
+        assert!(matches!(
+            x.contract(&b, &malformed),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::InvalidAxisSet { .. })
+        ));
+        let mut alias = b.clone();
+        assert!(matches!(
+            x.contract_into(&b, &CANONICAL, &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination storage must not alias an input"
+        ));
+        let mut lazy = x.compose(&a).unwrap().adjoint().unwrap();
+        assert!(matches!(
+            x.contract_into(&b, &CANONICAL, &mut lazy, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination must use ordinary dense host storage"
+        ));
+        let mut mismatched = a.scale(one).unwrap();
+        assert!(matches!(
+            x.contract_into(&b, &CANONICAL, &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+        assert!(differ(&mismatched, &a), "a rejected destination is untouched");
+        let mut shared = x.compose(&a).unwrap();
+        let keep = shared.clone();
+        assert!(matches!(
+            x.contract_into(&b, &CANONICAL, &mut shared, alpha, beta),
+            Err(Error::DestinationShared)
+        ));
+        assert!(differ(&keep, &x.compose(&a).unwrap()), "a shared destination is untouched");
+
+        $cuda(&a, &b, alpha, beta);
+    }};
+}
+
+/// `x[1, 2]` against `y[0, 1]`: the canonical composition geometry.
+const CANONICAL: ContractSpec<'static> = ContractSpec {
+    lhs: &[1, 2],
+    rhs: &[0, 1],
+    codomain: &[0],
+    domain: &[1],
+};
+
+/// [`CANONICAL`] with both open legs in the codomain, reversed.
+const FLAT: ContractSpec<'static> = ContractSpec {
+    lhs: &[1, 2],
+    rhs: &[0, 1],
+    codomain: &[1, 0],
+    domain: &[],
+};
+
+/// `t[2]` against a rank-(1,1) bond operand's codomain leg.
+const SCALE: ContractSpec<'static> = ContractSpec {
+    lhs: &[2],
+    rhs: &[0],
+    codomain: &[0, 1],
+    domain: &[2],
+};
+
+fn no_cuda_contract<T, D>(_: &T, _: &T, _: D, _: D) {}
+
+#[test]
+fn contract_host_rows_match_the_hand_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    contract_rows!(&runtime, u1_leg(), one, f64, real, no_cuda_contract);
+    contract_rows!(
+        &runtime,
+        u1_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+    contract_rows!(&runtime, su2_leg(), su2_dim, f64, real, no_cuda_contract);
+    contract_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+    contract_rows!(&runtime, fz2_leg(), one, f64, real, no_cuda_contract);
+    contract_rows!(
+        &runtime,
+        fz2_leg(),
+        one,
+        Complex64,
+        complex,
+        no_cuda_contract
+    );
+}
+
+/// Device results of the contract rows against Host: owned and lazy `a^H`,
+/// `compose`, `contract` in the canonical and a general output order,
+/// `contract_into`, within the executor's dtype tolerance (GEMMs sum in
+/// cuTENSOR's order), and the admission errors with the storage noun naming
+/// the placement.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn contract_cuda_rows_match_host() {
+    use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+
+    fn device_rows<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>, alpha: D, beta: D)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: tenet::typed::CudaPayload + Into<Complex64> + std::fmt::Debug,
+    {
+        let agree = |device: &TensorMap<R, D, tenet::typed::CudaStorage<D>>,
+                     host: &TensorMap<R, D>,
+                     what: &str| {
+            let (device, host) = (
+                device.to_host().unwrap().materialize().unwrap(),
+                host.materialize().unwrap(),
+            );
+            assert_eq!(device.codomain(), host.codomain(), "{what}");
+            assert_eq!(device.domain(), host.domain(), "{what}");
+            let (device, host) = (device.dense_data().unwrap(), host.dense_data().unwrap());
+            assert_eq!(device.len(), host.len(), "{what}");
+            for (&x, &y) in device.iter().zip(host) {
+                let (x, y): (Complex64, Complex64) = (x.into(), y.into());
+                assert!(
+                    (x - y).norm() <= 1e-12 * (1.0 + y.norm()),
+                    "{what}: {x} != {y}"
+                );
+            }
+        };
+        let (a_dev, b_dev) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
+        let (tb, tb_dev) = (
+            b.twist(&[1], Direction::Forward).unwrap(),
+            b_dev.twist(&[1], Direction::Forward).unwrap(),
+        );
+        for (host, device) in [
+            (
+                a.adjoint().unwrap().materialize().unwrap(),
+                a_dev.adjoint().unwrap().materialize().unwrap(),
+            ),
+            (a.adjoint().unwrap(), a_dev.adjoint().unwrap()),
+        ] {
+            agree(
+                &device.compose(&b_dev).unwrap(),
+                &host.compose(b).unwrap(),
+                "compose",
+            );
+            for spec in [CANONICAL, FLAT] {
+                agree(
+                    &device.contract(&tb_dev, &spec).unwrap(),
+                    &host.contract(&tb, &spec).unwrap(),
+                    "contract",
+                );
+            }
+            let mut host_destination = host.compose(a).unwrap();
+            let mut device_destination = device.compose(&a_dev).unwrap();
+            host.contract_into(&tb, &CANONICAL, &mut host_destination, alpha, beta)
+                .unwrap();
+            device
+                .contract_into(&tb_dev, &CANONICAL, &mut device_destination, alpha, beta)
+                .unwrap();
+            agree(&device_destination, &host_destination, "contract_into");
+        }
+        // Admission, as on Host with the storage noun.
+        let x = a_dev.adjoint().unwrap().materialize().unwrap();
+        let mut alias = b_dev.clone();
+        assert!(matches!(
+            x.contract_into(&b_dev, &CANONICAL, &mut alias, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination storage must not alias an input"
+        ));
+        let mut lazy = x.compose(&a_dev).unwrap().adjoint().unwrap();
+        assert!(matches!(
+            x.contract_into(&b_dev, &CANONICAL, &mut lazy, alpha, beta),
+            Err(Error::InvalidArgument(message)) if message == "destination must use ordinary dense CUDA storage"
+        ));
+        let mut mismatched = a_dev.clone().to_host().unwrap().to_cuda().unwrap();
+        assert!(matches!(
+            x.contract_into(&b_dev, &CANONICAL, &mut mismatched, alpha, beta),
+            Err(Error::Operation(op)) if matches!(*op, OperationError::SpaceMismatch { .. })
+        ));
+    }
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let su2_dim = |trees: &tenet::typed::BlockFusionTrees<SU2Irrep>| {
+        (trees.coupled().twice_spin() + 1) as f64
+    };
+    let (real, complex) = (|x: Complex64| x.re, |x: Complex64| x);
+    contract_rows!(&runtime, u1_leg(), one, f64, real, device_rows);
+    contract_rows!(&runtime, u1_leg(), one, Complex64, complex, device_rows);
+    contract_rows!(&runtime, su2_leg(), su2_dim, f64, real, device_rows);
+    contract_rows!(
+        &runtime,
+        su2_leg(),
+        su2_dim,
+        Complex64,
+        complex,
+        device_rows
+    );
+    contract_rows!(&runtime, fz2_leg(), one, f64, real, device_rows);
+    contract_rows!(&runtime, fz2_leg(), one, Complex64, complex, device_rows);
 }

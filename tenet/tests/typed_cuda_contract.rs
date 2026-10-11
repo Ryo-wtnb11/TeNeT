@@ -308,6 +308,7 @@ fn identity_adjoint_operands_are_borrowed_by_the_device_dynamic_tree() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
+    let _cache = cache_shared();
     fn at<R: DeviceRule, D: DevicePayload>(
         v: &tenet::typed::GradedSpace<R>,
         symmetry: &str,
@@ -841,6 +842,7 @@ fn contract_into_a_poisoned_destination_matches_the_host_and_the_oracles_at_ever
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_overwrite_transfers_and_allocates_nothing() {
+    let _cache = cache_shared();
     // What: no reset and no output initialisation — a warm overwrite costs
     // no upload, no download, no device allocation, no scratch growth and no
     // transform preparation, for a transformed general contraction, a

@@ -13,8 +13,8 @@ use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::mode::{
-    ContractRequest, ContractStaging, MultiplicityFreePlanningScalar, PlanningAlgebra,
-    StagedContraction, TreeStructureSource,
+    ContractRequest, ContractSide, ContractStaging, MultiplicityFreePlanningScalar,
+    PlanningAlgebra, StagedContraction, TreeStructureSource,
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{TreeTransformPlanning, TreeTransformRuleCacheKey};
@@ -1127,7 +1127,7 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
     {
-        self.tensorcontract_in::<MultiplicityFreeAdmissionMode, R>(
+        self.tensorcontract_in::<MultiplicityFreeContractStage<R>, R>(
             (lhs_authority, lhs, lhs_data),
             (rhs_authority, rhs, rhs_data),
             ContractRequest::Contract {
@@ -1171,7 +1171,7 @@ where
         E: From<OperationError>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + 'd,
     {
-        self.tensorcontract_into_in::<MultiplicityFreeAdmissionMode, R, E>(
+        self.tensorcontract_into_in::<MultiplicityFreeContractStage<R>, R, E>(
             (lhs_authority, lhs, lhs_data),
             (rhs_authority, rhs, rhs_data),
             ContractRequest::Contract {
@@ -1210,51 +1210,55 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
     {
-        self.tensorcontract_in::<MultiplicityFreeAdmissionMode, R>(
+        self.tensorcontract_in::<MultiplicityFreeContractStage<R>, R>(
             lhs,
             rhs,
             ContractRequest::Compose,
         )
     }
 
-    /// The one owned contraction and composition of both modes: stage the
-    /// destination (multiplicity-free derives it; checked Generic admits the
-    /// operands and stages it), plan and replay into a fresh zeroed payload
-    /// through [`Self::tensorcontract_planned_raw_into`], then commit and
+    /// The one owned Host contraction and composition of both modes, the
+    /// steps every storage runs ([`StagedContract`]): stage the destination
+    /// (multiplicity-free derives it; checked Generic admits the operands and
+    /// stages it), plan, replay into a fresh zeroed payload, then commit and
     /// publish (#2063).
     #[allow(clippy::type_complexity)]
-    pub(super) fn tensorcontract_in<M, R>(
+    pub(super) fn tensorcontract_in<'a, St, R>(
         &mut self,
-        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        request: ContractRequest<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), M::Error>
+        (lhs_authority, lhs, lhs_data): (
+            &'a BoundDynamicFusionMapSpace<R>,
+            FusionOperand<'a>,
+            &[D],
+        ),
+        (rhs_authority, rhs, rhs_data): (
+            &'a BoundDynamicFusionMapSpace<R>,
+            FusionOperand<'a>,
+            &[D],
+        ),
+        request: ContractRequest<'a>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), ContractStageError<'a, R, St>>
     where
-        M: ContractStaging<R, Scalar = C>,
+        St: ContractStageParts<'a, R>,
+        St::M: PlanningAlgebra<R, Scalar = C>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
     {
-        let StagedContraction {
-            stage,
-            authority,
-            mut txn,
-            len,
-        } = M::stage_contraction(
+        let mut staged = stage_contract::<R, St>(
             (lhs_authority, lhs, lhs_data.len()),
             (rhs_authority, rhs, rhs_data.len()),
             request,
         )?;
-        let mut data = crate::zeroed_payload(len);
-        let resolution = self.replay_staged_contraction::<M, R>(
-            (&stage, authority, &mut txn),
-            lhs_authority,
-            request,
-            &mut data,
-            (lhs, lhs_data),
-            (rhs, rhs_data),
+        let resolution =
+            self.plan_staged::<super::resolution::HostEagerExecutor, R, St>(&mut staged)?;
+        let mut data = crate::zeroed_payload(staged_len(&staged));
+        self.execute_contract_resolution_host(
+            &resolution,
+            (staged_destination(&staged).structure(), &mut data),
+            (lhs.storage_space().structure(), lhs_data),
+            (rhs.storage_space().structure(), rhs_data),
             D::one(),
             ContractDestinationInit::Zeroed,
         )?;
-        let destination = M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
+        let destination = staged_commit(staged, &resolution)?;
         Ok((destination, data))
     }
 
@@ -1269,103 +1273,119 @@ where
     /// staging step is deferred to planning on a memo hit, so the reported
     /// error does not depend on cache history.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub(super) fn tensorcontract_into_in<'d, M, R, E>(
+    pub(super) fn tensorcontract_into_in<'a, 'd, St, R, E>(
         &mut self,
-        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        request: ContractRequest<'_>,
+        (lhs_authority, lhs, lhs_data): (
+            &'a BoundDynamicFusionMapSpace<R>,
+            FusionOperand<'a>,
+            &[D],
+        ),
+        (rhs_authority, rhs, rhs_data): (
+            &'a BoundDynamicFusionMapSpace<R>,
+            FusionOperand<'a>,
+            &[D],
+        ),
+        request: ContractRequest<'a>,
         dst_space: &DynamicFusionMapSpace,
         dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
         alpha: D,
         beta: D,
     ) -> Result<(), E>
     where
-        M: ContractStaging<R, Scalar = C>,
+        St: ContractStageParts<'a, R>,
+        St::M: PlanningAlgebra<R, Scalar = C>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + 'd,
-        E: From<M::Error> + From<OperationError>,
+        E: From<ContractStageError<'a, R, St>> + From<OperationError>,
     {
-        let StagedContraction {
-            stage,
-            authority,
-            mut txn,
-            ..
-        } = M::stage_contraction(
+        let mut staged = stage_contract::<R, St>(
             (lhs_authority, lhs, lhs_data.len()),
             (rhs_authority, rhs, rhs_data.len()),
             request,
         )?;
-        if !M::contract_destination_matches(&stage, dst_space) {
-            // Why `E` directly: a destination mismatch is the caller's
-            // argument error in every mode, never a checked plan failure.
-            return Err(E::from(OperationError::SpaceMismatch {
-                message:
-                    "destination fusion space or block layout does not match the contraction result",
-            }));
-        }
+        // Why `E` directly: a destination mismatch is the caller's argument
+        // error in every mode, never a checked plan failure.
+        staged_require_destination(&staged, dst_space)?;
         let dst = dst_data()?;
-        let resolution = self.replay_staged_contraction::<M, R>(
-            (&stage, authority, &mut txn),
-            lhs_authority,
-            request,
-            dst,
-            (lhs, lhs_data),
-            (rhs, rhs_data),
+        let resolution =
+            self.plan_staged::<super::resolution::HostEagerExecutor, R, St>(&mut staged)?;
+        self.execute_contract_resolution_host(
+            &resolution,
+            (staged_destination(&staged).structure(), dst),
+            (lhs.storage_space().structure(), lhs_data),
+            (rhs.storage_space().structure(), rhs_data),
             alpha,
             ContractDestinationInit::Axpby(beta),
-        )?;
-        M::commit_contraction(lhs_authority, stage, txn, &resolution)?;
+        )
+        .map_err(ContractStageError::<'a, R, St>::from)?;
+        staged_commit(staged, &resolution)?;
         Ok(())
     }
 
-    /// Plans `request` against the staged destination and replays it into
-    /// `dst`: the step between staging and commit that the owned and the
-    /// existing-destination entries share.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn replay_staged_contraction<M, R>(
+    /// The planner's ladder over a staged contraction: the lock-free
+    /// canonical core, then the rest under this context's planning state or
+    /// the call's transaction.
+    fn plan_staged<'a, X: ExecCaps, R, St>(
         &mut self,
-        (stage, authority, txn): (
-            &M::ContractStage,
-            M::SpaceAuthority<'_>,
-            &mut M::ContractTxn,
-        ),
-        lhs_authority: &BoundDynamicFusionMapSpace<R>,
-        request: ContractRequest<'_>,
-        dst: &mut [D],
-        lhs: (FusionOperand<'_>, &[D]),
-        rhs: (FusionOperand<'_>, &[D]),
+        staged: &mut StagedContract<'a, R, St>,
+    ) -> Result<StorageContractResolution<C>, ContractStageError<'a, R, St>>
+    where
+        St: ContractStageParts<'a, R>,
+        St::M: PlanningAlgebra<R, Scalar = C>,
+    {
+        match staged_try_core::<X, R, St>(staged)? {
+            CoreRoute::Hit(core) => Ok(core),
+            CoreRoute::Miss(miss) => {
+                staged_plan_beyond_core::<X, R, St>(staged, miss, self.tree_context.planning())
+            }
+        }
+    }
+
+    /// Replays a planned route on the Host into `dst`: `dst = alpha ·
+    /// contract(lhs, rhs) + init(dst)`, the Host storage's contraction
+    /// kernel. `dst` is the staged destination structure the route was
+    /// planned for; `lhs`/`rhs` are the operands' stored structures and
+    /// payloads.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn execute_contract_resolution_host(
+        &mut self,
+        resolution: &StorageContractResolution<C>,
+        dst: (&Arc<BlockStructure>, &mut [D]),
+        lhs: (&Arc<BlockStructure>, &[D]),
+        rhs: (&Arc<BlockStructure>, &[D]),
         alpha: D,
         init: ContractDestinationInit<D>,
-    ) -> Result<StorageContractResolution<C>, M::Error>
+    ) -> Result<(), OperationError>
     where
-        M: ContractStaging<R, Scalar = C>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let (rule, space) = M::contract_destination(stage, lhs_authority);
-        let output_axes;
-        let planned = match request {
-            ContractRequest::Contract { axes, .. } => {
-                output_axes = spec_output_axes(axes, space.rank());
-                PlannedContraction::Contract((
-                    axes.lhs_contracting_axes(),
-                    axes.rhs_contracting_axes(),
-                    &output_axes,
-                ))
-            }
-            ContractRequest::Compose => PlannedContraction::Compose,
-        };
-        self.tensorcontract_planned_raw_into::<M, R>(
-            txn,
-            PlanTarget {
-                rule,
-                space,
-                authority,
-            },
-            dst,
-            lhs,
-            rhs,
-            planned,
-            alpha,
-            init,
+        #[cfg(test)]
+        self.record_contract_route(resolution);
+        self.execute_route_host(resolution, dst, lhs, rhs, alpha, init, None)
+    }
+
+    /// [`StagedContract::plan_beyond_core`] of a multiplicity-free
+    /// contraction, under this context's planning state.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn plan_staged_contract_beyond_core<X: ExecCaps, R>(
+        &mut self,
+        staged: &mut StagedContract<'_, R, MultiplicityFreeContractStage<R>>,
+        miss: CoreMiss,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        staged_plan_beyond_core::<X, R, MultiplicityFreeContractStage<R>>(
+            staged,
+            miss,
+            self.tree_context.planning(),
         )
     }
 
@@ -2339,6 +2359,285 @@ impl<'a, R> PlanTarget<'a, R> {
             space: space.space(),
             authority: space.layout_primer(),
         }
+    }
+}
+
+/// One pairwise contraction or composition staged by its admission mode and
+/// not yet planned: the destination derived (multiplicity-free) or staged
+/// (checked Generic, published only by `commit` after the replay, #2063).
+///
+/// Every storage runs the same steps on it — `try_core` (lock-free), on a
+/// miss `plan_beyond_core`, its own replay of the route into the staged
+/// destination structure, then `commit` — so the route, the destination and
+/// the publication do not depend on the storage. `St` is the mode's stage
+/// ([`MultiplicityFreeContractStage`] or [`CheckedContractStage`]).
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+pub struct StagedContract<'a, R, St> {
+    lhs: &'a BoundDynamicFusionMapSpace<R>,
+    operands: (FusionOperand<'a>, FusionOperand<'a>),
+    request: ContractRequest<'a>,
+    stage: St,
+}
+
+/// A multiplicity-free contraction's derived destination and layout primer.
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+pub struct MultiplicityFreeContractStage<R>(
+    StagedContraction<BoundDynamicFusionMapSpace<R>, LayoutKeyBuilder<R>, ()>,
+);
+
+/// What a contraction stage holds for its mode `M`.
+pub(crate) type StageParts<'a, R, M> = StagedContraction<
+    <M as ContractStaging<R>>::ContractStage,
+    <M as PlanningAlgebra<R>>::SpaceAuthority<'a>,
+    <M as PlanningAlgebra<R>>::ContractTxn,
+>;
+
+/// The admission mode a [`StagedContract`] stage belongs to, and its parts.
+pub(crate) trait ContractStageParts<'a, R: 'a>: Sized {
+    type M: ContractStaging<R>;
+    fn wrap(parts: StageParts<'a, R, Self::M>) -> Self;
+    fn parts(&self) -> &StageParts<'a, R, Self::M>;
+    fn parts_mut(&mut self) -> &mut StageParts<'a, R, Self::M>;
+    fn into_parts(self) -> StageParts<'a, R, Self::M>;
+}
+
+/// A contraction stage's mode error.
+pub(crate) type ContractStageError<'a, R, St> =
+    <<St as ContractStageParts<'a, R>>::M as PlanningAlgebra<R>>::Error;
+
+/// A contraction stage's mode coefficient.
+pub(crate) type ContractStageScalar<'a, R, St> =
+    <<St as ContractStageParts<'a, R>>::M as PlanningAlgebra<R>>::Scalar;
+
+/// A contraction's contracted axes and its output axes as the planner reads
+/// them.
+type PlannedAxes<'a> = (&'a [usize], &'a [usize], smallvec::SmallVec<[usize; 16]>);
+
+impl<'a, R> ContractStageParts<'a, R> for MultiplicityFreeContractStage<R>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + TreeTransformRuleCacheKey + 'a,
+    R::Scalar: MultiplicityFreePlanningScalar,
+{
+    type M = MultiplicityFreeAdmissionMode;
+    fn wrap(parts: StageParts<'a, R, Self::M>) -> Self {
+        Self(parts)
+    }
+    fn parts(&self) -> &StageParts<'a, R, Self::M> {
+        &self.0
+    }
+    fn parts_mut(&mut self) -> &mut StageParts<'a, R, Self::M> {
+        &mut self.0
+    }
+    fn into_parts(self) -> StageParts<'a, R, Self::M> {
+        self.0
+    }
+}
+
+pub(crate) fn stage_contract<'a, R, St>(
+    lhs: ContractSide<'a, R>,
+    rhs: ContractSide<'a, R>,
+    request: ContractRequest<'a>,
+) -> Result<StagedContract<'a, R, St>, ContractStageError<'a, R, St>>
+where
+    St: ContractStageParts<'a, R>,
+{
+    let parts = St::M::stage_contraction(lhs, rhs, request)?;
+    Ok(StagedContract {
+        lhs: lhs.0,
+        operands: (lhs.1, rhs.1),
+        request,
+        stage: St::wrap(parts),
+    })
+}
+
+/// The provider and destination space the plan targets.
+pub(crate) fn staged_destination<'s, 'a, R, St>(
+    staged: &'s StagedContract<'a, R, St>,
+) -> &'s DynamicFusionMapSpace
+where
+    St: ContractStageParts<'a, R>,
+{
+    St::M::contract_destination(&staged.stage.parts().stage, staged.lhs).1
+}
+
+pub(crate) fn staged_len<'a, R, St>(staged: &StagedContract<'a, R, St>) -> usize
+where
+    St: ContractStageParts<'a, R>,
+{
+    staged.stage.parts().len
+}
+
+/// TensorKit `spacecheck_contract` against an existing destination.
+pub(crate) fn staged_require_destination<'a, R, St>(
+    staged: &StagedContract<'a, R, St>,
+    dst: &DynamicFusionMapSpace,
+) -> Result<(), OperationError>
+where
+    St: ContractStageParts<'a, R>,
+{
+    if St::M::contract_destination_matches(&staged.stage.parts().stage, dst) {
+        return Ok(());
+    }
+    Err(OperationError::SpaceMismatch {
+        message: "destination fusion space or block layout does not match the contraction result",
+    })
+}
+
+/// The output axes of a contraction request, as the planner reads them.
+fn staged_contract_axes<'a>(request: ContractRequest<'a>, rank: usize) -> Option<PlannedAxes<'a>> {
+    match request {
+        ContractRequest::Contract { axes, .. } => Some((
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            spec_output_axes(axes, rank),
+        )),
+        ContractRequest::Compose => None,
+    }
+}
+
+/// The lock-free first half of the planner ([`plan_contract_in`]'s core, or
+/// the whole [`plan_compose_in`]) for an executor with capabilities `X`.
+pub(crate) fn staged_try_core<'a, X: ExecCaps, R, St>(
+    staged: &StagedContract<'a, R, St>,
+) -> Result<CoreRoute<ContractStageScalar<'a, R, St>>, ContractStageError<'a, R, St>>
+where
+    St: ContractStageParts<'a, R>,
+    ContractStageScalar<'a, R, St>: DenseBlockScalar,
+{
+    let parts = staged.stage.parts();
+    let (rule, space) = St::M::contract_destination(&parts.stage, staged.lhs);
+    let target = PlanTarget {
+        rule,
+        space,
+        authority: parts.authority,
+    };
+    let (lhs, rhs) = staged.operands;
+    let Some((lhs_axes, rhs_axes, output_axes)) =
+        staged_contract_axes(staged.request, space.rank())
+    else {
+        return plan_compose_in::<X, St::M, R>(target, lhs, rhs).map(CoreRoute::Hit);
+    };
+    let axes = TensorContractSpec::new_with_conjugation(
+        lhs_axes,
+        rhs_axes,
+        OutputAxisOrder::from_axes(&output_axes),
+        lhs.storage_conjugate(),
+        rhs.storage_conjugate(),
+    );
+    try_compile_core_route::<X, St::M, R>(target, lhs, rhs, axes, ContractKind::Contract)
+}
+
+/// The rest of [`plan_contract_in`] after `staged_try_core` missed: `copyC`,
+/// then the `DynamicTree` artifact, under the context's planning state or
+/// the call's transaction.
+pub(crate) fn staged_plan_beyond_core<'a, X: ExecCaps, R, St>(
+    staged: &mut StagedContract<'a, R, St>,
+    miss: CoreMiss,
+    planning: &mut TreeTransformPlanning,
+) -> Result<StorageContractResolution<ContractStageScalar<'a, R, St>>, ContractStageError<'a, R, St>>
+where
+    St: ContractStageParts<'a, R>,
+    ContractStageScalar<'a, R, St>: DenseBlockScalar,
+{
+    let StagedContract {
+        lhs: lhs_authority,
+        operands: (lhs, rhs),
+        request,
+        stage,
+    } = staged;
+    let StagedContraction {
+        stage,
+        authority,
+        txn,
+        ..
+    } = stage.parts_mut();
+    let (rule, space) = St::M::contract_destination(stage, lhs_authority);
+    let Some((lhs_axes, rhs_axes, output_axes)) = staged_contract_axes(*request, space.rank())
+    else {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "a composition plans only its core",
+        }
+        .into());
+    };
+    plan_contract_beyond_core_in::<X, St::M, R>(
+        St::M::contract_cache(planning, txn),
+        miss,
+        PlanTarget {
+            rule,
+            space,
+            authority: *authority,
+        },
+        *lhs,
+        *rhs,
+        (lhs_axes, rhs_axes, &output_axes),
+        None,
+    )
+}
+
+/// Commits the staged destination after the replay of `resolution`, then
+/// publishes what the call staged for it.
+pub(crate) fn staged_commit<'a, R, St>(
+    staged: StagedContract<'a, R, St>,
+    resolution: &StorageContractResolution<ContractStageScalar<'a, R, St>>,
+) -> Result<BoundDynamicFusionMapSpace<R>, ContractStageError<'a, R, St>>
+where
+    St: ContractStageParts<'a, R>,
+{
+    let lhs = staged.lhs;
+    let parts = staged.stage.into_parts();
+    St::M::commit_contraction(lhs, parts.stage, parts.txn, resolution)
+}
+
+impl<'a, R> StagedContract<'a, R, MultiplicityFreeContractStage<R>>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + TreeTransformRuleCacheKey + 'a,
+    R::Scalar: DenseBlockScalar,
+{
+    /// Derives the destination of a multiplicity-free `request`: two direct
+    /// operands through the owned derivation, a lazy adjoint through the
+    /// oriented one. Each operand is its logical space, its storage operand
+    /// (a lazy adjoint is storage-conjugate) and its stored length.
+    #[allow(clippy::type_complexity)]
+    pub fn multiplicity_free(
+        lhs: (&'a BoundDynamicFusionMapSpace<R>, FusionOperand<'a>, usize),
+        rhs: (&'a BoundDynamicFusionMapSpace<R>, FusionOperand<'a>, usize),
+        request: ContractRequest<'a>,
+    ) -> Result<Self, OperationError> {
+        stage_contract(lhs, rhs, request)
+    }
+
+    /// [`MultiplicityFreeContractStage`]'s `spacecheck_contract`.
+    pub fn require_destination(&self, dst: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+        staged_require_destination(self, dst)
+    }
+
+    /// The staged destination space the route writes.
+    pub fn destination(&self) -> &DynamicFusionMapSpace {
+        staged_destination(self)
+    }
+
+    /// The staged destination's payload length.
+    pub fn destination_len(&self) -> usize {
+        staged_len(self)
+    }
+
+    /// The canonical core route, resolved from the operands alone without
+    /// any context: a [`CoreRoute::Miss`] continues with
+    /// [`TensorContractFusionExecutionContext::plan_staged_contract_beyond_core`].
+    pub fn try_core<X: ExecCaps>(&self) -> Result<CoreRoute<R::Scalar>, OperationError> {
+        staged_try_core::<X, R, MultiplicityFreeContractStage<R>>(self)
+    }
+
+    /// The derived destination, after the replay of `resolution`.
+    pub fn commit(
+        self,
+        resolution: &StorageContractResolution<R::Scalar>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError> {
+        staged_commit(self, resolution)
     }
 }
 

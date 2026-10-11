@@ -397,37 +397,6 @@ pub(crate) fn observe_tree_transform_seam_call() {
     });
 }
 
-/// [`BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented`], the
-/// one oriented contraction-destination derivation. Host contraction derives
-/// it inside `tenet_tensors`' staged entry; the CUDA contraction keeps this
-/// call until #1756.
-#[cfg(feature = "cuda")]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn oriented_contract_destination<R>(
-    lhs_authority: &BoundDynamicFusionMapSpace<R>,
-    lhs: tenet_tensors::FusionOperand<'_>,
-    rhs_authority: &BoundDynamicFusionMapSpace<R>,
-    rhs: tenet_tensors::FusionOperand<'_>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: tenet_tensors::OutputAxisOrder<'_>,
-    codomain_rank: Option<usize>,
-) -> Result<BoundDynamicFusionMapSpace<R>, tenet_tensors::OperationError>
-where
-    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
-{
-    BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
-        lhs_authority,
-        lhs,
-        rhs_authority,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_order,
-        codomain_rank,
-    )
-}
-
 /// TensorKit tensor product: merge codomain trees with codomain trees and
 /// domain trees with domain trees, without crossing either pair of legs.
 pub(crate) fn tensorproduct_owned_multiplicity_free<R, D, C>(

@@ -1,5 +1,20 @@
 use super::*;
 
+impl<R, D, S> TensorMap<R, D, S> {
+    /// The storage operand a contraction stages and plans with: an owned
+    /// tensor direct, a lazy adjoint its parent read storage-conjugate.
+    pub(super) fn fusion_operand(&self) -> tenet_tensors::FusionOperand<'_> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => {
+                tenet_tensors::FusionOperand::direct(body.space.space())
+            }
+            TypedTensorRepr::Adjoint(view) => {
+                tenet_tensors::FusionOperand::adjoint(view.parent.space.space())
+            }
+        }
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
@@ -133,11 +148,33 @@ impl ContractSpec<'_> {
     }
 }
 
-impl<R, D> TensorMap<R, D>
+/// The staged request of `spec` between `lhs` and `rhs`, whose output order
+/// is `output_axes` (`spec.output_axes()`) and whose conjugation flags are
+/// the operands'.
+pub(super) fn contract_request<'a>(
+    lhs: tenet_tensors::FusionOperand<'_>,
+    rhs: tenet_tensors::FusionOperand<'_>,
+    spec: &ContractSpec<'a>,
+    output_axes: &'a [usize],
+) -> tenet_tensors::ContractRequest<'a> {
+    tenet_tensors::ContractRequest::Contract {
+        axes: tenet_tensors::TensorContractSpec::new_with_conjugation(
+            spec.lhs,
+            spec.rhs,
+            OutputAxisOrder::from_axes(output_axes),
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        ),
+        codomain_rank: spec.codomain.len(),
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorContractDispatch<R, D>,
     D: TensorScalar,
+    S: ContractExec<R, D>,
 {
     /// Contracts `spec.lhs` of `self` with `spec.rhs` of `other` (pairwise, in
     /// list order) and returns the open legs as `spec.codomain ← spec.domain`
@@ -226,6 +263,50 @@ where
     /// [`crate::sector::FusionRule::rule_identity`], which makes the choice of
     /// allocation immaterial to the algebra.
     ///
+    /// # CUDA storage
+    ///
+    /// Device tensors run this same body: the destination, the route, the
+    /// orientation and axis-order candidate, the source and output transform
+    /// structures, the operand borrow decisions and the core plan all come
+    /// from the one planner, with the device executor's capabilities (fully
+    /// direct cores only). The device only replays that route — each
+    /// non-identity source transform into device scratch, the coupled-sector
+    /// GEMMs, the output transform — which is TensorKit's `blas_contract!`
+    /// and QSpace's `contract` dataflow. A contraction whose canonical core
+    /// resolves from the operands alone takes no Host context lease.
+    ///
+    /// **Cost.** A warm call uploads nothing but the output initialisation
+    /// (#740): exactly one H2D of `required_len * size_of::<D>()` bytes, from
+    /// one host `Vec` of that size; its only device allocation is the
+    /// returned output; it downloads nothing. The first use of a transform
+    /// structure uploads its coefficient payload once (as the device
+    /// [`Self::permute`] does), and a new high-water mark of the operand or
+    /// core-destination scratch costs one zero upload of the new size per
+    /// buffer; both then stay resident on the Runtime (see
+    /// `Runtime::cuda_contract_scratch_bytes`) until the
+    /// deprecated [`crate::typed::Runtime::clear_tree_transform_cache`]. Per
+    /// call the device submits one region move per Single block / pack /
+    /// scatter column, one GEMM per recoupling job and per coupled-sector
+    /// job, one zero fill per inactive layout of each transform in overwrite
+    /// mode, and one zero fill per core-destination block no GEMM writes (the
+    /// Host clears its whole core destination instead). The warm contract
+    /// holds while this Runtime's Host transform store admits the structures
+    /// (see [`Self::permute`]).
+    ///
+    /// **Numerics.** Device and Host agree to dtype tolerance, never bitwise:
+    /// the GEMM summation order is cuTENSOR's, a Single-block move rounds as
+    /// `alpha * (c * x)`, and over a non-canonical expert tiling the Host
+    /// packs around its core where the device runs the transform route. Exact
+    /// zeros may differ in sign (Host `-0.0` where the device writes `+0.0`).
+    ///
+    /// **Fermionic twist.** The canonical form with a twist uniform per
+    /// coupled sector folds it into the GEMM alpha; every other case folds
+    /// `θ_b` into the descriptor alpha of the source-transform move writing
+    /// core-right block `b`, as the Host folds it into the same move.
+    ///
+    /// [`Error::PlacementMismatch`] for an operand on another device is
+    /// reported last, under the device lease, before any device work.
+    ///
     /// # Errors
     ///
     /// - [`Error::RuntimeMismatch`] when the operands belong to different
@@ -273,7 +354,7 @@ where
     /// ```
     pub fn contract<'a>(
         &self,
-        other: impl Into<TensorRef<'a, R, D>>,
+        other: impl Into<TensorRef<'a, R, D, S>>,
         spec: &ContractSpec<'_>,
     ) -> Result<Self, TypedFacadeError<R>> {
         let other = other.into().operand()?;
@@ -289,15 +370,17 @@ where
             self.provider(),
         ))
         .map_err(Error::from)?;
-        if self.spectrum().is_some() || other.spectrum().is_some() {
-            if let Some(compact) = self.try_contract_diagonal(
-                other,
-                spec.lhs,
-                spec.rhs,
-                &spec.output_axes(),
-                spec.codomain.len(),
-            )? {
-                return Ok(compact);
+        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+            if lhs.spectrum().is_some() || rhs.spectrum().is_some() {
+                if let Some(compact) = lhs.try_contract_diagonal(
+                    rhs,
+                    spec.lhs,
+                    spec.rhs,
+                    &spec.output_axes(),
+                    spec.codomain.len(),
+                )? {
+                    return Ok(S::from_host(compact)?);
+                }
             }
         }
         let (space, data) =
@@ -351,15 +434,26 @@ where
     /// non-symmetric (anyonic or `NoBraiding`) providers, as for
     /// [`Self::contract`]; [`Error::RuleMismatch`];
     /// [`Error::InvalidArgument`] for a destination that is not owned dense
-    /// host storage or aliases an operand (a lazy adjoint's parent
-    /// included); then the contraction's own errors, as for
+    /// storage of its placement or aliases an operand (a lazy adjoint's
+    /// parent included); then the contraction's own errors, as for
     /// [`Self::contract`]; `SpaceMismatch` for a destination of the wrong
     /// space or layout; [`Error::InvalidArgument`] for one of the wrong
     /// length; [`Error::DestinationShared`] when `destination` shares its
-    /// storage with a clone. Runtime-context leasing counts as validation.
+    /// storage with a clone; on CUDA storage, [`Error::PlacementMismatch`]
+    /// last. Runtime-context leasing counts as validation.
     /// Checked Generic reports these in [`GenericTensorError::Facade`] and
     /// staging failures in [`GenericTensorError::Plan`], as for
     /// [`Self::contract`].
+    ///
+    /// # CUDA storage
+    ///
+    /// The same body and route as [`Self::contract`]. On the core route the
+    /// coupled sectors no GEMM reaches become `beta * destination` through a
+    /// zero-source region move — zeros for `beta = 0`, which never reads the
+    /// destination, and nothing for `beta = 1`. No destination reset or
+    /// separate `beta` pass over written blocks; a warm call transfers
+    /// nothing and allocates nothing on the device; scratch and coefficient
+    /// payloads are as for [`Self::contract`].
     ///
     /// # Failure
     ///
@@ -370,7 +464,7 @@ where
     /// intact.
     pub fn contract_into<'a>(
         &self,
-        other: impl Into<TensorRef<'a, R, D>>,
+        other: impl Into<TensorRef<'a, R, D, S>>,
         spec: &ContractSpec<'_>,
         destination: &mut Self,
         alpha: D,
@@ -401,12 +495,18 @@ where
             return Err(Error::RuleMismatch.into());
         }
         // Why the storage bodies: a lazy-adjoint operand aliases its parent.
-        destination_precheck(destination, &self.storage_body().data, "host")?;
-        destination_precheck(destination, &other.storage_body().data, "host")?;
-        if (self.spectrum().is_some() || other.spectrum().is_some())
-            && self.try_contract_diagonal_into(other, spec, destination, alpha, beta)?
-        {
-            return Ok(());
+        destination_precheck(destination, &self.storage_body().data, S::NOUN)?;
+        destination_precheck(destination, &other.storage_body().data, S::NOUN)?;
+        if let (Some(lhs), Some(rhs), Some(dst)) = (
+            S::as_host(self),
+            S::as_host(other),
+            S::as_host_mut(destination),
+        ) {
+            if (lhs.spectrum().is_some() || rhs.spectrum().is_some())
+                && lhs.try_contract_diagonal_into(rhs, spec, dst, alpha, beta)?
+            {
+                return Ok(());
+            }
         }
         <R::Mode as TypedTensorContractDispatch<R, D>>::contract_into(
             self,
@@ -495,11 +595,12 @@ where
     }
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorContractDispatch<R, D>,
     D: TensorScalar,
+    S: ContractExec<R, D>,
 {
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
     /// `self`'s whole domain is contracted against `other`'s whole codomain,
@@ -560,6 +661,12 @@ where
     ///   Those come back from the expert layer, which owns the rules.
     ///   Checked Generic failures use [`GenericTensorError::Plan`].
     ///
+    /// On CUDA storage the composition plans for the device executor, which
+    /// runs only fully-direct cores, so a non-canonical expert tiling the
+    /// Host packs is [`crate::typed::OperationError::UnsupportedTensorContractScope`]
+    /// there; [`Error::PlacementMismatch`] comes last, as for
+    /// [`Self::contract`].
+    ///
     /// ```compile_fail
     /// use tenet::sector::FibonacciFusionRule;
     /// use tenet::typed::TensorMap;
@@ -570,7 +677,7 @@ where
     #[doc(alias = "mul")]
     pub fn compose<'a>(
         &self,
-        other: impl Into<TensorRef<'a, R, D>>,
+        other: impl Into<TensorRef<'a, R, D, S>>,
     ) -> Result<Self, TypedFacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
@@ -580,12 +687,215 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        if self.spectrum().is_some() || other.spectrum().is_some() {
-            if let Some(compact) = self.compose_compact(other)? {
-                return Ok(compact);
+        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+            if lhs.spectrum().is_some() || rhs.spectrum().is_some() {
+                if let Some(compact) = lhs.compose_compact(rhs)? {
+                    return Ok(S::from_host(compact)?);
+                }
             }
         }
         let (space, data) = <R::Mode as TypedTensorContractDispatch<R, D>>::compose(self, other)?;
         Ok(self.published(space, data))
     }
+}
+
+type RouteReplay<D, C> = fn(
+    &mut crate::runtime::TensorExecutionContext,
+    &tenet_tensors::StorageContractResolution<C>,
+    (&Arc<BlockStructure>, &mut [D]),
+    (&Arc<BlockStructure>, &[D]),
+    (&Arc<BlockStructure>, &[D]),
+    D,
+    tenet_tensors::ContractDestinationInit<D>,
+) -> Result<(), TransformExecError>;
+
+fn host_route_replay<L, D, C>(
+    context: &mut crate::runtime::TensorExecutionContext,
+    resolution: &tenet_tensors::StorageContractResolution<C>,
+    dst: (&Arc<BlockStructure>, &mut [D]),
+    lhs: (&Arc<BlockStructure>, &[D]),
+    rhs: (&Arc<BlockStructure>, &[D]),
+    alpha: D,
+    init: tenet_tensors::ContractDestinationInit<D>,
+) -> Result<(), TransformExecError>
+where
+    L: HostTreeLane<D, C>,
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    L::contract_lane(context)?
+        .execute_contract_resolution_host(resolution, dst, lhs, rhs, alpha, init)
+        .map_err(TransformExecError::Replay)
+}
+
+/// One planned contraction route, handed to the storage kernel by value: the
+/// pooled context lease it was planned under (`None` when the lock-free core
+/// answered and no lease was taken), the route, and the staged destination
+/// and stored operand block structures it maps between.
+///
+/// Host replays under that lease, taking one only when planning took none,
+/// so a Host contraction takes one lease; CUDA releases it before taking the
+/// device lease. The Host replay of the staging mode's lane is bound here,
+/// where that lane's scalar bounds are proved.
+///
+/// Internal and unstable despite being public for [`ContractExec`].
+#[doc(hidden)]
+pub struct ContractReplay<'a, D, C> {
+    pub(super) runtime: &'a Runtime,
+    pub(super) lease: Option<crate::runtime::ContextLease<'a>>,
+    execute: RouteReplay<D, C>,
+    pub(super) resolution: &'a tenet_tensors::StorageContractResolution<C>,
+    pub(super) destination: &'a Arc<BlockStructure>,
+    pub(super) destination_len: usize,
+    pub(super) lhs: &'a Arc<BlockStructure>,
+    pub(super) rhs: &'a Arc<BlockStructure>,
+}
+
+impl<'a, D, C> ContractReplay<'a, D, C>
+where
+    D: tenet_tensors::DenseRecouplingScalar
+        + RecouplingCoefficientAction<C>
+        + tenet_tensors::ConjugateValue,
+    C: tenet_tensors::DenseBlockScalar,
+{
+    /// The replay of `resolution` on lane `L` into `destination`
+    /// (`destination_len` elements) from the stored `operands`.
+    pub(super) fn new<L: HostTreeLane<D, C>>(
+        runtime: &'a Runtime,
+        lease: Option<crate::runtime::ContextLease<'a>>,
+        resolution: &'a tenet_tensors::StorageContractResolution<C>,
+        (destination, destination_len): (&'a DynamicFusionMapSpace, usize),
+        (lhs, rhs): (
+            tenet_tensors::FusionOperand<'a>,
+            tenet_tensors::FusionOperand<'a>,
+        ),
+    ) -> Self {
+        Self {
+            runtime,
+            lease,
+            execute: host_route_replay::<L, D, C>,
+            resolution,
+            destination: destination.structure(),
+            destination_len,
+            lhs: lhs.storage_space().structure(),
+            rhs: rhs.storage_space().structure(),
+        }
+    }
+}
+
+/// The storage kernels of the one contraction and composition body:
+/// admission, staging, planning, the destination checks and the commit are
+/// shared; a kernel only replays the planned route on its storage.
+#[doc(hidden)]
+pub trait ContractExec<R, D>: TypedStorage<R, D> {
+    /// The planner capabilities of this storage's route executor: Host's
+    /// eager executor packs an irregular core; the device runs only
+    /// fully-direct cores.
+    type Caps: tenet_tensors::ExecCaps;
+
+    /// `contract(lhs, rhs)` into a fresh zeroed payload of `replay`'s
+    /// destination, reading each operand's stored payload (a lazy adjoint's
+    /// parent; Host densifies a compact operand).
+    fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
+        replay: ContractReplay<'_, D, C>,
+        lhs: &TensorMap<R, D, Self>,
+        rhs: &TensorMap<R, D, Self>,
+    ) -> Result<Self, TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>;
+
+    /// `destination = alpha · contract(lhs, rhs) + beta · destination` into a
+    /// destination that passed every admission check.
+    fn contract_into<C: tenet_tensors::DenseBlockScalar>(
+        replay: ContractReplay<'_, D, C>,
+        lhs: &TensorMap<R, D, Self>,
+        rhs: &TensorMap<R, D, Self>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>;
+}
+
+impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
+    type Caps = tenet_tensors::HostEagerExecutor;
+
+    fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
+        replay: ContractReplay<'_, D, C>,
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<Self, TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
+        let mut data = tenet_tensors::zeroed_payload(replay.destination_len);
+        host_contract(
+            replay,
+            lhs,
+            rhs,
+            &mut data,
+            D::from_real(1.0),
+            tenet_tensors::ContractDestinationInit::Zeroed,
+        )?;
+        Ok(data)
+    }
+
+    fn contract_into<C: tenet_tensors::DenseBlockScalar>(
+        replay: ContractReplay<'_, D, C>,
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError>
+    where
+        D: RecouplingCoefficientAction<C>,
+    {
+        host_contract(
+            replay,
+            lhs,
+            rhs,
+            destination,
+            alpha,
+            tenet_tensors::ContractDestinationInit::Axpby(beta),
+        )
+    }
+}
+
+fn host_contract<R, D: TensorScalar, C>(
+    replay: ContractReplay<'_, D, C>,
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    destination: &mut [D],
+    alpha: D,
+    init: tenet_tensors::ContractDestinationInit<D>,
+) -> Result<(), TransformExecError> {
+    let ContractReplay {
+        runtime,
+        lease,
+        execute,
+        resolution,
+        destination: destination_structure,
+        lhs: lhs_structure,
+        rhs: rhs_structure,
+        ..
+    } = replay;
+    let mut lease = match lease {
+        Some(lease) => lease,
+        None => runtime.lease_context()?,
+    };
+    let (_, lhs_data) = lhs.fusion_operand_and_data();
+    let (_, rhs_data) = rhs.fusion_operand_and_data();
+    execute(
+        lease.context(),
+        resolution,
+        (destination_structure, destination),
+        (lhs_structure, &lhs_data),
+        (rhs_structure, &rhs_data),
+        alpha,
+        init,
+    )
 }

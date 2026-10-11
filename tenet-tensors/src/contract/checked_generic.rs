@@ -19,6 +19,10 @@ use super::backend::TensorContractBackend;
 use super::context::TensorContractFusionExecutionContext;
 #[cfg(test)]
 use super::context::{plan_contract_in, PlanTarget};
+use super::context::{
+    stage_contract, staged_commit, staged_destination, staged_len, staged_plan_beyond_core,
+    staged_require_destination, staged_try_core, ContractStageParts, StageParts, StagedContract,
+};
 use super::dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace,
@@ -26,7 +30,9 @@ use super::dynamic_space::{
 #[cfg(test)]
 use super::resolution::HostEagerExecutor;
 use super::resolution::StorageContractResolution;
+use super::resolution::{CoreMiss, CoreRoute, ExecCaps};
 use super::structure::TensorContractAxisPlan;
+use crate::tree_transform::TreeTransformPlanning;
 
 type CheckedContractResult<P, D> = Result<
     (BoundDynamicFusionMapSpace<P>, Vec<D>),
@@ -431,6 +437,101 @@ where
     }
 }
 
+/// A checked Generic contraction's staged destination and preview, its
+/// planning authority and its call transaction, held opaque until
+/// [`StagedContract::commit`].
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
+pub struct CheckedContractStage<'a, P>(
+    StagedContraction<
+        (PreparedCheckedGenericDynamicSpace, DynamicFusionMapSpace),
+        CheckedAuthority<'a, P>,
+        CheckedContractTxn,
+    >,
+);
+
+impl<'a, P> ContractStageParts<'a, P> for CheckedContractStage<'a, P>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64> + 'a,
+{
+    type M = CheckedGenericAdmissionMode;
+    fn wrap(parts: StageParts<'a, P, Self::M>) -> Self {
+        Self(parts)
+    }
+    fn parts(&self) -> &StageParts<'a, P, Self::M> {
+        &self.0
+    }
+    fn parts_mut(&mut self) -> &mut StageParts<'a, P, Self::M> {
+        &mut self.0
+    }
+    fn into_parts(self) -> StageParts<'a, P, Self::M> {
+        self.0
+    }
+}
+
+impl<'a, P> StagedContract<'a, P, CheckedContractStage<'a, P>>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64> + 'a,
+{
+    /// Admits checked Generic operands and stages the destination of
+    /// `request`; operands as in [`StagedContract::multiplicity_free`]. The
+    /// staging validates the stored lengths.
+    #[allow(clippy::type_complexity)]
+    pub fn checked_generic(
+        lhs: (&'a BoundDynamicFusionMapSpace<P>, FusionOperand<'a>, usize),
+        rhs: (&'a BoundDynamicFusionMapSpace<P>, FusionOperand<'a>, usize),
+        request: ContractRequest<'a>,
+    ) -> Result<Self, CheckedGenericPlanError<P::Error>> {
+        stage_contract(lhs, rhs, request)
+    }
+
+    /// The staged preview's `spacecheck_contract`.
+    pub fn require_destination(&self, dst: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+        staged_require_destination(self, dst)
+    }
+
+    /// The staged destination preview the route writes.
+    pub fn destination(&self) -> &DynamicFusionMapSpace {
+        staged_destination(self)
+    }
+
+    /// The staged destination's payload length.
+    pub fn destination_len(&self) -> usize {
+        staged_len(self)
+    }
+
+    /// The canonical core route, resolved without any context.
+    pub fn try_core<X: ExecCaps>(
+        &self,
+    ) -> Result<CoreRoute<f64>, CheckedGenericPlanError<P::Error>> {
+        staged_try_core::<X, P, CheckedContractStage<'a, P>>(self)
+    }
+
+    /// The rest of the planner after a core miss, under the call's own
+    /// transaction (it needs no context).
+    pub fn plan_beyond_core<X: ExecCaps>(
+        &mut self,
+        miss: CoreMiss,
+    ) -> Result<StorageContractResolution<f64>, CheckedGenericPlanError<P::Error>> {
+        // The checked planner never reads the context's planning state.
+        staged_plan_beyond_core::<X, P, CheckedContractStage<'a, P>>(
+            self,
+            miss,
+            &mut TreeTransformPlanning::default(),
+        )
+    }
+
+    /// Commits the staged destination after the replay of `resolution`, then
+    /// the intermediates and transformers that route used (#2063).
+    pub fn commit(
+        self,
+        resolution: &StorageContractResolution<f64>,
+    ) -> Result<BoundDynamicFusionMapSpace<P>, CheckedGenericPlanError<P::Error>> {
+        staged_commit(self, resolution)
+    }
+}
+
 impl<D, BT, BC> TensorContractFusionExecutionContext<D, RuleIdentity, BT, BC>
 where
     D: DenseRecouplingScalar
@@ -472,7 +573,7 @@ where
     where
         P: CheckedGenericRigidSymbols<Scalar = f64>,
     {
-        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(
+        self.tensorcontract_in::<CheckedContractStage<'_, P>, P>(
             (lhs_space, lhs, lhs_data),
             (rhs_space, rhs, rhs_data),
             ContractRequest::Contract {
@@ -514,7 +615,7 @@ where
         E: From<CheckedGenericPlanError<P::Error>> + From<OperationError>,
         D: 'd,
     {
-        self.tensorcontract_into_in::<CheckedGenericAdmissionMode, P, E>(
+        self.tensorcontract_into_in::<CheckedContractStage<'_, P>, P, E>(
             (lhs_space, lhs, lhs_data),
             (rhs_space, rhs, rhs_data),
             ContractRequest::Contract {
@@ -558,7 +659,7 @@ where
     where
         P: CheckedGenericRigidSymbols<Scalar = f64>,
     {
-        self.tensorcontract_in::<CheckedGenericAdmissionMode, P>(lhs, rhs, ContractRequest::Compose)
+        self.tensorcontract_in::<CheckedContractStage<'_, P>, P>(lhs, rhs, ContractRequest::Compose)
     }
 }
 

@@ -271,8 +271,6 @@ use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
-#[cfg(feature = "cuda")]
-use crate::tensor_core::oriented_contract_destination;
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, tensorproduct_owned_checked_generic,
@@ -410,7 +408,10 @@ mod cat;
 mod compact_arms;
 mod construction;
 mod contract_ops;
+use contract_ops::contract_request;
 pub use contract_ops::ContractSpec;
+#[doc(hidden)]
+pub use contract_ops::{ContractExec, ContractReplay};
 /// The seam `tenet-network` drives; not part of the facade.
 #[doc(hidden)]
 pub mod __network;
@@ -446,6 +447,7 @@ pub use transform_ops::TypedTensorUnitDispatch;
 use transform_ops::{
     checked_generic_exec_error, lazy_adjoint_of_transformed_parent, map_spectrum_dtype,
     scale_by_beta, transform_source_len, with_transform_into_source, CheckedGenericTreeLane,
+    HostTreeLane, MultiplicityFreeTreeLane,
 };
 #[doc(hidden)]
 pub use transform_ops::{TransformExec, TransformExecError, TransformIntoSource, TreeReplay};
