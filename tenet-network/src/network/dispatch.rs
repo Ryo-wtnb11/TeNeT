@@ -94,6 +94,27 @@ impl<T> StepOutput<T> {
     }
 }
 
+/// The Host step of every mode: a retained destination is overwritten through
+/// `contract_into` (`beta = 0`), otherwise the step returns the eager result.
+fn host_contract_step<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    destination: &mut Option<TensorMap<R, D>>,
+    spec: &ContractSpec<'_>,
+) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorContractDispatch<R, D>,
+    D: TensorScalar,
+{
+    if let Some(destination) = destination {
+        lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
+        Ok(StepOutput::Overwritten)
+    } else {
+        Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
+    }
+}
+
 impl<R, D> HostNetworkModeDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -122,12 +143,7 @@ where
         destination: &mut Option<TensorMap<R, D>>,
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
-        if let Some(destination) = destination {
-            lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
-            Ok(StepOutput::Overwritten)
-        } else {
-            Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
-        }
+        host_contract_step(lhs, rhs, destination, spec)
     }
 
     fn permute_final(
@@ -160,7 +176,7 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    const REUSE_DESTINATIONS: bool = false;
+    const REUSE_DESTINATIONS: bool = true;
 
     fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
         CheckedGenericFusion::braiding_style(provider)
@@ -184,10 +200,10 @@ where
     fn contract_step(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-        _destination: &mut Option<TensorMap<R, D>>,
+        destination: &mut Option<TensorMap<R, D>>,
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
-        Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
+        host_contract_step(lhs, rhs, destination, spec)
     }
 
     fn permute_final(
@@ -207,6 +223,9 @@ where
         Ok(())
     }
 
+    // Why drop rather than park: parking detaches the Runtime through the
+    // multiplicity-free `__network::detach_runtime` seam, so a checked
+    // destination is reused only while its caller-held workspace keeps it.
     fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
         for buffers in &mut workspace.intermediates {
             buffers.output = None;

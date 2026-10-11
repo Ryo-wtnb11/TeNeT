@@ -1208,3 +1208,162 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_operands_match_direct_author
         direct.dense_data().unwrap()
     );
 }
+
+#[test]
+fn checked_warm_replay_matches_eager_chain_and_multiplicity_free_su2() {
+    // What: a checked Generic replay that overwrites its retained step
+    // destinations (`contract_into`) gives the eager chain's values and the
+    // multiplicity-free SU(2) replay of the same spin-½ blocks.
+    use tenet::sector::{SU2FusionRule, SU2Irrep};
+
+    fn fill(seed: usize) -> impl Fn(&[usize]) -> f64 {
+        move |indices| (1 + seed + 7 * indices[0] + 3 * indices[1]) as f64 / 16.0
+    }
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let network = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["a"], &["d"])],
+        &["c"],
+        &["d"],
+    );
+    let first = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[1],
+        domain: &[0],
+    };
+    let second = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    let degeneracies = [(5, 4), (4, 6), (5, 6)];
+
+    let checked = Arc::new(SUNFusionRule::new(2).unwrap());
+    let checked_space = |dim| GradedSpace::try_new(Arc::clone(&checked), [(vec![1], dim)]).unwrap();
+    let checked_tensors: Vec<TensorMap<SUNFusionRule, f64>> = degeneracies
+        .iter()
+        .enumerate()
+        .map(|(seed, &(rows, cols))| {
+            let value = fill(seed);
+            TensorMap::from_subblock_fn(
+                &runtime,
+                // The third operand's `a` leg pairs with the first one's.
+                [&if seed == 2 {
+                    checked_space(rows).try_dual().unwrap()
+                } else {
+                    checked_space(rows)
+                }],
+                [&checked_space(cols)],
+                |_, indices| value(indices),
+            )
+            .unwrap()
+        })
+        .collect();
+    let checked_refs = [
+        &checked_tensors[0],
+        &checked_tensors[1],
+        &checked_tensors[2],
+    ];
+    let expected = checked_tensors[0]
+        .contract(&checked_tensors[1], &first)
+        .unwrap()
+        .contract(&checked_tensors[2], &second)
+        .unwrap();
+    let checked_plan = network.plan(&checked_refs, &GreedyDenseOptimizer).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    let cold = checked_plan.execute(&checked_refs, &mut workspace).unwrap();
+    let warm = checked_plan.execute(&checked_refs, &mut workspace).unwrap();
+    assert_same(&cold, &expected);
+    assert_same(&warm, &expected);
+
+    let mf = Arc::new(SU2FusionRule);
+    let mf_space =
+        |dim| GradedSpace::try_new(Arc::clone(&mf), [(SU2Irrep::from_twice_spin(1), dim)]).unwrap();
+    let mf_tensors: Vec<TensorMap<SU2FusionRule, f64>> = degeneracies
+        .iter()
+        .enumerate()
+        .map(|(seed, &(rows, cols))| {
+            let value = fill(seed);
+            TensorMap::from_subblock_fn(
+                &runtime,
+                // The third operand's `a` leg pairs with the first one's.
+                [&if seed == 2 {
+                    mf_space(rows).try_dual().unwrap()
+                } else {
+                    mf_space(rows)
+                }],
+                [&mf_space(cols)],
+                |_, indices| value(indices),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mf_refs = [&mf_tensors[0], &mf_tensors[1], &mf_tensors[2]];
+    let mf_plan = network.plan(&mf_refs, &GreedyDenseOptimizer).unwrap();
+    let mut mf_workspace = NetworkExecutionWorkspace::default();
+    drop(mf_plan.execute(&mf_refs, &mut mf_workspace).unwrap());
+    let mf_warm = mf_plan.execute(&mf_refs, &mut mf_workspace).unwrap();
+    let (checked_data, mf_data) = (warm.dense_data().unwrap(), mf_warm.dense_data().unwrap());
+    assert_eq!(checked_data.len(), mf_data.len());
+    for (index, (&lhs, &rhs)) in checked_data.iter().zip(mf_data).enumerate() {
+        assert!(
+            (lhs - rhs).abs() <= 1.0e-10 * (1.0 + lhs.abs()),
+            "payload {index}: checked {lhs} vs multiplicity-free {rhs}"
+        );
+    }
+}
+
+#[test]
+fn checked_destination_reuse_queries_no_more_provider_symbols_than_a_fresh_replay() {
+    // What: overwriting the kept step destinations (`contract_into`) stages
+    // the same contractions as the returning replay, so a replay through a
+    // kept workspace asks the provider for no more symbols than one through a
+    // fresh workspace, and gives the same values.
+    const ISOLATED: &str = "TENET_CHECKED_GENERIC_NETWORK_REUSE_LEDGER_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checked_destination_reuse_queries_no_more_provider_symbols_than_a_fresh_replay",
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated checked-Generic reuse ledger test failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let (provider, tensors, planned) = injected_plan_case(4, true);
+    let refs = tensors.iter().collect::<Vec<_>>();
+    let mut kept = NetworkExecutionWorkspace::default();
+    drop(planned.execute(&refs, &mut kept).unwrap());
+    // Both measured replays start from empty structure caches, so each one
+    // stages its contractions from provider queries.
+    tenet::cache::clear();
+    provider.reset_symbols();
+    let fresh = planned.execute(&refs, &mut Default::default()).unwrap();
+    let fresh_calls = provider.symbol_calls.load(Ordering::SeqCst);
+    tenet::cache::clear();
+    provider.reset_symbols();
+    let reused = planned.execute(&refs, &mut kept).unwrap();
+    let reused_calls = provider.symbol_calls.load(Ordering::SeqCst);
+    assert!(fresh_calls > 0);
+    assert!(
+        reused_calls <= fresh_calls,
+        "reused replay asked {reused_calls} symbols, fresh replay {fresh_calls}"
+    );
+    assert_eq!(reused.subblock_count(), fresh.subblock_count());
+    for (&actual, &want) in reused
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(fresh.dense_data().unwrap())
+    {
+        assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
+    }
+}

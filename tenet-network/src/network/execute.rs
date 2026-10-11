@@ -39,10 +39,10 @@ pub struct CompiledStep {
 
 /// Caller-owned replay state for one planned network at a time.
 ///
-/// The stored payload destinations are private implementation details. Host MF
-/// replay can reuse compatible intermediate buffers. Checked Generic replay
-/// reuses the plan and workspace containers but admits new intermediate
-/// tensors. The final tensor leaves the workspace in both modes.
+/// The stored payload destinations are private implementation details. Host
+/// replay in both modes overwrites compatible intermediate buffers through
+/// `contract_into`; only multiplicity-free destinations also survive parking
+/// in the plan-cache pool. The final tensor leaves the workspace in both modes.
 ///
 /// `S` is the operand payload storage and defaults to Host `Vec<D>`. A device
 /// storage uses the same ownership, parking, quarantine and budget model; what
