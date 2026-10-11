@@ -799,19 +799,37 @@ macro_rules! device_suite {
 
 #[cfg(feature = "cuda")]
 fn device_all(rt: &Runtime) {
+    // Why one closure per suite: expanded inline, the twelve suites share
+    // one debug-build stack frame, which alone nears the 2 MiB test-thread
+    // stack; each closure frame is popped before the next suite runs.
     macro_rules! dtypes {
         ($legs:expr, $label:expr) => {{
             let (v, bond) = $legs;
-            device_suite!(rt, v.clone(), bond.clone(), f64, concat!($label, " f64"));
-            device_suite!(
-                rt,
-                v.clone(),
-                bond.clone(),
-                Complex64,
-                concat!($label, " c64")
-            );
-            device_suite!(rt, v.clone(), bond.clone(), f32, concat!($label, " f32"));
-            device_suite!(rt, v, bond, Complex32, concat!($label, " c32"));
+            let real = || device_suite!(rt, v.clone(), bond.clone(), f64, concat!($label, " f64"));
+            real();
+            let complex = || {
+                device_suite!(
+                    rt,
+                    v.clone(),
+                    bond.clone(),
+                    Complex64,
+                    concat!($label, " c64")
+                )
+            };
+            complex();
+            let single =
+                || device_suite!(rt, v.clone(), bond.clone(), f32, concat!($label, " f32"));
+            single();
+            let single_complex = || {
+                device_suite!(
+                    rt,
+                    v.clone(),
+                    bond.clone(),
+                    Complex32,
+                    concat!($label, " c32")
+                )
+            };
+            single_complex();
         }};
     }
     dtypes!(u1(), "U1");

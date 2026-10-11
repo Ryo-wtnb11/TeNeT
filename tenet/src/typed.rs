@@ -297,8 +297,6 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-#[cfg(feature = "cuda")]
-use linear_ops::unique_dense_destination;
 #[doc(hidden)]
 pub use linear_ops::ElementwiseExec;
 use linear_ops::{
@@ -368,8 +366,6 @@ pub use factorize::FactorExec;
 pub use factorize::FusionMode;
 mod checked_generic_contract;
 mod mode_dispatch;
-#[cfg(feature = "cuda")]
-use checked_generic_contract::trace_source;
 use checked_generic_contract::write_identity_blocks_generic;
 pub(crate) use checked_generic_contract::TypedFacadeError;
 #[doc(hidden)]
@@ -408,9 +404,10 @@ mod cat;
 mod compact_arms;
 mod construction;
 mod contract_ops;
+#[doc(hidden)]
+pub use checked_generic_contract::TraceExec;
 use contract_ops::contract_request;
 pub use contract_ops::ContractSpec;
-#[doc(hidden)]
 pub use contract_ops::{ContractExec, ContractReplay};
 /// The seam `tenet-network` drives; not part of the facade.
 #[doc(hidden)]

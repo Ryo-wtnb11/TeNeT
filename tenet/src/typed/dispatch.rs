@@ -336,32 +336,31 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Stages the destination of an admitted trace source and runs the one
-    /// owned trace into it; `payload` is read only after the compile, and
-    /// not at all when `read` answers a scalar destination from the compiled
-    /// terms (a compact spectrum).
-    fn trace<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    /// Stages the destination of `source`'s admitted trace (read through its
+    /// storage body) and runs the one owned trace into it: the compile, the
+    /// storage's [`TraceExec::trace_owned`] kernel — given `read`'s answer
+    /// for a single-scalar destination (a compact spectrum) — then the
+    /// commit.
+    fn trace<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError>;
 
     /// `destination = alpha · trace + beta · destination` for a
     /// `destination` that passed [`destination_precheck`]:
     /// [`Self::trace`]'s staging, the staged space against the
     /// destination's (HomSpace before the pair duality, then the layout),
-    /// [`destination_slice`], the write — `read`'s scalar or the compiled
-    /// terms over `payload` — then the same commit.
+    /// [`destination_storage_mut`], the storage's
+    /// [`TraceExec::trace_into`] kernel, then the same commit.
     #[allow(clippy::too_many_arguments)]
-    fn trace_into<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    fn trace_into<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Self::FacadeError>;

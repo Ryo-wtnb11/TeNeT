@@ -8,45 +8,47 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn trace<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    fn trace<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
+        let space = &source.storage_body().space;
         let stage = tenet_tensors::tensortrace_stage_multiplicity_free(space, axes, dst_nout)?;
-        Ok(tenet_tensors::tensortrace_multiplicity_free_in(
+        tenet_tensors::tensortrace_multiplicity_free_with(
             stage,
             space,
-            read,
-            payload,
             axes,
-            D::from_real(1.0),
-        )?)
+            read,
+            |structure, compact, nout| {
+                S::trace_owned(structure, nout, compact, source, D::from_real(1.0))
+                    .map_err(Error::from)
+            },
+        )
     }
 
-    fn trace_into<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    fn trace_into<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Error> {
         let destination_space = destination.logical_space().space().clone();
-        tenet_tensors::tensortrace_into_multiplicity_free_in(
-            space,
+        tenet_tensors::tensortrace_into_multiplicity_free_with(
+            &source.storage_body().space,
             read,
-            payload,
             axes,
             dst_nout,
             &destination_space,
-            || destination_slice(destination),
-            alpha,
-            beta,
+            || destination_storage_mut(destination),
+            |structure, compact, destination| {
+                S::trace_into(structure, compact, source, destination, alpha, beta)
+                    .map_err(Error::from)
+            },
         )
     }
 }
@@ -59,46 +61,138 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    fn trace<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    fn trace<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError> {
+        let space = &source.storage_body().space;
         let stage = tenet_tensors::tensortrace_stage_checked_generic(space, axes, dst_nout)?;
-        Ok(tenet_tensors::tensortrace_checked_generic_in(
+        tenet_tensors::tensortrace_checked_generic_with(
             stage,
             space,
-            read,
-            payload,
             axes,
-            D::from_real(1.0),
-        )?)
+            read,
+            |structure, compact, nout| {
+                S::trace_owned(structure, nout, compact, source, D::from_real(1.0))
+                    .map_err(checked_generic_exec_error)
+            },
+        )
     }
 
-    fn trace_into<P: AsRef<[D]>>(
-        space: &BoundDynamicFusionMapSpace<R>,
+    fn trace_into<S: TraceExec<R, D>>(
+        source: &TensorMap<R, D, S>,
         read: impl FnOnce(&tenet_tensors::TensorTraceFusionStructure<f64>) -> Option<D>,
-        payload: impl FnOnce() -> P,
         axes: tenet_tensors::TensorTraceAxisSpec<'_>,
         dst_nout: usize,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Self::FacadeError> {
         let destination_space = destination.logical_space().space().clone();
-        tenet_tensors::tensortrace_into_checked_generic_in(
-            space,
+        tenet_tensors::tensortrace_into_checked_generic_with(
+            &source.storage_body().space,
             read,
-            payload,
             axes,
             dst_nout,
             &destination_space,
-            || destination_slice(destination).map_err(Self::FacadeError::from),
+            || destination_storage_mut(destination).map_err(Self::FacadeError::from),
+            |structure, compact, destination| {
+                S::trace_into(structure, compact, source, destination, alpha, beta)
+                    .map_err(checked_generic_exec_error)
+            },
+        )
+    }
+}
+
+/// The storage kernels of the one `trace_pairs` / `trace_pairs_into` body:
+/// admission, staging, the compile, the destination checks and the commit
+/// are shared; a kernel only replays the compiled terms on its storage.
+///
+/// `compact` is the compact arm's answer for a single-scalar destination
+/// (a compact spectrum traced over its only pair, read through
+/// [`TypedStorage::as_host`]); it is always `None` on a storage without
+/// compact data.
+#[doc(hidden)]
+pub trait TraceExec<R, D>: ElementwiseExec<R, D> {
+    /// `alpha · trace(source)` into a fresh payload of `structure`'s destination
+    /// (`dst_nout` its codomain rank), reading `source`'s stored payload (a
+    /// lazy adjoint's parent).
+    fn trace_owned(
+        structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
+        dst_nout: usize,
+        compact: Option<D>,
+        source: &TensorMap<R, D, Self>,
+        alpha: D,
+    ) -> Result<Self, TransformExecError>;
+
+    /// `destination = alpha · trace(source) + beta · destination` into a
+    /// destination that passed every admission check, with TensorKit's
+    /// `beta` pass over every destination layout first.
+    fn trace_into(
+        structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
+        compact: Option<D>,
+        source: &TensorMap<R, D, Self>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError>;
+}
+
+/// The Host kernels: the strided partial-trace replay inside the Runtime's
+/// Host pool, where a compact source other than the scalar arm is
+/// materialized.
+impl<R, D: TensorScalar> TraceExec<R, D> for Vec<D> {
+    fn trace_owned(
+        structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
+        dst_nout: usize,
+        compact: Option<D>,
+        source: &TensorMap<R, D>,
+        alpha: D,
+    ) -> Result<Self, TransformExecError> {
+        if let Some(value) = compact {
+            return Ok(vec![value * alpha]);
+        }
+        let _host_pool = source.runtime.enter_host_pool();
+        let body = source.storage_body();
+        tenet_tensors::tensortrace_fusion_structure_owned_host(
+            structure,
+            dst_nout,
+            body.space.space().structure(),
+            &body.materialized_dense_data(),
+            alpha,
+        )
+        .map_err(TransformExecError::Replay)
+    }
+
+    fn trace_into(
+        structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
+        compact: Option<D>,
+        source: &TensorMap<R, D>,
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TransformExecError> {
+        if let (Some(value), [slot]) = (compact, destination.as_mut_slice()) {
+            *slot = if beta == D::zero() {
+                value * alpha
+            } else {
+                value * alpha + beta * *slot
+            };
+            return Ok(());
+        }
+        let _host_pool = source.runtime.enter_host_pool();
+        let body = source.storage_body();
+        tenet_tensors::tensortrace_fusion_structure_into_host(
+            structure,
+            destination,
+            body.space.space().structure(),
+            &body.materialized_dense_data(),
             alpha,
             beta,
         )
+        .map_err(TransformExecError::Replay)
     }
 }
 
@@ -213,11 +307,12 @@ pub(super) fn trace_source<'t, R, D, S>(
     }))
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTraceDispatch<R, D>,
     D: TensorScalar,
+    S: TraceExec<R, D>,
 {
     /// Traces mutually dual axis pairs and returns the tensor on the remaining
     /// legs, preserving their order and codomain/domain side.
@@ -252,8 +347,41 @@ where
     /// `StructureMismatch { "trace axes" }` for legs that are not mutually
     /// dual, in both admission modes. Trace execution failures return their
     /// corresponding [`Error`] variant. If required pivotal data is unavailable, the original
-    /// provider error is available as the source. A failed trace returns no
-    /// output tensor.
+    /// provider error is available as the source. On CUDA storage,
+    /// [`Error::PlacementMismatch`] last. A failed trace returns no output
+    /// tensor.
+    ///
+    /// # CUDA storage
+    ///
+    /// The same body, compile and terms: the device only replays them, one
+    /// contraction per term, reading the source block through one merged
+    /// diagonal axis per pair (extent `t_k`, stride `s_lhs + s_rhs`; pairs are
+    /// never merged with each other) against the coefficient repeated (the
+    /// context ones template for a unit coefficient, the scaled template
+    /// otherwise), so each traced element is scaled before the sum as on the
+    /// Host, accumulated (`beta = 1`) into the zero-initialised output, so a
+    /// destination block with several producers receives their sum. A lazy
+    /// adjoint traces its parent with the Host's parent axes and a conjugated
+    /// read.
+    ///
+    /// A warm call transfers only the #740 output initialisation: one H2D of
+    /// `required_len * size_of::<D>()` bytes, one device allocation (the
+    /// output), no download and no new cuTENSOR plan while the trace's
+    /// distinct term signatures fit the plan-cache budget the transform
+    /// executor raises the bound under (about 585 plans together with the
+    /// prepared transforms; beyond it a warm call rebuilds plans). The first
+    /// call whose largest traced extent `prod t_k` exceeds the resident ones
+    /// or scaled template grows it once (one upload each, reported by
+    /// `CudaTreeTransformStats::context_scalar_operand_bytes`).
+    /// One submission per term with a non-zero coefficient, plus one device
+    /// refill of the scaled template per distinct non-unit coefficient; FLOPs
+    /// are the Host's `sum_terms |out| * prod t_k` multiply-adds.
+    ///
+    /// Device and Host agree to dtype tolerance, never bitwise: the sum order
+    /// is cuTENSOR's. Both scale each traced element by `alpha * c` before
+    /// the sum and skip a zero coefficient, as TensorKit's `_trace_permute!`
+    /// and TensorOperations' `tensortrace!` do (#1438). A rejected call
+    /// leaves the device and the Runtime unchanged.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -267,23 +395,15 @@ where
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, TypedFacadeError<R>> {
-        let _host_pool = self.runtime.enter_host_pool();
         let braiding = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider());
         let Some(source) = trace_source(self, braiding, pairs)? else {
             return Ok(self.clone());
         };
-        let (space, axes) = (&source.body.space, source.spec());
-        let dst_nout = source.axes.destination_codomain_rank;
-        let read = |structure: &tenet_tensors::TensorTraceFusionStructure<f64>| {
-            let spectrum = self.spectrum()?;
-            compact_arms::full_trace_terms(structure, space.space().structure(), spectrum)
-        };
         let (space, data) = <R::Mode as TypedTensorTraceDispatch<R, D>>::trace(
-            space,
-            read,
-            || source.body.materialized_dense_data(),
-            axes,
-            dst_nout,
+            self,
+            |structure| self.compact_full_trace(structure),
+            source.spec(),
+            source.axes.destination_codomain_rank,
         )?;
         Ok(self.published(space, data))
     }
@@ -306,20 +426,25 @@ where
     /// writes `alpha` times its spectrum's compiled trace without
     /// materializing (`O(Σ_c k_c)`).
     ///
+    /// On CUDA storage the `beta` pass is a zero-source region move per
+    /// destination layout (zeros for `beta = 0`, nothing for `beta = 1`),
+    /// then every term accumulates as in [`Self::trace_pairs`].
+    ///
     /// # Errors
     ///
     /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`];
     /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for a
     /// non-symmetric braiding, even with an empty `pairs`; the pair-list errors
     /// of [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
-    /// that is not owned dense host storage or aliases the source's storage
-    /// (a lazy adjoint's parent included); then, in TensorKit
+    /// that is not owned dense storage of its placement or aliases the
+    /// source's storage (a lazy adjoint's parent included); then, in TensorKit
     /// `trace_permute!`'s order, the staging errors of [`Self::trace_pairs`]
     /// (checked Generic: provider and preflight errors), `SpaceMismatch` for
     /// a destination whose HomSpace is not the result's, the duality error of
     /// [`Self::trace_pairs`], and `SpaceMismatch` for a destination whose
     /// layout is not the result's; then [`Error::InvalidArgument`] for the
-    /// wrong length and [`Error::DestinationShared`].
+    /// wrong length and [`Error::DestinationShared`]; on CUDA storage,
+    /// [`Error::PlacementMismatch`] last.
     ///
     /// # Failure
     ///
@@ -355,23 +480,29 @@ where
             return Ok(axpby_into_checked(self, destination, alpha, beta)?);
         };
         // Why the storage body: a lazy adjoint is read through its parent.
-        destination_precheck(destination, &source.body.data, "host")?;
-        let _host_pool = self.runtime.enter_host_pool();
-        let (space, axes) = (&source.body.space, source.spec());
-        let dst_nout = source.axes.destination_codomain_rank;
-        let read = |structure: &tenet_tensors::TensorTraceFusionStructure<f64>| {
-            let spectrum = self.spectrum()?;
-            compact_arms::full_trace_terms(structure, space.space().structure(), spectrum)
-        };
+        destination_precheck(destination, &source.body.data, S::NOUN)?;
         <R::Mode as TypedTensorTraceDispatch<R, D>>::trace_into(
-            space,
-            read,
-            || source.body.materialized_dense_data(),
-            axes,
-            dst_nout,
+            self,
+            |structure| self.compact_full_trace(structure),
+            source.spec(),
+            source.axes.destination_codomain_rank,
             destination,
             alpha,
             beta,
+        )
+    }
+
+    /// The compact arm: a compact spectrum's full trace into a
+    /// single-scalar destination, from the compiled terms alone.
+    fn compact_full_trace(
+        &self,
+        structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
+    ) -> Option<D> {
+        let spectrum = S::as_host(self)?.spectrum()?;
+        compact_arms::full_trace_terms(
+            structure,
+            self.storage_body().space.space().structure(),
+            spectrum,
         )
     }
 }

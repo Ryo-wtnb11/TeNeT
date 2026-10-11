@@ -94,4 +94,11 @@ fn unified_methods_resolve_in_path_form() {
     let mut into = TensorMap::zeros_like(&t).unwrap();
     TensorMap::contract_into(&t, &t, &spec, &mut into, 2.0, 0.0).unwrap();
     assert_eq!(into.dense_data().unwrap(), twice.dense_data().unwrap());
+
+    // L9 trace. The trace of the rank-2 identity is its dimension.
+    let traced = TensorMap::trace_pairs(&t, &[(0, 1)]).unwrap();
+    assert_eq!(traced.scalar().unwrap(), 2.0);
+    let mut into = TensorMap::zeros_like(&traced).unwrap();
+    TensorMap::trace_pairs_into(&t, &[(0, 1)], &mut into, 2.0, 0.0).unwrap();
+    assert_eq!(into.scalar().unwrap(), 4.0);
 }
