@@ -1258,9 +1258,14 @@ fn transform_cuda_rows_match_host() {
             }
         };
         let (a_dev, b_dev) = (a.to_cuda().unwrap(), b.to_cuda().unwrap());
-        for (host, device) in [
-            (a.clone(), a_dev.clone()),
-            (a.adjoint().unwrap(), a_dev.adjoint().unwrap()),
+        for (host, device, host_b, device_b) in [
+            (a.clone(), a_dev.clone(), b.clone(), b_dev.clone()),
+            (
+                a.adjoint().unwrap(),
+                a_dev.adjoint().unwrap(),
+                b.adjoint().unwrap(),
+                b_dev.adjoint().unwrap(),
+            ),
         ] {
             let rotated = rotation(host.codomain_rank(), host.rank(), 1);
             let flipped = host.rank() - host.codomain_rank();
@@ -1300,8 +1305,16 @@ fn transform_cuda_rows_match_host() {
                 );
             }
             // `_into` from this source into `T b`.
-            let mut host_destination = b.permute(PERMUTE.0, PERMUTE.1).unwrap();
-            let mut device_destination = b_dev.permute(PERMUTE.0, PERMUTE.1).unwrap();
+            let mut host_destination = host_b
+                .permute(PERMUTE.0, PERMUTE.1)
+                .unwrap()
+                .materialize()
+                .unwrap();
+            let mut device_destination = device_b
+                .permute(PERMUTE.0, PERMUTE.1)
+                .unwrap()
+                .materialize()
+                .unwrap();
             host.permute_into(PERMUTE.0, PERMUTE.1, &mut host_destination, alpha, beta)
                 .unwrap();
             device
