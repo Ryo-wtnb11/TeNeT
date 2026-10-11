@@ -58,14 +58,21 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
 
+    /// Re-attaches the parked destinations to `runtime` and the step
+    /// authorities, or discards them all on drift.
     fn activate_parked(
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,
         runtime: &Runtime,
         tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
-    ) -> Result<(), HostNetworkError<R>>;
+    ) -> Result<(), HostNetworkError<R>> {
+        Ok(workspace.activate_parked(runtime, tensors, steps)?)
+    }
 
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>);
+    /// Parks every idle destination without its Runtime and provider.
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>) {
+        workspace.park_runtime_owners();
+    }
 }
 
 #[doc(hidden)]
@@ -91,6 +98,27 @@ impl<T> StepOutput<T> {
                 .take()
                 .expect("successful overwrite retains its destination"),
         }
+    }
+}
+
+/// The Host step of every mode: a retained destination is overwritten through
+/// `contract_into` (`beta = 0`), otherwise the step returns the eager result.
+fn host_contract_step<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    destination: &mut Option<TensorMap<R, D>>,
+    spec: &ContractSpec<'_>,
+) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorContractDispatch<R, D>,
+    D: TensorScalar,
+{
+    if let Some(destination) = destination {
+        lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
+        Ok(StepOutput::Overwritten)
+    } else {
+        Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
     }
 }
 
@@ -122,12 +150,7 @@ where
         destination: &mut Option<TensorMap<R, D>>,
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
-        if let Some(destination) = destination {
-            lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
-            Ok(StepOutput::Overwritten)
-        } else {
-            Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
-        }
+        host_contract_step(lhs, rhs, destination, spec)
     }
 
     fn permute_final(
@@ -136,19 +159,6 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D>, Error> {
         tensor.permute(codomain, domain)
-    }
-
-    fn activate_parked(
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
-        runtime: &Runtime,
-        tensors: &[&TensorMap<R, D>],
-        steps: &[CompiledStep],
-    ) -> Result<(), Error> {
-        workspace.activate_parked(runtime, tensors, steps)
-    }
-
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
-        workspace.park_runtime_owners();
     }
 }
 
@@ -160,7 +170,7 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    const REUSE_DESTINATIONS: bool = false;
+    const REUSE_DESTINATIONS: bool = true;
 
     fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
         CheckedGenericFusion::braiding_style(provider)
@@ -184,10 +194,10 @@ where
     fn contract_step(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-        _destination: &mut Option<TensorMap<R, D>>,
+        destination: &mut Option<TensorMap<R, D>>,
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
-        Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
+        host_contract_step(lhs, rhs, destination, spec)
     }
 
     fn permute_final(
@@ -196,22 +206,6 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
         tensor.permute(codomain, domain)
-    }
-
-    fn activate_parked(
-        _workspace: &mut NetworkExecutionWorkspace<R, D>,
-        _runtime: &Runtime,
-        _tensors: &[&TensorMap<R, D>],
-        _steps: &[CompiledStep],
-    ) -> Result<(), HostNetworkError<R>> {
-        Ok(())
-    }
-
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
-        for buffers in &mut workspace.intermediates {
-            buffers.output = None;
-            buffers.parked = None;
-        }
     }
 }
 
@@ -275,18 +269,5 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         tensor.permute(codomain, domain)
-    }
-
-    fn activate_parked(
-        workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,
-        runtime: &Runtime,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-        steps: &[CompiledStep],
-    ) -> Result<(), Error> {
-        workspace.activate_parked(runtime, tensors, steps)
-    }
-
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>) {
-        workspace.park_runtime_owners();
     }
 }

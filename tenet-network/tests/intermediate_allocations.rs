@@ -18,7 +18,7 @@ mod numerics;
 
 use tenet_network::{
     ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, NetworkIR,
-    PlannedNetwork, TemporaryLabel, TensorId,
+    TemporaryLabel, TensorId,
 };
 
 #[test]
@@ -777,10 +777,8 @@ impl AllocationScalar for Complex64 {
     }
 }
 
-fn measure_typed_overwrite_witness<D>(
-    planned: &PlannedNetwork,
-    tensors: &[TypedTensorMap<U1FusionRule, D>; 3],
-    workspace: &mut NetworkExecutionWorkspace<U1FusionRule, D>,
+fn measure_typed_overwrite_witness<R, D>(
+    execute: impl FnOnce() -> TypedTensorMap<R, D>,
     oracle: &[D],
 ) -> AllocationSample
 where
@@ -796,8 +794,7 @@ where
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
 
-    let refs = tensors.iter().collect::<Vec<_>>();
-    let output = planned.execute(&refs, workspace).unwrap();
+    let output = execute();
     assert_eq!(output.dense_data().unwrap().len(), oracle.len());
     assert!(
         output
@@ -839,6 +836,99 @@ where
     }
 }
 
+/// `a·b → (a, c)` then `· c → (c, d)`: the first step's output is reordered,
+/// and both step outputs have the same payload size.
+fn overwrite_network() -> (Network, ContractionPlan) {
+    let label = TemporaryLabel::from;
+    let output = vec![label("c"), label("d")];
+    let inputs = vec![
+        vec![label("a"), label("b")],
+        vec![label("b"), label("c")],
+        vec![label("a"), label("d")],
+    ];
+    let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
+    let network = Network::new(inputs, vec![false; 3], vec![Some(1); 3], output, Some(1)).unwrap();
+    let plan = ContractionPlan::from_steps(
+        &ir,
+        vec![
+            ContractionStep::new(
+                TensorId::new(0),
+                TensorId::new(1),
+                TensorId::new(3),
+                0,
+                vec![label("a"), label("c")],
+            ),
+            ContractionStep::new(
+                TensorId::new(3),
+                TensorId::new(2),
+                TensorId::new(4),
+                0,
+                vec![label("c"), label("d")],
+            ),
+        ],
+    )
+    .unwrap();
+    (network, plan)
+}
+
+const OVERWRITE_FIRST_SPEC: ContractSpec<'static> = ContractSpec {
+    lhs: &[1],
+    rhs: &[0],
+    codomain: &[1],
+    domain: &[0],
+};
+const OVERWRITE_SECOND_SPEC: ContractSpec<'static> = ContractSpec {
+    lhs: &[1],
+    rhs: &[0],
+    codomain: &[0],
+    domain: &[1],
+};
+
+/// Warms `execute` and prints three measured replays. A fresh workspace per
+/// call (`reuse = false`) is the returning-allocation control.
+fn sample_overwrite_replays<R, D>(
+    chi: usize,
+    reuse: bool,
+    mut execute: impl FnMut(&mut NetworkExecutionWorkspace<R, D>) -> TypedTensorMap<R, D>,
+    oracle: &[D],
+) where
+    D: AllocationScalar,
+{
+    let mut workspace = NetworkExecutionWorkspace::default();
+    for _ in 0..8 {
+        if !reuse {
+            workspace = NetworkExecutionWorkspace::default();
+        }
+        drop(execute(&mut workspace));
+    }
+    let samples = std::array::from_fn::<_, 3, _>(|_| {
+        if !reuse {
+            workspace = NetworkExecutionWorkspace::default();
+        }
+        measure_typed_overwrite_witness(|| execute(&mut workspace), oracle)
+    });
+    for sample in samples {
+        println!(
+            "TENET_TYPED_ALLOC_SAMPLE {chi} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            u8::from(reuse),
+            sample.alloc_calls,
+            sample.realloc_calls,
+            sample.dealloc_calls,
+            sample.allocated_bytes,
+            sample.deallocated_bytes,
+            sample.peak_live_delta,
+            sample.output_live_bytes,
+            sample.retained_live_bytes,
+            sample.payload_alloc_calls,
+            sample.payload_peak_live_bytes,
+            sample.payload_retained_live_bytes,
+            sample.payload_output_live_bytes,
+            sample.payload_size_bytes,
+            sample.registry_overflows,
+        );
+    }
+}
+
 fn typed_overwrite_worker<D>(chi: usize, reuse: bool)
 where
     D: AllocationScalar,
@@ -863,106 +953,138 @@ where
         )
         .unwrap()
     });
-    let label = TemporaryLabel::from;
-    let output = vec![label("c"), label("d")];
-    let inputs = vec![
-        vec![label("a"), label("b")],
-        vec![label("b"), label("c")],
-        vec![label("a"), label("d")],
-    ];
-    let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
-    let network = Network::new(
-        inputs,
-        vec![false; 3],
-        vec![Some(1); 3],
-        output.clone(),
-        Some(1),
-    )
-    .unwrap();
-    let plan = ContractionPlan::from_steps(
-        &ir,
-        vec![
-            ContractionStep::new(
-                TensorId::new(0),
-                TensorId::new(1),
-                TensorId::new(3),
-                0,
-                vec![label("a"), label("c")],
-            ),
-            ContractionStep::new(
-                TensorId::new(3),
-                TensorId::new(2),
-                TensorId::new(4),
-                0,
-                vec![label("c"), label("d")],
-            ),
-        ],
-    )
-    .unwrap();
+    let (network, plan) = overwrite_network();
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
     let planned = network.plan_with(&refs, plan).unwrap();
-    let mut workspace = NetworkExecutionWorkspace::default();
-    for _ in 0..8 {
-        if !reuse {
-            workspace = NetworkExecutionWorkspace::default();
-        }
-        drop(planned.execute(&refs, &mut workspace).unwrap());
-    }
     let oracle = tensors[0]
-        .contract(
-            &tensors[1],
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[1],
-                domain: &[0],
-            },
-        )
+        .contract(&tensors[1], &OVERWRITE_FIRST_SPEC)
         .unwrap()
-        .contract(
-            &tensors[2],
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
+        .contract(&tensors[2], &OVERWRITE_SECOND_SPEC)
         .unwrap()
         .dense_data()
         .unwrap()
         .to_vec();
-    let samples = std::array::from_fn::<_, 3, _>(|_| {
-        if !reuse {
-            workspace = NetworkExecutionWorkspace::default();
-        }
-        measure_typed_overwrite_witness(&planned, &tensors, &mut workspace, &oracle)
-    });
-    for sample in samples {
-        println!(
-            "TENET_TYPED_ALLOC_SAMPLE {chi} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
-            u8::from(reuse),
-            sample.alloc_calls,
-            sample.realloc_calls,
-            sample.dealloc_calls,
-            sample.allocated_bytes,
-            sample.deallocated_bytes,
-            sample.peak_live_delta,
-            sample.output_live_bytes,
-            sample.retained_live_bytes,
-            sample.payload_alloc_calls,
-            sample.payload_peak_live_bytes,
-            sample.payload_retained_live_bytes,
-            sample.payload_output_live_bytes,
-            sample.payload_size_bytes,
-            sample.registry_overflows,
-        );
-    }
+    sample_overwrite_replays(
+        chi,
+        reuse,
+        |workspace| planned.execute(&refs, workspace).unwrap(),
+        &oracle,
+    );
 }
 
-fn run_typed_overwrite_worker(dtype: &str, chi: usize, reuse: bool) -> Vec<AllocationSample> {
+/// The checked-Generic twin over SU(2): one self-dual spin-½ sector per leg
+/// keeps every step output a single `(chi + 1)²` block, as in the U(1) worker.
+#[cfg(feature = "racah-generated")]
+fn checked_overwrite_worker<D>(chi: usize, reuse: bool)
+where
+    D: AllocationScalar,
+{
+    use tenet::sector::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(2).unwrap());
+    let fundamental = || vec![1_i64];
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(fundamental(), chi)]).unwrap();
+    let left = GradedSpace::try_new(Arc::clone(&provider), [(fundamental(), chi + 1)]).unwrap();
+    let right = GradedSpace::try_new(provider, [(fundamental(), chi + 1)]).unwrap();
+    let left_dual = left.try_dual().unwrap();
+    let tensors: [TypedTensorMap<SUNFusionRule, D>; 3] = std::array::from_fn(|index| {
+        let (codomain, domain) = match index {
+            0 => (&left, &bond),
+            1 => (&bond, &right),
+            _ => (&left_dual, &right),
+        };
+        TypedTensorMap::rand_with_seed(
+            &runtime,
+            [codomain],
+            [domain],
+            74_800 + chi as u64 * 10 + index as u64,
+        )
+        .unwrap()
+    });
+    let (network, plan) = overwrite_network();
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
+    let planned = network.plan_with(&refs, plan).unwrap();
+    let oracle = tensors[0]
+        .contract(&tensors[1], &OVERWRITE_FIRST_SPEC)
+        .unwrap()
+        .contract(&tensors[2], &OVERWRITE_SECOND_SPEC)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+    sample_overwrite_replays(
+        chi,
+        reuse,
+        |workspace| planned.execute(&refs, workspace).unwrap(),
+        &oracle,
+    );
+}
+
+/// The checked worker through the Runtime plan cache (`Network::contract`):
+/// `cached` leases the pooled workspace whose destinations were parked by the
+/// previous call; the control disables the cache, so every call allocates.
+/// Every leg has dimension `chi + 1`, so each step output is one `(chi + 1)²`
+/// block whatever order the planner picks.
+#[cfg(feature = "racah-generated")]
+fn checked_cached_worker<D>(chi: usize, cached: bool)
+where
+    D: AllocationScalar,
+{
+    use tenet::sector::SUNFusionRule;
+    use tenet_network::{configure_plan_cache, PlanCacheConfig};
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            enabled: cached,
+            ..Default::default()
+        },
+    );
+    let provider = Arc::new(SUNFusionRule::new(2).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![1_i64], chi + 1)]).unwrap();
+    let leg_dual = leg.try_dual().unwrap();
+    let tensors: [TypedTensorMap<SUNFusionRule, D>; 3] = std::array::from_fn(|index| {
+        let codomain = if index == 2 { &leg_dual } else { &leg };
+        TypedTensorMap::rand_with_seed(
+            &runtime,
+            [codomain],
+            [&leg],
+            74_900 + chi as u64 * 10 + index as u64,
+        )
+        .unwrap()
+    });
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
+    let oracle = tensors[0]
+        .contract(&tensors[1], &OVERWRITE_FIRST_SPEC)
+        .unwrap()
+        .contract(&tensors[2], &OVERWRITE_SECOND_SPEC)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+    let contract = || {
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["a"], &["d"])],
+            &["c"],
+            &["d"],
+        )
+        .contract(&refs)
+        .unwrap()
+    };
+    sample_overwrite_replays::<SUNFusionRule, D>(chi, cached, |_| contract(), &oracle);
+}
+
+fn run_typed_overwrite_worker(
+    rule: &str,
+    dtype: &str,
+    chi: usize,
+    reuse: bool,
+) -> Vec<AllocationSample> {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "measured_typed_overwrite_witness", "--nocapture"])
+        .env("TENET_TYPED_ALLOC_RULE", rule)
         .env("TENET_TYPED_ALLOC_DTYPE", dtype)
         .env(
             "TENET_TYPED_ALLOC_MODE",
@@ -1134,18 +1256,27 @@ fn measured_typed_overwrite_witness() {
             .parse()
             .unwrap();
         let reuse = std::env::var("TENET_TYPED_ALLOC_MODE").unwrap() == "reuse";
-        match dtype.as_str() {
-            "f64" => typed_overwrite_worker::<f64>(chi, reuse),
-            "c64" => typed_overwrite_worker::<Complex64>(chi, reuse),
-            _ => panic!("unknown typed allocator dtype {dtype:?}"),
+        let rule = std::env::var("TENET_TYPED_ALLOC_RULE").unwrap();
+        match (rule.as_str(), dtype.as_str()) {
+            ("u1", "f64") => typed_overwrite_worker::<f64>(chi, reuse),
+            ("u1", "c64") => typed_overwrite_worker::<Complex64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2", "f64") => checked_overwrite_worker::<f64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2", "c64") => checked_overwrite_worker::<Complex64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2-cached", "f64") => checked_cached_worker::<f64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2-cached", "c64") => checked_cached_worker::<Complex64>(chi, reuse),
+            _ => panic!("unknown typed allocator worker {rule:?}/{dtype:?}"),
         }
         return;
     }
 
     for dtype in ["f64", "c64"] {
         for chi in [8, 16, 32, 64] {
-            let fresh = run_typed_overwrite_worker(dtype, chi, false);
-            let warm = run_typed_overwrite_worker(dtype, chi, true);
+            let fresh = run_typed_overwrite_worker("u1", dtype, chi, false);
+            let warm = run_typed_overwrite_worker("u1", dtype, chi, true);
             assert_eq!(fresh.len(), 3);
             assert_eq!(warm.len(), 3);
             let values = |samples: &[AllocationSample], field: fn(&AllocationSample) -> u64| {
@@ -1189,6 +1320,55 @@ fn measured_typed_overwrite_witness() {
                 }),
                 "{diagnostics}; warm samples={warm:?}"
             );
+        }
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_replay_overwrites_the_retained_step_destination() {
+    // What: a checked Generic replay through a kept workspace writes the
+    // reused step's retained destination (`contract_into`) instead of
+    // allocating that step's `n_C` result, so it makes exactly one payload
+    // allocation fewer than a fresh workspace and retains none of its own.
+    // `Network::contract` (`sun2-cached`) gives the same relation through
+    // the plan-cache pool: the warm lease re-attaches the destination the
+    // previous call parked; the control runs with the cache disabled.
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    for (rule, dtype, chi) in ["sun2", "sun2-cached"].into_iter().flat_map(|rule| {
+        ["f64", "c64"]
+            .into_iter()
+            .flat_map(move |dtype| [8, 16, 32].map(|chi| (rule, dtype, chi)))
+    }) {
+        {
+            let fresh = run_typed_overwrite_worker(rule, dtype, chi, false);
+            let warm = run_typed_overwrite_worker(rule, dtype, chi, true);
+            assert_eq!(fresh.len(), 3);
+            assert_eq!(warm.len(), 3);
+            for (fresh, warm) in fresh.iter().zip(&warm) {
+                let diagnostics =
+                    format!("dtype={dtype}, chi={chi}, fresh={fresh:?}, warm={warm:?}");
+                assert_eq!(fresh.registry_overflows, 0, "{diagnostics}");
+                assert_eq!(warm.registry_overflows, 0, "{diagnostics}");
+                assert_eq!(
+                    fresh.payload_alloc_calls,
+                    warm.payload_alloc_calls + 1,
+                    "{diagnostics}"
+                );
+                // A kept fresh workspace holds its first step's result; the
+                // uncached control drops its workspace with the call.
+                if rule == "sun2" {
+                    assert_eq!(
+                        fresh.payload_retained_live_bytes, fresh.payload_size_bytes,
+                        "{diagnostics}"
+                    );
+                }
+                assert_eq!(warm.payload_retained_live_bytes, 0, "{diagnostics}");
+                assert_eq!(
+                    warm.payload_output_live_bytes, warm.payload_size_bytes,
+                    "{diagnostics}"
+                );
+            }
         }
     }
 }

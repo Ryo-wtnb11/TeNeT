@@ -81,10 +81,10 @@ Notes:
    checked trace during call-local lowering, before it looks up the reduced
    contraction/permutation plan. The trace is recomputed on each call; only the
    reduced plan and its workspace are reused. The macro asks for pivotal
-   provider data only for these trace-bearing expressions. Host MF workspaces
-   can reuse compatible intermediate payload buffers; checked Generic
-   workspaces reuse plan and workspace containers but create newly admitted
-   intermediates. The final
+   provider data only for these trace-bearing expressions. Host workspaces in
+   both modes reuse compatible intermediate payload buffers through
+   `contract_into`, and park them in the plan-cache pool between calls. The
+   final
    tensor leaves the workspace in both modes, and neither mode accepts a
    caller-owned payload destination. That public destination boundary remains
    an [intentional difference](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)

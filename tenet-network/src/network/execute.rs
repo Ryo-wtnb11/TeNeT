@@ -39,10 +39,10 @@ pub struct CompiledStep {
 
 /// Caller-owned replay state for one planned network at a time.
 ///
-/// The stored payload destinations are private implementation details. Host MF
-/// replay can reuse compatible intermediate buffers. Checked Generic replay
-/// reuses the plan and workspace containers but admits new intermediate
-/// tensors. The final tensor leaves the workspace in both modes.
+/// The stored payload destinations are private implementation details. Host
+/// replay in both modes overwrites compatible intermediate buffers through
+/// `contract_into`, and parks them in the plan-cache pool between calls. The
+/// final tensor leaves the workspace in both modes.
 ///
 /// `S` is the operand payload storage and defaults to Host `Vec<D>`. A device
 /// storage uses the same ownership, parking, quarantine and budget model; what
@@ -326,10 +326,7 @@ where
         bytes
     }
 
-    pub(crate) fn park_runtime_owners(&mut self)
-    where
-        R: tenet::sector::FusionRule,
-    {
+    pub(crate) fn park_runtime_owners(&mut self) {
         for buffers in &mut self.intermediates {
             debug_assert!(buffers.parked.is_none());
             buffers.parked = buffers.output.take().and_then(__network::detach_runtime);
@@ -341,10 +338,7 @@ where
         runtime: &Runtime,
         tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
-    ) -> Result<(), Error>
-    where
-        R: tenet::sector::FusionRule,
-    {
+    ) -> Result<(), Error> {
         // Validate the complete idle set before consuming any payload. A
         // runtime/layout drift makes the old destinations ineligible, but is
         // not an execution error: discard them and let replay allocate against

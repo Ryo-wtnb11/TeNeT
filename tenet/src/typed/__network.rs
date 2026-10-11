@@ -30,10 +30,9 @@ pub fn cuda_device_ordinal(runtime: &Runtime) -> Option<usize> {
 }
 
 /// Parks an ordinary dense destination without its runtime and provider.
-pub fn detach_runtime<R, D, S>(tensor: TensorMap<R, D, S>) -> Option<RuntimeDetachedTensorMap<D, S>>
-where
-    R: tenet_core::FusionRule,
-{
+pub fn detach_runtime<R, D, S>(
+    tensor: TensorMap<R, D, S>,
+) -> Option<RuntimeDetachedTensorMap<D, S>> {
     tensor.detach_runtime()
 }
 
