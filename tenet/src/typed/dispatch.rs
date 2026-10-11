@@ -207,25 +207,25 @@ where
 pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
     TensorScalar
 {
-    fn contract(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>;
 
-    fn contract_into(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract_into<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
     ) -> Result<(), Error>;
 
-    fn compose(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error>;
+    fn compose<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>;
 }
 
 /// Ribbon-twist execution selected by the admitted provider mode.
@@ -298,34 +298,35 @@ where
     D: TensorScalar,
 {
     /// Contracts two operands, a lazy adjoint read through its parent's
-    /// payload, into a fresh destination payload.
-    fn contract(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    /// payload, into a fresh destination payload of their storage: the
+    /// staging, the storage's planner capabilities, its kernel, the commit.
+    fn contract<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError>;
 
     /// `destination = alpha · contract(lhs, rhs) + beta · destination` on
     /// the dense route (a lazy adjoint read through its parent's payload, a
     /// compact operand densified) for a `destination` that passed
     /// [`destination_precheck`]: one lease, [`Self::contract`]'s staging, the
-    /// staged space against the destination's, [`destination_slice`], the
-    /// write, then the same commit.
-    fn contract_into(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    /// staged space against the destination's, [`destination_storage_mut`],
+    /// planning, the storage's write, then the same commit.
+    fn contract_into<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Self::FacadeError>;
 
     /// Composes two operands, a lazy adjoint read through its parent's
-    /// payload, into a fresh destination payload.
-    fn compose(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError>;
+    /// payload, into a fresh destination payload of their storage.
+    fn compose<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError>;
 }
 
 /// Partial categorical trace execution selected by provider-owned mode.

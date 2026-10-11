@@ -704,29 +704,29 @@ where
         + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>
         + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
-    fn contract(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    fn contract<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         D::contract(lhs, rhs, spec)
     }
 
-    fn contract_into(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    fn contract_into<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Error> {
         D::contract_into(lhs, rhs, spec, destination, alpha, beta)
     }
 
-    fn compose(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error> {
+    fn compose<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         D::compose(lhs, rhs)
     }
 }
@@ -739,67 +739,122 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    fn contract(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    fn contract<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError> {
         let output_axes = spec.output_axes();
-        let mut lease = lhs.runtime.lease_context()?;
-        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        Ok(lease
-            .context()
-            .generic_lane::<D>()?
-            .tensorcontract_checked_generic_in(
-                (lhs.logical_space(), lhs_operand, &lhs_data),
-                (rhs.logical_space(), rhs_operand, &rhs_data),
-                (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-                spec.codomain.len(),
-            )?)
+        let (lhs_operand, rhs_operand) = (lhs.fusion_operand(), rhs.fusion_operand());
+        let request = contract_request(lhs_operand, rhs_operand, spec, &output_axes);
+        checked_generic_contract_owned(lhs, rhs, request)
     }
 
-    fn contract_into(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
+    fn contract_into<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, D>,
+        destination: &mut TensorMap<R, D, S>,
         alpha: D,
         beta: D,
     ) -> Result<(), Self::FacadeError> {
         let output_axes = spec.output_axes();
         let mut lease = lhs.runtime.lease_context()?;
-        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        let destination_space = destination.logical_space().space().clone();
-        lease
-            .context()
-            .generic_lane::<D>()?
-            .tensorcontract_into_checked_generic_in(
-                (lhs.logical_space(), lhs_operand, &lhs_data),
-                (rhs.logical_space(), rhs_operand, &rhs_data),
-                (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-                spec.codomain.len(),
-                &destination_space,
-                || destination_slice(destination).map_err(Self::FacadeError::from),
-                alpha,
-                beta,
-            )
+        lease.context().generic_lane::<D>()?;
+        let (lhs_operand, rhs_operand) = (lhs.fusion_operand(), rhs.fusion_operand());
+        let mut staged = tenet_tensors::StagedContract::checked_generic(
+            (
+                lhs.logical_space(),
+                lhs_operand,
+                transform_source_len(lhs.storage_body())?,
+            ),
+            (
+                rhs.logical_space(),
+                rhs_operand,
+                transform_source_len(rhs.storage_body())?,
+            ),
+            contract_request(lhs_operand, rhs_operand, spec, &output_axes),
+        )?;
+        staged.require_destination(destination.logical_space().space())?;
+        let destination = destination_storage_mut(destination)?;
+        let resolution = match staged.try_core::<S::Caps>()? {
+            tenet_tensors::CoreRoute::Hit(core) => core,
+            tenet_tensors::CoreRoute::Miss(miss) => staged.plan_beyond_core::<S::Caps>(miss)?,
+        };
+        S::contract_into(
+            ContractReplay::new::<CheckedGenericTreeLane>(
+                &lhs.runtime,
+                Some(lease),
+                &resolution,
+                (staged.destination(), staged.destination_len()),
+                (lhs_operand, rhs_operand),
+            ),
+            lhs,
+            rhs,
+            destination,
+            alpha,
+            beta,
+        )
+        .map_err(checked_generic_exec_error)?;
+        staged.commit(&resolution)?;
+        Ok(())
     }
 
-    fn compose(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Self::FacadeError> {
-        let mut lease = lhs.runtime.lease_context()?;
-        let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-        let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        Ok(lease
-            .context()
-            .generic_lane::<D>()?
-            .tensorcompose_checked_generic_in(
-                (lhs.logical_space(), lhs_operand, &lhs_data),
-                (rhs.logical_space(), rhs_operand, &rhs_data),
-            )?)
+    fn compose<S: ContractExec<R, D>>(
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Self::FacadeError> {
+        checked_generic_contract_owned(lhs, rhs, tenet_tensors::ContractRequest::Compose)
     }
+}
+
+/// The checked Generic owned contraction or composition on any storage:
+/// one lease, the staging, the planner under the call's transaction, the
+/// storage's kernel, then the commit and publication (#2063).
+fn checked_generic_contract_owned<'a, R, D, S>(
+    lhs: &'a TensorMap<R, D, S>,
+    rhs: &'a TensorMap<R, D, S>,
+    request: tenet_tensors::ContractRequest<'a>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, S), TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+    S: ContractExec<R, D>,
+{
+    // The kernel resolves the generic lane under this lease, once.
+    let lease = lhs.runtime.lease_context()?;
+    let (lhs_operand, rhs_operand) = (lhs.fusion_operand(), rhs.fusion_operand());
+    let mut staged = tenet_tensors::StagedContract::checked_generic(
+        (
+            lhs.logical_space(),
+            lhs_operand,
+            transform_source_len(lhs.storage_body())?,
+        ),
+        (
+            rhs.logical_space(),
+            rhs_operand,
+            transform_source_len(rhs.storage_body())?,
+        ),
+        request,
+    )?;
+    let resolution = match staged.try_core::<S::Caps>()? {
+        tenet_tensors::CoreRoute::Hit(core) => core,
+        tenet_tensors::CoreRoute::Miss(miss) => staged.plan_beyond_core::<S::Caps>(miss)?,
+    };
+    let data = S::contract_owned(
+        ContractReplay::new::<CheckedGenericTreeLane>(
+            &lhs.runtime,
+            Some(lease),
+            &resolution,
+            (staged.destination(), staged.destination_len()),
+            (lhs_operand, rhs_operand),
+        ),
+        lhs,
+        rhs,
+    )
+    .map_err(checked_generic_exec_error)?;
+    Ok((staged.commit(&resolution)?, data))
 }

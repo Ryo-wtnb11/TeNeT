@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Direction, Eigh, GradedSpace, HermitianTol, Qr, Runtime, Svd, TensorMap};
+use tenet::typed::{
+    ContractSpec, Direction, Eigh, GradedSpace, HermitianTol, Qr, Runtime, Svd, TensorMap,
+};
 
 #[test]
 fn unified_methods_resolve_in_path_form() {
@@ -77,4 +79,19 @@ fn unified_methods_resolve_in_path_form() {
             .dense_data()
             .unwrap()
     );
+
+    // L8 contract. `t` is the identity, so `t · t = t ∘ t = t`.
+    let spec = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    let product = TensorMap::contract(&t, &t, &spec).unwrap();
+    assert_eq!(product.dense_data().unwrap(), t.dense_data().unwrap());
+    let composed = TensorMap::compose(&t, &t).unwrap();
+    assert_eq!(composed.dense_data().unwrap(), t.dense_data().unwrap());
+    let mut into = TensorMap::zeros_like(&t).unwrap();
+    TensorMap::contract_into(&t, &t, &spec, &mut into, 2.0, 0.0).unwrap();
+    assert_eq!(into.dense_data().unwrap(), twice.dense_data().unwrap());
 }

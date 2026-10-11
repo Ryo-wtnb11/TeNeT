@@ -79,6 +79,7 @@ pub use backend::{
     HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
     TensorContractWorkspace,
 };
+pub use checked_generic::CheckedContractStage;
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
@@ -87,6 +88,7 @@ pub use context::{
     TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractPlanKey,
 };
+pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]
 pub(crate) use dynamic_space::{
     checked_layout_primer, checked_metadata_dispatcher, fusion_operand_projection_prepares,

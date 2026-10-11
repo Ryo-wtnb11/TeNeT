@@ -376,64 +376,96 @@ where
     }
 }
 
+/// The multiplicity-free owned contraction or composition on any storage,
+/// one body for every coefficient lane (TensorKit `tensorcontract!` has no
+/// symbol-type dispatch): the staged destination, the lock-free canonical
+/// core for the storage's executor, else the rest of the planner under one
+/// context lease, the storage's kernel, then the commit.
 #[allow(private_bounds)]
-fn compose_multiplicity_free<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error>
+fn contract_owned_multiplicity_free<'a, R, D, S>(
+    lhs: &'a TensorMap<R, D, S>,
+    rhs: &'a TensorMap<R, D, S>,
+    request: impl FnOnce(
+        tenet_tensors::FusionOperand<'a>,
+        tenet_tensors::FusionOperand<'a>,
+    ) -> tenet_tensors::ContractRequest<'a>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+    S: ContractExec<R, D>,
 {
-    let mut lease = lhs.runtime.lease_context()?;
-    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-    Ok(
-        D::lane(lease.context())?.tensorcompose_multiplicity_free_in(
-            (lhs.logical_space(), lhs_operand, &lhs_data),
-            (rhs.logical_space(), rhs_operand, &rhs_data),
-        )?,
-    )
+    let (lhs_operand, rhs_operand) = (lhs.fusion_operand(), rhs.fusion_operand());
+    let mut staged = tenet_tensors::StagedContract::multiplicity_free(
+        (
+            lhs.logical_space(),
+            lhs_operand,
+            transform_source_len(lhs.storage_body())?,
+        ),
+        (
+            rhs.logical_space(),
+            rhs_operand,
+            transform_source_len(rhs.storage_body())?,
+        ),
+        request(lhs_operand, rhs_operand),
+    )?;
+    // Why the lease waits for a core miss: the canonical core resolves from
+    // the operands alone, and the device kernel must not hold a context
+    // lease; the Host kernel takes the one lease when planning took none.
+    let (lease, resolution) = match staged.try_core::<S::Caps>()? {
+        tenet_tensors::CoreRoute::Hit(core) => (None, core),
+        tenet_tensors::CoreRoute::Miss(miss) => {
+            let mut lease = lhs.runtime.lease_context()?;
+            let resolution = D::lane(lease.context())?
+                .plan_staged_contract_beyond_core::<S::Caps, R>(&mut staged, miss)?;
+            (Some(lease), resolution)
+        }
+    };
+    let data = S::contract_owned(
+        ContractReplay::new::<MultiplicityFreeTreeLane>(
+            &lhs.runtime,
+            lease,
+            &resolution,
+            (staged.destination(), staged.destination_len()),
+            (lhs_operand, rhs_operand),
+        ),
+        lhs,
+        rhs,
+    )?;
+    Ok((staged.commit(&resolution)?, data))
 }
 
-/// The owned multiplicity-free contraction, one body for every coefficient
-/// lane: the complex-symbol lane runs the same staging, plan and replay as
-/// the real one (TensorKit `tensorcontract!` has no symbol-type dispatch).
 #[allow(private_bounds)]
-fn contract_multiplicity_free<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
+fn contract_multiplicity_free<R, D, S>(
+    lhs: &TensorMap<R, D, S>,
+    rhs: &TensorMap<R, D, S>,
     spec: &ContractSpec<'_>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), Error>
+) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error>
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+    S: ContractExec<R, D>,
 {
     let output_axes = spec.output_axes();
-    let mut lease = lhs.runtime.lease_context()?;
-    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
     #[cfg(test)]
     crate::tensor_core::observe_contract_seam_call();
-    Ok(
-        D::lane(lease.context())?.tensorcontract_multiplicity_free_in(
-            (lhs.logical_space(), lhs_operand, &lhs_data),
-            (rhs.logical_space(), rhs_operand, &rhs_data),
-            (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-            spec.codomain.len(),
-        )?,
-    )
+    contract_owned_multiplicity_free(lhs, rhs, |lhs, rhs| {
+        contract_request(lhs, rhs, spec, &output_axes)
+    })
 }
 
-/// [`contract_multiplicity_free`] written into an existing destination.
+/// [`contract_multiplicity_free`] written into an existing destination: one
+/// lease first (leasing counts as validation), the same staging, the staged
+/// space against the destination's, its length and ownership, planning, the
+/// storage's write, then the commit.
 #[allow(private_bounds)]
-fn contract_into_multiplicity_free<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
+fn contract_into_multiplicity_free<R, D, S>(
+    lhs: &TensorMap<R, D, S>,
+    rhs: &TensorMap<R, D, S>,
     spec: &ContractSpec<'_>,
-    destination: &mut TensorMap<R, D>,
+    destination: &mut TensorMap<R, D, S>,
     alpha: D,
     beta: D,
 ) -> Result<(), Error>
@@ -441,22 +473,48 @@ where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
     D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+    S: ContractExec<R, D>,
 {
     let output_axes = spec.output_axes();
     let mut lease = lhs.runtime.lease_context()?;
-    let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
-    let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-    let destination_space = destination.logical_space().space().clone();
-    D::lane(lease.context())?.tensorcontract_into_multiplicity_free_in(
-        (lhs.logical_space(), lhs_operand, &lhs_data),
-        (rhs.logical_space(), rhs_operand, &rhs_data),
-        (spec.lhs, spec.rhs, OutputAxisOrder::from_axes(&output_axes)),
-        spec.codomain.len(),
-        &destination_space,
-        || destination_slice(destination),
+    D::lane(lease.context())?;
+    let (lhs_operand, rhs_operand) = (lhs.fusion_operand(), rhs.fusion_operand());
+    let mut staged = tenet_tensors::StagedContract::multiplicity_free(
+        (
+            lhs.logical_space(),
+            lhs_operand,
+            transform_source_len(lhs.storage_body())?,
+        ),
+        (
+            rhs.logical_space(),
+            rhs_operand,
+            transform_source_len(rhs.storage_body())?,
+        ),
+        contract_request(lhs_operand, rhs_operand, spec, &output_axes),
+    )?;
+    staged.require_destination(destination.logical_space().space())?;
+    let destination = destination_storage_mut(destination)?;
+    let resolution = match staged.try_core::<S::Caps>()? {
+        tenet_tensors::CoreRoute::Hit(core) => core,
+        tenet_tensors::CoreRoute::Miss(miss) => D::lane(lease.context())?
+            .plan_staged_contract_beyond_core::<S::Caps, R>(&mut staged, miss)?,
+    };
+    S::contract_into(
+        ContractReplay::new::<MultiplicityFreeTreeLane>(
+            &lhs.runtime,
+            Some(lease),
+            &resolution,
+            (staged.destination(), staged.destination_len()),
+            (lhs_operand, rhs_operand),
+        ),
+        lhs,
+        rhs,
+        destination,
         alpha,
         beta,
-    )
+    )?;
+    staged.commit(&resolution)?;
+    Ok(())
 }
 
 impl<R, D> MultiplicityFreeContractExecution<R, f64> for D
@@ -464,30 +522,30 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn contract(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         contract_multiplicity_free(lhs, rhs, spec)
     }
 
-    fn contract_into(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract_into<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
     ) -> Result<(), Error> {
         contract_into_multiplicity_free(lhs, rhs, spec, destination, alpha, beta)
     }
 
-    fn compose(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
-        compose_multiplicity_free(lhs, rhs)
+    fn compose<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
+        contract_owned_multiplicity_free(lhs, rhs, |_, _| tenet_tensors::ContractRequest::Compose)
     }
 }
 
@@ -495,30 +553,30 @@ impl<R> MultiplicityFreeContractExecution<R, Complex64> for Complex64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = Complex64> + CheckedFusionAlgebra + SectorCodec,
 {
-    fn contract(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
         contract_multiplicity_free(lhs, rhs, spec)
     }
 
-    fn contract_into(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
+    fn contract_into<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
         spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, Self>,
+        destination: &mut TensorMap<R, Self, S>,
         alpha: Self,
         beta: Self,
     ) -> Result<(), Error> {
         contract_into_multiplicity_free(lhs, rhs, spec, destination, alpha, beta)
     }
 
-    fn compose(
-        lhs: &TensorMap<R, Self>,
-        rhs: &TensorMap<R, Self>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<Self>), Error> {
-        compose_multiplicity_free(lhs, rhs)
+    fn compose<S: ContractExec<R, Self>>(
+        lhs: &TensorMap<R, Self, S>,
+        rhs: &TensorMap<R, Self, S>,
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
+        contract_owned_multiplicity_free(lhs, rhs, |_, _| tenet_tensors::ContractRequest::Compose)
     }
 }
 

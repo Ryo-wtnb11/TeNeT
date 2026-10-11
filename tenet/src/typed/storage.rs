@@ -25,6 +25,9 @@ pub trait TypedStorage<R, D>: TensorStorage<D> + sealed::Sealed + Sized + 'stati
     /// data, since `to_cuda` densifies and every device kernel outputs dense.
     fn as_host(t: &TensorMap<R, D, Self>) -> Option<&TensorMap<R, D>>;
 
+    /// [`Self::as_host`] for a compact arm's existing destination.
+    fn as_host_mut(t: &mut TensorMap<R, D, Self>) -> Option<&mut TensorMap<R, D>>;
+
     /// The inverse of [`Self::as_host`] for a compact arm's result. Reached
     /// only after `as_host` returned `Some`, so the CUDA impl's error is
     /// unreachable.
@@ -35,6 +38,10 @@ impl<R, D: 'static> TypedStorage<R, D> for Vec<D> {
     const NOUN: &'static str = "host";
 
     fn as_host(t: &TensorMap<R, D, Self>) -> Option<&TensorMap<R, D>> {
+        Some(t)
+    }
+
+    fn as_host_mut(t: &mut TensorMap<R, D, Self>) -> Option<&mut TensorMap<R, D>> {
         Some(t)
     }
 

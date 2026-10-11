@@ -487,8 +487,10 @@ where
 /// a directly written `dst` have no writer; they become `beta * dst` through
 /// a zero-source region move. No pass reads or clears the whole destination.
 ///
-/// A borrowed source (an identity transform of an unconjugated operand
-/// already in core layout) is read in place, as on the host. The fermionic
+/// A borrowed source is read in place, as on the host: an identity
+/// transform of an operand already in core layout, or of a lazy adjoint
+/// whose parent tiles canonical coupled-sector matrices, which the core
+/// GEMM reads in its parent's storage with an adjoint op (#2160). The fermionic
 /// contraction twist is folded into the source move writing each twisted
 /// block (`replay_with_destination_scales`), as the Host folds it.
 ///

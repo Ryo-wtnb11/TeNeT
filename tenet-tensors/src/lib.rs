@@ -54,7 +54,8 @@ pub use contract::{
 };
 #[doc(hidden)]
 pub use contract::{
-    plan_compose, try_compile_storage_contract_core_route, HostContractMembersWorkspace,
+    plan_compose, try_compile_storage_contract_core_route, CheckedContractStage,
+    HostContractMembersWorkspace, MultiplicityFreeContractStage, StagedContract,
     StorageContractResolution,
 };
 pub use contract::{
@@ -77,6 +78,8 @@ pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
+#[doc(hidden)]
+pub use mode::ContractRequest;
 #[doc(hidden)]
 pub use mode::{CoefficientAlgebra, PivotalCoefficientAlgebra, RigidCoefficientAlgebra};
 pub(crate) use oriented_elementwise::validate_oriented_fusion_layout;

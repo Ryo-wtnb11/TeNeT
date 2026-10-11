@@ -485,9 +485,12 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         Self::Scalar: DenseBlockScalar;
 }
 
-/// What the one owned contraction entry is asked for.
+/// What a pairwise contraction entry computes.
+///
+/// Internal and unstable despite being public for `tenet`.
+#[doc(hidden)]
 #[derive(Clone, Copy)]
-pub(crate) enum ContractRequest<'s> {
+pub enum ContractRequest<'s> {
     /// `lhs·rhs` over `axes`, whose conjugation flags are the operands',
     /// split after the first `codomain_rank` output axes.
     Contract {

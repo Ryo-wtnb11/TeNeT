@@ -712,16 +712,18 @@ impl<R, D, S> TensorMap<R, D, S> {
     }
 }
 
-impl<R, D> TensorMap<R, D> {
+impl<R, D, S> TensorMap<R, D, S> {
     /// An operation's fresh dense result on `space`, bound to this tensor's
     /// runtime.
-    pub(super) fn published(&self, space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+    pub(super) fn published(&self, space: BoundDynamicFusionMapSpace<R>, data: S) -> Self {
         Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         }
     }
+}
 
+impl<R, D> TensorMap<R, D> {
     pub(super) fn with_data(&self, data: Vec<D>) -> Self {
         Self {
             runtime: self.runtime.clone(),

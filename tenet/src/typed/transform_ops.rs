@@ -672,7 +672,8 @@ type TreeLane<D, C> = tenet_tensors::TreeTransformExecutionContext<
     tenet_tensors::DenseTreeTransformOperations,
 >;
 
-/// Which pooled lane a mode stages and replays its transforms on.
+/// Which pooled lane a mode stages and replays its transforms and
+/// contractions on.
 pub(super) trait HostTreeLane<D, C>
 where
     D: tenet_tensors::DenseRecouplingScalar
@@ -680,9 +681,15 @@ where
         + tenet_tensors::ConjugateValue,
     C: tenet_tensors::DenseBlockScalar,
 {
+    fn contract_lane(
+        context: &mut crate::runtime::TensorExecutionContext,
+    ) -> Result<&mut crate::runtime::CoefficientCtx<D, tenet_core::RuleIdentity, C>, Error>;
+
     fn lane(
         context: &mut crate::runtime::TensorExecutionContext,
-    ) -> Result<&mut TreeLane<D, C>, Error>;
+    ) -> Result<&mut TreeLane<D, C>, Error> {
+        Ok(Self::contract_lane(context)?.tree_context_mut())
+    }
 }
 
 /// The multiplicity-free namespace's coefficient lane.
@@ -695,10 +702,10 @@ where
         + tenet_tensors::ConjugateValue,
     C: tenet_tensors::DenseBlockScalar,
 {
-    fn lane(
+    fn contract_lane(
         context: &mut crate::runtime::TensorExecutionContext,
-    ) -> Result<&mut TreeLane<D, C>, Error> {
-        Ok(D::lane(context)?.tree_context_mut())
+    ) -> Result<&mut crate::runtime::CoefficientCtx<D, tenet_core::RuleIdentity, C>, Error> {
+        D::lane(context)
     }
 }
 
@@ -709,10 +716,10 @@ impl<D> HostTreeLane<D, f64> for CheckedGenericTreeLane
 where
     D: ScalarOps + tenet_tensors::DenseRecouplingScalar + tenet_tensors::ConjugateValue,
 {
-    fn lane(
+    fn contract_lane(
         context: &mut crate::runtime::TensorExecutionContext,
-    ) -> Result<&mut TreeLane<D, f64>, Error> {
-        Ok(context.generic_lane::<D>()?.tree_context_mut())
+    ) -> Result<&mut crate::runtime::CoefficientCtx<D, tenet_core::RuleIdentity, f64>, Error> {
+        context.generic_lane::<D>()
     }
 }
 
