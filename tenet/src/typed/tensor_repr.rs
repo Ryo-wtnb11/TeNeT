@@ -412,10 +412,7 @@ impl<R, D, S> Clone for TensorMap<R, D, S> {
     }
 }
 
-impl<R, D, S> TensorMap<R, D, S>
-where
-    R: tenet_core::FusionRule,
-{
+impl<R, D, S> TensorMap<R, D, S> {
     /// Removes Runtime and provider ownership from an ordinary dense
     /// destination while preserving its validated layout and payload allocation.
     ///
@@ -478,10 +475,7 @@ impl<D, S> RuntimeDetachedTensorMap<D, S> {
         &self,
         runtime: &Runtime,
         authority: &TensorMap<R, D, S>,
-    ) -> Result<(), Error>
-    where
-        R: tenet_core::FusionRule,
-    {
+    ) -> Result<(), Error> {
         if !self.matches_runtime(runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -496,10 +490,7 @@ impl<D, S> RuntimeDetachedTensorMap<D, S> {
         self,
         runtime: &Runtime,
         authority: &TensorMap<R, D, S>,
-    ) -> Result<TensorMap<R, D, S>, Error>
-    where
-        R: tenet_core::FusionRule,
-    {
+    ) -> Result<TensorMap<R, D, S>, Error> {
         if !self.matches_runtime(runtime) {
             return Err(Error::RuntimeMismatch);
         }

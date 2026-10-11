@@ -58,14 +58,21 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
 
+    /// Re-attaches the parked destinations to `runtime` and the step
+    /// authorities, or discards them all on drift.
     fn activate_parked(
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,
         runtime: &Runtime,
         tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
-    ) -> Result<(), HostNetworkError<R>>;
+    ) -> Result<(), HostNetworkError<R>> {
+        Ok(workspace.activate_parked(runtime, tensors, steps)?)
+    }
 
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>);
+    /// Parks every idle destination without its Runtime and provider.
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>) {
+        workspace.park_runtime_owners();
+    }
 }
 
 #[doc(hidden)]
@@ -153,19 +160,6 @@ where
     ) -> Result<TensorMap<R, D>, Error> {
         tensor.permute(codomain, domain)
     }
-
-    fn activate_parked(
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
-        runtime: &Runtime,
-        tensors: &[&TensorMap<R, D>],
-        steps: &[CompiledStep],
-    ) -> Result<(), Error> {
-        workspace.activate_parked(runtime, tensors, steps)
-    }
-
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
-        workspace.park_runtime_owners();
-    }
 }
 
 impl<R, D> HostNetworkModeDispatch<R, D> for CheckedGenericAdmissionMode
@@ -212,25 +206,6 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
         tensor.permute(codomain, domain)
-    }
-
-    fn activate_parked(
-        _workspace: &mut NetworkExecutionWorkspace<R, D>,
-        _runtime: &Runtime,
-        _tensors: &[&TensorMap<R, D>],
-        _steps: &[CompiledStep],
-    ) -> Result<(), HostNetworkError<R>> {
-        Ok(())
-    }
-
-    // Why drop rather than park: parking detaches the Runtime through the
-    // multiplicity-free `__network::detach_runtime` seam, so a checked
-    // destination is reused only while its caller-held workspace keeps it.
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
-        for buffers in &mut workspace.intermediates {
-            buffers.output = None;
-            buffers.parked = None;
-        }
     }
 }
 
@@ -294,18 +269,5 @@ where
         domain: &[usize],
     ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         tensor.permute(codomain, domain)
-    }
-
-    fn activate_parked(
-        workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,
-        runtime: &Runtime,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-        steps: &[CompiledStep],
-    ) -> Result<(), Error> {
-        workspace.activate_parked(runtime, tensors, steps)
-    }
-
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>) {
-        workspace.park_runtime_owners();
     }
 }

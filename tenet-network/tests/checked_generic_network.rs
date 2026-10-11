@@ -1366,4 +1366,114 @@ fn checked_destination_reuse_queries_no_more_provider_symbols_than_a_fresh_repla
     {
         assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
     }
+
+    // The plan-cache lease re-attaches the parked destinations; that replay
+    // asks no more symbols than the same call with the cache disabled.
+    let runtime = tensors[0].runtime().clone();
+    let network = injected_network(4, true);
+    drop(network.contract(&refs).unwrap());
+    tenet::cache::clear();
+    provider.reset_symbols();
+    let leased = network.contract(&refs).unwrap();
+    let leased_calls = provider.symbol_calls.load(Ordering::SeqCst);
+    assert_eq!(plan_cache_stats(&runtime).workspace_reuses, 1);
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            enabled: false,
+            ..plan_cache_config(&runtime)
+        },
+    );
+    tenet::cache::clear();
+    provider.reset_symbols();
+    let uncached = network.contract(&refs).unwrap();
+    let uncached_calls = provider.symbol_calls.load(Ordering::SeqCst);
+    assert!(
+        leased_calls <= uncached_calls,
+        "leased replay asked {leased_calls} symbols, uncached call {uncached_calls}"
+    );
+    for (&actual, &want) in leased
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(uncached.dense_data().unwrap())
+    {
+        assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
+    }
+}
+
+#[test]
+fn parked_checked_workspace_releases_provider_and_reattaches_only_to_its_runtime() {
+    // What: a checked destination parked by the plan-cache pool keeps no
+    // provider, is re-attached to the current call's provider on the next
+    // lease, and the parked payload rebinds only to the Runtime it came from.
+    use tenet::typed::{__network, Error};
+    use tenet_network::plan_cache_stats;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let chain = |provider: &Arc<SUNFusionRule>, seed: u64| {
+        let leg = GradedSpace::try_new(Arc::clone(provider), [(vec![1], 3)]).unwrap();
+        let tensors: Vec<TensorMap<SUNFusionRule, f64>> = (0..3)
+            .map(|index| TensorMap::rand_with_seed(&runtime, [&leg], [&leg], seed + index).unwrap())
+            .collect();
+        tensors
+    };
+    let contract = |tensors: &[TensorMap<SUNFusionRule, f64>]| {
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&tensors[0], &tensors[1], &tensors[2]])
+        .unwrap()
+    };
+
+    let first_provider = Arc::new(SUNFusionRule::new(2).unwrap());
+    let first_weak = Arc::downgrade(&first_provider);
+    let first = chain(&first_provider, 20);
+    drop(contract(&first));
+    drop((first, first_provider));
+    assert!(first_weak.upgrade().is_none());
+
+    let current_provider = Arc::new(SUNFusionRule::new(2).unwrap());
+    let current = chain(&current_provider, 30);
+    let output = contract(&current);
+    assert!(std::ptr::eq(output.provider(), current_provider.as_ref()));
+    assert_eq!(plan_cache_stats(&runtime).workspace_reuses, 1);
+    let expected = current[0]
+        .contract(
+            &current[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+        .contract(
+            &current[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    assert_same(&output, &expected);
+
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let parked = __network::detach_runtime(output.clone()).map(|_| ());
+    assert!(parked.is_none(), "a shared destination is never parked");
+    let authority = current[0].clone();
+    let parked = __network::detach_runtime(output).unwrap();
+    assert!(matches!(
+        parked.can_attach(&other_runtime, &authority),
+        Err(Error::RuntimeMismatch)
+    ));
+    parked.can_attach(&runtime, &authority).unwrap();
+    let attached = parked.attach_runtime(&runtime, &authority).unwrap();
+    assert!(std::ptr::eq(attached.provider(), current_provider.as_ref()));
+    assert_same(&attached, &expected);
 }

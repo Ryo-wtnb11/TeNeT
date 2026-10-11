@@ -1021,6 +1021,61 @@ where
     );
 }
 
+/// The checked worker through the Runtime plan cache (`Network::contract`):
+/// `cached` leases the pooled workspace whose destinations were parked by the
+/// previous call; the control disables the cache, so every call allocates.
+/// Every leg has dimension `chi + 1`, so each step output is one `(chi + 1)²`
+/// block whatever order the planner picks.
+#[cfg(feature = "racah-generated")]
+fn checked_cached_worker<D>(chi: usize, cached: bool)
+where
+    D: AllocationScalar,
+{
+    use tenet::sector::SUNFusionRule;
+    use tenet_network::{configure_plan_cache, PlanCacheConfig};
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            enabled: cached,
+            ..Default::default()
+        },
+    );
+    let provider = Arc::new(SUNFusionRule::new(2).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![1_i64], chi + 1)]).unwrap();
+    let leg_dual = leg.try_dual().unwrap();
+    let tensors: [TypedTensorMap<SUNFusionRule, D>; 3] = std::array::from_fn(|index| {
+        let codomain = if index == 2 { &leg_dual } else { &leg };
+        TypedTensorMap::rand_with_seed(
+            &runtime,
+            [codomain],
+            [&leg],
+            74_900 + chi as u64 * 10 + index as u64,
+        )
+        .unwrap()
+    });
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
+    let oracle = tensors[0]
+        .contract(&tensors[1], &OVERWRITE_FIRST_SPEC)
+        .unwrap()
+        .contract(&tensors[2], &OVERWRITE_SECOND_SPEC)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+    let contract = || {
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["a"], &["d"])],
+            &["c"],
+            &["d"],
+        )
+        .contract(&refs)
+        .unwrap()
+    };
+    sample_overwrite_replays::<SUNFusionRule, D>(chi, cached, |_| contract(), &oracle);
+}
+
 fn run_typed_overwrite_worker(
     rule: &str,
     dtype: &str,
@@ -1209,6 +1264,10 @@ fn measured_typed_overwrite_witness() {
             ("sun2", "f64") => checked_overwrite_worker::<f64>(chi, reuse),
             #[cfg(feature = "racah-generated")]
             ("sun2", "c64") => checked_overwrite_worker::<Complex64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2-cached", "f64") => checked_cached_worker::<f64>(chi, reuse),
+            #[cfg(feature = "racah-generated")]
+            ("sun2-cached", "c64") => checked_cached_worker::<Complex64>(chi, reuse),
             _ => panic!("unknown typed allocator worker {rule:?}/{dtype:?}"),
         }
         return;
@@ -1272,11 +1331,18 @@ fn checked_replay_overwrites_the_retained_step_destination() {
     // reused step's retained destination (`contract_into`) instead of
     // allocating that step's `n_C` result, so it makes exactly one payload
     // allocation fewer than a fresh workspace and retains none of its own.
+    // `Network::contract` (`sun2-cached`) gives the same relation through
+    // the plan-cache pool: the warm lease re-attaches the destination the
+    // previous call parked; the control runs with the cache disabled.
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    for dtype in ["f64", "c64"] {
-        for chi in [8, 16, 32] {
-            let fresh = run_typed_overwrite_worker("sun2", dtype, chi, false);
-            let warm = run_typed_overwrite_worker("sun2", dtype, chi, true);
+    for (rule, dtype, chi) in ["sun2", "sun2-cached"].into_iter().flat_map(|rule| {
+        ["f64", "c64"]
+            .into_iter()
+            .flat_map(move |dtype| [8, 16, 32].map(|chi| (rule, dtype, chi)))
+    }) {
+        {
+            let fresh = run_typed_overwrite_worker(rule, dtype, chi, false);
+            let warm = run_typed_overwrite_worker(rule, dtype, chi, true);
             assert_eq!(fresh.len(), 3);
             assert_eq!(warm.len(), 3);
             for (fresh, warm) in fresh.iter().zip(&warm) {
@@ -1289,10 +1355,14 @@ fn checked_replay_overwrites_the_retained_step_destination() {
                     warm.payload_alloc_calls + 1,
                     "{diagnostics}"
                 );
-                assert_eq!(
-                    fresh.payload_retained_live_bytes, fresh.payload_size_bytes,
-                    "{diagnostics}"
-                );
+                // A kept fresh workspace holds its first step's result; the
+                // uncached control drops its workspace with the call.
+                if rule == "sun2" {
+                    assert_eq!(
+                        fresh.payload_retained_live_bytes, fresh.payload_size_bytes,
+                        "{diagnostics}"
+                    );
+                }
                 assert_eq!(warm.payload_retained_live_bytes, 0, "{diagnostics}");
                 assert_eq!(
                     warm.payload_output_live_bytes, warm.payload_size_bytes,

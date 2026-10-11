@@ -83,8 +83,8 @@ Notes:
    reduced plan and its workspace are reused. The macro asks for pivotal
    provider data only for these trace-bearing expressions. Host workspaces in
    both modes reuse compatible intermediate payload buffers through
-   `contract_into`; only multiplicity-free buffers also survive parking in the
-   plan-cache pool. The final
+   `contract_into`, and park them in the plan-cache pool between calls. The
+   final
    tensor leaves the workspace in both modes, and neither mode accepts a
    caller-owned payload destination. That public destination boundary remains
    an [intentional difference](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)
