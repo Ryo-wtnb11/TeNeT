@@ -30,7 +30,7 @@ use tenet_core::{
 use tenet_matrixalgebra::HermitianTol;
 #[cfg(test)]
 use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
-use tenet_tensors::{zeroed_payload, FusionOperand, OperationError};
+use tenet_tensors::{FusionOperand, OperationError};
 
 #[cfg(feature = "cuda")]
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};

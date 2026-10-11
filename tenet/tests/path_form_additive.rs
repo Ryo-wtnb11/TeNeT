@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{
-    ContractSpec, Direction, Eigh, GradedSpace, HermitianTol, Qr, Runtime, Svd, TensorMap,
+    ComposePlan, ContractPlan, ContractSpec, ContractWorkspace, Direction, Eigh, GradedSpace,
+    HermitianTol, Qr, Runtime, StackedTensorMap, Svd, TensorMap,
 };
 
 #[test]
@@ -101,4 +102,38 @@ fn unified_methods_resolve_in_path_form() {
     let mut into = TensorMap::zeros_like(&traced).unwrap();
     TensorMap::trace_pairs_into(&t, &[(0, 1)], &mut into, 2.0, 0.0).unwrap();
     assert_eq!(into.scalar().unwrap(), 4.0);
+
+    // L10 prepared contract over a one-member stack of `t`.
+    let stack = StackedTensorMap::pack(&[&t]).unwrap();
+    let mut dst = StackedTensorMap::pack(&[&zero]).unwrap();
+    let plan = ContractPlan::new(&stack, &stack, &spec).unwrap();
+    let mut workspace = ContractPlan::workspace(&plan).unwrap();
+    let out = ContractPlan::execute(&plan, &stack, &stack, &mut workspace).unwrap();
+    assert_eq!(
+        out.member(0).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    ContractPlan::execute_into(&plan, &stack, &stack, &mut dst, &mut workspace).unwrap();
+    assert_eq!(
+        dst.member(0).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    assert!(ContractWorkspace::retained_bytes(&workspace) > 0);
+    let plan = ComposePlan::new(&stack, &stack).unwrap();
+    let mut workspace = ComposePlan::workspace(&plan).unwrap();
+    let out = ComposePlan::execute(&plan, &stack, &stack, &mut workspace).unwrap();
+    assert_eq!(
+        out.member(0).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    ComposePlan::execute_into(&plan, &stack, &stack, &mut dst, &mut workspace).unwrap();
+    assert_eq!(
+        dst.member(0).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    let taken = ContractWorkspace::take_output(&mut workspace).unwrap();
+    assert_eq!(
+        taken.member(0).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
 }

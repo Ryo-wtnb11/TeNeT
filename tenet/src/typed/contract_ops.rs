@@ -818,10 +818,109 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     ) -> Result<(), TransformExecError>
     where
         D: RecouplingCoefficientAction<C>;
+
+    /// What a prepared stack replay holds from its output allocation through
+    /// its replay: the device lease on CUDA; nothing on Host, whose replay
+    /// takes its context lease itself.
+    type MembersLease<'r>;
+
+    /// Reserves this storage's resources for a new [`ContractWorkspace`].
+    fn reserve_members(
+        plan: &ContractPlan<R, D, Self>,
+        workspace: &mut ContractWorkspace<R, D, Self>,
+    ) -> Result<(), Error>;
+
+    /// Takes the lease of one prepared replay, after every no-write check.
+    fn lease_members(runtime: &Runtime) -> Result<Self::MembersLease<'_>, Error>;
+
+    /// A zeroed payload of `members` members of `member_len` elements each
+    /// (`total` in all).
+    fn zeroed_members(
+        lease: &Self::MembersLease<'_>,
+        total: usize,
+        member_len: usize,
+        members: usize,
+    ) -> Result<Self, Error>;
+
+    /// Replays `plan` on every member of the checked operands (each its
+    /// stored block structure and payload) into `dst`.
+    #[allow(clippy::too_many_arguments)]
+    fn contract_members(
+        plan: &ContractPlan<R, D, Self>,
+        workspace: &mut ContractWorkspace<R, D, Self>,
+        lease: &mut Self::MembersLease<'_>,
+        dst: &mut Self,
+        lhs: (&Arc<BlockStructure>, &Self),
+        rhs: (&Arc<BlockStructure>, &Self),
+        members: usize,
+        init: tenet_tensors::ContractDestinationInit<D>,
+    ) -> Result<(), Error>;
+
+    /// The workspace's retained device scratch (none on Host).
+    fn retained_scratch_bytes(workspace: &ContractWorkspace<R, D, Self>) -> usize;
+
+    /// The retained bytes of one workspace-owned output payload of `len`
+    /// elements.
+    fn retained_payload_bytes(payload: &Self, len: usize) -> usize;
 }
 
 impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
     type Caps = tenet_tensors::HostEagerExecutor;
+    type MembersLease<'r> = ();
+
+    fn reserve_members(
+        _plan: &ContractPlan<R, D>,
+        _workspace: &mut ContractWorkspace<R, D>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn lease_members(_runtime: &Runtime) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn zeroed_members(
+        _lease: &(),
+        total: usize,
+        _member_len: usize,
+        _members: usize,
+    ) -> Result<Self, Error> {
+        Ok(tenet_tensors::zeroed_payload(total))
+    }
+
+    fn contract_members(
+        plan: &ContractPlan<R, D>,
+        workspace: &mut ContractWorkspace<R, D>,
+        _lease: &mut (),
+        dst: &mut Self,
+        lhs: (&Arc<BlockStructure>, &Self),
+        rhs: (&Arc<BlockStructure>, &Self),
+        members: usize,
+        init: tenet_tensors::ContractDestinationInit<D>,
+    ) -> Result<(), Error> {
+        let mut lease = plan.runtime.lease_context()?;
+        lease
+            .context()
+            .multiplicity_free_lane::<D>()?
+            .execute_storage_contract_members_host(
+                &plan.resolution,
+                (plan.space.space().structure(), dst),
+                (lhs.0, lhs.1),
+                (rhs.0, rhs.1),
+                &mut workspace.members,
+                members,
+                init,
+            )?;
+        Ok(())
+    }
+
+    fn retained_scratch_bytes(_workspace: &ContractWorkspace<R, D>) -> usize {
+        0
+    }
+
+    fn retained_payload_bytes(payload: &Self, _len: usize) -> usize {
+        payload.capacity().saturating_mul(std::mem::size_of::<D>())
+    }
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
         replay: ContractReplay<'_, D, C>,
