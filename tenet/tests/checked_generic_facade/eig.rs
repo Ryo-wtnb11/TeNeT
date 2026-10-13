@@ -219,6 +219,16 @@ where
     let dense_len = d.materialize().unwrap().dense_data().unwrap().len();
     assert!(!format!("{d:?}").contains(&format!("elements: {dense_len}")));
     let complex_source = D::to_complex(&source);
+    for (sector, a) in complex_source.blocks().unwrap() {
+        let (v, d) = (v.block(&sector).unwrap(), d.block(&sector).unwrap());
+        assert_unit_gauged_eigenpairs(
+            a.rows(),
+            |i, j| a.get(i, j).unwrap(),
+            |i, j| v.get(i, j).unwrap(),
+            |k| d.get(k, k).unwrap(),
+            f64::EPSILON,
+        );
+    }
     let av = complex_source.compose(&v).unwrap();
     let vd = v.compose(&d).unwrap();
     assert!(av
@@ -1110,7 +1120,7 @@ fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
 /// Independent dense oracle for one coupled block: every returned pair
 /// satisfies `A v = lambda v` to backward error relative to `|A| |v|` and no
 /// eigenvector vanishes. No inverse of `V` is formed: a defective block has
-/// no eigenbasis, and the dense backend may return an unnormalized column.
+/// no eigenbasis.
 fn assert_defective_eigenpairs(
     n: usize,
     a: impl Fn(usize, usize) -> Complex64,
@@ -1209,6 +1219,229 @@ fn eig_full_accepts_finite_defective_sectors_in_both_modes_without_a_rank_svd() 
     let spin_half = SU2Irrep::from_twice_spin(1);
     check!(mf_leg, spin_half, f64, |z| z.re, real);
     check!(mf_leg, spin_half, Complex64, |z| z, complex);
+}
+
+/// Independent oracle for the published eigenvector gauge (#2073), per
+/// column `k` of one coupled block: `A v = lambda v` to backward error, unit
+/// 2-norm (LAPACK `geev`, which MatrixAlgebraKit `eig_full!` publishes), and
+/// the first largest-magnitude component real and non-negative (MAK
+/// `gaugefix!`). `eps` is the payload's machine epsilon.
+fn assert_unit_gauged_eigenpairs(
+    n: usize,
+    a: impl Fn(usize, usize) -> Complex64,
+    v: impl Fn(usize, usize) -> Complex64,
+    lambda: impl Fn(usize) -> Complex64,
+    eps: f64,
+) {
+    let scale = (0..n)
+        .flat_map(|i| (0..n).map(move |j| (i, j)))
+        .map(|(i, j)| a(i, j).norm())
+        .fold(1.0_f64, f64::max);
+    let tol = 64.0 * n as f64 * eps;
+    for k in 0..n {
+        let norm = (0..n).map(|i| v(i, k).norm_sqr()).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() <= tol, "column {k} has norm {norm}");
+        let pivot = (0..n).fold(0, |best, i| {
+            if v(best, k).norm() < v(i, k).norm() {
+                i
+            } else {
+                best
+            }
+        });
+        assert!(v(pivot, k).im.abs() <= tol && v(pivot, k).re >= 0.0);
+        for i in 0..n {
+            let av = (0..n).map(|j| a(i, j) * v(j, k)).sum::<Complex64>();
+            assert!((av - lambda(k) * v(i, k)).norm() <= tol * scale);
+        }
+    }
+}
+
+#[test]
+fn eig_full_publishes_unit_norm_phase_gauged_columns_in_both_modes() {
+    let _cache = cache_shared();
+    use tenet::sector::{SU2FusionRule, SU2Irrep};
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    // `lambda I + N` (a single Jordan chain: defective, and on base the dense
+    // backend returned a column like `[9.007e14, -1]`), and an upper
+    // triangular block with distinct eigenvalues `lambda + k` whose
+    // eigenvectors have no magnitude ties.
+    let jordan = |lambda: Complex64, row: usize, col: usize| {
+        if row == col {
+            lambda
+        } else if col == row + 1 {
+            Complex64::new(1.0, 0.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    };
+    let triangular = |lambda: Complex64, row: usize, col: usize| {
+        if row == col {
+            lambda + row as f64
+        } else if col == row + 1 {
+            Complex64::new(0.5, 0.0)
+        } else if col == row + 2 {
+            Complex64::new(0.25, 0.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    };
+    let checked_leg = GradedSpace::try_new(
+        Arc::new(CheckedOnlyToy::new(0)),
+        [(Label::Vacuum, 2), (Label::X, 3)],
+    )
+    .unwrap();
+    // Non-Abelian sectors with degeneracy 2 and 3.
+    let mf_leg = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(1), 2),
+            (SU2Irrep::from_twice_spin(2), 3),
+        ],
+    )
+    .unwrap();
+    macro_rules! check {
+        ($leg:expr, $first:expr, $dtype:ty, $from:expr, $widen:expr, $widen_eig:expr, $eps:expr, $lambda:expr) => {{
+            let from: fn(Complex64) -> $dtype = $from;
+            let lambda = |sector: &_| $lambda[usize::from(sector != &$first)];
+            for fixture in [jordan, triangular] {
+                let source: TensorMap<_, $dtype> =
+                    TensorMap::from_subblock_fn(&runtime, [&$leg], [&$leg], |trees, index| {
+                        from(fixture(lambda(trees.coupled()), index[0], index[1]))
+                    })
+                    .unwrap();
+                let Eig { d, v } = source.eig_full(&[0], &[1]).unwrap();
+                let mut sectors = 0;
+                for (sector, a) in source.blocks().unwrap() {
+                    let (v, d) = (v.block(&sector).unwrap(), d.block(&sector).unwrap());
+                    assert_unit_gauged_eigenpairs(
+                        a.rows(),
+                        |i, j| $widen(a.get(i, j).unwrap()),
+                        |i, j| $widen_eig(v.get(i, j).unwrap()),
+                        |k| $widen_eig(d.get(k, k).unwrap()),
+                        $eps,
+                    );
+                    sectors += 1;
+                }
+                assert_eq!(sectors, 2);
+            }
+        }};
+    }
+    let real = [Complex64::new(2.0, 0.0), Complex64::new(-0.5, 0.0)];
+    let complex = [Complex64::new(2.0, 1.0), Complex64::new(-0.5, -0.25)];
+    let c32 = |z: Complex32| Complex64::new(z.re.into(), z.im.into());
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    macro_rules! both_modes {
+        ($($args:tt)*) => {
+            check!(checked_leg, Label::Vacuum, $($args)*);
+            check!(mf_leg, spin_half, $($args)*);
+        };
+    }
+    both_modes!(
+        f64,
+        |z| z.re,
+        |x: f64| Complex64::new(x, 0.0),
+        |z| z,
+        f64::EPSILON,
+        real
+    );
+    both_modes!(Complex64, |z| z, |z| z, |z| z, f64::EPSILON, complex);
+    both_modes!(
+        f32,
+        |z| z.re as f32,
+        |x: f32| Complex64::new(x.into(), 0.0),
+        c32,
+        f64::from(f32::EPSILON),
+        real
+    );
+    both_modes!(
+        Complex32,
+        |z| Complex32::new(z.re as f32, z.im as f32),
+        c32,
+        c32,
+        f64::from(f32::EPSILON),
+        complex
+    );
+}
+
+#[test]
+fn eig_full_rejects_nonfinite_eigenvectors_of_finite_input_in_both_modes() {
+    let _cache = cache_shared();
+    use tenet::sector::{SU2FusionRule, SU2Irrep};
+
+    // A finite Jordan block `2 I + N` of size n in one sector. faer's
+    // back-substitution overflows here (f32 from n = 8, f64 from n = 26)
+    // while the eigenvalues stay finite; LAPACK `xTREVC` rescales and
+    // returns finite columns. Either outcome is allowed, but never `Ok` with
+    // a nonfinite column: the eigenvalue check runs first, then the
+    // eigenvector check, both a `NumericalFailure`.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let jordan = |row: usize, col: usize| {
+        if row == col {
+            2.0
+        } else if col == row + 1 {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    let faer_only = cfg!(all(
+        feature = "cpu-faer",
+        not(any(
+            feature = "cpu-blas",
+            feature = "blas-accelerate",
+            feature = "blas-openblas",
+            feature = "blas-mkl"
+        ))
+    ));
+    macro_rules! check {
+        ($leg:expr, $dtype:ty, $from:expr) => {{
+            let from: fn(f64) -> $dtype = $from;
+            let source: TensorMap<_, $dtype> =
+                TensorMap::from_subblock_fn(&runtime, [&$leg], [&$leg], |_, index| {
+                    from(jordan(index[0], index[1]))
+                })
+                .unwrap();
+            match source.eig_full(&[0], &[1]) {
+                Ok(Eig { v, .. }) => {
+                    assert!(
+                        v.dense_data()
+                            .unwrap()
+                            .iter()
+                            .all(|value| value.re.is_finite() && value.im.is_finite()),
+                        "Ok with a nonfinite eigenvector column"
+                    );
+                    assert!(!faer_only, "faer is expected to overflow on this block");
+                }
+                Err(error) => {
+                    let message = format!("{error:?}");
+                    assert!(
+                        message.contains("NumericalFailure")
+                            && message.contains("eig eigenvector check"),
+                        "{message}"
+                    );
+                }
+            }
+        }};
+    }
+    for (n, single) in [(26, false), (30, false), (8, true), (10, true)] {
+        let checked_leg =
+            GradedSpace::try_new(Arc::new(CheckedOnlyToy::new(0)), [(Label::Vacuum, n)]).unwrap();
+        let mf_leg =
+            GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(1), n)])
+                .unwrap();
+        if single {
+            check!(checked_leg, f32, |x| x as f32);
+            check!(checked_leg, Complex32, |x| Complex32::new(x as f32, 0.0));
+            check!(mf_leg, f32, |x| x as f32);
+            check!(mf_leg, Complex32, |x| Complex32::new(x as f32, 0.0));
+        } else {
+            check!(checked_leg, f64, |x| x);
+            check!(checked_leg, Complex64, |x| Complex64::new(x, 0.0));
+            check!(mf_leg, f64, |x| x);
+            check!(mf_leg, Complex64, |x| Complex64::new(x, 0.0));
+        }
+    }
 }
 
 #[test]

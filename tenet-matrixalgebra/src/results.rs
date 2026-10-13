@@ -99,7 +99,9 @@ pub struct Eigh<T> {
 pub struct Eig<T> {
     /// Complex eigenvalues, `W <- W`.
     pub d: T,
-    /// Right eigenvectors, `codomain(t) <- W`, one column per eigenvalue.
+    /// Right eigenvectors, `codomain(t) <- W`, one column per eigenvalue,
+    /// each of unit 2-norm with its largest-magnitude component real and
+    /// non-negative (MatrixAlgebraKit `geev!` then `gaugefix!`).
     pub v: T,
 }
 
