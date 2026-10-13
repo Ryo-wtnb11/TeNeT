@@ -1,6 +1,6 @@
 use core::fmt;
 use core::marker::PhantomData;
-use core::ops::{Add, Mul};
+use core::ops::{Add, Div, Mul};
 use std::convert::Infallible;
 
 use num_complex::Complex64;
@@ -1218,8 +1218,13 @@ pub trait GenericFusionSymbols: FusionRule {
 /// consumer does not need every bound site to use it.
 ///
 /// `Add`/`Mul` are supertraits so the braid can use the `+`/`*` operators
-/// exactly as TensorKit writes them.
-pub trait CategoricalScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
+/// exactly as TensorKit writes them. `Div` is one for the trace channel
+/// factor `dim(c) / dim(first)` (TensorKit `_trace_permute!`,
+/// `tensoroperations.jl:252`), which divides the provider's exact
+/// dimensions once instead of squaring two rounded square roots.
+pub trait CategoricalScalar:
+    Clone + Add<Output = Self> + Mul<Output = Self> + Div<Output = Self>
+{
     /// Additive identity — the `coeff = zero(oneT)` accumulator seed at
     /// `braiding_manipulations.jl:179`.
     fn zero() -> Self;
