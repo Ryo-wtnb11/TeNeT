@@ -178,6 +178,7 @@ impl GenericRigidSymbols for DenseGenericRule {
 pub(super) enum CheckedPlanCall {
     Dual,
     N,
+    Dim,
     SqrtDim,
     InvSqrtDim,
     FrobeniusSchur,
@@ -186,7 +187,7 @@ pub(super) enum CheckedPlanCall {
 }
 
 impl CheckedPlanCall {
-    pub(super) const COUNT: usize = 7;
+    pub(super) const COUNT: usize = 8;
 
     fn index(self) -> usize {
         self as usize
@@ -330,6 +331,11 @@ where
     R::Scalar: tenet_core::CategoricalScalar + Send + Sync,
 {
     type Scalar = R::Scalar;
+
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.trip(CheckedPlanCall::Dim)?;
+        Ok(self.rule.dim_scalar(sector))
+    }
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         self.trip(CheckedPlanCall::SqrtDim)?;
@@ -635,6 +641,11 @@ impl CheckedGenericFusion for SynchronizedCheckedGeneric {
 impl CheckedGenericRigidSymbols for SynchronizedCheckedGeneric {
     type Scalar = f64;
 
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.hit();
+        Ok(self.rule.dim_scalar(sector))
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.hit();
         Ok(self.rule.sqrt_dim_scalar(sector))
@@ -721,6 +732,9 @@ impl GenericFusionSymbols for AnyonicGenericRule {
 }
 
 impl GenericRigidSymbols for AnyonicGenericRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.dim_scalar(sector)
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         DenseGenericRule.sqrt_dim_scalar(sector)
     }
@@ -1064,6 +1078,9 @@ impl GenericFusionSymbols for TruncatedRGenericRule {
 }
 
 impl GenericRigidSymbols for TruncatedRGenericRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.dim_scalar(sector)
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         DenseGenericRule.sqrt_dim_scalar(sector)
     }

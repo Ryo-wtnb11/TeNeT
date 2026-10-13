@@ -1846,6 +1846,13 @@ impl GenericFusionSymbols for A4BendRule {
 }
 
 impl GenericRigidSymbols for A4BendRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector.id() == 3 {
+            3.0
+        } else {
+            1.0
+        }
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         if sector.id() == 3 {
             3.0_f64.sqrt()
@@ -1917,6 +1924,10 @@ impl CheckedGenericFusion for A4BendRule {
 
 impl CheckedGenericRigidSymbols for A4BendRule {
     type Scalar = f64;
+
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(GenericRigidSymbols::dim_scalar(self, sector))
+    }
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(GenericRigidSymbols::sqrt_dim_scalar(self, sector))
@@ -2084,6 +2095,10 @@ impl CheckedGenericFusion for CheckedA4Spy {
 
 impl CheckedGenericRigidSymbols for CheckedA4Spy {
     type Scalar = f64;
+
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(GenericRigidSymbols::dim_scalar(&A4BendRule, sector))
+    }
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Self::trip(&self.sqrt_calls, self.fail_sqrt, RigidSpyError::Sqrt)?;
@@ -2463,6 +2478,13 @@ impl GenericFusionSymbols for A4FoldRule {
 }
 
 impl GenericRigidSymbols for A4FoldRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector.id() == 3 {
+            3.0
+        } else {
+            1.0
+        }
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         if sector.id() == 3 {
             3.0_f64.sqrt()
@@ -2695,6 +2717,13 @@ impl GenericFusionSymbols for Su3BendRule {
 }
 
 impl GenericRigidSymbols for Su3BendRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        match sector.id() {
+            1 => 27.0,
+            2 | 3 => 15.0,
+            _ => 1.0,
+        }
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         match sector.id() {
             1 => 27.0_f64.sqrt(),
