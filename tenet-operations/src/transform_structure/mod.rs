@@ -357,6 +357,20 @@ impl<T: Copy> TreeTransformStructure<T> {
         &self.core.identity
     }
 
+    /// The coefficient payload's identity: shared by every core bound to one
+    /// payload.
+    #[inline]
+    #[cfg(feature = "cuda")]
+    pub(crate) fn coefficient_identity_marker(&self) -> &Arc<()> {
+        self.core.coefficients.identity()
+    }
+
+    /// Whether `self` and `other` share one coefficient payload allocation.
+    #[doc(hidden)]
+    pub fn shares_coefficients_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.core.coefficients, &other.core.coefficients)
+    }
+
     #[cfg(test)]
     pub(crate) fn gathered_coefficients(&self) -> Vec<T>
     where

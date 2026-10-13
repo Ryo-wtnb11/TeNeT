@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreePairKey,
@@ -953,21 +953,57 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
     }
 }
 
-/// A categorical transform assembled from shared per-group spec slices (the
+/// One source group's specs as the composed-coefficient cache (#2014-4)
+/// holds them, plus the payload last bound from a group set that starts
+/// with this group.
+///
+/// The payload is derived data of that set, which is a sequence of these
+/// cached groups, so it lives with them instead of in a cache of its own.
+/// The slot is weak: it shares a payload while some binding holds it and
+/// retains nothing once the last one is dropped. One slot per group: two sets
+/// that start with one group and alternate rebuild their payload per
+/// binding, as before this slot existed (#1753).
+#[doc(hidden)]
+pub struct TreeTransformSpecGroup<T> {
+    specs: Box<[TreeTransformGroupBlockSpec<T>]>,
+    payload: Mutex<Weak<TreeTransformCoefficients<T>>>,
+}
+
+impl<T> TreeTransformSpecGroup<T> {
+    pub fn new(specs: Vec<TreeTransformGroupBlockSpec<T>>) -> Self {
+        Self {
+            specs: specs.into_boxed_slice(),
+            payload: Mutex::new(Weak::new()),
+        }
+    }
+
+    #[inline]
+    pub fn specs(&self) -> &[TreeTransformGroupBlockSpec<T>] {
+        &self.specs
+    }
+
+    fn payload(&self) -> std::sync::MutexGuard<'_, Weak<TreeTransformCoefficients<T>>> {
+        // The slot holds a `Weak` only; a panic mid-store leaves a valid one.
+        self.payload.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A categorical transform assembled from shared cached groups (the
 /// composed-coefficient cache's entries, #2014-4), bound without copying
-/// any spec: a plan miss whose groups all hit allocates only the group list
-/// and its bindings' own payload. Each binding builds its own coefficient
-/// payload; the matrices stay shared.
+/// any spec: a plan miss whose groups all hit allocates only the group list.
+/// Every binding of one group set shares one coefficient payload, so a
+/// degeneracy-only rebinding neither rebuilds it on the host nor, through
+/// its identity, uploads it again on a device (#1753).
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SharedTreeTransformGroupPlan<T> {
-    groups: Vec<Arc<[TreeTransformGroupBlockSpec<T>]>>,
+    groups: Vec<Arc<TreeTransformSpecGroup<T>>>,
     len: usize,
 }
 
 impl<T> SharedTreeTransformGroupPlan<T> {
-    pub fn new(groups: Vec<Arc<[TreeTransformGroupBlockSpec<T>]>>) -> Self {
-        let len = groups.iter().map(|group| group.len()).sum();
+    pub fn new(groups: Vec<Arc<TreeTransformSpecGroup<T>>>) -> Self {
+        let len = groups.iter().map(|group| group.specs.len()).sum();
         Self { groups, len }
     }
 
@@ -982,7 +1018,7 @@ impl<T> SharedTreeTransformGroupPlan<T> {
 }
 
 struct SpecsIter<'a, T> {
-    groups: std::slice::Iter<'a, Arc<[TreeTransformGroupBlockSpec<T>]>>,
+    groups: std::slice::Iter<'a, Arc<TreeTransformSpecGroup<T>>>,
     current: std::slice::Iter<'a, TreeTransformGroupBlockSpec<T>>,
     remaining: usize,
 }
@@ -1007,7 +1043,7 @@ impl<'a, T> Iterator for SpecsIter<'a, T> {
                 self.remaining -= 1;
                 return Some(spec);
             }
-            self.current = self.groups.next()?.iter();
+            self.current = self.groups.next()?.specs.iter();
         }
     }
 
@@ -1019,8 +1055,22 @@ impl<'a, T> Iterator for SpecsIter<'a, T> {
 impl<T> ExactSizeIterator for SpecsIter<'_, T> {}
 
 impl<T: Copy> SharedTreeTransformGroupPlan<T> {
+    /// The payload of this group set: the live one another binding of the
+    /// same set built, else a new one, recorded for the next binding.
     fn coefficients(&self) -> Result<Arc<TreeTransformCoefficients<T>>, OperationError> {
-        coefficients_of(self.specs()).map(Arc::new)
+        let Some(first) = self.groups.first() else {
+            return coefficients_of(self.specs()).map(Arc::new);
+        };
+        if let Some(resident) = first.payload().upgrade() {
+            if resident.is_built_from(&self.groups) {
+                return Ok(resident);
+            }
+        }
+        // Built outside the lock: concurrent first bindings may each build
+        // one, equal in value; the last recorded is the one later bindings share.
+        let built = Arc::new(coefficients_of(self.specs())?.built_from(&self.groups));
+        *first.payload() = Arc::downgrade(&built);
+        Ok(built)
     }
 
     pub fn compile_shared_structures_with_storage_conjugation(

@@ -463,12 +463,26 @@ struct CacheEntry<V> {
 /// not this count, is the binding limit.
 pub(crate) const DEFAULT_STRUCTURE_CACHE_ENTRIES: usize = 256;
 
+/// A cached value's payload that other entries may hold too, charged once.
+pub(crate) trait SharedPayload {
+    /// The address of the payload this value holds, if any. Every holder keeps
+    /// the payload alive, so two live values report equal addresses exactly
+    /// when they hold one payload.
+    fn shared_payload(&self) -> Option<*const ()> {
+        None
+    }
+}
+
 /// Small LRU cache of per-structure device state, bounded by retained bytes and
 /// by an entry count (see [`DEFAULT_STRUCTURE_CACHE_ENTRIES`]).
 ///
-/// Ownership is singular: the cached value is the only copy of that device
-/// state, and dropping the entry frees it. Bytes are reported so the owner of
-/// the device memory budget can charge them.
+/// Ownership is singular: the cached values are the only holders of that
+/// device state, and dropping the last entry holding a payload frees it. A
+/// payload held by several entries ([`SharedPayload`]) is charged to exactly
+/// one of them, so the reported bytes are unique device bytes and the budget
+/// binds on them; the charge moves to a remaining holder when its entry
+/// leaves. Bytes are reported so the owner of the device memory budget can
+/// charge them.
 pub(crate) struct StructureCache<V> {
     entries: Vec<CacheEntry<V>>,
     budget_bytes: usize,
@@ -476,7 +490,7 @@ pub(crate) struct StructureCache<V> {
     bytes: usize,
 }
 
-impl<V> StructureCache<V> {
+impl<V: SharedPayload> StructureCache<V> {
     pub(crate) fn new(budget_bytes: usize, max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -531,30 +545,57 @@ impl<V> StructureCache<V> {
 
     /// Drops every entry whose structure no longer exists.
     pub(crate) fn purge_dead(&mut self) {
-        self.entries.retain(|entry| {
-            let live = entry.key.structure.strong_count() > 0;
-            if !live {
-                self.bytes = self.bytes.saturating_sub(entry.bytes);
+        let mut index = 0;
+        while index < self.entries.len() {
+            if self.entries[index].key.structure.strong_count() > 0 {
+                index += 1;
+            } else {
+                self.remove(index);
             }
-            live
-        });
+        }
+    }
+
+    /// Removes the entry at `index`. Its charge moves to another holder of
+    /// its payload if one remains, and is released otherwise.
+    fn remove(&mut self, index: usize) {
+        let removed = self.entries.remove(index);
+        if removed.bytes == 0 {
+            return;
+        }
+        let payload = removed.value.shared_payload();
+        match self
+            .entries
+            .iter_mut()
+            .find(|entry| payload.is_some() && entry.value.shared_payload() == payload)
+        {
+            Some(holder) => holder.bytes = removed.bytes,
+            None => self.bytes = self.bytes.saturating_sub(removed.bytes),
+        }
     }
 
     /// Inserts `value` as most-recently-used, evicting least-recently-used
-    /// entries while the cache is over budget.
+    /// entries while the cache is over budget. `bytes` is the size of the
+    /// value's device state, charged unless another entry already holds the
+    /// same payload.
     ///
     /// The new entry is never evicted, even when it alone exceeds the budget:
     /// the budget bounds *reuse*, and refusing to keep the structure currently
     /// being replayed would only force an upload per replay.
     pub(crate) fn insert(&mut self, key: StructureKey, value: V, bytes: usize) {
         self.purge_dead();
+        let payload = value.shared_payload();
+        let held = payload.is_some()
+            && self
+                .entries
+                .iter()
+                .any(|entry| entry.value.shared_payload() == payload);
+        let bytes = if held { 0 } else { bytes };
         self.entries.push(CacheEntry { key, bytes, value });
         self.bytes = self.bytes.saturating_add(bytes);
         while (self.bytes > self.budget_bytes || self.entries.len() > self.max_entries)
             && self.entries.len() > 1
         {
-            let evicted = self.entries.remove(0);
-            self.bytes = self.bytes.saturating_sub(evicted.bytes);
+            self.remove(0);
         }
     }
 
@@ -580,6 +621,9 @@ mod tests {
 
     use super::*;
     use crate::{TreeTransformBlockSpec, TreeTransformStructure};
+
+    impl SharedPayload for usize {}
+    impl SharedPayload for &str {}
 
     fn structure(shapes: Vec<Vec<usize>>) -> Arc<BlockStructure> {
         Arc::new(BlockStructure::packed_column_major(shapes[0].len(), shapes).unwrap())
@@ -1001,5 +1045,50 @@ mod tests {
         assert_eq!(cache.entry_count(), 1);
         assert_eq!(cache.get(&key(1)), Some(&1));
         assert_eq!(cache.retained_bytes(), 4096);
+    }
+
+    /// A value holding a shared payload, as a prepared structure holds its
+    /// uploaded coefficients.
+    struct Holder(Arc<()>);
+
+    impl SharedPayload for Holder {
+        fn shared_payload(&self) -> Option<*const ()> {
+            Some(Arc::as_ptr(&self.0))
+        }
+    }
+
+    #[test]
+    fn a_shared_payload_is_charged_once_and_released_with_its_last_holder() {
+        // What (#1753): holders of one payload are separate entries charged
+        // once; the charge survives eviction and purge of any holder but the
+        // last, whose removal releases it; another payload is charged apart.
+        let structures: Vec<Arc<()>> = (0..4).map(|_| Arc::new(())).collect();
+        let key = |index: usize| StructureKey {
+            structure: Arc::downgrade(&structures[index]),
+            scalar: TypeId::of::<f64>(),
+            context: 7,
+        };
+        let shared = Arc::new(());
+        let mut cache = StructureCache::new(100, 3);
+        cache.insert(key(0), Holder(Arc::clone(&shared)), 40);
+        cache.insert(key(1), Holder(Arc::clone(&shared)), 40);
+        assert_eq!((cache.entry_count(), cache.retained_bytes()), (2, 40));
+
+        // A second 40-byte payload fits a 100-byte budget only because the
+        // first is charged once.
+        cache.insert(key(2), Holder(Arc::new(())), 40);
+        assert_eq!((cache.entry_count(), cache.retained_bytes()), (3, 80));
+
+        // The entry cap evicts holder 0, the charged one: the charge moves.
+        cache.insert(key(3), Holder(Arc::new(())), 10);
+        assert_eq!(cache.position(&key(0)), None);
+        assert_eq!((cache.entry_count(), cache.retained_bytes()), (3, 90));
+
+        // Purging the last holder releases the shared payload.
+        let mut structures = structures;
+        structures[1] = Arc::new(());
+        cache.purge_dead();
+        assert_eq!((cache.entry_count(), cache.retained_bytes()), (2, 50));
+        assert_eq!(Arc::strong_count(&shared), 1, "no entry holds the payload");
     }
 }

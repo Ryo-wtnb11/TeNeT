@@ -61,6 +61,7 @@ use tenet_core::{
 };
 
 use tenet_core::BlockStructure;
+use tenet_operations::transform_plan::TreeTransformSpecGroup;
 use tenet_operations::TreeTransformStructure;
 
 use super::{
@@ -151,19 +152,11 @@ impl tenet_core::StructureCacheEquivalent<CoefficientGroupKey> for GroupKeyRef<'
     }
 }
 
-/// The cached value: one source group's specs, in builder order. A `Multi`
+/// The cached value: one source group's specs, in builder order, shared
+/// whole by a plan assembled from hits, so it copies no spec. A `Multi`
 /// spec's recoupling matrix is a shared `Arc`, so a cache-3 core bound from
-/// it shares those bytes.
-pub(crate) struct CoefficientGroupEntry<T> {
-    specs: Arc<[TreeTransformGroupBlockSpec<T>]>,
-}
-
-impl<T> CoefficientGroupEntry<T> {
-    /// Shared, so a plan assembled from hits copies no spec.
-    pub(crate) fn specs(&self) -> &Arc<[TreeTransformGroupBlockSpec<T>]> {
-        &self.specs
-    }
-}
+/// it shares those bytes; the payload slot it carries holds only a `Weak`.
+pub(crate) type CoefficientGroupEntry<T> = TreeTransformSpecGroup<T>;
 
 struct CoefficientGroupsControl;
 
@@ -486,14 +479,13 @@ where
         specs: Vec<TreeTransformGroupBlockSpec<T>>,
     ) -> Arc<CoefficientGroupEntry<T>> {
         let key = self.context.key(hash, group);
-        let entry = Arc::new(CoefficientGroupEntry {
-            specs: specs.into(),
-        });
+        let entry = Arc::new(CoefficientGroupEntry::new(specs));
         let bytes = {
             let mut backings = self.backings.borrow_mut();
             backings.clear();
             charged_key_bytes(&key, &mut backings)
-                .saturating_add(charged_entry_bytes(&entry.specs, &mut backings)) as u64
+                .saturating_add(charged_entry_bytes(entry.specs(), &mut backings))
+                as u64
         };
         self.built
             .borrow_mut()
@@ -627,8 +619,6 @@ fn charged_entry_bytes<T>(
     backings: &mut rustc_hash::FxHashSet<usize>,
 ) -> usize {
     core::mem::size_of::<CoefficientGroupEntry<T>>()
-        // The specs' own `Arc` control.
-        .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
             specs
                 .len()

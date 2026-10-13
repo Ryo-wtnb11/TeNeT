@@ -352,3 +352,53 @@ fn degeneracy_only_change_recomposes_no_group_and_matches_the_uncached_producer(
         assert_eq!(bits(&warm), bits(&eager));
     }
 }
+
+/// #1753: degeneracy-only bindings of one cached group set share one
+/// coefficient payload allocation (so a device uploads it once), with the
+/// values of an uncached build; another operation's group set does not.
+#[test]
+fn degeneracy_only_bindings_of_one_group_set_share_one_coefficient_payload() {
+    // Hits must not race a clearing sibling test.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let operation = TreeTransformOperation::braid([1, 0], [2, 3], [1, 0], [2, 3]);
+    let planning = TreeTransformPlanning::default();
+    // Degeneracies no other test uses, so each binding is a cache-3 miss.
+    let bind = |degeneracy: usize, operation: &TreeTransformOperation| {
+        let source = su2_structure(degeneracy);
+        planning
+            .resolve_tree_pair(&SU2FusionRule, operation, &source, &source, false)
+            .unwrap()
+    };
+    let first = bind(43, &operation);
+    let second = bind(47, &operation);
+    take_coefficient_group_activity();
+    let third = bind(53, &operation);
+    assert_eq!(take_coefficient_group_activity().misses, 0);
+
+    assert!(first.shares_coefficients_with(&second));
+    assert!(second.shares_coefficients_with(&third));
+    let bits = |structure: &crate::TreeTransformStructure<f64>| {
+        let mut coefficients = Vec::new();
+        structure.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let source = su2_structure(47);
+    let eager = crate::tree_transform::compile_multiplicity_free_tree_pair_structure(
+        &SU2FusionRule,
+        &operation,
+        Arc::clone(&source),
+        source,
+        false,
+    )
+    .unwrap();
+    assert!(!eager.shares_coefficients_with(&second));
+    assert_eq!(bits(&second), bits(&eager));
+
+    let other = TreeTransformOperation::permute([1, 0], [2, 3]);
+    assert!(!bind(43, &other).shares_coefficients_with(&first));
+}

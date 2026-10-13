@@ -16,14 +16,21 @@
 
 mod categorical_recoupling;
 
+use std::sync::Arc;
+
 use categorical_recoupling::{
-    alphas, assert_close, expected, expected_scaled, fixtures, host_replay, host_replay_scaled,
-    non_symmetric_fixture, Compiled, TestScalar,
+    alphas, assert_close, compile, expected, expected_scaled, fixtures, four_leg_channels,
+    host_replay, host_replay_scaled, non_symmetric_fixture, su2_space, Compiled, TestScalar,
 };
 use num_complex::Complex64;
+use tenet_core::SU2FusionRule;
 use tenet_dense::{cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats};
 use tenet_operations::cuda::CudaStorage;
-use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
+use tenet_operations::{
+    CudaTreeTransformDestination, CudaTreeTransformExecutor, DEFAULT_COEFFICIENT_BUDGET_BYTES,
+    DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+};
+use tenet_tensors::{build_tree_pair_transform_group_plan, TreeTransformOperation};
 
 /// Payload dtypes replayed on device, with the host arithmetic the oracle and
 /// the host comparison need.
@@ -295,4 +302,222 @@ fn check_scales<T: DeviceScalar>(
             );
         }
     }
+}
+
+/// One SU(2) F-move plan bound at degeneracies 3 and 2: two structures with
+/// different layouts and one shared coefficient payload, as a degeneracy-only
+/// rebinding of a cached group set produces (#1753).
+fn degeneracy_pair() -> (Compiled, Compiled) {
+    let operation = TreeTransformOperation::permute([0usize, 2, 1, 3], []);
+    let space = |degeneracy| su2_space(&[1usize; 4], &four_leg_channels(), degeneracy);
+    let plan = build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &space(2)).unwrap();
+    let bind = |degeneracy| {
+        let space = space(degeneracy);
+        Compiled {
+            name: format!("su2_permute_degeneracy_{degeneracy}"),
+            structure: plan
+                .compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(&space),
+                    Arc::clone(&space),
+                    false,
+                )
+                .unwrap(),
+            space,
+            conjugate: false,
+            source_axes: vec![0, 2, 1, 3],
+        }
+    };
+    let pair = (bind(3), bind(2));
+    assert!(pair.0.structure.shares_coefficients_with(&pair.1.structure));
+    pair
+}
+
+/// The same degeneracy-2 transform from a plan of its own: equal values, an
+/// independent payload.
+fn independent_small() -> Compiled {
+    compile(
+        "su2_permute_independent",
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0usize, 2, 1, 3], []),
+        &su2_space(&[1usize; 4], &four_leg_channels(), 2),
+        false,
+    )
+}
+
+/// Replays `fixture` (overwrite, unit scale), checks it against the oracle and
+/// returns the host-to-device uploads the replay itself made. Its operands are
+/// uploaded before counting, so on a context whose workspace and templates
+/// already fit, every counted upload is a coefficient upload.
+fn replay_uploads<T: DeviceScalar>(
+    ctx: &mut CudaDenseContext,
+    executor: &mut CudaTreeTransformExecutor,
+    fixture: &Compiled,
+) -> u64 {
+    let source = fixture.source::<T>();
+    let destination = vec![T::from_parts(-1.0, 0.5); fixture.len()];
+    let mut device_dst = CudaStorage::<T>::upload(ctx, &destination).unwrap();
+    let device_src = CudaStorage::<T>::upload(ctx, &source).unwrap();
+    let before = cuda_transfer_stats();
+    executor
+        .replay(
+            ctx,
+            &fixture.structure,
+            &fixture.space,
+            &fixture.space,
+            &mut device_dst,
+            &device_src,
+            T::from_parts(1.0, 0.0),
+            CudaTreeTransformDestination::Overwrite,
+        )
+        .unwrap();
+    let uploads = cuda_transfer_stats().h2d_calls - before.h2d_calls;
+    assert_close(
+        &device_dst.download(ctx).unwrap(),
+        &expected(fixture, &source, &destination, true),
+        &format!("{} / {}", fixture.name, T::NAME),
+    );
+    uploads
+}
+
+/// Device bytes the executor's prepared structures retain (its coefficient
+/// payloads), without the workspace.
+fn payload_bytes(executor: &CudaTreeTransformExecutor) -> usize {
+    executor.executor_device_bytes() - executor.workspace_device_bytes()
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn degeneracy_only_structures_upload_and_charge_one_coefficient_payload() {
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let (large, small) = degeneracy_pair();
+    // Larger first, so the smaller one grows no workspace or template.
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &large) > 0);
+    let one = payload_bytes(&executor);
+    assert!(one > 0);
+
+    assert_eq!(
+        replay_uploads::<f64>(&mut ctx, &mut executor, &small),
+        0,
+        "a structure bound to a resident payload must not upload it again"
+    );
+    assert_eq!(
+        executor.prepared_structures(),
+        2,
+        "entries are per structure"
+    );
+    assert_eq!(
+        payload_bytes(&executor),
+        one,
+        "the shared payload is charged once"
+    );
+
+    // Control: an equal payload from another plan is another payload.
+    let independent = independent_small();
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &independent) > 0);
+    assert!(payload_bytes(&executor) > one);
+    assert_eq!(executor.prepared_structures(), 3);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_shared_payload_outlives_one_evicted_holder_and_is_released_with_the_last() {
+    let mut ctx = context();
+    // One entry: every insert evicts the previous structure.
+    let mut executor = CudaTreeTransformExecutor::with_structure_entries(
+        DEFAULT_COEFFICIENT_BUDGET_BYTES,
+        DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+        1,
+    );
+    let (large, small) = degeneracy_pair();
+    let other = non_symmetric_fixture();
+    let other_bytes = {
+        let mut alone = CudaTreeTransformExecutor::default();
+        replay_uploads::<f64>(&mut ctx, &mut alone, &other);
+        payload_bytes(&alone)
+    };
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &other) > 0);
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &large) > 0);
+    let one = payload_bytes(&executor);
+    assert_ne!(one, other_bytes, "the control must be told apart by size");
+
+    // `small` shares `large`'s payload, then its insert evicts `large`.
+    assert_eq!(replay_uploads::<f64>(&mut ctx, &mut executor, &small), 0);
+    assert_eq!(executor.prepared_structures(), 1);
+    assert_eq!(payload_bytes(&executor), one, "the charge moved to `small`");
+    // `large` is re-prepared from the payload `small` kept alive.
+    assert_eq!(replay_uploads::<f64>(&mut ctx, &mut executor, &large), 0);
+    assert_eq!(payload_bytes(&executor), one);
+
+    // Evicting the last holder releases the payload.
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &other) > 0);
+    assert_eq!(payload_bytes(&executor), other_bytes);
+    assert!(
+        replay_uploads::<f64>(&mut ctx, &mut executor, &small) > 0,
+        "a released payload is uploaded again"
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn dead_holders_are_purged_and_reset_releases_every_payload() {
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let (large, small) = degeneracy_pair();
+    let other = non_symmetric_fixture();
+    replay_uploads::<f64>(&mut ctx, &mut executor, &large);
+    let one = payload_bytes(&executor);
+    assert_eq!(replay_uploads::<f64>(&mut ctx, &mut executor, &small), 0);
+
+    // `large`'s core dies; the next insert purges its entry, and its charge
+    // moves to `small`, which still holds the payload.
+    drop(large);
+    replay_uploads::<f64>(&mut ctx, &mut executor, &other);
+    let with_other = payload_bytes(&executor);
+    assert_eq!(executor.prepared_structures(), 2);
+    assert!(with_other > one);
+    assert_eq!(replay_uploads::<f64>(&mut ctx, &mut executor, &small), 0);
+
+    // The last holder dies: the next insert releases the payload.
+    drop(small);
+    let independent = independent_small();
+    replay_uploads::<f64>(&mut ctx, &mut executor, &independent);
+    assert_eq!(executor.prepared_structures(), 2);
+    assert_eq!(
+        payload_bytes(&executor),
+        with_other,
+        "`independent` replaced the released payload byte for byte"
+    );
+
+    executor.clear(&mut ctx);
+    assert_eq!(executor.prepared_structures(), 0);
+    assert_eq!(executor.executor_device_bytes(), 0);
+    assert!(replay_uploads::<f64>(&mut ctx, &mut executor, &independent) > 0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn another_dtype_or_context_never_shares_a_payload() {
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let (large, small) = degeneracy_pair();
+    replay_uploads::<f64>(&mut ctx, &mut executor, &large);
+    replay_uploads::<Complex64>(&mut ctx, &mut executor, &large);
+    let both = payload_bytes(&executor);
+
+    // Each dtype shares within itself only.
+    assert_eq!(
+        replay_uploads::<Complex64>(&mut ctx, &mut executor, &small),
+        0
+    );
+    assert_eq!(replay_uploads::<f64>(&mut ctx, &mut executor, &small), 0);
+    assert_eq!(payload_bytes(&executor), both);
+
+    let mut other_ctx = context();
+    assert_ne!(ctx.identity(), other_ctx.identity());
+    assert!(
+        replay_uploads::<f64>(&mut other_ctx, &mut executor, &small) > 0,
+        "another context must upload its own payload"
+    );
+    assert!(payload_bytes(&executor) > both);
 }
