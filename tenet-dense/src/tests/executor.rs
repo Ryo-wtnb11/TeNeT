@@ -2295,6 +2295,53 @@ fn identity_batch_with_malformed_single_run_falls_back_to_grouped() {
     assert_eq!(executor.staged_grouped_jobs(), jobs.len());
 }
 
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_single_job_batch_takes_the_strided_entry() {
+    // One job is one GEMM. It is computed at its offsets with the caller's
+    // alpha/beta, through the strided entry rather than the grouped one, whose
+    // validator allocates on every call (#2184). The `runs` hint is ignored.
+    let job = DenseGemmBatchJob {
+        dst_offset: 3,
+        lhs_offset: 2,
+        rhs_offset: 1,
+        rows: 3,
+        contracted: 2,
+        cols: 2,
+    };
+    let lhs = (0..8).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+    let rhs = (0..5).map(|i| 0.5 - 0.25 * i as f64).collect::<Vec<_>>();
+    let initial = (0..10).map(|i| -1.0 + 0.5 * i as f64).collect::<Vec<_>>();
+    let (alpha, beta) = (2.0, -0.5);
+    for runs in [&[1usize][..], &[2]] {
+        let mut output = initial.clone();
+        let mut executor = DefaultDenseExecutor::new();
+        executor.reset_seam_dispatches();
+        executor
+            .matmul_batch_axpby_into(
+                DenseWrite::F64(DenseViewMut::new(&mut output, &[10], &[1], 0).unwrap()),
+                DenseRead::F64(DenseView::new(&lhs, &[8], &[1], 0).unwrap()),
+                DenseRead::F64(DenseView::new(&rhs, &[5], &[1], 0).unwrap()),
+                &[job],
+                runs,
+                DenseScalar::F64(alpha),
+                DenseScalar::F64(beta),
+            )
+            .unwrap();
+
+        let product = matmul_f64(&lhs[2..8], &rhs[1..5], 3, 2, 2);
+        for (index, actual) in output.iter().enumerate() {
+            let expected = match index.checked_sub(3) {
+                Some(local) if local < 6 => alpha * product[local] + beta * initial[index],
+                _ => initial[index],
+            };
+            assert_f64_close(*actual, expected, 1.0e-12);
+        }
+        assert_eq!(executor.staged_grouped_jobs(), 0);
+        assert_eq!(executor.seam_dispatches(), 1);
+    }
+}
+
 /// Decomposition outputs one tensor short, to reach the arity checks of the
 /// `*_into` / values-only trait defaults.
 struct DropsLastOutput(DefaultDenseExecutor);

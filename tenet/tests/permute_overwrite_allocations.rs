@@ -123,6 +123,79 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     assert!(std::ptr::eq(destination.provider(), provider.as_ref()));
 }
 
+/// Caller-thread allocation calls of one warm `into` call, after three
+/// warm-up calls.
+fn warm_calls(mut into: impl FnMut()) -> usize {
+    for _ in 0..3 {
+        into();
+    }
+    measure(&mut into).0
+}
+
+#[test]
+fn warm_recoupling_permute_into_allocations_do_not_grow_with_block_count() {
+    let _measurement = counting_alloc::serial();
+    // What: a warm multiplicity-free non-Abelian `permute_into` submits each
+    // Multi block's recoupling GEMM without a per-block allocation, so its
+    // caller-thread allocation calls are the same for B and > 3B blocks
+    // (#2184). Degeneracies stay small so no GEMM reaches the dense provider's
+    // own packing workspace.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SU2FusionRule);
+    let warm = |spins: usize| {
+        let space = GradedSpace::try_new(
+            Arc::clone(&provider),
+            (0..spins).map(|twice_spin| (SU2Irrep::from_twice_spin(twice_spin), 2)),
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 2184).unwrap();
+        let mut destination = source.permute(&[1, 3], &[0, 2]).unwrap();
+        let calls = warm_calls(|| {
+            source
+                .permute_into(&[1, 3], &[0, 2], &mut destination, 1.0, 0.0)
+                .unwrap()
+        });
+        black_box(destination.dense_data().unwrap());
+        (source.subblock_count(), calls)
+    };
+    let (small_blocks, small_calls) = warm(3);
+    let (large_blocks, large_calls) = warm(4);
+    assert!(large_blocks > 3 * small_blocks);
+    assert_eq!(large_calls, small_calls);
+}
+
+/// The checked Generic counterpart of the multiplicity-free relation above:
+/// SU(3) with fusion multiplicity.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn warm_checked_generic_permute_into_allocations_do_not_grow_with_block_count() {
+    let _measurement = counting_alloc::serial();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let warm = |labels: &[Vec<i64>]| {
+        let space = GradedSpace::try_new(
+            Arc::clone(&provider),
+            labels.iter().map(|label| (label.clone(), 2)),
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 2184).unwrap();
+        let mut destination = source.permute(&[1, 3], &[0, 2]).unwrap();
+        let calls = warm_calls(|| {
+            source
+                .permute_into(&[1, 3], &[0, 2], &mut destination, 1.0, 0.0)
+                .unwrap()
+        });
+        black_box(destination.dense_data().unwrap());
+        (source.subblock_count(), calls)
+    };
+    let (small_blocks, small_calls) = warm(&[vec![1, 0], vec![0, 1]]);
+    let (large_blocks, large_calls) = warm(&[vec![1, 0], vec![0, 1], vec![1, 1]]);
+    assert!(large_blocks > 3 * small_blocks);
+    assert_eq!(large_calls, small_calls);
+}
+
 #[test]
 fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
     let _measurement = counting_alloc::serial();
