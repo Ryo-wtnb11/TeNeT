@@ -844,10 +844,10 @@ where
     /// and `Complex64`, and `Complex32` for `f32` and `Complex32`. `v : codomain(self) <- W` holds right eigenvectors and compact
     /// `d : W <- W` holds their eigenvalues. Values are ascending in
     /// lexicographic `(real(λ), imag(λ))` order within each sector (dense
-    /// sectors are sorted; MatrixAlgebraKit keeps `geev`'s order there), and
-    /// the largest-magnitude component of each
-    /// eigenvector is made real and non-negative. Degenerate eigenbases remain
-    /// backend-dependent.
+    /// sectors are sorted; MatrixAlgebraKit keeps `geev`'s order there).
+    /// Each eigenvector column has unit 2-norm, as LAPACK `geev` returns it to
+    /// MatrixAlgebraKit, and its largest-magnitude component is then made real
+    /// and non-negative. Degenerate eigenbases remain backend-dependent.
     ///
     /// Both fusion modes promise `self * v ≈ v * d` to backward error and
     /// certify no eigenvector rank, as MatrixAlgebraKit `eig_full!`: a finite
@@ -860,7 +860,12 @@ where
     /// dense payload.
     ///
     /// A non-endomorphism, non-finite input, invalid/non-finite eigenvalue,
-    /// factor-layout failure, or provider failure returns no factors.
+    /// non-finite eigenvector entry, factor-layout failure, or provider
+    /// failure returns no factors. The solver's results are checked
+    /// eigenvalues first, then eigenvectors; both failures are a
+    /// `DenseError::NumericalFailure` (a dense solver whose back-substitution
+    /// overflows on a large Jordan block reports it here rather than
+    /// returning NaN columns).
     /// The direct compact path sorts in `O(Σ_c n_c log n_c)` time and writes
     /// `O(Σ_c n_c²)` eigenvector elements; the dense route costs
     /// `O(Σ_c n_c³)` time.

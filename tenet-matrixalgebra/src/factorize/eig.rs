@@ -1097,13 +1097,20 @@ pub fn require_finite_eigh_input<D: FactorScalar>(data: &[D]) -> Result<(), Oper
 
 /// General eigendecomposition of one `n x n` endomorphism sector, shared by
 /// both fusion modes: values in [`lexicographic_eig_order`], eigenvectors
-/// reordered to match and phase-gauged.
+/// reordered to match, scaled to unit 2-norm and phase-gauged.
+///
+/// Result checks, in this order: eigenvalues finite
+/// ([`validate_complex_eigenvalues`]), then every eigenvector entry finite
+/// ([`validate_eigenvectors`]). Both are the solver's numerical failure on an
+/// admitted finite input; faer's back-substitution overflows to NaN on large
+/// Jordan blocks where LAPACK `xTREVC` rescales, and a nonfinite column has
+/// no unit-norm representative to publish.
 ///
 /// Borrowed contract: MatrixAlgebraKit v0.6.8 `eig_full_qr_iteration!`
 /// (<https://github.com/QuantumKitHub/MatrixAlgebraKit.jl/blob/33d77fdf032d5ffa36310a04c21aef0c51a554f3/src/implementations/eig.jl#L117>)
-/// runs `geev!` and then `gaugefix!`, promising `A V = V D` to backward error
-/// and certifying no eigenvector rank, so a defective sector returns its
-/// computed eigenvectors. Why no rank SVD here: a numerical-rank threshold on
+/// runs `geev!` (unit 2-norm columns) and then `gaugefix!`, promising
+/// `A V = V D` to backward error and certifying no eigenvector rank, so a
+/// defective sector returns its computed eigenvectors. Why no rank SVD here: a numerical-rank threshold on
 /// `V` neither detects every defective input nor changes the eigenpair
 /// equation, and `V^-1` reconstruction is promised only for diagonalizable
 /// inputs. The callers' strict finite-input stage is TeNeT's approved
@@ -1139,16 +1146,48 @@ where
     let complex_values: Vec<Complex64> =
         values.iter().map(|&value| value.widen_complex()).collect();
     validate_complex_eigenvalues(&complex_values)?;
+    validate_eigenvectors(vectors)?;
     let mut order = vec![0; n];
     lexicographic_eig_order(&complex_values, &mut order);
     let sorted_values: Vec<Complex64> = order.iter().map(|&index| complex_values[index]).collect();
     let mut sorted_vectors = vec![<D::Eig as num_traits::Zero>::zero(); n * n];
     for (position, &index) in order.iter().enumerate() {
-        sorted_vectors[position * n..(position + 1) * n]
-            .copy_from_slice(&vectors[index * n..(index + 1) * n]);
+        unit_norm_column_into(
+            &vectors[index * n..(index + 1) * n],
+            &mut sorted_vectors[position * n..(position + 1) * n],
+        );
     }
     eigenvector_gauge(&mut sorted_vectors, n, n, n);
     Ok((sorted_values, sorted_vectors))
+}
+
+/// Writes `source / ‖source‖₂` into `dest`: LAPACK `geev`'s unit 2-norm
+/// eigenvector columns, which MAK `eig_full_qr_iteration!` publishes before
+/// `gaugefix!` (#2073). Providers that already normalize (LAPACK) are
+/// unchanged up to rounding; faer does not normalize. The phase gauge runs
+/// after, as in MAK; it is a unit-modulus scaling, so the two commute.
+///
+/// The column is first divided by its largest magnitude and the arithmetic
+/// runs in `f64`, so neither huge nor tiny finite columns overflow or
+/// underflow, at single precision too. The caller has rejected nonfinite
+/// entries ([`validate_eigenvectors`]); an all-zero column (no eigenvector)
+/// is copied unscaled rather than turned into NaN.
+fn unit_norm_column_into<D: FactorScalar>(source: &[D], dest: &mut [D]) {
+    let largest = source.iter().fold(0.0f64, |largest, value| {
+        largest.max(value.widen_complex().norm())
+    });
+    if !(largest > 0.0 && largest.is_finite()) {
+        dest.copy_from_slice(source);
+        return;
+    }
+    let relative_norm = source
+        .iter()
+        .map(|value| (value.widen_complex() / largest).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
+    for (slot, &value) in dest.iter_mut().zip(source) {
+        *slot = D::from_complex64(value.widen_complex() / largest / relative_norm);
+    }
 }
 
 /// Hermitian eigenvalues of every sector through the no-vector solver,
@@ -1570,6 +1609,26 @@ pub(crate) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationE
 #[cfg(test)]
 pub(crate) fn validate_real_eigenvalues_for_test(values: &[f64]) -> Result<(), OperationError> {
     validate_real_eigenvalues(values)
+}
+
+/// The `op` of TeNeT's own general eigenvector check.
+const EIG_EIGENVECTOR_CHECK: &str = "eig eigenvector check";
+
+/// A nonfinite eigenvector entry of an admitted finite input is the
+/// eigensolver's numerical failure, reported as [`invalid_eigenvalues`] is.
+fn validate_eigenvectors<D: FactorScalar>(vectors: &[D]) -> Result<(), OperationError> {
+    if vectors.iter().all(|value| {
+        let value = value.widen_complex();
+        value.re.is_finite() && value.im.is_finite()
+    }) {
+        Ok(())
+    } else {
+        Err(OperationError::Dense(DenseError::NumericalFailure {
+            backend: DenseBackend::Tenferro,
+            op: EIG_EIGENVECTOR_CHECK,
+            message: "eigenvectors must be finite".to_string(),
+        }))
+    }
 }
 
 pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), OperationError> {
