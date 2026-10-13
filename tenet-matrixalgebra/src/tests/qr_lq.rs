@@ -1217,3 +1217,120 @@ fn checked_lazy_adjoint_lq_tree_route_publishes_the_region_route_factors() {
         }
     }
 }
+
+/// U(1) fusion declared under Generic style, so the checked route admits the
+/// exact geometry the multiplicity-free route factors.
+struct U1AsGeneric;
+
+impl FusionRule for U1AsGeneric {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        U1FusionRule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        U1FusionRule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        U1FusionRule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        U1FusionRule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        U1FusionRule.nsymbol(left, right, coupled)
+    }
+    fn sector_order_key(&self, sector: SectorId) -> tenet_core::SectorOrderKey {
+        U1FusionRule.sector_order_key(sector)
+    }
+}
+
+/// Warm allocation calls of checked compact LQ (eager, lazy adjoint) minus
+/// those of the multiplicity-free direct-region route on the same U(1) data
+/// and layout, with charges `-m..=m` on every leg (`4m + 1` coupled sectors).
+fn checked_lq_excess_calls<D: FactorScalar>(m: i32) -> [u64; 2] {
+    use super::null_space::counting_alloc;
+    static RULE: U1AsGeneric = U1AsGeneric;
+    let leg = |degeneracy: usize| {
+        SectorLeg::new(
+            (-m..=m).map(|charge| (U1Irrep::new(charge).sector_id(), degeneracy)),
+            false,
+        )
+    };
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(2), leg(2)]),
+        FusionProductSpace::new([leg(1), leg(1)]),
+    );
+    let mf = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(U1FusionRule),
+        homspace.clone(),
+    )
+    .unwrap();
+    let checked = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(InfallibleGeneric::new(&RULE)),
+        homspace,
+    )
+    .unwrap();
+    let data = (0..mf.space().required_len().unwrap())
+        .map(|index| D::from_real(((index * 7 + 3) as f64 * 0.37).sin()))
+        .collect::<Vec<_>>();
+    let mf_input = BoundDynamicTensorRef::try_new(&mf, &data).unwrap();
+    let checked_input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mf_adjoint =
+        <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::CoefficientAlgebra<
+            U1FusionRule,
+        >>::adjoint_space(mf_input.space())
+        .unwrap();
+    let checked_adjoint = <CheckedGenericAdmissionMode as tenet_tensors::CoefficientAlgebra<
+        InfallibleGeneric<'static, U1AsGeneric>,
+    >>::adjoint_space(checked_input.space())
+    .unwrap();
+    let context = tenet_dense::SharedCpuContext::with_threads(1).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::with_shared_context(&context, None).unwrap();
+    let mut warm = |call: &mut dyn FnMut(&mut tenet_dense::DefaultDenseExecutor)| {
+        call(&mut dense);
+        call(&mut dense);
+        counting_alloc::measure(|| call(&mut dense)).1.calls
+    };
+    let eager = warm(&mut |dense| {
+        lq_compact_dyn_checked_generic(dense, &checked_input).unwrap();
+    }) - warm(&mut |dense| {
+        lq_compact_dyn(dense, &mf_input).unwrap();
+    });
+    let lazy = warm(&mut |dense| {
+        crate::factorize::lq_compact_adjoint_dyn_checked_generic(
+            dense,
+            &checked_input,
+            &checked_adjoint,
+        )
+        .unwrap();
+    }) - warm(&mut |dense| {
+        crate::factorize::lq_compact_adjoint_dyn(dense, &mf_input, &mf_adjoint).unwrap();
+    });
+    [eager, lazy]
+}
+
+#[test]
+fn checked_compact_lq_adds_no_per_sector_allocation_over_the_multiplicity_free_route() {
+    // What: checked compact LQ, eager and lazy adjoint, adjoints every sector
+    // through one scratch and writes each final adjoint once into the buffers
+    // it publishes, as the multiplicity-free route does (#2204). Its
+    // allocation excess over that route is then the per-call checked
+    // staging alone, so it must not grow with the coupled-sector count.
+    fn check<D: FactorScalar>() {
+        let few = checked_lq_excess_calls::<D>(1);
+        let many = checked_lq_excess_calls::<D>(2);
+        eprintln!(
+            "checked - MF LQ warm calls (eager, lazy): 5 sectors {few:?}, 9 sectors {many:?}"
+        );
+        for (few, many) in few.into_iter().zip(many) {
+            assert!(many <= few, "5 sectors {few}, 9 sectors {many}");
+        }
+    }
+    check::<f64>();
+    check::<Complex64>();
+}

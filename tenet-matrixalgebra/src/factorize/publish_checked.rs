@@ -119,7 +119,7 @@ pub(super) fn checked_extent(shape: &[usize]) -> Option<usize> {
 pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
     structure: &BlockStructure,
     matricizations: &[M],
-    pairs: &[FactorPair<D>],
+    pairs: &impl PairedFactors<D>,
     required_len: usize,
     side: FactorSide,
 ) -> bool {
@@ -128,7 +128,8 @@ pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
     }
     let mut block_index = 0usize;
     let mut output_offset = 0usize;
-    for (matrix, pair) in matricizations.iter().zip(pairs) {
+    for (index, matrix) in matricizations.iter().enumerate() {
+        let pair = pairs.pair(index);
         if pair.sector != matrix.sector() {
             return false;
         }
@@ -512,6 +513,99 @@ pub(super) fn append_owned_factor<D>(
     }
 }
 
+/// One sector's factor pair as the checked paired builder reads it; see
+/// [`FactorPair`].
+pub(super) struct FactorPairRef<'a, D> {
+    pub(super) sector: SectorId,
+    pub(super) kept: usize,
+    pub(super) left: &'a [D],
+    pub(super) left_rows: usize,
+    pub(super) right: &'a [D],
+    pub(super) right_leading: usize,
+}
+
+/// The factor pairs the checked paired builder publishes, in matricization
+/// order.
+pub(super) trait PairedFactors<D> {
+    fn len(&self) -> usize;
+    fn pair(&self, index: usize) -> FactorPairRef<'_, D>;
+    /// Each side's factors concatenated in pair order: the canonical
+    /// publication of `left_len`/`right_len` output elements.
+    fn into_concatenated(self, left_len: usize, right_len: usize) -> (Vec<D>, Vec<D>);
+}
+
+impl<D> PairedFactors<D> for Vec<FactorPair<D>> {
+    fn len(&self) -> usize {
+        <[FactorPair<D>]>::len(self)
+    }
+
+    fn pair(&self, index: usize) -> FactorPairRef<'_, D> {
+        let pair = &self[index];
+        FactorPairRef {
+            sector: pair.sector,
+            kept: pair.kept,
+            left: &pair.left,
+            left_rows: pair.left_rows,
+            right: &pair.right,
+            right_leading: pair.right_leading,
+        }
+    }
+
+    fn into_concatenated(self, left_len: usize, right_len: usize) -> (Vec<D>, Vec<D>) {
+        publish_generic_factor_pairs(self, left_len, right_len)
+    }
+}
+
+/// One sector of [`PackedFactorPairs`]: its factors' element ranges in the
+/// per-side buffers, with the [`FactorPair`] geometry.
+pub(super) struct PackedFactorPair {
+    pub(super) sector: SectorId,
+    pub(super) kept: usize,
+    pub(super) left: std::ops::Range<usize>,
+    pub(super) left_rows: usize,
+    pub(super) right: std::ops::Range<usize>,
+    pub(super) right_leading: usize,
+}
+
+/// Factor pairs whose final factors were written once into one buffer per
+/// side, in pair order, so canonical publication takes the buffers as they
+/// are.
+pub(super) struct PackedFactorPairs<D> {
+    pub(super) pairs: Vec<PackedFactorPair>,
+    pub(super) left: Vec<D>,
+    pub(super) right: Vec<D>,
+}
+
+impl<D> PairedFactors<D> for PackedFactorPairs<D> {
+    fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    fn pair(&self, index: usize) -> FactorPairRef<'_, D> {
+        let pair = &self.pairs[index];
+        FactorPairRef {
+            sector: pair.sector,
+            kept: pair.kept,
+            left: &self.left[pair.left.clone()],
+            left_rows: pair.left_rows,
+            right: &self.right[pair.right.clone()],
+            right_leading: pair.right_leading,
+        }
+    }
+
+    fn into_concatenated(self, left_len: usize, right_len: usize) -> (Vec<D>, Vec<D>) {
+        debug_assert_eq!((self.left.len(), self.right.len()), (left_len, right_len));
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.left_owner_reused += usize::from(!self.left.is_empty());
+            value.right_owner_reused += usize::from(!self.right.is_empty());
+            probe.set(value);
+        });
+        (self.left, self.right)
+    }
+}
+
 pub(super) fn publish_generic_factor_pairs<D>(
     pairs: Vec<FactorPair<D>>,
     left_len: usize,
@@ -554,7 +648,7 @@ pub(super) fn build_left_right_bound_pair_generic_checked<R, D, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[M],
-    pairs: Vec<FactorPair<D>>,
+    pairs: impl PairedFactors<D>,
 ) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
@@ -562,11 +656,13 @@ where
     M: SectorGeometry,
 {
     let authority = CheckedAuthority(provider);
-    let ranks = pairs
-        .iter()
-        .map(|pair| SectorRank {
-            sector: pair.sector,
-            kept: pair.kept,
+    let ranks = (0..pairs.len())
+        .map(|index| {
+            let pair = pairs.pair(index);
+            SectorRank {
+                sector: pair.sector,
+                kept: pair.kept,
+            }
         })
         .collect::<Vec<_>>();
     let mut matrix_by_sector = None;
@@ -637,7 +733,7 @@ where
             value.canonical_publications += 1;
             probe.set(value);
         });
-        publish_generic_factor_pairs(pairs, left_len, right_len)
+        pairs.into_concatenated(left_len, right_len)
     } else {
         #[cfg(test)]
         GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
@@ -652,14 +748,15 @@ where
             .map_err(CheckedGenericFactorPlanError::from)?;
         let right_groups = SectorBlockGroups::new(right.space().structure(), FactorSide::Right)
             .map_err(CheckedGenericFactorPlanError::from)?;
-        for (matrix, pair) in matricizations.iter().zip(&pairs) {
+        for (pair_index, matrix) in matricizations.iter().take(pairs.len()).enumerate() {
+            let pair = pairs.pair(pair_index);
             scatter_left_sector_blocks_generic(
                 left.space(),
                 &mut left_data,
                 matrix,
                 &index,
                 &left_groups,
-                &pair.left,
+                pair.left,
                 pair.left_rows,
             )
             .map_err(CheckedGenericFactorPlanError::from)?;
@@ -669,7 +766,7 @@ where
                 matrix,
                 &index,
                 &right_groups,
-                &pair.right,
+                pair.right,
                 pair.right_leading,
             )
             .map_err(CheckedGenericFactorPlanError::from)?;
@@ -690,7 +787,7 @@ pub(super) fn build_checked_pair_from_input<R, D>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &InputMatricizations<'_, D>,
-    pairs: Vec<FactorPair<D>>,
+    pairs: impl PairedFactors<D>,
 ) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
