@@ -106,17 +106,15 @@ where
         })
     }
 
+    /// Why this seam keeps a release check although the `tenet-tensors`
+    /// gate already admitted the style: for an identity plan it is the only
+    /// guard, since the identity rows never consult the rule (#1950).
     pub fn execute_multiplicity_free_for_block_index(
         &self,
         index: usize,
         operation: &PreparedTreePairOperation<'_>,
     ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
-        if !self.rule.fusion_style().is_multiplicity_free() {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Simple,
-                actual: self.rule.fusion_style(),
-            });
-        }
+        validate_multiplicity_free_execution_style(self.rule)?;
         let key = self.required_fusion_tree_pair_key(index)?;
         operation.execute_multiplicity_free_proven(ValidatedFusionTreePair {
             rule: self.rule,
@@ -164,9 +162,16 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        validate_multiplicity_free_execution_style(self.rule)?;
         self.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(indices, &operation)
     }
 
+    /// Style-admitted seam of the `tenet-tensors` tree-transform miss path:
+    /// the caller has already rejected the rule's fusion style with its own
+    /// `OperationError::UnsupportedFusionStyle` gate, so this checks the
+    /// style only in debug builds (#1950). Why not check again: the gate
+    /// owns the observable error, and a second query only repeats it per
+    /// block or block group.
     #[doc(hidden)]
     pub fn execute_multiplicity_free_braid_ordered_for_block_indices_borrowed<I>(
         &self,
@@ -176,7 +181,7 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
-        validate_multiplicity_free_execution_style(self.rule)?;
+        debug_assert!(self.rule.fusion_style().is_multiplicity_free());
         operation.validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
@@ -222,11 +227,18 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        validate_multiplicity_free_execution_style(self.rule)?;
         self.execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
             indices, &operation,
         )
     }
 
+    /// Style-admitted seam of the `tenet-tensors` tree-transform miss path:
+    /// the caller has already rejected the rule's fusion style with its own
+    /// `OperationError::UnsupportedFusionStyle` gate, so this checks the
+    /// style only in debug builds (#1950). Why not check again: the gate
+    /// owns the observable error, and a second query only repeats it per
+    /// block or block group.
     #[doc(hidden)]
     pub fn execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed<I>(
         &self,
@@ -236,7 +248,7 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
-        validate_multiplicity_free_execution_style(self.rule)?;
+        debug_assert!(self.rule.fusion_style().is_multiplicity_free());
         operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
         let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_ordered_proven(batch, operation)

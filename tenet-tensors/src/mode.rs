@@ -1251,9 +1251,9 @@ where
                     let actual =
                         source.validate_transformed_generic_checked_identity(provider_identity)?;
                     if provider.fusion_style() != FusionStyleKind::Generic {
-                        return Err(CoreError::UnsupportedFusionStyle {
-                            expected: FusionStyleKind::Generic,
-                            actual: provider.fusion_style(),
+                        return Err(OperationError::UnsupportedFusionStyle {
+                            operation: Box::new(operation.clone()),
+                            style: provider.fusion_style(),
                         }
                         .into());
                     }

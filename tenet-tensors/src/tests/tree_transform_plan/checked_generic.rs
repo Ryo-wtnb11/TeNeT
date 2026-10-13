@@ -713,10 +713,18 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             .tree_transform_owned_checked_generic_in(&test_space, None, &src_data, &operation, 1.0)
             .unwrap_err();
         if style_mismatch {
-            assert!(matches!(
-                error,
-                CheckedGenericPlanError::Core(CoreError::UnsupportedFusionStyle { .. })
-            ));
+            // The checked transform's own admission reports the tensors
+            // variant (#1950), not the core one.
+            assert!(
+                matches!(
+                    &error,
+                    CheckedGenericPlanError::Operation(OperationError::UnsupportedFusionStyle {
+                        operation: rejected,
+                        style: FusionStyleKind::Unique,
+                    }) if **rejected == operation
+                ),
+                "{error:?}"
+            );
         } else {
             assert!(matches!(
                 error,

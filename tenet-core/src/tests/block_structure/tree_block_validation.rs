@@ -1091,6 +1091,32 @@ fn validated_per_index_permute_preserves_planar_braiding_rejection_before_index_
 }
 
 #[test]
+fn multiplicity_free_per_block_seam_rejects_misreported_style_under_identity_plan() {
+    let rule = MisreportedGenericMultiplicityFreeRule;
+    let vacuum = rule.vacuum();
+    let key = FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(&rule, [], vacuum, [], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [], vacuum, [], [], []).unwrap(),
+    );
+    let structure = packed_fixture_structure(0, [(key, vec![])]).unwrap();
+    let proof = LocallyValidatedFusionTreeBlockStructure::try_new(&rule, &structure).unwrap();
+    let identity = PreparedTreePairOperation::prepare_transpose(0, 0, &[], &[]).unwrap();
+
+    // What: identity rows never consult the rule, so the per-block seam's
+    // own style check is the only guard; it rejects in release builds too
+    // (#1950 review P2).
+    assert_eq!(
+        proof
+            .execute_multiplicity_free_for_block_index(0, &identity)
+            .unwrap_err(),
+        CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: FusionStyleKind::Generic,
+        }
+    );
+}
+
+#[test]
 fn multiplicity_free_block_boundaries_reject_misreported_style_before_empty_identity() {
     let rule = MisreportedGenericMultiplicityFreeRule;
     let structure = BlockStructure::empty(0);
@@ -1112,6 +1138,24 @@ fn multiplicity_free_block_boundaries_reject_misreported_style_before_empty_iden
                 .unwrap_err(),
             expected
         );
+    assert_eq!(
+        proof
+            .execute_multiplicity_free_braid_ordered_for_block_indices(
+                std::iter::empty(),
+                identity.clone(),
+            )
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        proof
+            .execute_multiplicity_free_transpose_ordered_for_block_indices(
+                std::iter::empty(),
+                identity.clone(),
+            )
+            .unwrap_err(),
+        expected
+    );
     assert_eq!(
         proof
             .execute_multiplicity_free_transpose_for_block_indices(std::iter::empty(), identity,)

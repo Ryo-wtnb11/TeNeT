@@ -1693,3 +1693,80 @@ fn oriented_cold_and_warm_admission_rejects_equal_key_capability_changes() {
         }
     }
 }
+
+#[test]
+fn every_tree_transform_entry_reports_the_operation_fusion_style_error() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let structure = simple_su2_vertex_structure(1);
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let generic = AdmissionCountingSu2Rule {
+        nsymbol_calls: Arc::new(AtomicUsize::new(0)),
+        fusion_style: Some(FusionStyleKind::Generic),
+        braiding_style: None,
+    };
+    let rejected = |style| OperationError::UnsupportedFusionStyle {
+        operation: Box::new(operation.clone()),
+        style,
+    };
+    let cache = crate::tree_transform::TreeTransformPlanning::default();
+
+    // What: each tensors-layer tree-transform entry rejects a style it
+    // cannot lower with the operation-carrying tensors variant, never the
+    // core variant wrapped in `OperationError::Core` (#1950).
+    assert_eq!(
+        crate::build_tree_pair_transform_group_plan(&generic, operation.clone(), &structure)
+            .unwrap_err(),
+        rejected(FusionStyleKind::Generic)
+    );
+    assert_eq!(
+        crate::build_multiplicity_free_tree_pair_transform_group_plan(
+            &generic,
+            operation.clone(),
+            &structure
+        )
+        .unwrap_err(),
+        rejected(FusionStyleKind::Generic)
+    );
+    assert_eq!(
+        crate::build_all_codomain_tree_transform_group_plan(
+            &generic,
+            operation.clone(),
+            &structure
+        )
+        .unwrap_err(),
+        rejected(FusionStyleKind::Generic)
+    );
+    assert_eq!(
+        cache
+            .resolve_tree_pair(&generic, &operation, &structure, &structure, false)
+            .unwrap_err(),
+        rejected(FusionStyleKind::Generic)
+    );
+    assert_eq!(
+        cache
+            .resolve_all_codomain(&generic, &operation, &structure, &structure)
+            .unwrap_err(),
+        rejected(FusionStyleKind::Generic)
+    );
+    assert_eq!(
+        crate::build_unique_tree_pair_transform_group_plan(
+            &SU2FusionRule,
+            operation.clone(),
+            &structure
+        )
+        .unwrap_err(),
+        rejected(FusionStyleKind::Simple)
+    );
+    assert_eq!(
+        crate::build_unique_all_codomain_tree_transform_group_plan(
+            &SU2FusionRule,
+            operation.clone(),
+            &structure
+        )
+        .unwrap_err(),
+        rejected(FusionStyleKind::Simple)
+    );
+    assert_eq!(generic.nsymbol_calls.load(Ordering::Relaxed), 0);
+}
