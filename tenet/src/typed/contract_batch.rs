@@ -275,7 +275,7 @@ where
             #[cfg(feature = "cuda")]
             reserved_plan_entries: 0,
         };
-        S::reserve_members(self, &mut workspace)?;
+        S::reserve_members(EXEC, self, &mut workspace)?;
         Ok(workspace)
     }
 
@@ -297,7 +297,7 @@ where
         let buffers = workspace.output.take();
         let prepared = self.check(lhs, rhs).and_then(|members| {
             let total = self.total_len(self.member_len, members)?;
-            Ok((members, total, S::lease_members(&self.runtime)?))
+            Ok((members, total, S::lease_members(EXEC, &self.runtime)?))
         });
         let (members, total, mut lease) = match prepared {
             Ok(prepared) => prepared,
@@ -309,13 +309,14 @@ where
                 runtime: self.runtime.clone(),
                 space: self.space.clone(),
                 signature: self.output_signature.clone(),
-                storage: S::zeroed_members(&lease, total, self.member_len, members)?,
+                storage: S::zeroed_members(EXEC, &lease, total, self.member_len, members)?,
                 members,
                 member_len: self.member_len,
                 _payload: PhantomData,
             },
         };
         let result = S::contract_members(
+            EXEC,
             self,
             workspace,
             &mut lease,
@@ -347,8 +348,9 @@ where
         self.check_workspace(workspace)?;
         let result = self.check(lhs, rhs).and_then(|members| {
             self.check_destination(dst, members)?;
-            let mut lease = S::lease_members(&self.runtime)?;
+            let mut lease = S::lease_members(EXEC, &self.runtime)?;
             S::contract_members(
+                EXEC,
                 self,
                 workspace,
                 &mut lease,
@@ -515,12 +517,13 @@ impl<R, D, S: ContractExec<R, D>> ContractWorkspace<R, D, S> {
     /// and Host layout scratch), excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.members.retained_bytes()
-            + S::retained_scratch_bytes(self)
+            + S::retained_scratch_bytes(EXEC, self)
             + self
                 .output
                 .buffers()
                 .map(|output| {
                     S::retained_payload_bytes(
+                        EXEC,
                         &output.storage,
                         output.members.saturating_mul(output.member_len),
                     )

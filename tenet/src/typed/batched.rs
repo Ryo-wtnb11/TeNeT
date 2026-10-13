@@ -36,9 +36,9 @@ use tenet_tensors::{FusionOperand, OperationError};
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};
 use super::{
     owned_repr, require_restriction_set, restricted_space, restriction_runs,
-    BoundDynamicFusionMapSpace, FactorExec, FactorizationScalar, LegSelection, Runtime,
+    BoundDynamicFusionMapSpace, ExecToken, FactorExec, FactorizationScalar, LegSelection, Runtime,
     SectorSpectrum, TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission,
-    TypedTensorBody, TypedTensorRepr, TypedTensorRootDispatch,
+    TypedTensorBody, TypedTensorRepr, TypedTensorRootDispatch, EXEC,
 };
 use crate::error::Error;
 use crate::runtime::RuntimeIdentity;
@@ -428,7 +428,7 @@ impl<R, D, S: StackExec<D>> StackedTensorMap<R, D, S> {
     /// Nothing is downloaded and nothing waits on the device.
     pub fn select(&self, members: &[usize]) -> Result<Self, Error> {
         let len = self.selection_len(members)?;
-        S::select_members(self, members, len)
+        S::select_members(EXEC, self, members, len)
     }
 }
 
@@ -480,7 +480,7 @@ where
     {
         require_restriction_set(&self.space, legs)?;
         let destination = restricted_space(&self.space, legs)?;
-        Ok(S::restrict_members(self, destination, legs)?)
+        Ok(S::restrict_members(EXEC, self, destination, legs)?)
     }
 }
 
@@ -499,6 +499,7 @@ pub trait StackExec<D>: TensorStorage<D> + super::storage::sealed::Sealed + Size
     /// The stack of `stack`'s members `members`, whose checked payload
     /// length is `len`.
     fn select_members<R>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D, Self>,
         members: &[usize],
         len: usize,
@@ -507,6 +508,7 @@ pub trait StackExec<D>: TensorStorage<D> + super::storage::sealed::Sealed + Size
     /// The stack over the checked `destination` holding every member of
     /// `stack` restricted by `legs`.
     fn restrict_members<R: TypedSectorAdmission>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D, Self>,
         destination: BoundDynamicFusionMapSpace<R>,
         legs: &[(usize, &LegSelection<R>)],
@@ -517,6 +519,7 @@ pub trait StackExec<D>: TensorStorage<D> + super::storage::sealed::Sealed + Size
 
 impl<D: Copy> StackExec<D> for Vec<D> {
     fn select_members<R>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D>,
         members: &[usize],
         len: usize,
@@ -530,6 +533,7 @@ impl<D: Copy> StackExec<D> for Vec<D> {
     }
 
     fn restrict_members<R: TypedSectorAdmission>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D>,
         destination: BoundDynamicFusionMapSpace<R>,
         legs: &[(usize, &LegSelection<R>)],
@@ -1101,7 +1105,7 @@ where
             return Err(workspace.output.hide(error.into()));
         }
         let mut buffers = workspace.take_buffers(source.members);
-        if let Err(error) = S::eigh_full_stack(self, source, &mut buffers, workspace) {
+        if let Err(error) = S::eigh_full_stack(EXEC, self, source, &mut buffers, workspace) {
             return Err(workspace.output.fail(buffers, error));
         }
         if let Err(error) = self.publish(workspace, source.members) {
@@ -1703,6 +1707,7 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> StackExec<D> for CudaStorage<D> {
     fn select_members<R>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D, Self>,
         members: &[usize],
         _len: usize,
@@ -1716,6 +1721,7 @@ impl<D: CudaPayload> StackExec<D> for CudaStorage<D> {
     }
 
     fn restrict_members<R: TypedSectorAdmission>(
+        _: ExecToken,
         stack: &StackedTensorMap<R, D, Self>,
         destination: BoundDynamicFusionMapSpace<R>,
         legs: &[(usize, &LegSelection<R>)],

@@ -225,7 +225,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    fn dense_norm(t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, Error> {
+    fn dense_norm(_: ExecToken, t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, Error> {
         if p != 2.0 {
             return Err(Error::UnsupportedOnDevice(format!(
                 "device norm supports only p = 2, got {p}"
@@ -237,7 +237,11 @@ where
         Ok(t.weighted_inner_cuda(storage, storage)?.re.sqrt())
     }
 
-    fn dense_inner(x: &TensorMap<R, D, Self>, y: &TensorMap<R, D, Self>) -> Result<D, Error> {
+    fn dense_inner(
+        _: ExecToken,
+        x: &TensorMap<R, D, Self>,
+        y: &TensorMap<R, D, Self>,
+    ) -> Result<D, Error> {
         let lhs = x.direct_cuda_storage("inner")?;
         let rhs = y.direct_cuda_storage("inner")?;
         x.weighted_inner_cuda(lhs, rhs).map(D::from_complex64)
@@ -249,7 +253,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    fn zeros(t: &TensorMap<R, D, Self>) -> Result<TensorMap<R, D, Self>, Error> {
+    fn zeros(_: ExecToken, t: &TensorMap<R, D, Self>) -> Result<TensorMap<R, D, Self>, Error> {
         let required_len = t.logical_space().space().required_len()?;
         let source = t.direct_cuda_storage("zeros_like")?;
         let output = t.cuda_zeros_owned(required_len, source)?;
@@ -257,6 +261,7 @@ where
     }
 
     fn combine(
+        _: ExecToken,
         x: &TensorMap<R, D, Self>,
         alpha: D,
         y: Option<(&TensorMap<R, D, Self>, D)>,
@@ -323,6 +328,7 @@ where
     /// read `x` (the destination becomes `beta * destination` through a
     /// zero-source move).
     fn axpby_into(
+        _: ExecToken,
         x: &TensorMap<R, D, Self>,
         destination: &mut TensorMap<R, D, Self>,
         alpha: D,

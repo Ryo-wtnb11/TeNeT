@@ -170,6 +170,7 @@ where
     D: CudaPayload,
 {
     fn materialize(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         source: &Self,
         map: Option<&tenet_tensors::AdjointBlockMap<'_>>,

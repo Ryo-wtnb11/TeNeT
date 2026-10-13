@@ -93,14 +93,14 @@ where
         let (source, map) = match &self.repr {
             TypedTensorRepr::Owned(body) => {
                 if let Some((host, spectrum)) =
-                    S::as_host(self).and_then(|t| Some((t, t.spectrum()?)))
+                    S::as_host(EXEC, self).and_then(|t| Some((t, t.spectrum()?)))
                 {
                     let data = tenet_matrixalgebra::seam::diagonal_bond_data(
                         host.logical_space().space(),
                         spectrum,
                         &|value| value,
                     )?;
-                    return S::from_host(host.with_data(data));
+                    return S::from_host(EXEC, host.with_data(data));
                 }
                 (dense(body.data.as_ref())?, None)
             }
@@ -121,7 +121,7 @@ where
                 )
             }
         };
-        let storage = S::materialize(self, source, map.as_ref())?;
+        let storage = S::materialize(EXEC, self, source, map.as_ref())?;
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(
@@ -141,6 +141,7 @@ pub trait MaterializeExec<R, D>: TypedStorage<R, D> {
     /// `source` without a `map`, else lazy adjoint `t`'s parent `source`
     /// written block by block as `map` names.
     fn materialize(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         source: &Self,
         map: Option<&tenet_tensors::AdjointBlockMap<'_>>,
@@ -149,6 +150,7 @@ pub trait MaterializeExec<R, D>: TypedStorage<R, D> {
 
 impl<R, D: TensorScalar> MaterializeExec<R, D> for Vec<D> {
     fn materialize(
+        _: ExecToken,
         t: &TensorMap<R, D>,
         source: &Self,
         map: Option<&tenet_tensors::AdjointBlockMap<'_>>,

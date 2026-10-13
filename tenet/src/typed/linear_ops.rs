@@ -122,9 +122,9 @@ where
                 message: "tensors live on different spaces or block layouts",
             }));
         }
-        if let (Some(x), Some(y)) = (S::as_host(self), S::as_host(other)) {
+        if let (Some(x), Some(y)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if let Some(sum) = x.compact_axpby(alpha, y, beta)? {
-                return S::from_host(sum);
+                return S::from_host(EXEC, sum);
             }
         }
         if let (TypedTensorRepr::Adjoint(x), TypedTensorRepr::Adjoint(y)) =
@@ -138,7 +138,7 @@ where
             )?;
             return sum.lazy_adjoint_on(&x.logical_space);
         }
-        S::combine(self, alpha, Some((other, beta)))
+        S::combine(EXEC, self, alpha, Some((other, beta)))
     }
 
     /// Returns `factor * self`.
@@ -168,7 +168,7 @@ where
             let parent = self.parent_of(view).scale(FactorScalar::adjoint(factor))?;
             return Ok(parent.lazy_adjoint_on(&view.logical_space)?);
         }
-        Ok(S::combine(self, factor, None)?)
+        Ok(S::combine(EXEC, self, factor, None)?)
     }
 
     /// `destination = alpha * self + beta * destination`: BLAS `axpby`,
@@ -383,13 +383,14 @@ fn lazy_plus_spectrum<R, D: TensorScalar>(
 #[doc(hidden)]
 pub trait ElementwiseExec<R, D>: TypedStorage<R, D> {
     /// A fresh exact-zero dense payload on an owned dense `t`'s space.
-    fn zeros(t: &TensorMap<R, D, Self>) -> Result<TensorMap<R, D, Self>, Error>;
+    fn zeros(_: ExecToken, t: &TensorMap<R, D, Self>) -> Result<TensorMap<R, D, Self>, Error>;
 
     /// `alpha * x + beta * y`, or `alpha * x` without `y`, as a fresh owned
     /// dense result on `x`'s logical space. The operands are dense, share
     /// one runtime and space, and at most one is a lazy adjoint; `x` alone
     /// is owned.
     fn combine(
+        _: ExecToken,
         x: &TensorMap<R, D, Self>,
         alpha: D,
         y: Option<(&TensorMap<R, D, Self>, D)>,
@@ -398,6 +399,7 @@ pub trait ElementwiseExec<R, D>: TypedStorage<R, D> {
     /// `destination = alpha * x + beta * destination` into an admitted
     /// destination: same runtime and space, owned dense, unaliased, unique.
     fn axpby_into(
+        _: ExecToken,
         x: &TensorMap<R, D, Self>,
         destination: &mut TensorMap<R, D, Self>,
         alpha: D,
@@ -406,7 +408,7 @@ pub trait ElementwiseExec<R, D>: TypedStorage<R, D> {
 }
 
 impl<R, D: TensorScalar> ElementwiseExec<R, D> for Vec<D> {
-    fn zeros(t: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+    fn zeros(_: ExecToken, t: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         Ok(t.with_data(vec![
             D::from_real(0.0);
             t.owned_body()
@@ -418,6 +420,7 @@ impl<R, D: TensorScalar> ElementwiseExec<R, D> for Vec<D> {
     }
 
     fn combine(
+        _: ExecToken,
         x: &TensorMap<R, D>,
         alpha: D,
         y: Option<(&TensorMap<R, D>, D)>,
@@ -467,6 +470,7 @@ impl<R, D: TensorScalar> ElementwiseExec<R, D> for Vec<D> {
     }
 
     fn axpby_into(
+        _: ExecToken,
         x: &TensorMap<R, D>,
         destination: &mut TensorMap<R, D>,
         alpha: D,
@@ -723,5 +727,5 @@ where
         x.logical_space().space(),
         S::NOUN,
     )?;
-    S::axpby_into(x, destination, alpha, beta)
+    S::axpby_into(EXEC, x, destination, alpha, beta)
 }

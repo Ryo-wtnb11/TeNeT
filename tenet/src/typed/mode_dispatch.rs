@@ -448,6 +448,7 @@ where
             .tree_context_mut()
             .stage_tree_transform_checked_generic_in(&body.space, None, src_len, &operation)?;
         let data = S::replay_owned(
+            EXEC,
             TreeReplay::staged::<CheckedGenericTreeLane, _, _>(&tensor.runtime, lease, &staged),
             tensor,
             D::from_real(1.0),
@@ -487,6 +488,7 @@ where
         let destination_data = destination_storage_mut(destination)?;
         with_transform_into_source(source, &operation, alpha, beta, |input| {
             S::replay_into(
+                EXEC,
                 TreeReplay::staged::<CheckedGenericTreeLane, _, _>(&source.runtime, lease, &staged),
                 input,
                 destination_data,
@@ -782,6 +784,7 @@ where
             tenet_tensors::CoreRoute::Miss(miss) => staged.plan_beyond_core::<S::Caps>(miss)?,
         };
         S::contract_into(
+            EXEC,
             ContractReplay::new::<CheckedGenericTreeLane>(
                 &lhs.runtime,
                 Some(lease),
@@ -845,6 +848,7 @@ where
         tenet_tensors::CoreRoute::Miss(miss) => staged.plan_beyond_core::<S::Caps>(miss)?,
     };
     let data = S::contract_owned(
+        EXEC,
         ContractReplay::new::<CheckedGenericTreeLane>(
             &lhs.runtime,
             Some(lease),

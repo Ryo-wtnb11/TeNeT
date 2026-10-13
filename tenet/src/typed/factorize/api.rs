@@ -253,7 +253,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, S::qr_compact)
+        self.with_leg_roles(rows, cols, |t| S::qr_compact(EXEC, t))
     }
 
     /// Returns the compact singular-value decomposition
@@ -352,7 +352,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, S::svd_compact)
+        self.with_leg_roles(rows, cols, |t| S::svd_compact(EXEC, t))
     }
 
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
@@ -454,7 +454,7 @@ where
         cols: &[usize],
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, |t| S::eigh_full(t, hermitian_tol))
+        self.with_leg_roles(rows, cols, |t| S::eigh_full(EXEC, t, hermitian_tol))
     }
 }
 

@@ -641,9 +641,9 @@ where
         &self,
         operation: TreeTransformOperation,
     ) -> Result<Self, TypedFacadeError<R>> {
-        if let Some(host) = S::as_host(self) {
+        if let Some(host) = S::as_host(EXEC, self) {
             if let Some(compact) = compact_arms::transform_rank_one_diagonal(host, &operation)? {
-                return Ok(S::from_host(compact)?);
+                return Ok(S::from_host(EXEC, compact)?);
             }
         }
         if let TypedTensorRepr::Adjoint(_) = &self.repr {
@@ -934,6 +934,7 @@ pub trait TransformExec<R, D>: TypedStorage<R, D> {
     /// `alpha · structure(t)` into a fresh payload of `replay`'s destination
     /// structure, for an owned `t` (Host densifies a compact diagonal).
     fn replay_owned<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         t: &TensorMap<R, D, Self>,
         alpha: D,
@@ -944,6 +945,7 @@ pub trait TransformExec<R, D>: TypedStorage<R, D> {
     /// `destination = alpha · structure(source) + beta · destination` into a
     /// destination that passed every admission check.
     fn replay_into<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         source: TransformIntoSource<'_, D, Self, C>,
         destination: &mut Self,
@@ -956,6 +958,7 @@ pub trait TransformExec<R, D>: TypedStorage<R, D> {
 
 impl<R, D: TensorScalar> TransformExec<R, D> for Vec<D> {
     fn replay_owned<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         t: &TensorMap<R, D>,
         alpha: D,
@@ -985,6 +988,7 @@ impl<R, D: TensorScalar> TransformExec<R, D> for Vec<D> {
     }
 
     fn replay_into<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         source: TransformIntoSource<'_, D, Self, C>,
         destination: &mut Self,
@@ -1193,6 +1197,7 @@ where
             nout,
         );
         return Ok(S::replay_into(
+            EXEC,
             replay,
             TransformIntoSource::Stored(data),
             destination_storage_mut(destination)?,
@@ -1218,6 +1223,7 @@ where
     let destination_data = destination_storage_mut(destination)?;
     with_transform_into_source(source, &operation, alpha, beta, |input| {
         S::replay_into(
+            EXEC,
             TreeReplay::staged::<MultiplicityFreeTreeLane, _, _>(&source.runtime, lease, &staged),
             input,
             destination_data,
@@ -1273,6 +1279,7 @@ where
         .tree_context_mut()
         .stage_tree_transform_multiplicity_free_in(&body.space, None, src_len, &operation)?;
     let data = S::replay_owned(
+        EXEC,
         TreeReplay::staged::<MultiplicityFreeTreeLane, _, _>(&tensor.runtime, lease, &staged),
         tensor,
         D::from_real(1.0),
