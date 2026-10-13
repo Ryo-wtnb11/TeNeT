@@ -54,6 +54,7 @@ where
     D: CudaPayload,
 {
     fn replay_owned<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         t: &TensorMap<R, D, Self>,
         alpha: D,
@@ -111,6 +112,7 @@ where
     /// expressibility and Stage C before its first submission, so a rejected
     /// replay leaves the caller's destination byte-identical.
     fn replay_into<C: Copy>(
+        _: ExecToken,
         replay: TreeReplay<'_, D, C>,
         source: TransformIntoSource<'_, D, Self, C>,
         destination: &mut Self,
@@ -173,6 +175,7 @@ where
     D: CudaPayload,
 {
     fn scale_blocks(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         factor_of: &dyn Fn(&BlockKey) -> f64,
         operation: &'static str,

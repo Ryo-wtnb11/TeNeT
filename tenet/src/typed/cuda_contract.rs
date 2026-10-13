@@ -11,6 +11,7 @@ where
     /// The #740 output upload, then every term accumulates (`beta = 1`), so
     /// no `beta` pass is submitted.
     fn trace_owned(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         _dst_nout: usize,
         compact: Option<D>,
@@ -51,6 +52,7 @@ where
     /// The executor admits every region before its first submission, so a
     /// rejected replay leaves the caller's destination byte-identical.
     fn trace_into(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         compact: Option<D>,
         source: &TensorMap<R, D, Self>,
@@ -114,6 +116,7 @@ where
     type MembersLease<'r> = CudaMembersLease<'r>;
 
     fn reserve_members(
+        _: ExecToken,
         plan: &ContractPlan<R, D, Self>,
         workspace: &mut ContractWorkspace<R, D, Self>,
     ) -> Result<(), Error> {
@@ -126,11 +129,12 @@ where
         Ok(())
     }
 
-    fn lease_members(runtime: &Runtime) -> Result<CudaMembersLease<'_>, Error> {
+    fn lease_members(_: ExecToken, runtime: &Runtime) -> Result<CudaMembersLease<'_>, Error> {
         Ok(CudaMembersLease(runtime.lease_cuda()?))
     }
 
     fn zeroed_members(
+        _: ExecToken,
         lease: &CudaMembersLease<'_>,
         total: usize,
         member_len: usize,
@@ -145,6 +149,7 @@ where
     }
 
     fn contract_members(
+        _: ExecToken,
         plan: &ContractPlan<R, D, Self>,
         workspace: &mut ContractWorkspace<R, D, Self>,
         lease: &mut CudaMembersLease<'_>,
@@ -167,15 +172,16 @@ where
         Ok(())
     }
 
-    fn retained_scratch_bytes(workspace: &ContractWorkspace<R, D, Self>) -> usize {
+    fn retained_scratch_bytes(_: ExecToken, workspace: &ContractWorkspace<R, D, Self>) -> usize {
         workspace.members_cuda.retained_bytes()
     }
 
-    fn retained_payload_bytes(_payload: &Self, len: usize) -> usize {
+    fn retained_payload_bytes(_: ExecToken, _payload: &Self, len: usize) -> usize {
         len.saturating_mul(std::mem::size_of::<D>())
     }
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D, Self>,
         rhs: &TensorMap<R, D, Self>,
@@ -224,6 +230,7 @@ where
     /// The route executor admits every region before its first submission,
     /// so a rejected replay leaves the caller's destination byte-identical.
     fn contract_into<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D, Self>,
         rhs: &TensorMap<R, D, Self>,

@@ -370,7 +370,7 @@ where
             self.provider(),
         ))
         .map_err(Error::from)?;
-        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+        if let (Some(lhs), Some(rhs)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if lhs.spectrum().is_some() || rhs.spectrum().is_some() {
                 if let Some(compact) = lhs.try_contract_diagonal(
                     rhs,
@@ -379,7 +379,7 @@ where
                     &spec.output_axes(),
                     spec.codomain.len(),
                 )? {
-                    return Ok(S::from_host(compact)?);
+                    return Ok(S::from_host(EXEC, compact)?);
                 }
             }
         }
@@ -498,9 +498,9 @@ where
         destination_precheck(destination, &self.storage_body().data, S::NOUN)?;
         destination_precheck(destination, &other.storage_body().data, S::NOUN)?;
         if let (Some(lhs), Some(rhs), Some(dst)) = (
-            S::as_host(self),
-            S::as_host(other),
-            S::as_host_mut(destination),
+            S::as_host(EXEC, self),
+            S::as_host(EXEC, other),
+            S::as_host_mut(EXEC, destination),
         ) {
             if (lhs.spectrum().is_some() || rhs.spectrum().is_some())
                 && lhs.try_contract_diagonal_into(rhs, spec, dst, alpha, beta)?
@@ -687,10 +687,10 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+        if let (Some(lhs), Some(rhs)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if lhs.spectrum().is_some() || rhs.spectrum().is_some() {
                 if let Some(compact) = lhs.compose_compact(rhs)? {
-                    return Ok(S::from_host(compact)?);
+                    return Ok(S::from_host(EXEC, compact)?);
                 }
             }
         }
@@ -799,6 +799,7 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     /// destination, reading each operand's stored payload (a lazy adjoint's
     /// parent; Host densifies a compact operand).
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D, Self>,
         rhs: &TensorMap<R, D, Self>,
@@ -809,6 +810,7 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     /// `destination = alpha · contract(lhs, rhs) + beta · destination` into a
     /// destination that passed every admission check.
     fn contract_into<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D, Self>,
         rhs: &TensorMap<R, D, Self>,
@@ -826,16 +828,18 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
 
     /// Reserves this storage's resources for a new [`ContractWorkspace`].
     fn reserve_members(
+        _: ExecToken,
         plan: &ContractPlan<R, D, Self>,
         workspace: &mut ContractWorkspace<R, D, Self>,
     ) -> Result<(), Error>;
 
     /// Takes the lease of one prepared replay, after every no-write check.
-    fn lease_members(runtime: &Runtime) -> Result<Self::MembersLease<'_>, Error>;
+    fn lease_members(_: ExecToken, runtime: &Runtime) -> Result<Self::MembersLease<'_>, Error>;
 
     /// A zeroed payload of `members` members of `member_len` elements each
     /// (`total` in all).
     fn zeroed_members(
+        _: ExecToken,
         lease: &Self::MembersLease<'_>,
         total: usize,
         member_len: usize,
@@ -846,6 +850,7 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     /// stored block structure and payload) into `dst`.
     #[allow(clippy::too_many_arguments)]
     fn contract_members(
+        _: ExecToken,
         plan: &ContractPlan<R, D, Self>,
         workspace: &mut ContractWorkspace<R, D, Self>,
         lease: &mut Self::MembersLease<'_>,
@@ -857,11 +862,11 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     ) -> Result<(), Error>;
 
     /// The workspace's retained device scratch (none on Host).
-    fn retained_scratch_bytes(workspace: &ContractWorkspace<R, D, Self>) -> usize;
+    fn retained_scratch_bytes(_: ExecToken, workspace: &ContractWorkspace<R, D, Self>) -> usize;
 
     /// The retained bytes of one workspace-owned output payload of `len`
     /// elements.
-    fn retained_payload_bytes(payload: &Self, len: usize) -> usize;
+    fn retained_payload_bytes(_: ExecToken, payload: &Self, len: usize) -> usize;
 }
 
 impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
@@ -869,17 +874,19 @@ impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
     type MembersLease<'r> = ();
 
     fn reserve_members(
+        _: ExecToken,
         _plan: &ContractPlan<R, D>,
         _workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
         Ok(())
     }
 
-    fn lease_members(_runtime: &Runtime) -> Result<(), Error> {
+    fn lease_members(_: ExecToken, _runtime: &Runtime) -> Result<(), Error> {
         Ok(())
     }
 
     fn zeroed_members(
+        _: ExecToken,
         _lease: &(),
         total: usize,
         _member_len: usize,
@@ -889,6 +896,7 @@ impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
     }
 
     fn contract_members(
+        _: ExecToken,
         plan: &ContractPlan<R, D>,
         workspace: &mut ContractWorkspace<R, D>,
         _lease: &mut (),
@@ -914,15 +922,16 @@ impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
         Ok(())
     }
 
-    fn retained_scratch_bytes(_workspace: &ContractWorkspace<R, D>) -> usize {
+    fn retained_scratch_bytes(_: ExecToken, _workspace: &ContractWorkspace<R, D>) -> usize {
         0
     }
 
-    fn retained_payload_bytes(payload: &Self, _len: usize) -> usize {
+    fn retained_payload_bytes(_: ExecToken, payload: &Self, _len: usize) -> usize {
         payload.capacity().saturating_mul(std::mem::size_of::<D>())
     }
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
@@ -943,6 +952,7 @@ impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
     }
 
     fn contract_into<C: tenet_tensors::DenseBlockScalar>(
+        _: ExecToken,
         replay: ContractReplay<'_, D, C>,
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,

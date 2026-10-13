@@ -22,7 +22,7 @@ where
             axes,
             read,
             |structure, compact, nout| {
-                S::trace_owned(structure, nout, compact, source, D::from_real(1.0))
+                S::trace_owned(EXEC, structure, nout, compact, source, D::from_real(1.0))
                     .map_err(Error::from)
             },
         )
@@ -46,7 +46,7 @@ where
             &destination_space,
             || destination_storage_mut(destination),
             |structure, compact, destination| {
-                S::trace_into(structure, compact, source, destination, alpha, beta)
+                S::trace_into(EXEC, structure, compact, source, destination, alpha, beta)
                     .map_err(Error::from)
             },
         )
@@ -75,7 +75,7 @@ where
             axes,
             read,
             |structure, compact, nout| {
-                S::trace_owned(structure, nout, compact, source, D::from_real(1.0))
+                S::trace_owned(EXEC, structure, nout, compact, source, D::from_real(1.0))
                     .map_err(checked_generic_exec_error)
             },
         )
@@ -99,7 +99,7 @@ where
             &destination_space,
             || destination_storage_mut(destination).map_err(Self::FacadeError::from),
             |structure, compact, destination| {
-                S::trace_into(structure, compact, source, destination, alpha, beta)
+                S::trace_into(EXEC, structure, compact, source, destination, alpha, beta)
                     .map_err(checked_generic_exec_error)
             },
         )
@@ -120,6 +120,7 @@ pub trait TraceExec<R, D>: ElementwiseExec<R, D> {
     /// (`dst_nout` its codomain rank), reading `source`'s stored payload (a
     /// lazy adjoint's parent).
     fn trace_owned(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         dst_nout: usize,
         compact: Option<D>,
@@ -131,6 +132,7 @@ pub trait TraceExec<R, D>: ElementwiseExec<R, D> {
     /// destination that passed every admission check, with TensorKit's
     /// `beta` pass over every destination layout first.
     fn trace_into(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         compact: Option<D>,
         source: &TensorMap<R, D, Self>,
@@ -145,6 +147,7 @@ pub trait TraceExec<R, D>: ElementwiseExec<R, D> {
 /// materialized.
 impl<R, D: TensorScalar> TraceExec<R, D> for Vec<D> {
     fn trace_owned(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         dst_nout: usize,
         compact: Option<D>,
@@ -167,6 +170,7 @@ impl<R, D: TensorScalar> TraceExec<R, D> for Vec<D> {
     }
 
     fn trace_into(
+        _: ExecToken,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
         compact: Option<D>,
         source: &TensorMap<R, D>,
@@ -498,7 +502,7 @@ where
         &self,
         structure: &tenet_tensors::TensorTraceFusionStructure<f64>,
     ) -> Option<D> {
-        let spectrum = S::as_host(self)?.spectrum()?;
+        let spectrum = S::as_host(EXEC, self)?.spectrum()?;
         compact_arms::full_trace_terms(
             structure,
             self.storage_body().space.space().structure(),
@@ -554,6 +558,7 @@ where
         }
     };
     let data = S::contract_owned(
+        EXEC,
         ContractReplay::new::<MultiplicityFreeTreeLane>(
             &lhs.runtime,
             lease,
@@ -631,6 +636,7 @@ where
             .plan_staged_contract_beyond_core::<S::Caps, R>(&mut staged, miss)?,
     };
     S::contract_into(
+        EXEC,
         ContractReplay::new::<MultiplicityFreeTreeLane>(
             &lhs.runtime,
             Some(lease),

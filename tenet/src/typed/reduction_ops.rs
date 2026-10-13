@@ -220,13 +220,14 @@ where
         // Checked before any dispatch so an invalid `p` is rejected the same
         // way on every representation and storage.
         validate_norm_p(p)?;
-        if let Some(spectrum) = S::as_host(self).and_then(TensorMap::spectrum) {
+        if let Some(spectrum) = S::as_host(EXEC, self).and_then(TensorMap::spectrum) {
             return compact_norm(spectrum, self.logical_space().provider(), p);
         }
         // Every entrywise norm is adjoint invariant: reduce the parent's
         // payload without materializing the logical adjoint.
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return S::dense_norm(
+                EXEC,
                 &Self {
                     runtime: self.runtime.clone(),
                     repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
@@ -234,7 +235,7 @@ where
                 p,
             );
         }
-        S::dense_norm(self, p)
+        S::dense_norm(EXEC, self, p)
     }
 
     /// Returns the quantum-dimension-weighted Frobenius inner product
@@ -273,12 +274,12 @@ where
             })
             .into());
         }
-        if let (Some(lhs), Some(rhs)) = (S::as_host(self), S::as_host(other)) {
+        if let (Some(lhs), Some(rhs)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if let Some(value) = lhs.compact_inner_arms(rhs)? {
                 return Ok(value);
             }
         }
-        S::dense_inner(self, other)
+        S::dense_inner(EXEC, self, other)
     }
 }
 
@@ -335,11 +336,16 @@ where
     R::Mode: TypedSpaceModeDispatch<R>,
 {
     /// `norm(t, p)` of an owned dense tensor, `p` already validated.
-    fn dense_norm(t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, TypedFacadeError<R>>;
+    fn dense_norm(
+        _: ExecToken,
+        t: &TensorMap<R, D, Self>,
+        p: f64,
+    ) -> Result<f64, TypedFacadeError<R>>;
 
     /// `inner(x, y)` of two dense operands, owned or lazy adjoint, on one
     /// runtime and one space.
     fn dense_inner(
+        _: ExecToken,
         x: &TensorMap<R, D, Self>,
         y: &TensorMap<R, D, Self>,
     ) -> Result<D, TypedFacadeError<R>>;
@@ -351,7 +357,7 @@ where
     R::Mode: TypedSpaceModeDispatch<R>,
     D: TensorScalar,
 {
-    fn dense_norm(t: &TensorMap<R, D>, p: f64) -> Result<f64, TypedFacadeError<R>> {
+    fn dense_norm(_: ExecToken, t: &TensorMap<R, D>, p: f64) -> Result<f64, TypedFacadeError<R>> {
         let provider = t.logical_space().provider();
         let payload = t
             .owned_body()
@@ -399,7 +405,11 @@ where
         )
     }
 
-    fn dense_inner(x: &TensorMap<R, D>, y: &TensorMap<R, D>) -> Result<D, TypedFacadeError<R>> {
+    fn dense_inner(
+        _: ExecToken,
+        x: &TensorMap<R, D>,
+        y: &TensorMap<R, D>,
+    ) -> Result<D, TypedFacadeError<R>> {
         let _host_pool = x.runtime.enter_host_pool();
         let provider = x.logical_space().provider();
         if matches!(&x.repr, TypedTensorRepr::Adjoint(_))

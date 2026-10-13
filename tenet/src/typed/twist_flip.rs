@@ -126,13 +126,14 @@ where
         else {
             return Ok(self.clone());
         };
-        if let Some(compact) =
-            S::as_host(self).and_then(|t| compact_arms::twist_spectrum(t, legs, inverse, &theta))
+        if let Some(compact) = S::as_host(EXEC, self)
+            .and_then(|t| compact_arms::twist_spectrum(t, legs, inverse, &theta))
         {
-            return Ok(S::from_host(compact)?);
+            return Ok(S::from_host(EXEC, compact)?);
         }
         let name = if inverse { "inverse twist" } else { "twist" };
         Ok(S::scale_blocks(
+            EXEC,
             self,
             &twist_block_factor(&theta, nout, legs, inverse),
             name,
@@ -171,6 +172,7 @@ pub trait TwistExec<R, D>: TypedStorage<R, D> {
     /// scaled by `factor_of(block key)`; `operation` names the call in a
     /// capability error.
     fn scale_blocks(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         factor_of: &dyn Fn(&BlockKey) -> f64,
         operation: &'static str,
@@ -179,6 +181,7 @@ pub trait TwistExec<R, D>: TypedStorage<R, D> {
 
 impl<R, D: TensorScalar> TwistExec<R, D> for Vec<D> {
     fn scale_blocks(
+        _: ExecToken,
         t: &TensorMap<R, D>,
         factor_of: &dyn Fn(&BlockKey) -> f64,
         _: &'static str,

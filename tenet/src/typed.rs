@@ -436,6 +436,7 @@ mod reduction_ops;
 pub use reduction_ops::ReduceExec;
 mod restrict;
 mod storage;
+pub(crate) use storage::sealed::{ExecToken, EXEC};
 #[doc(hidden)]
 pub use storage::TypedStorage;
 #[cfg(feature = "cuda")]

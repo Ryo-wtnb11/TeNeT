@@ -772,15 +772,22 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    fn qr_compact(t: &TensorMap<R, D, Self>) -> Result<Qr<TensorMap<R, D, Self>>, Error> {
+    fn qr_compact(
+        _: ExecToken,
+        t: &TensorMap<R, D, Self>,
+    ) -> Result<Qr<TensorMap<R, D, Self>>, Error> {
         t.qr_compact_matrix()
     }
 
-    fn svd_compact(t: &TensorMap<R, D, Self>) -> Result<Svd<TensorMap<R, D, Self>>, Error> {
+    fn svd_compact(
+        _: ExecToken,
+        t: &TensorMap<R, D, Self>,
+    ) -> Result<Svd<TensorMap<R, D, Self>>, Error> {
         t.svd_compact_matrix()
     }
 
     fn eigh_full(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<TensorMap<R, D, Self>>, Error> {
@@ -788,6 +795,7 @@ where
     }
 
     fn eigh_full_stack(
+        _: ExecToken,
         plan: &EighFullPlan<R, D, Self>,
         source: &StackedTensorMap<R, D, Self>,
         buffers: &mut Option<super::batched::StackPair<R, D, Self>>,

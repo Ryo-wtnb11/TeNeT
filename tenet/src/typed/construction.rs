@@ -373,6 +373,6 @@ where
                     .collect(),
             ));
         }
-        Ok(S::zeros(self)?)
+        Ok(S::zeros(EXEC, self)?)
     }
 }

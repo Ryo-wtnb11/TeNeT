@@ -522,16 +522,19 @@ where
 {
     /// Compact QR of `t`'s current split.
     fn qr_compact(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
     ) -> Result<Qr<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
 
     /// Compact SVD of `t`'s current split.
     fn svd_compact(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
     ) -> Result<Svd<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
 
     /// Hermitian eigendecomposition of `t`'s current split.
     fn eigh_full(
+        _: ExecToken,
         t: &TensorMap<R, D, Self>,
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
@@ -540,6 +543,7 @@ where
     /// `buffers` (allocated when `None`) and `workspace`'s sorted spectra,
     /// after the plan checked the workspace and the source signature.
     fn eigh_full_stack(
+        _: ExecToken,
         plan: &EighFullPlan<R, D, Self>,
         source: &StackedTensorMap<R, D, Self>,
         buffers: &mut Option<super::batched::StackPair<R, D, Self>>,
@@ -555,17 +559,24 @@ where
     R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
-    fn qr_compact(t: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, TypedFacadeError<R>> {
+    fn qr_compact(
+        _: ExecToken,
+        t: &TensorMap<R, D>,
+    ) -> Result<Qr<TensorMap<R, D>>, TypedFacadeError<R>> {
         t.factor_qr(FactorOp::QrCompact, |lease, source| {
             tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(lease, source)
         })
     }
 
-    fn svd_compact(t: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, TypedFacadeError<R>> {
+    fn svd_compact(
+        _: ExecToken,
+        t: &TensorMap<R, D>,
+    ) -> Result<Svd<TensorMap<R, D>>, TypedFacadeError<R>> {
         t.factor_svd_compact()
     }
 
     fn eigh_full(
+        _: ExecToken,
         t: &TensorMap<R, D>,
         hermitian_tol: HermitianTol,
     ) -> Result<Eigh<TensorMap<R, D>>, TypedFacadeError<R>> {
@@ -573,6 +584,7 @@ where
     }
 
     fn eigh_full_stack(
+        _: ExecToken,
         plan: &EighFullPlan<R, D>,
         source: &StackedTensorMap<R, D>,
         buffers: &mut Option<super::batched::StackPair<R, D, Self>>,
