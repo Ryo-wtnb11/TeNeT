@@ -153,6 +153,7 @@ where
 }
 
 mod eigh_eig;
+mod exact_generic_dim;
 mod generic_dispatch;
 mod matrix_functions;
 mod null_space;

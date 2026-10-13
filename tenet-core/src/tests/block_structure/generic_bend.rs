@@ -504,6 +504,10 @@ impl GenericFusionSymbols for MisreportedSimpleA4Rule {
 }
 
 impl GenericRigidSymbols for MisreportedSimpleA4Rule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        A4BendRule.dim_scalar(sector)
+    }
+
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         A4BendRule.sqrt_dim_scalar(sector)
     }

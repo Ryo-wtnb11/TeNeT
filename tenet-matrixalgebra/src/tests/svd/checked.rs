@@ -736,6 +736,10 @@ impl CheckedGenericFusion for FailSingleLegFold {
 impl CheckedGenericRigidSymbols for FailSingleLegFold {
     type Scalar = f64;
 
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.dim_scalar(sector))
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.rule.sqrt_dim_scalar(sector))
     }

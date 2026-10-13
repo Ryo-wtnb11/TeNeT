@@ -1135,6 +1135,10 @@ where
 {
     type Scalar = R::Scalar;
 
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.dim_scalar(sector))
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.sqrt_dim_scalar(sector))
     }
@@ -1376,6 +1380,20 @@ pub trait GenericRigidSymbols: GenericFusionSymbols
 where
     Self::Scalar: CategoricalScalar,
 {
+    /// The quantum dimension `dim(sector)` — TensorKitSectors `dim`, an exact
+    /// categorical dimension (`Int` for group-like sectors), not a square.
+    ///
+    /// The default squares [`sqrt_dim_scalar`](Self::sqrt_dim_scalar), which
+    /// is exact only where `√dim` is (dims 1, 4, 9, …; an irrational dim such
+    /// as `1 + √2` has no better `Scalar`). A provider with any other integer
+    /// dimension overrides this, and a wrapper of another provider forwards it:
+    /// [`InfallibleGeneric`] reports it as `try_dim_scalar`, the exact weight
+    /// of rank budgets and the trace channel factor.
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let sqrt_dim = self.sqrt_dim_scalar(sector);
+        sqrt_dim.clone() * sqrt_dim
+    }
+
     /// `√dim(sector)` — TensorKitSectors `sqrtdim` (`sectors.jl:440`).
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
 

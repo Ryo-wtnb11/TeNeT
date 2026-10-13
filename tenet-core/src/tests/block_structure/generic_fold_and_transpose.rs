@@ -299,6 +299,9 @@ impl GenericFusionSymbols for MalformedA4FProbe {
 }
 
 impl GenericRigidSymbols for MalformedA4FProbe {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        GenericRigidSymbols::dim_scalar(&A4FoldRule, sector)
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         GenericRigidSymbols::sqrt_dim_scalar(&A4FoldRule, sector)
     }

@@ -59,6 +59,9 @@ impl GenericFusionSymbols for TruncatedSymbolRule {
 }
 
 impl GenericRigidSymbols for TruncatedSymbolRule {
+    fn dim_scalar(&self, sector: SectorId) -> f64 {
+        A4FoldRule.dim_scalar(sector)
+    }
     fn sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
         A4FoldRule.sqrt_dim_scalar(sector)
     }

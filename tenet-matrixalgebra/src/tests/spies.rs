@@ -725,6 +725,10 @@ impl CheckedGenericFusion for LateGenericSpy {
 impl CheckedGenericRigidSymbols for LateGenericSpy {
     type Scalar = f64;
 
+    fn try_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.call(|| self.rule.dim_scalar(sector))
+    }
+
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         self.call(|| self.rule.sqrt_dim_scalar(sector))
     }

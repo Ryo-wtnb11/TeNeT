@@ -214,7 +214,10 @@ because truncation budgets and quantum-dimension-weighted norms compare
 
 `InfallibleGeneric<'a, R>` adapts an existing infallible
 provider to the checked interface; see `tenet-sectors/src/sun.rs` for a
-catalog-bounded provider.
+catalog-bounded provider. Its `try_dim_scalar` is the testing-tier
+`GenericRigidSymbols::dim_scalar`, which likewise defaults to
+`sqrt_dim_scalar²`: override it for any integer dimension that is not a
+perfect square.
 
 Current checked Generic coverage is defined by the public bounds and executable
 tests at this revision. It is a Host path; CUDA typed execution is currently
