@@ -87,62 +87,103 @@ where
         .unwrap_or_default()
 }
 
-impl<R, D> network_operand_sealed::Sealed for TensorMap<R, D>
+/// The storage half of [`NetworkOperand`]: the operand admission
+/// [`Network::contract`] decides before the plan lookup, and the planned
+/// execution it then runs. Host checks braiding and runs
+/// [`PlannedNetwork::execute`]; the device adds placement and dense-payload
+/// admission (`cuda_operand_admission`) and runs
+/// `PlannedNetwork::execute_cuda`. Everything else in the eager call is one
+/// body over the storage.
+#[doc(hidden)]
+pub trait NetworkOperandStorage<R, D>: NetworkPayloadStorage<D> + Send + Sync + Sized
 where
-    R: TypedSectorAdmission + Send + Sync,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D, Self>,
+    D: TensorScalar,
+{
+    fn admit_operands(
+        tensors: &[&TensorMap<R, D, Self>],
+        contracts: bool,
+    ) -> Result<(), HostNetworkError<R>>;
+
+    fn execute_planned(
+        planned: &PlannedNetwork,
+        tensors: &[&TensorMap<R, D, Self>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, Self>,
+    ) -> Result<TensorMap<R, D, Self>, HostNetworkError<R>>;
+}
+
+impl<R, D> NetworkOperandStorage<R, D> for Vec<D>
+where
+    R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar + Send + Sync + 'static,
 {
+    fn admit_operands(
+        tensors: &[&TensorMap<R, D>],
+        contracts: bool,
+    ) -> Result<(), HostNetworkError<R>> {
+        reject_non_symmetric_network(tensors, contracts)
+    }
+
+    fn execute_planned(
+        planned: &PlannedNetwork,
+        tensors: &[&TensorMap<R, D>],
+        workspace: &mut NetworkExecutionWorkspace<R, D>,
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+        planned.execute(tensors, workspace)
+    }
 }
 
-impl<R, D> NetworkOperand for TensorMap<R, D>
+#[cfg(feature = "cuda")]
+impl<R, D> NetworkOperandStorage<R, D> for CudaStorage<D>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: CudaPayload,
+{
+    fn admit_operands(tensors: &[&TensorMap<R, D, Self>], contracts: bool) -> Result<(), Error> {
+        cuda_operand_admission(tensors, contracts)
+    }
+
+    fn execute_planned(
+        planned: &PlannedNetwork,
+        tensors: &[&TensorMap<R, D, Self>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, Self>,
+    ) -> Result<TensorMap<R, D, Self>, Error> {
+        planned.execute_cuda(tensors, workspace)
+    }
+}
+
+impl<R, D, S> network_operand_sealed::Sealed for TensorMap<R, D, S>
 where
     R: TypedSectorAdmission + Send + Sync,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    // The metadata preflight and plan lookup read leg dimensions through the
+    // Host policy, which exists whenever a storage's policy does.
+    R::Mode: HostNetworkModeDispatch<R, D> + HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar + Send + Sync + 'static,
+    S: NetworkOperandStorage<R, D>,
+{
+}
+
+impl<R, D, S> NetworkOperand for TensorMap<R, D, S>
+where
+    R: TypedSectorAdmission + Send + Sync,
+    // The metadata preflight and plan lookup read leg dimensions through the
+    // Host policy, which exists whenever a storage's policy does.
+    R::Mode: HostNetworkModeDispatch<R, D> + HostNetworkModeDispatch<R, D, S>,
+    D: TensorScalar + Send + Sync + 'static,
+    S: NetworkOperandStorage<R, D>,
 {
     type Error = HostNetworkError<R>;
 
     fn contract_network(network: &Network, tensors: &[&Self]) -> Result<Self, Self::Error> {
         network.validate_operand_count(tensors.len())?;
-        reject_non_symmetric_network(tensors, tensors.len() > 1)?;
+        S::admit_operands(tensors, tensors.len() > 1)?;
         network.contract_preflight(tensors)?;
         crate::plancache::get_or_plan_network(network, tensors, &runtime_optimizer(tensors))?
-            .execute_host(tensors)
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<R, D> network_operand_sealed::Sealed for TensorMap<R, D, CudaStorage<D>>
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send
-        + Sync,
-    D: CudaPayload,
-{
-}
-
-#[cfg(feature = "cuda")]
-impl<R, D> NetworkOperand for TensorMap<R, D, CudaStorage<D>>
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send
-        + Sync,
-    D: CudaPayload,
-{
-    type Error = Error;
-
-    fn contract_network(network: &Network, tensors: &[&Self]) -> Result<Self, Error> {
-        network.validate_operand_count(tensors.len())?;
-        cuda_operand_admission(tensors, tensors.len() > 1)?;
-        network.contract_preflight(tensors)?;
-        crate::plancache::get_or_plan_network(network, tensors, &runtime_optimizer(tensors))?
-            .execute_cuda(tensors)
+            .execute(tensors)
     }
 }

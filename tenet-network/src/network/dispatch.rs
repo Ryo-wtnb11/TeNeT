@@ -101,19 +101,23 @@ impl<T> StepOutput<T> {
     }
 }
 
-/// The Host step of every mode: a retained destination is overwritten through
-/// `contract_into` (`beta = 0`), otherwise the step returns the eager result.
-fn host_contract_step<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    destination: &mut Option<TensorMap<R, D>>,
+/// The step of every mode and storage: a retained destination is overwritten
+/// through `contract_into` (`beta = 0`), otherwise the step returns the eager
+/// result.
+fn host_contract_step<R, D, S>(
+    lhs: &TensorMap<R, D, S>,
+    rhs: &TensorMap<R, D, S>,
+    destination: &mut Option<TensorMap<R, D, S>>,
     spec: &ContractSpec<'_>,
-) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>
+) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorContractDispatch<R, D>,
     D: TensorScalar,
+    S: ContractExec<R, D>,
 {
+    #[cfg(all(test, feature = "cuda"))]
+    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(calls.get() + 1));
     if let Some(destination) = destination {
         lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
         Ok(StepOutput::Overwritten)
@@ -122,13 +126,28 @@ where
     }
 }
 
-impl<R, D> HostNetworkModeDispatch<R, D> for MultiplicityFreeAdmissionMode
+/// The multiplicity-free policy on every storage that has the transform and
+/// contraction kernels: Host `Vec<D>` and, with the `cuda` feature, the
+/// device storage for the multiplicity-free rules its kernels admit.
+///
+/// Each step is the typed general-axes `contract` / `contract_into` with
+/// `beta = 0` (the Host-compiled DynamicTree or core route, fermionic twist
+/// included), writing the step's own output orientation. Every step but the
+/// last overwrites a destination the workspace kept from the previous call
+/// (the device overwrite needs no reset of it); the final schedule slot
+/// leaves the workspace and therefore always allocates a fresh returning
+/// output. Slots, producers, input snapshots and parking are the same on
+/// every storage, which is what lets one pool serve both placements. Device
+/// admission is decided before the first step by
+/// `PlannedNetwork::validate_cuda_admission`.
+impl<R, D, S> HostNetworkModeDispatch<R, D, S> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D> + TransformExec<R, D> + ContractExec<R, D>,
 {
     const REUSE_DESTINATIONS: bool = true;
 
@@ -140,24 +159,24 @@ where
         tensor.leg_dims()
     }
 
-    fn adjoint_operand(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+    fn adjoint_operand(tensor: &TensorMap<R, D, S>) -> Result<TensorMap<R, D, S>, Error> {
         tensor.adjoint()
     }
 
     fn contract_step(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-        destination: &mut Option<TensorMap<R, D>>,
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
+        destination: &mut Option<TensorMap<R, D, S>>,
         spec: &ContractSpec<'_>,
-    ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
+    ) -> Result<StepOutput<TensorMap<R, D, S>>, Error> {
         host_contract_step(lhs, rhs, destination, spec)
     }
 
     fn permute_final(
-        tensor: &TensorMap<R, D>,
+        tensor: &TensorMap<R, D, S>,
         codomain: &[usize],
         domain: &[usize],
-    ) -> Result<TensorMap<R, D>, Error> {
+    ) -> Result<TensorMap<R, D, S>, Error> {
         tensor.permute(codomain, domain)
     }
 }
@@ -205,69 +224,6 @@ where
         codomain: &[usize],
         domain: &[usize],
     ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
-        tensor.permute(codomain, domain)
-    }
-}
-
-/// Device network policy: the Host step sequence on device tensors, with
-/// retained device destinations.
-///
-/// Each arm is the Host arm with the device twin of the same typed operation:
-/// general-axes `contract` / `contract_into` with `beta = 0` (the
-/// Host-compiled DynamicTree or core route, fermionic twist included), each
-/// writing the step's own output orientation. Every step but the last
-/// overwrites a destination the workspace kept from the previous call (the
-/// device overwrite needs no reset of it); the final schedule slot leaves the
-/// workspace and therefore always allocates a fresh returning output. Slots, producers, input
-/// snapshots and parking behave exactly as on Host, which is what lets one
-/// pool serve both placements. Admission is decided before the first step by
-/// `PlannedNetwork::validate_cuda_admission`.
-#[cfg(feature = "cuda")]
-impl<R, D> HostNetworkModeDispatch<R, D, CudaStorage<D>> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: CudaPayload,
-{
-    const REUSE_DESTINATIONS: bool = true;
-
-    fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
-        tenet::sector::FusionRule::braiding_style(provider)
-    }
-
-    fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
-        tensor.leg_dims()
-    }
-
-    fn adjoint_operand(
-        tensor: &TensorMap<R, D, CudaStorage<D>>,
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
-        tensor.adjoint()
-    }
-
-    fn contract_step(
-        lhs: &TensorMap<R, D, CudaStorage<D>>,
-        rhs: &TensorMap<R, D, CudaStorage<D>>,
-        destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
-        spec: &ContractSpec<'_>,
-    ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
-        #[cfg(test)]
-        CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(calls.get() + 1));
-        if let Some(destination) = destination {
-            lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
-            Ok(StepOutput::Overwritten)
-        } else {
-            Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
-        }
-    }
-
-    fn permute_final(
-        tensor: &TensorMap<R, D, CudaStorage<D>>,
-        codomain: &[usize],
-        domain: &[usize],
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         tensor.permute(codomain, domain)
     }
 }

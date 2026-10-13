@@ -29,13 +29,7 @@ use std::sync::{Arc, Mutex, Weak};
 use lru::LruCache;
 use tenet::expert::TensorStorage;
 use tenet::sector::TypedSectorAdmission;
-#[cfg(feature = "cuda")]
-use tenet::sector::{
-    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
-};
 use tenet::typed::TensorMap;
-#[cfg(feature = "cuda")]
-use tenet::typed::{CudaPayload, CudaStorage, FusionAlgebraError};
 use tenet::typed::{Error, Runtime, TensorScalar};
 
 mod config;
@@ -468,33 +462,17 @@ pub(crate) struct CachedPlan {
 }
 
 impl CachedPlan {
-    pub(crate) fn execute_host<R, D>(
+    pub(crate) fn execute<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
+        tensors: &[&TensorMap<R, D, S>],
+    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
     where
         R: TypedSectorAdmission + Send + Sync,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: HostNetworkModeDispatch<R, D, S>,
         D: TensorScalar + Send + Sync + 'static,
+        S: crate::network::NetworkOperandStorage<R, D>,
     {
-        self.execute_leased(tensors, PlannedNetwork::execute)
-    }
-
-    #[cfg(feature = "cuda")]
-    pub(crate) fn execute_cuda<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
-    where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec
-            + Send
-            + Sync,
-        D: CudaPayload,
-    {
-        self.execute_leased(tensors, PlannedNetwork::execute_cuda)
+        self.execute_leased(tensors, S::execute_planned)
     }
 
     /// One lease lifecycle for every placement: take a workspace from this
@@ -1740,7 +1718,7 @@ mod tests {
         )
         .unwrap();
         let cached = super::get_or_plan_network(&network, &tensors, &Default::default()).unwrap();
-        cached.execute_host(&tensors).unwrap();
+        cached.execute(&tensors).unwrap();
         let warm = super::plan_cache_stats(&runtime);
         assert_eq!(warm.idle_workspaces, 1, "a success recycles its lease");
 
@@ -1753,7 +1731,7 @@ mod tests {
         let after = super::plan_cache_stats(&runtime);
         assert_eq!(after.idle_workspaces, 0, "the failed lease is quarantined");
 
-        cached.execute_host(&tensors).unwrap();
+        cached.execute(&tensors).unwrap();
         let rebuilt = super::plan_cache_stats(&runtime);
         assert_eq!(
             rebuilt.workspaces_created,
