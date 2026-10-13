@@ -412,7 +412,8 @@ impl DefaultDenseExecutor {
 
     /// Routes one typed identity batch by what the two tenferro entries can
     /// represent, not by a run-length cutoff. The strided entry is one rank-3
-    /// contraction, so it can carry a batch iff the batch is ONE affine run:
+    /// contraction, so it can carry a batch iff the batch is one job (batch
+    /// extent one; TensorKit's per-block `mul!`) or ONE affine run:
     /// `runs == [jobs.len()]`, at least two jobs (a step needs two offsets),
     /// every job sharing job 0's shape and the job-0-to-job-1 offset steps
     /// (`strided_batch_run_len`, O(J): `runs` is a caller claim, and a wrong
@@ -425,6 +426,11 @@ impl DefaultDenseExecutor {
     /// GEMM list with no cutoff — represents every batch, so everything else
     /// goes there as ONE submission built from `jobs` (never from `runs`, so a
     /// malformed partition cannot skip or over-index a job).
+    ///
+    /// Why not send one job to the grouped entry too: tenferro's grouped
+    /// validator allocates its O(J) range list on every call, so a recoupling
+    /// replay that submits one GEMM per Multi block would allocate once per
+    /// block on every warm call (#2184); the strided entry allocates nothing.
     ///
     /// Why not keep a per-run cutoff: it was an empirical constant in tensor
     /// semantics (user decision 2026-09-14). The disadvantage accepted here: a
@@ -460,7 +466,7 @@ impl DefaultDenseExecutor {
                 .checked_sub(jobs[0].dst_offset)
                 .zip(jobs[0].rows.checked_mul(jobs[0].cols))
                 .is_some_and(|(dst_step, block)| dst_step >= block);
-        if single_self_disjoint_run {
+        if jobs.len() == 1 || single_self_disjoint_run {
             return self.matmul_strided_batch_run_typed(
                 output,
                 lhs,
@@ -879,25 +885,34 @@ impl DefaultDenseExecutor {
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
     ) -> Result<StridedBatchRunLayout, DenseError> {
-        // Two jobs define the structural batch stride; singletons cannot.
-        debug_assert!(run.len() >= 2, "strided run must hold at least two jobs");
         let first = &run[0];
-        let next = &run[1];
         let run_len = run.len();
-        let Some(lhs_batch_stride) = next.lhs_offset.checked_sub(first.lhs_offset) else {
-            return Err(DenseError::OffsetOverflow {
-                value: first.lhs_offset,
-            });
-        };
-        let Some(rhs_batch_stride) = next.rhs_offset.checked_sub(first.rhs_offset) else {
-            return Err(DenseError::OffsetOverflow {
-                value: first.rhs_offset,
-            });
-        };
-        let Some(dst_batch_stride) = next.dst_offset.checked_sub(first.dst_offset) else {
-            return Err(DenseError::OffsetOverflow {
-                value: first.dst_offset,
-            });
+        // Two jobs define the structural batch stride. A single job never
+        // steps it, so its stride is the matrix extent: a dense, self-disjoint
+        // value every view validator accepts.
+        let (lhs_batch_stride, rhs_batch_stride, dst_batch_stride) = match run.get(1) {
+            Some(next) => {
+                let step = |next: usize, first: usize| {
+                    next.checked_sub(first)
+                        .ok_or(DenseError::OffsetOverflow { value: first })
+                };
+                (
+                    step(next.lhs_offset, first.lhs_offset)?,
+                    step(next.rhs_offset, first.rhs_offset)?,
+                    step(next.dst_offset, first.dst_offset)?,
+                )
+            }
+            None => {
+                let extent = |a: usize, b: usize, offset: usize| {
+                    a.checked_mul(b)
+                        .ok_or(DenseError::OffsetOverflow { value: offset })
+                };
+                (
+                    extent(first.rows, first.contracted, first.lhs_offset)?,
+                    extent(first.contracted, first.cols, first.rhs_offset)?,
+                    extent(first.rows, first.cols, first.dst_offset)?,
+                )
+            }
         };
         let lhs_shape = [first.rows, first.contracted, run_len];
         let lhs_strides = match lhs_op {
