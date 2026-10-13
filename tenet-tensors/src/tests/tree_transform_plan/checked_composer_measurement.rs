@@ -7,7 +7,7 @@
 
 use super::*;
 use std::cell::Cell;
-use std::ops::{Add, Mul};
+use std::ops::{Add, Div, Mul};
 use tenet_core::{
     BraidingStyleKind, CategoricalScalar, FusionStyleKind, SUNFusionRule, SUNFusionRuleError,
     SectorVec,
@@ -35,6 +35,13 @@ impl Mul for Counted {
     fn mul(self, other: Self) -> Self {
         MULS.set(MULS.get() + 1);
         Self(self.0 * other.0)
+    }
+}
+
+impl Div for Counted {
+    type Output = Self;
+    fn div(self, other: Self) -> Self {
+        Self(self.0 / other.0)
     }
 }
 

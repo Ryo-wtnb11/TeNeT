@@ -159,6 +159,10 @@ fn f_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId,
 fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar;
 ```
 
+`CategoricalScalar` (shared with `CheckedGenericRigidSymbols::Scalar`) needs
+`+`, `*` and `/`: the trace channel factor divides quantum dimensions,
+`dim(c) / dim(first)`, as TensorKit does.
+
 Argument order is TensorKitSectors' `Fsymbol(a,b,c,d,e,f)` / `Rsymbol(a,b,c)`
 verbatim: `e` is the `(a,b)` channel, `f` is the `(b,c)` channel, `d` is the
 total.

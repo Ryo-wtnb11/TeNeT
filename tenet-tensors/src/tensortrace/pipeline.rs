@@ -733,16 +733,16 @@ where
                 message: "trace channel requires at least one uncoupled sector",
             })
         })?;
-        let sqrt_coupled = rule
-            .try_sqrt_dim_scalar(trace_tree.coupled())
+        let dim_coupled = rule
+            .try_dim_scalar(trace_tree.coupled())
             .map_err(CheckedGenericPlanError::Provider)?;
-        let inv_sqrt_first = rule
-            .try_inv_sqrt_dim_scalar(first)
+        let dim_first = rule
+            .try_dim_scalar(first)
             .map_err(CheckedGenericPlanError::Provider)?;
-        // The categorical trace factor is dim(coupled)/dim(first), expressed
-        // through the Generic provider's square-root dimension interface.
-        let mut factor =
-            sqrt_coupled.clone() * sqrt_coupled * inv_sqrt_first.clone() * inv_sqrt_first;
+        // Why not `sqrt_dim(c)² · inv_sqrt_dim(first)²`: four roundings put an
+        // integer-dimension quotient (SU(3) `15/3`) ulps off TensorKit's
+        // `dim(c) / dim(first)`, which this single division reproduces.
+        let mut factor = dim_coupled / dim_first;
         for (&sector, &is_dual) in trace_tree
             .uncoupled()
             .iter()

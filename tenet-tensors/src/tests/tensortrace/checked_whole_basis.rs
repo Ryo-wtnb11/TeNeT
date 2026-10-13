@@ -496,9 +496,13 @@ fn group_admission_validates_each_member_once_in_block_order() {
 /// now admits its input once instead of admitting the input and both
 /// outputs twice each. #2149 lowers a group whole right after composing it,
 /// so the same multiset of queries (`sorted`, pinned before and after) comes
-/// in group order rather than source-block order (`ledger`). The ledger is
-/// exact; term values go through `portable` (racah SU(3) coefficients round
-/// their last bits differently on Linux and macOS).
+/// in group order rather than source-block order (`ledger`). #2075 asks
+/// each trace channel factor for `Dim(c)`, `Dim(first)` instead of
+/// `SqrtDim(c)`, `InvSqrtDim(first)` (16 factors: 208/144/0 to 192/128/32
+/// SqrtDim/InvSqrtDim/Dim queries, same count); its 0–3 ulp term changes
+/// are below `portable`'s `f32` rounding. The ledger is exact; term values
+/// go through `portable` (racah SU(3) coefficients round their last bits
+/// differently on Linux and macOS).
 #[test]
 fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
     let fixture = fixture();
@@ -522,8 +526,8 @@ fn cold_compile_ledger_and_term_bits_match_pinned_revision() {
         (calls.len(), multiset, ledger, terms),
         (
             1519,
-            18_127_165_706_457_959_630,
-            5_669_293_502_179_296_014,
+            4_651_798_264_327_362_414,
+            8_649_410_880_240_935_342,
             14_775_106_432_576_145_088
         )
     );
@@ -733,4 +737,76 @@ fn owned_checked_trace_preflights_once() {
     owned(provider.calls.take());
     publishing_compile(&fixture).unwrap();
     owned(provider.calls.take());
+}
+
+/// What (#2075): the checked trace channel factor is TensorKit's
+/// `dim(c) / dim(first)` (`_trace_permute!`, `tensoroperations.jl:252`) to
+/// the bit. SU(3) `V ⊗ V ← V ⊗ V` with `V = 3 ⊕ 8`, traced over the second
+/// leg pair, permutes nothing (coefficient 1) and SU(3) twists are 1, so each
+/// term is the bare factor of its source tree `(a, b) → c`. Every quotient of
+/// these Weyl dimensions is dyadic, so the exact value and the partial-trace
+/// sum rule `Σ_{c,μ} dim(c)/dim(a) = dim(b)` (`tr_W id_{V⊗W} = dim(W) id_V`)
+/// are exact `f64` comparisons. The previous `sqrt_dim² · inv_sqrt_dim²`
+/// factor misses both (`15/3 → 5.000000000000002`, `3/8` three ulps low).
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_trace_channel_factor_is_the_exact_dimension_quotient() {
+    let rule = SUNFusionRule::new(3).unwrap();
+    // Hand Weyl formula for SU(3) `(p, q)`, independent of the provider.
+    let weyl = |sector: SectorId| {
+        let label = rule.decode_dynkin(sector).unwrap();
+        let (p, q) = (label[0], label[1]);
+        ((p + 1) * (q + 1) * (p + q + 2) / 2) as f64
+    };
+    let fundamental = rule.encode_dynkin(&[1, 0]).unwrap();
+    let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
+    let provider = Arc::new(rule.clone());
+    let v = || SectorLeg::new([(fundamental, 2), (adjoint, 1)], false);
+    let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v(), v()]),
+            FusionProductSpace::new([v(), v()]),
+        ),
+    )
+    .unwrap();
+    let axes = TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]);
+    let preflight = crate::tensortrace_fusion_dyn_preflight_generic_checked(&src, axes, 1).unwrap();
+    let dst = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        preflight.into_selected_homspace(),
+    )
+    .unwrap();
+    let structure = crate::tensortrace::compile_fusion_dyn_generic_checked(
+        &dst,
+        &src,
+        axes,
+        &mut crate::tree_transform::CheckedPendingCoefficients::new(),
+    )
+    .unwrap();
+
+    let src_structure = src.space().structure();
+    let mut sums: Vec<((usize, SectorId), f64)> = Vec::new();
+    for term in structure.terms() {
+        let tree = source_key(src_structure, term.src_block()).codomain_tree();
+        let (a, b, c) = (tree.uncoupled()[0], tree.uncoupled()[1], tree.coupled());
+        let want = weyl(c) / weyl(a);
+        assert_eq!(
+            term.coefficient().to_bits(),
+            want.to_bits(),
+            "dim({c:?})/dim({a:?}): {} != {want}",
+            term.coefficient()
+        );
+        let key = (term.dst_block(), b);
+        match sums.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, sum)) => *sum += *term.coefficient(),
+            None => sums.push((key, *term.coefficient())),
+        }
+    }
+    // Every (a, b) in {3, 8}² and the 8 ⊗ 8 → 8 multiplicity are present.
+    assert_eq!(sums.len(), 4);
+    assert!(structure.terms().len() > 10);
+    for ((_, b), sum) in sums {
+        assert_eq!(sum, weyl(b), "Σ dim(c)/dim(a) over b = {b:?}");
+    }
 }
