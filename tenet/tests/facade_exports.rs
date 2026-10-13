@@ -347,6 +347,7 @@ const TYPED: &[&str] = &[
     "Side",
     "SignatureField",
     "SpectrumMagnitude",
+    "StackExec",
     "StackedTensorMap",
     "StructureSignature",
     "Svd",

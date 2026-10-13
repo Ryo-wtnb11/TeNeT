@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{
-    ComposePlan, ContractPlan, ContractSpec, ContractWorkspace, Direction, Eigh, GradedSpace,
-    HermitianTol, Qr, Runtime, StackedTensorMap, Svd, TensorMap,
+    ComposePlan, ContractPlan, ContractSpec, ContractWorkspace, Direction, Eigh, EighFullPlan,
+    GradedSpace, HermitianTol, LegSelection, Qr, Runtime, StackedTensorMap, Svd, TensorMap,
 };
 
 #[test]
@@ -136,4 +136,19 @@ fn unified_methods_resolve_in_path_form() {
         taken.member(0).unwrap().dense_data().unwrap(),
         t.dense_data().unwrap()
     );
+
+    // L11 stacked member movement and the prepared eigh.
+    let pair = StackedTensorMap::select(&stack, &[0, 0]).unwrap();
+    assert_eq!(pair.len(), 2);
+    assert_eq!(
+        pair.member(1).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    let first = LegSelection::try_new(&v, [(U1Irrep::new(0), 0..1)]).unwrap();
+    let corner = StackedTensorMap::restrict_leg(&stack, &[(0, &first), (1, &first)]).unwrap();
+    assert_eq!(corner.member(0).unwrap().dense_data().unwrap(), &[1.0]);
+    let plan = EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let out = EighFullPlan::execute(&plan, &stack, &mut workspace).unwrap();
+    assert_eq!(out.spectra[0][0].values, [1.0, 1.0]);
 }

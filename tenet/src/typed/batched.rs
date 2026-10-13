@@ -36,9 +36,9 @@ use tenet_tensors::{FusionOperand, OperationError};
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};
 use super::{
     owned_repr, require_restriction_set, restricted_space, restriction_runs,
-    BoundDynamicFusionMapSpace, FactorizationScalar, LegSelection, Runtime, SectorSpectrum,
-    TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission, TypedTensorBody,
-    TypedTensorRepr, TypedTensorRootDispatch,
+    BoundDynamicFusionMapSpace, FactorExec, FactorizationScalar, LegSelection, Runtime,
+    SectorSpectrum, TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission,
+    TypedTensorBody, TypedTensorRepr, TypedTensorRootDispatch,
 };
 use crate::error::Error;
 use crate::runtime::RuntimeIdentity;
@@ -403,10 +403,11 @@ where
             repr: owned_repr(TypedTensorBody::dense(self.space.clone(), data)),
         })
     }
+}
 
+impl<R, D, S: StackExec<D>> StackedTensorMap<R, D, S> {
     /// A new stack whose member `j` is member `members[j]` of this one, with
-    /// the same signature, placement and Runtime: one allocation of
-    /// `members.len() * L` elements and one slice copy per selected member.
+    /// the same signature, placement and Runtime.
     ///
     /// Indices may appear in any order and may repeat (a repeated index
     /// replicates that member), so the result can be longer than this stack.
@@ -417,19 +418,25 @@ where
     ///
     /// This is how a caller drops the members a batched handle rejected, or
     /// splits a stack into groups whose truncated signatures agree.
+    ///
+    /// # Cost
+    ///
+    /// Host: one allocation of `members.len() * L` elements and one slice
+    /// copy per selected member. CUDA: one upload of the `members.len()`
+    /// member offsets and one Tenferro `gather` launch per call, whatever
+    /// `B` and the block structure; the gather allocates the result buffer.
+    /// Nothing is downloaded and nothing waits on the device.
     pub fn select(&self, members: &[usize]) -> Result<Self, Error> {
-        let mut storage = Vec::with_capacity(self.selection_len(members)?);
-        for &member in members {
-            storage.extend_from_slice(&self.storage[member * self.member_len..][..self.member_len]);
-        }
-        Ok(self.with_storage(storage, members.len()))
+        let len = self.selection_len(members)?;
+        S::select_members(self, members, len)
     }
 }
 
-impl<R, D> StackedTensorMap<R, D>
+impl<R, D, S> StackedTensorMap<R, D, S>
 where
     R: TypedSectorAdmission,
     D: TensorScalar,
+    S: StackExec<D>,
 {
     /// Restricts the listed legs of every member: member `i` of the result
     /// is `self.member(i)?.restrict_leg(legs)?`, bit for bit, with the same
@@ -441,11 +448,21 @@ where
     ///
     /// # Cost
     ///
-    /// The eager block plan is built once; each destination block is then one
-    /// strided copy for all `B` members and all restricted legs, the member
-    /// axis being one more dimension of the copy. `B · L'` elements move into
-    /// one output allocation, left unfilled when the blocks tile it (as
-    /// eager), plus `O(rank + blocks)` structural work independent of `B`.
+    /// Host: the eager block plan is built once; each destination block is
+    /// then one strided copy for all `B` members and all restricted legs, the
+    /// member axis being one more dimension of the copy. `B · L'` elements
+    /// move into one output allocation, left unfilled when the blocks tile it
+    /// (as eager), plus `O(rank + blocks)` structural work independent of
+    /// `B`.
+    ///
+    /// CUDA: one upload of an `L'`-entry element table and one Tenferro
+    /// `gather` launch per call, whatever `B`, the block count and the number
+    /// of restricted legs. Nothing is downloaded and nothing waits on the
+    /// device. The table maps each destination element to its source element
+    /// within a member. It is the eager restriction kernel applied once, on
+    /// the Host, to the payload `0, 1, …, L - 1`, so the block plan has one
+    /// implementation; the gather then reads that element of every member
+    /// (its window is the member axis) and allocates the `[L', B]` result.
     ///
     /// # Errors
     ///
@@ -463,16 +480,73 @@ where
     {
         require_restriction_set(&self.space, legs)?;
         let destination = restricted_space(&self.space, legs)?;
-        let _host_pool = self.runtime.enter_host_pool();
+        Ok(S::restrict_members(self, destination, legs)?)
+    }
+}
+
+/// The member-movement kernels of a stack for one storage (#1756):
+/// [`StackedTensorMap::select`] and [`StackedTensorMap::restrict_leg`] own
+/// the index checks and the result space, and call one of these, last. Each
+/// returns the finished stack, so a storage's resource scope (the Host pool,
+/// the device lease) spans exactly what it spanned before.
+///
+/// Why not a subtrait of [`super::TypedStorage`]: these kernels move member
+/// elements and never read the rule, and the CUDA `TypedStorage` impl is
+/// bounded by the multiplicity-free rules, which would remove the device
+/// `select` and `restrict_leg` of a checked Generic stack.
+#[doc(hidden)]
+pub trait StackExec<D>: TensorStorage<D> + super::storage::sealed::Sealed + Sized {
+    /// The stack of `stack`'s members `members`, whose checked payload
+    /// length is `len`.
+    fn select_members<R>(
+        stack: &StackedTensorMap<R, D, Self>,
+        members: &[usize],
+        len: usize,
+    ) -> Result<StackedTensorMap<R, D, Self>, Error>;
+
+    /// The stack over the checked `destination` holding every member of
+    /// `stack` restricted by `legs`.
+    fn restrict_members<R: TypedSectorAdmission>(
+        stack: &StackedTensorMap<R, D, Self>,
+        destination: BoundDynamicFusionMapSpace<R>,
+        legs: &[(usize, &LegSelection<R>)],
+    ) -> Result<StackedTensorMap<R, D, Self>, Error>
+    where
+        D: TensorScalar;
+}
+
+impl<D: Copy> StackExec<D> for Vec<D> {
+    fn select_members<R>(
+        stack: &StackedTensorMap<R, D>,
+        members: &[usize],
+        len: usize,
+    ) -> Result<StackedTensorMap<R, D>, Error> {
+        let mut storage = Vec::with_capacity(len);
+        for &member in members {
+            storage
+                .extend_from_slice(&stack.storage[member * stack.member_len..][..stack.member_len]);
+        }
+        Ok(stack.with_storage(storage, members.len()))
+    }
+
+    fn restrict_members<R: TypedSectorAdmission>(
+        stack: &StackedTensorMap<R, D>,
+        destination: BoundDynamicFusionMapSpace<R>,
+        legs: &[(usize, &LegSelection<R>)],
+    ) -> Result<StackedTensorMap<R, D>, Error>
+    where
+        D: TensorScalar,
+    {
+        let _host_pool = stack.runtime.enter_host_pool();
         let data = tenet_tensors::stacked_fusion_restrict_owned(
             destination.space().structure(),
-            FusionOperand::direct(self.space.space()),
-            &self.storage,
-            self.members,
-            &restriction_runs(self.rank(), legs),
+            FusionOperand::direct(stack.space.space()),
+            &stack.storage,
+            stack.members,
+            &restriction_runs(stack.rank(), legs),
         )
         .map_err(Error::from)?;
-        Ok(self.with_space(destination, data)?)
+        stack.with_space(destination, data)
     }
 }
 
@@ -706,14 +780,14 @@ pub struct EighFullWorkspace<R: SectorCodec, D, S = Vec<D>> {
     output: OutputSlot<StackPair<R, D, S>>,
     spectra: Vec<Vec<SectorSpectrum<<R as SectorCodec>::Sector>>>,
     /// Every member's ascending eigenvalues, member-major (`Σ n` each).
-    sorted: Vec<f64>,
+    pub(super) sorted: Vec<f64>,
     /// The solver-to-ascending column order of `sorted`'s entries.
     #[cfg(feature = "cuda")]
-    orders: Vec<usize>,
+    pub(super) orders: Vec<usize>,
 }
 
 /// `(d, v)` of a prepared eigendecomposition.
-type StackPair<R, D, S> = (StackedTensorMap<R, D, S>, StackedTensorMap<R, D, S>);
+pub(super) type StackPair<R, D, S> = (StackedTensorMap<R, D, S>, StackedTensorMap<R, D, S>);
 
 /// The data-independent part of the eigendecomposition, compiled once from
 /// the structure for both placements (`eigh_full` keeps every eigenpair, so
@@ -961,13 +1035,16 @@ impl<R: SectorCodec, D, S> EighFullPlan<R, D, S> {
     }
 }
 
-impl<R, D> EighFullPlan<R, D>
+impl<R, D, S> EighFullPlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: FactorizationScalar,
+    S: FactorExec<R, D>,
 {
     /// Decomposes every member into the workspace-owned `(d, v)` and borrows
     /// them with the host spectra.
+    ///
+    /// # Host
     ///
     /// Every member is admitted (the eager Hermitian rule, per coupled
     /// sector, one read of its `Σ n²` region entries) before any member is
@@ -982,6 +1059,24 @@ where
     /// changes and reused otherwise: `v` is overwritten, and `d` only on its
     /// diagonal, since the workspace never writes `d` elsewhere.
     ///
+    /// # CUDA
+    ///
+    /// Per call, independent of `B`: at most three admission downloads and
+    /// one spectra download; one batched solver call per coupled sector
+    /// (each reads its solver status, a host barrier, inside the backend);
+    /// one column gather per coupled sector, then one strided copy per
+    /// aligned coupled sector (per codomain tree otherwise); one strided copy
+    /// per coupled sector onto `d`'s diagonals. Host to device, per call:
+    /// the `B · Σ n` sorted eigenvalues (the only payload of `d` that
+    /// changes), one `[B · n, 2]` index table per coupled sector and at most
+    /// two `[B]` normalizer vectors per coupled sector.
+    ///
+    /// `d` and `v` are reused across calls at the same `B`. A new `B`, or a
+    /// call after [`EighFullWorkspace::take_output`], allocates both with one
+    /// zero upload each (`B · Σ n²` and `B · L_v` elements, the only device
+    /// allocation path until #740); `d`'s off-diagonal entries are never
+    /// written.
+    ///
     /// # Errors
     ///
     /// [`BatchError::Operation`] with [`Error::BatchSignatureMismatch`] for a
@@ -991,17 +1086,22 @@ where
     /// operation's errors as [`BatchError::Operation`]. A workspace from
     /// another plan is rejected before it is touched. Once the workspace is
     /// bound to this plan, any execution error leaves no observable output.
+    ///
+    /// On CUDA, non-Hermitian members are found by the batched admission
+    /// before any solver launch, and [`BatchError::Solver`] is returned when
+    /// the solver reports a numerical failure on a block. Argument, bounds
+    /// and backend failures are [`BatchError::Operation`].
     pub fn execute<'a>(
         &self,
-        source: &StackedTensorMap<R, D>,
-        workspace: &'a mut EighFullWorkspace<R, D>,
-    ) -> Result<EighStackOutput<'a, R, D>, BatchError> {
+        source: &StackedTensorMap<R, D, S>,
+        workspace: &'a mut EighFullWorkspace<R, D, S>,
+    ) -> Result<EighStackOutput<'a, R, D, S>, BatchError> {
         self.check_workspace(workspace)?;
         if let Err(error) = self.check_source(source) {
             return Err(workspace.output.hide(error.into()));
         }
         let mut buffers = workspace.take_buffers(source.members);
-        if let Err(error) = self.run_host(source, &mut buffers, &mut workspace.sorted) {
+        if let Err(error) = S::eigh_full_stack(self, source, &mut buffers, workspace) {
             return Err(workspace.output.fail(buffers, error));
         }
         if let Err(error) = self.publish(workspace, source.members) {
@@ -1012,12 +1112,18 @@ where
         }
         Ok(self.output_ref(workspace)?)
     }
+}
 
+impl<R, D> EighFullPlan<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: FactorizationScalar,
+{
     /// The Host call into `buffers`, allocated zeroed when absent; writes
     /// every member's ascending eigenvalues into `sorted`. `d`'s
     /// off-diagonal entries are never written, so a reused `d` needs only
     /// its diagonals.
-    fn run_host(
+    pub(super) fn run_host(
         &self,
         source: &StackedTensorMap<R, D>,
         buffers: &mut Option<StackPair<R, D, Vec<D>>>,
@@ -1377,60 +1483,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    /// The device form of the Host [`EighFullPlan::execute`].
-    ///
-    /// Per call, independent of `B`: at most three admission downloads and
-    /// one spectra download; one batched solver call per coupled sector
-    /// (each reads its solver status, a host barrier, inside the backend);
-    /// one column gather per coupled sector, then one strided copy per
-    /// aligned coupled sector (per codomain tree otherwise); one strided copy
-    /// per coupled sector onto `d`'s diagonals. Host to device, per call:
-    /// the `B · Σ n` sorted eigenvalues (the only payload of `d` that
-    /// changes), one `[B · n, 2]` index table per coupled sector and at most
-    /// two `[B]` normalizer vectors per coupled sector.
-    ///
-    /// `d` and `v` are reused across calls at the same `B`. A new `B`, or a
-    /// call after [`EighFullWorkspace::take_output`], allocates both with one
-    /// zero upload each (`B · Σ n²` and `B · L_v` elements, the only device
-    /// allocation path until #740); `d`'s off-diagonal entries are never
-    /// written.
-    ///
-    /// # Errors
-    ///
-    /// As the Host form, with non-Hermitian members found by the batched
-    /// admission before any solver launch, and [`BatchError::Solver`] when
-    /// the solver reports a numerical failure on a block. Argument, bounds
-    /// and backend failures are [`BatchError::Operation`].
-    pub fn execute<'a>(
-        &self,
-        source: &StackedTensorMap<R, D, CudaStorage<D>>,
-        workspace: &'a mut EighFullWorkspace<R, D, CudaStorage<D>>,
-    ) -> Result<EighStackOutput<'a, R, D, CudaStorage<D>>, BatchError> {
-        self.check_workspace(workspace)?;
-        if let Err(error) = self.check_source(source) {
-            return Err(workspace.output.hide(error.into()));
-        }
-        let mut buffers = workspace.take_buffers(source.members);
-        if let Err(error) = self.run_cuda(
-            source,
-            &mut buffers,
-            &mut workspace.sorted,
-            &mut workspace.orders,
-        ) {
-            return Err(workspace.output.fail(buffers, error));
-        }
-        if let Err(error) = self.publish(workspace, source.members) {
-            return Err(workspace.output.fail(buffers, error.into()));
-        }
-        if let Some(buffers) = buffers {
-            workspace.output.publish(buffers);
-        }
-        Ok(self.output_ref(workspace)?)
-    }
-
     /// The device call into `buffers`, allocated zeroed when absent; returns
     /// every member's sorted eigenvalues, member-major (`Σ n` per member).
-    fn run_cuda(
+    pub(super) fn run_cuda(
         &self,
         source: &StackedTensorMap<R, D, CudaStorage<D>>,
         buffers: &mut Option<StackPair<R, D, CudaStorage<D>>>,
@@ -1643,28 +1698,31 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
         let storage = self.storage.download(&lease)?;
         Ok(self.with_storage(storage, self.members))
     }
+}
 
-    /// The device form of the Host [`StackedTensorMap::restrict_leg`], with
-    /// the same result space and errors: one upload of an `L'`-entry element
-    /// table and one Tenferro `gather` launch per call, whatever `B`, the
-    /// block count and the number of restricted legs. Nothing is downloaded
-    /// and nothing waits on the device.
-    ///
-    /// The table maps each destination element to its source element within
-    /// a member. It is the eager restriction kernel applied once, on the Host,
-    /// to the payload `0, 1, …, L - 1`, so the block plan has one
-    /// implementation; the gather then reads that element of every member
-    /// (its window is the member axis) and allocates the `[L', B]` result.
-    pub fn restrict_leg(
-        &self,
+#[cfg(feature = "cuda")]
+impl<D: CudaPayload> StackExec<D> for CudaStorage<D> {
+    fn select_members<R>(
+        stack: &StackedTensorMap<R, D, Self>,
+        members: &[usize],
+        _len: usize,
+    ) -> Result<StackedTensorMap<R, D, Self>, Error> {
+        let mut lease = stack.runtime.lease_cuda()?;
+        let storage =
+            stack
+                .storage
+                .gather_members(&mut lease, stack.member_len, stack.members, members)?;
+        Ok(stack.with_storage(storage, members.len()))
+    }
+
+    fn restrict_members<R: TypedSectorAdmission>(
+        stack: &StackedTensorMap<R, D, Self>,
+        destination: BoundDynamicFusionMapSpace<R>,
         legs: &[(usize, &LegSelection<R>)],
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<StackedTensorMap<R, D, Self>, Error>
     where
-        R: TypedSectorAdmission,
-        R::Mode: TypedTensorRootDispatch<R>,
+        D: TensorScalar,
     {
-        require_restriction_set(&self.space, legs)?;
-        let destination = restricted_space(&self.space, legs)?;
         // The element table is the eager kernel itself run over the payload
         // `0, 1, …, L - 1` (in `i64`, the gather's index type), so the block
         // plan keeps one implementation. Why not enumerate the destination
@@ -1673,40 +1731,26 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
         // `L`-element iota per call, host work `O(L + L')`, independent of `B`
         // and of the number of restricted legs.
         let elements = {
-            let _host_pool = self.runtime.enter_host_pool();
-            let iota = (0..self.member_len)
+            let _host_pool = stack.runtime.enter_host_pool();
+            let iota = (0..stack.member_len)
                 .map(i64::try_from)
                 .collect::<Result<Vec<i64>, _>>()
                 .map_err(|_| Error::InvalidArgument("restrict_leg: a member exceeds i64".into()))?;
             tenet_tensors::oriented_fusion_restrict_owned(
                 destination.space().structure(),
-                FusionOperand::direct(self.space.space()),
+                FusionOperand::direct(stack.space.space()),
                 &iota,
-                &restriction_runs(self.rank(), legs),
+                &restriction_runs(stack.rank(), legs),
             )
             .map_err(Error::from)?
         };
-        let mut lease = self.runtime.lease_cuda()?;
-        let storage = self
+        let mut lease = stack.runtime.lease_cuda()?;
+        let storage = stack
             .storage
-            .gather_member_elements(&mut lease, self.member_len, self.members, elements)
+            .gather_member_elements(&mut lease, stack.member_len, stack.members, elements)
             .map_err(Error::from)?;
         drop(lease);
-        Ok(self.with_space(destination, storage)?)
-    }
-
-    /// The device form of the Host [`StackedTensorMap::select`], with the
-    /// same index policy: one upload of the `members.len()` member offsets
-    /// and one Tenferro `gather` launch per call, whatever `B` and the block
-    /// structure. The gather allocates the result buffer. Nothing is
-    /// downloaded and nothing waits on the device.
-    pub fn select(&self, members: &[usize]) -> Result<Self, Error> {
-        self.selection_len(members)?;
-        let mut lease = self.runtime.lease_cuda()?;
-        let storage =
-            self.storage
-                .gather_members(&mut lease, self.member_len, self.members, members)?;
-        Ok(self.with_storage(storage, members.len()))
+        stack.with_space(destination, storage)
     }
 }
 
