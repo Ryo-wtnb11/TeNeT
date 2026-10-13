@@ -170,7 +170,8 @@ pub use qr_lq::{
     lq_compact_adjoint_from_parent, lq_compact_from_source, lq_full_adjoint_from_parent,
     lq_full_from_source, qr_compact_from_source, qr_full_from_source,
 };
-pub(crate) use scalar::{require_finite_factor_input, FactorFamily};
+pub(crate) use scalar::require_finite_factor_input;
+pub use scalar::{nonfinite_factor_input, FactorFamily};
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     axpby_axis_by_spectrum_into, decide_bond_truncation, decide_bond_truncation_generic_checked,

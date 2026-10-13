@@ -215,7 +215,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              lq_compact_adjoint_from_parent lq_compact_from_source \
              lq_full_adjoint_from_parent lq_full_from_source pinv_diagonal_spectrum \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
-             require_finite_eigh_input \
+             require_finite_eigh_input nonfinite_factor_input FactorFamily \
              rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
              right_polar_adjoint_from_parent right_polar_from_source \
              right_polar_of_diagonal scale_axis_by_spectrum_mapped axpby_axis_by_spectrum_into spectrum_bond \

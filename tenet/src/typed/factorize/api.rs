@@ -248,6 +248,11 @@ where
     /// identity-selector GEMM. A moved leg-role split is one device permute.
     /// A lazy adjoint device operand returns [`Error::UnsupportedOnDevice`]
     /// before any output exists.
+    ///
+    /// The finite-input check above holds on the device too, after the
+    /// structural admission and before any output upload or solver call: it
+    /// costs one device scan of the payload and one scalar download, which
+    /// synchronizes the host with the device.
     pub fn qr_compact(
         &self,
         rows: &[usize],
@@ -327,14 +332,17 @@ where
     /// contract; each route's singular values are copied into its diagonal on
     /// the device (element stride `k + 1`). A moved leg-role split is one
     /// device permute. A lazy adjoint device operand returns
-    /// [`Error::UnsupportedOnDevice`] before any output exists.
+    /// [`Error::UnsupportedOnDevice`] before any output exists. The
+    /// finite-input check above holds on the device too, after the structural
+    /// admission and before any output upload or solver call.
     ///
     /// Transfers, exactly: host to device, one zero upload per factor
     /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
     /// elements, since a host zero buffer is the only device allocation
     /// path until #740) plus one upload of `max_c rows_c` `i64` gauge weights
-    /// when any route is nonempty. Device to host, no tensor payload:
-    /// the singular values never cross to the host, so the call ends
+    /// when any route is nonempty. Device to host, no tensor payload: one
+    /// real scalar, the finite-input scan's sum over the payload (a host
+    /// sync); the singular values never cross to the host, so the call ends
     /// without a spectrum download. The backend still reads O(1)
     /// solver-status metadata per route, a host barrier each.
     ///
@@ -426,8 +434,15 @@ where
     /// tree on a non-aligned route). Only if some sector's order is not the
     /// identity are the columns gathered by a selector GEMM instead.
     ///
+    /// A nonfinite entry returns [`Error::Operation`] (an `InvalidArgument`:
+    /// `eigh input components must be finite`) as on the Host: after the
+    /// endomorphism, stacking and placement admission, before the Hermiticity
+    /// check, and before any output upload or solver call.
+    ///
     /// Transfers, exactly:
     ///
+    /// - Finite-input check: one device scan of the payload and one real
+    ///   scalar download, a host sync.
     /// - Hermiticity admission (`cuda_hermitian_regions`): at most three
     ///   downloads of gathered real scalars, one per stage that has an
     ///   undecided sector (per-sector maxima, then sums of squares and

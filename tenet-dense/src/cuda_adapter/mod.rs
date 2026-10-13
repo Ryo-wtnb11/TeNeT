@@ -38,6 +38,7 @@ use crate::tensor::dense_dtype_from_tenferro;
 mod context;
 mod elementwise;
 mod factorization;
+mod finite;
 mod gemm;
 mod hermitian;
 mod storage;
@@ -59,6 +60,7 @@ pub use factorization::{
     cuda_eigh_region, cuda_eigh_region_batched, cuda_gather_columns_batched_into, cuda_qr_region,
     cuda_svd_gauge_phases, cuda_svd_region, CudaSpectrum, CudaSvdGaugeWeights, CudaSvdPhases,
 };
+pub use finite::cuda_all_finite;
 pub use gemm::{
     cuda_gemm_region_batched_into, cuda_gemm_region_batched_scaled_into, cuda_gemm_region_into,
     cuda_gemm_region_with_ops_into, cuda_matmul_region_into,

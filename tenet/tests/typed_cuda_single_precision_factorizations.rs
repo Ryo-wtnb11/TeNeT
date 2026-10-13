@@ -1254,7 +1254,7 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
 }
 
 /// Complex device QR does the real path's device work: the same calls,
-/// allocations, copies and GEMMs, no download, and exactly twice the uploaded
+/// allocations, copies and GEMMs, one scalar download, and exactly twice the uploaded
 /// bytes (a complex element is two real ones). Relative and same-process, so
 /// no platform constant appears.
 #[test]
@@ -1312,7 +1312,10 @@ fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
             "{name}: (h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls, \
              solver_calls) must not depend on the field"
         );
-        assert_eq!(complex.2, 0, "{name}: device QR downloads nothing");
+        assert_eq!(
+            complex.2, 1,
+            "{name}: device QR downloads only its finite-input scalar"
+        );
         assert!(real.1 > 0 && real.7 > 0, "{name}: vacuous cost");
         assert_eq!(complex.1, real.1 * 2, "{name}: h2d bytes must be doubled");
     }

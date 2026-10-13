@@ -71,9 +71,9 @@ pub use tenferro_cpu::CpuBackendKind;
 
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{
-    cuda_conj, cuda_copy_strided_into, cuda_download_batched_spectra, cuda_eigh_region_batched,
-    cuda_gather_columns_batched_into, cuda_gather_elements, cuda_gather_member_elements,
-    cuda_gather_members, cuda_hermitian_regions_batched,
+    cuda_all_finite, cuda_conj, cuda_copy_strided_into, cuda_download_batched_spectra,
+    cuda_eigh_region_batched, cuda_gather_columns_batched_into, cuda_gather_elements,
+    cuda_gather_member_elements, cuda_gather_members, cuda_hermitian_regions_batched,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{
