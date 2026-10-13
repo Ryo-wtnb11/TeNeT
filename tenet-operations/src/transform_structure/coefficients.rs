@@ -1,4 +1,7 @@
+use std::sync::Weak;
+
 use super::*;
+use crate::transform_plan::TreeTransformSpecGroup;
 
 /// One plan's coefficients, shared by every binding of that plan.
 ///
@@ -7,11 +10,28 @@ use super::*;
 /// names its matrix by ordinal, the number of Multi specs before it, which
 /// is the same in every binding, so binding an existing plan is one `Arc`
 /// bump.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct TreeTransformCoefficients<T> {
     pub(super) singles: Vec<T>,
     pub(super) matrices: Vec<Arc<[T]>>,
     pub(super) len: usize,
+    /// Type-erased identity of this payload: a device upload of it is keyed
+    /// on a `Weak` of this marker, which pins the address while the key
+    /// lives, so a freed payload's address can never alias a new one. Only a
+    /// device keys on it, so a host-only build allocates none.
+    #[cfg(feature = "cuda")]
+    identity: Arc<()>,
+    /// The cached groups a shared group plan built this payload from, in
+    /// order; empty for any other producer. Weak, so the payload never keeps
+    /// an evicted group's specs alive, yet each pins its group's address.
+    sources: Vec<Weak<TreeTransformSpecGroup<T>>>,
+}
+
+// The identity and provenance are bookkeeping, never part of the value.
+impl<T: PartialEq> PartialEq for TreeTransformCoefficients<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.singles == other.singles && self.matrices == other.matrices && self.len == other.len
+    }
 }
 
 impl<T: Copy> TreeTransformCoefficients<T> {
@@ -37,6 +57,9 @@ impl<T: Copy> TreeTransformCoefficients<T> {
             singles: Vec::with_capacity(single_count),
             matrices: Vec::with_capacity(matrix_count),
             len: single_count,
+            #[cfg(feature = "cuda")]
+            identity: Arc::new(()),
+            sources: Vec::new(),
         };
         for (dst_count, src_count, values, shared) in specs {
             if dst_count == 1 && src_count == 1 {
@@ -58,6 +81,30 @@ impl<T: Copy> TreeTransformCoefficients<T> {
 }
 
 impl<T> TreeTransformCoefficients<T> {
+    /// Records the cached groups this payload was built from, in order.
+    pub(crate) fn built_from(mut self, groups: &[Arc<TreeTransformSpecGroup<T>>]) -> Self {
+        self.sources = groups.iter().map(Arc::downgrade).collect();
+        self
+    }
+
+    /// Whether this payload was built from exactly `groups`, in order. Exact:
+    /// each recorded `Weak` pins its group's allocation, and every `groups`
+    /// entry is alive, so equal addresses are the same group.
+    pub(crate) fn is_built_from(&self, groups: &[Arc<TreeTransformSpecGroup<T>>]) -> bool {
+        self.sources.len() == groups.len()
+            && self
+                .sources
+                .iter()
+                .zip(groups)
+                .all(|(source, group)| core::ptr::eq(source.as_ptr(), Arc::as_ptr(group)))
+    }
+
+    #[inline]
+    #[cfg(feature = "cuda")]
+    pub(crate) fn identity(&self) -> &Arc<()> {
+        &self.identity
+    }
+
     #[inline]
     pub(super) fn matrix(&self, ordinal: u32) -> Option<&[T]> {
         self.matrices.get(ordinal as usize).map(|matrix| &**matrix)
@@ -68,9 +115,26 @@ impl<T> TreeTransformCoefficients<T> {
     pub(super) fn charged_bytes(&self) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
         let element = core::mem::size_of::<T>();
+        // Why the recorded groups are charged as their `Weak` handles only:
+        // once a group leaves cache 4, its handle pins the group's header
+        // (`Arc` control plus a box pointer and a slot, no spec), a fixed
+        // multiple of the handle itself. Charging headers that cache 4 already
+        // charges while the group is resident would double the charge and
+        // evict a near-budget core (#1998's rank-6 transform).
         self.matrices.iter().fold(
             ARC_CONTROL_BYTES
                 .saturating_add(core::mem::size_of::<Self>())
+                // The identity marker's own allocation.
+                .saturating_add(if cfg!(feature = "cuda") {
+                    ARC_CONTROL_BYTES
+                } else {
+                    0
+                })
+                .saturating_add(
+                    self.sources
+                        .capacity()
+                        .saturating_mul(core::mem::size_of::<Weak<TreeTransformSpecGroup<T>>>()),
+                )
                 .saturating_add(self.singles.capacity().saturating_mul(element))
                 .saturating_add(
                     self.matrices
@@ -127,6 +191,11 @@ mod tests {
             coefficients.charged_bytes(),
             arc_control
                 + core::mem::size_of::<TreeTransformCoefficients<f64>>()
+                + if cfg!(feature = "cuda") {
+                    arc_control
+                } else {
+                    0
+                }
                 + coefficients.singles.capacity() * element
                 + coefficients.matrices.capacity() * core::mem::size_of::<Arc<[f64]>>()
                 + (arc_control + wide.len() * element)

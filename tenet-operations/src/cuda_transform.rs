@@ -25,7 +25,7 @@
 //! `scatter_column_into_layout`.
 
 use core::any::TypeId;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tenet_core::{BlockStructure, Placement, TensorStorage};
 pub use tenet_dense::DEFAULT_PLAN_CACHE_BUDGET_BYTES;
@@ -37,8 +37,8 @@ use tenet_dense::{
 
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
-    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, StructureCache,
-    StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
+    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, SharedPayload,
+    StructureCache, StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
 use crate::fusion_replay::{FusionScaleBlockLayout, FusionStridedBlockLayout};
 use crate::opaque_admission::{
@@ -558,7 +558,16 @@ struct PreparedStructure {
     /// `S_b x D_b` run at its own `coefficient_start`, both addressed exactly as
     /// the structure indexes them. `None` only for a structure with no
     /// coefficients at all.
-    coefficients: Option<CudaDenseStorage>,
+    ///
+    /// Shared by every entry of this dtype and context whose structure is bound
+    /// to the same host payload (`coefficient_identity`): the vector is a
+    /// function of that payload and the dtype alone, never of a layout, so
+    /// structures differing only in degeneracies upload it once (#1753).
+    coefficients: Option<Arc<CudaDenseStorage>>,
+    /// The host payload `coefficients` was converted from. The `Weak` pins the
+    /// payload's identity marker, so a live payload at the same address is
+    /// this one, never a successor.
+    coefficient_identity: Weak<()>,
     /// How many elements of the payload the recoupling matrices occupy, which
     /// is what Stage C requires of the converted-coefficient slot.
     recoupling_len: usize,
@@ -566,6 +575,14 @@ struct PreparedStructure {
     /// than rebuilt from the lookup key at replay time: Stage C then checks
     /// something this executor observed, not something it restated.
     readiness: CoefficientReadiness,
+}
+
+impl SharedPayload for PreparedStructure {
+    fn shared_payload(&self) -> Option<*const ()> {
+        self.coefficients
+            .as_ref()
+            .map(|payload| Arc::as_ptr(payload).cast())
+    }
 }
 
 /// The device scratch a Multi replay packs into and scatters out of, held per
@@ -1135,7 +1152,7 @@ impl CudaTreeTransformExecutor {
             submit_move::<D>(
                 ctx,
                 &src.0,
-                prepared.coefficients.as_ref(),
+                prepared.coefficients.as_deref(),
                 entry,
                 conjugate,
                 destination_scaled(alpha, destination_scales, entry),
@@ -1155,7 +1172,7 @@ impl CudaTreeTransformExecutor {
         let coefficients =
             prepared
                 .coefficients
-                .as_ref()
+                .as_deref()
                 .ok_or(OperationError::InvalidArgument {
                     message: "device tree transform recoupling block has no uploaded matrix",
                 })?;
@@ -1250,25 +1267,50 @@ impl CudaTreeTransformExecutor {
             plan.workspace_destination_len,
         )?;
 
-        // The whole payload, converted once, indexed exactly as the structure
-        // indexes it: a Single block's scalar at its own coefficient index and a
-        // Multi block's matrix as the run at its own `coefficient_start`. This
-        // gathers the shared per-group matrices into the one upload; the gather
-        // is the conversion copy the upload already needed.
-        let mut values: Vec<D> = Vec::new();
-        task.gather_converted_coefficients_into(&mut values, D::coefficient_as_data);
+        // A move's coefficient index is a Single scalar's, and the scalars
+        // lead the payload, so this reads the host scalars, not the upload.
+        let singles = task.single_coefficients();
         for entry in &mut prepared.moves {
-            entry.zero_coefficient = entry
-                .coefficient
-                .is_some_and(|index| values.get(index) == Some(&D::ZERO));
+            entry.zero_coefficient = entry.coefficient.is_some_and(|index| {
+                singles
+                    .get(index)
+                    .is_some_and(|&value| D::coefficient_as_data(value) == D::ZERO)
+            });
         }
         prepared.zero_coefficient_moves = prepared.moves.iter().any(|entry| entry.zero_coefficient);
-        let device_bytes = core::mem::size_of_val(values.as_slice());
-        if !values.is_empty() {
-            prepared.coefficients = Some(
-                CudaDenseStorage::upload_owned::<D>(ctx, values).map_err(OperationError::Dense)?,
-            );
-        }
+        let device_bytes = task
+            .coefficient_len()
+            .saturating_mul(core::mem::size_of::<D>());
+        prepared.coefficient_identity = task.coefficient_identity();
+        let resident = self
+            .prepared
+            .values_on(key.context)
+            .find(|entry| {
+                entry.readiness.scalar == key.scalar
+                    && Weak::ptr_eq(&entry.coefficient_identity, &prepared.coefficient_identity)
+            })
+            .and_then(|entry| entry.coefficients.clone());
+        prepared.coefficients = match resident {
+            Some(payload) => Some(payload),
+            None => {
+                // The whole payload, converted once, indexed exactly as the
+                // structure indexes it: a Single block's scalar at its own
+                // coefficient index and a Multi block's matrix as the run at its
+                // own `coefficient_start`. This gathers the shared per-group
+                // matrices into the one upload; the gather is the conversion
+                // copy the upload already needed.
+                let mut values: Vec<D> = Vec::new();
+                task.gather_converted_coefficients_into(&mut values, D::coefficient_as_data);
+                if values.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(
+                        CudaDenseStorage::upload_owned::<D>(ctx, values)
+                            .map_err(OperationError::Dense)?,
+                    ))
+                }
+            }
+        };
         self.prepared.insert(key.clone(), prepared, device_bytes);
         self.refresh_plan_cache(ctx)
     }
@@ -1444,6 +1486,7 @@ fn prepared_structure(
         zero_fills_reserved: false,
         zero_coefficient_moves: false,
         coefficients: None,
+        coefficient_identity: Weak::new(),
         recoupling_len,
         readiness,
     })
@@ -1612,7 +1655,7 @@ fn workspace_snapshot<D: CudaScalar>(
         converted_coefficients: if prepared.recoupling_len == 0 {
             empty_workspace_snapshot(executor)
         } else {
-            slot(prepared.coefficients.as_ref())
+            slot(prepared.coefficients.as_deref())
         },
         fused_index_capacity: 0,
         fused_index_placement: executor.placement,

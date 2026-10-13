@@ -51,6 +51,15 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
     pub(crate) fn admission_identity(self) -> std::sync::Weak<()> {
         Arc::downgrade(self.structure.identity_marker())
     }
+
+    /// Process-local identity of the coefficient payload, shared by every
+    /// structure bound to one payload whatever its layouts: equal identities
+    /// mean an equal payload in every dtype it converts to.
+    #[inline]
+    #[cfg(feature = "cuda")]
+    pub(crate) fn coefficient_identity(self) -> std::sync::Weak<()> {
+        Arc::downgrade(self.structure.coefficient_identity_marker())
+    }
     #[inline]
     pub(crate) fn blocks(self) -> &'a [TreeTransformBlock] {
         self.structure.blocks()

@@ -860,9 +860,10 @@ where
         .filter_map(|(index, slot)| matches!(slot, GroupSlot::Miss(_)).then_some(index))
         .collect();
     let mut built = build_missing(missing)?.into_iter();
-    // Why shared slices rather than one flat spec vector: a degeneracy-only
+    // Why shared groups rather than one flat spec vector: a degeneracy-only
     // miss whose groups all hit then copies no spec (one spec is hundreds of
-    // bytes of tree keys), only one `Arc` per group.
+    // bytes of tree keys), only one `Arc` per group, and shares the set's
+    // coefficient payload through its first group (#1753).
     let mut shared = Vec::with_capacity(groups.len());
     for (&group, slot) in groups.iter().zip(slots) {
         let entry = match slot {
@@ -873,7 +874,7 @@ where
                 built.next().expect("every missing group was built"),
             ),
         };
-        shared.push(Arc::clone(entry.specs()));
+        shared.push(entry);
     }
     Ok(ComposedPlan::Shared(SharedTreeTransformGroupPlan::new(
         shared,
