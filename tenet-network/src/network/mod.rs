@@ -28,9 +28,9 @@ use tenet::typed::FusionAlgebraError;
 #[cfg(test)]
 use tenet::typed::OperationError;
 use tenet::typed::{
-    ContractSpec, GradedSpace, TensorMap, TypedAdjointSpace, TypedSpaceModeDispatch,
-    TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
-    TypedTensorTransformDispatch,
+    ContractExec, ContractSpec, GradedSpace, TensorMap, TransformExec, TypedAdjointSpace,
+    TypedSpaceModeDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
+    TypedTensorRootDispatch, TypedTensorTransformDispatch,
 };
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
@@ -77,6 +77,7 @@ use schedule::*;
 pub(crate) use dispatch::HostNetworkModeDispatch;
 
 pub use eager::NetworkOperand;
+pub(crate) use eager::NetworkOperandStorage;
 pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 
 /// A labeled tensor network: per-operand label lists (+ conj markers) and
@@ -154,11 +155,13 @@ thread_local! {
     static INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
-// Per thread, like `tenet_dense::cuda_transfer_stats`: device steps run on the
-// caller's thread, so a concurrent device test cannot perturb the count (#1568).
+// Steps of every storage, counted per thread like
+// `tenet_dense::cuda_transfer_stats`: steps run on the caller's thread, so a
+// concurrent test cannot perturb the count (#1568). The device rejection tests
+// read it around a single `execute_cuda`.
 #[cfg(all(test, feature = "cuda"))]
 thread_local! {
-    static CUDA_NETWORK_CONTRACT_CALLS: std::cell::Cell<usize> =
+    static NETWORK_CONTRACT_STEP_CALLS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 

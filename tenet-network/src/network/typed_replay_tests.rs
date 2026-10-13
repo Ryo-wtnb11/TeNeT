@@ -1531,14 +1531,14 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     let planned = pair
         .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
         .unwrap();
-    CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
+    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
     assert!(planned
         .execute_cuda(
             &[&tensors[0], &bad_rhs],
             &mut NetworkExecutionWorkspace::default()
         )
         .is_err());
-    assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(NETWORK_CONTRACT_STEP_CALLS.with(std::cell::Cell::get), 0);
 
     let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let other_space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
@@ -1551,14 +1551,14 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     .unwrap()
     .to_cuda()
     .unwrap();
-    CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
+    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
     assert!(planned
         .execute_cuda(
             &[&tensors[0], &foreign],
             &mut NetworkExecutionWorkspace::default()
         )
         .is_err());
-    assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(NETWORK_CONTRACT_STEP_CALLS.with(std::cell::Cell::get), 0);
 }
 
 #[test]
