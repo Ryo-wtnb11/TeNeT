@@ -333,8 +333,8 @@ mod cuda_factor;
 pub(crate) use cuda_factor::{
     assemble_aligned_left_factor, assemble_left_factor, assemble_right_factor,
     copy_left_factor_treewise, copy_whole_factor, cuda_download_spectra, cuda_hermitian_regions,
-    cuda_qr_region, cuda_svd_region, dense_err, fill_diagonal_values, typed_cuda_eigh_region,
-    upload_selector,
+    cuda_qr_region, cuda_svd_region, dense_err, fill_diagonal_values, require_finite_cuda_input,
+    typed_cuda_eigh_region, upload_selector,
 };
 #[cfg(feature = "cuda")]
 use cuda_factor::{

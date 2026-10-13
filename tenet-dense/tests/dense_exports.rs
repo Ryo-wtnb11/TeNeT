@@ -168,6 +168,7 @@ fn tenet_dense_exports_exactly_the_pinned_names() {
         "arity_mismatch",
         "check_contiguous_output",
         "cpu_session_stats",
+        "cuda_all_finite",
         "cuda_conj",
         "cuda_copy_region_into",
         "cuda_copy_spectrum_into",

@@ -1287,7 +1287,7 @@ fn typed_cuda_svd_of_a_near_tie_follows_the_first_largest_entry() {
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
+fn typed_cuda_svd_gauge_costs_the_documented_ops_and_only_the_finite_scan_download() {
     // What: the rustdoc's cost of the gauge. Per nonempty route, 13 ops for
     // the phases, 2 per aligned side (broadcast, mul) or 1 per non-aligned
     // side (the selector's embed_diagonal), and 1 conj for a complex left
@@ -1347,7 +1347,8 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
                 expected_ops,
                 "treewise {treewise}"
             );
-            assert_eq!(after.d2h_calls - before.d2h_calls, 0, "treewise {treewise}");
+            // The finite-input scan's one scalar (#2038); nothing else.
+            assert_eq!(after.d2h_calls - before.d2h_calls, 1, "treewise {treewise}");
             assert_eq!(after.h2d_calls - before.h2d_calls, 4, "treewise {treewise}");
             let len = |t: &TensorMap<U1FusionRule, D, CudaStorage<D>>| {
                 t.logical_space().space().required_len().unwrap()
@@ -1591,4 +1592,198 @@ fn typed_cuda_svd_diagonal_written_on_device_equals_the_downloaded_diagonal_bitw
         &[&fermion_leg, &fermion_leg],
         &[&fermion_leg],
     );
+}
+
+/// A payload built from widened components; the imaginary part is dropped
+/// for a real payload.
+#[cfg(feature = "cuda")]
+trait NonfiniteFixture: CudaFactorizationPayload {
+    const MAX: f64;
+    const SUBNORMAL: f64;
+    fn from_parts(re: f64, im: f64) -> Self;
+}
+#[cfg(feature = "cuda")]
+impl NonfiniteFixture for f32 {
+    const MAX: f64 = f32::MAX as f64;
+    const SUBNORMAL: f64 = (f32::MIN_POSITIVE / 4.0) as f64;
+    fn from_parts(re: f64, _: f64) -> Self {
+        re as f32
+    }
+}
+#[cfg(feature = "cuda")]
+impl NonfiniteFixture for f64 {
+    const MAX: f64 = f64::MAX;
+    const SUBNORMAL: f64 = f64::MIN_POSITIVE / 4.0;
+    fn from_parts(re: f64, _: f64) -> Self {
+        re
+    }
+}
+#[cfg(feature = "cuda")]
+impl NonfiniteFixture for num_complex::Complex32 {
+    const MAX: f64 = f32::MAX as f64;
+    const SUBNORMAL: f64 = (f32::MIN_POSITIVE / 4.0) as f64;
+    fn from_parts(re: f64, im: f64) -> Self {
+        num_complex::Complex32::new(re as f32, im as f32)
+    }
+}
+#[cfg(feature = "cuda")]
+impl NonfiniteFixture for Complex64 {
+    const MAX: f64 = f64::MAX;
+    const SUBNORMAL: f64 = f64::MIN_POSITIVE / 4.0;
+    fn from_parts(re: f64, im: f64) -> Self {
+        Complex64::new(re, im)
+    }
+}
+
+/// Three U(1) sectors of `rows x cols` blocks, real symmetric and
+/// diagonally dominant when square; `entry` replaces the last element of the
+/// last sector, so a check that stopped early would miss it.
+#[cfg(feature = "cuda")]
+fn finite_input_fixture<D: NonfiniteFixture>(
+    runtime: &Runtime,
+    rows: usize,
+    cols: usize,
+    entry: Option<(f64, f64)>,
+) -> TensorMap<U1FusionRule, D> {
+    let leg = |dim: usize| {
+        GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            (0..3).map(|charge| (U1Irrep::new(charge), dim)),
+        )
+        .unwrap()
+    };
+    let last = U1Irrep::new(2);
+    TensorMap::from_subblock_fn(runtime, [&leg(rows)], [&leg(cols)], |trees, index| {
+        let (i, j) = (index[0], index[1]);
+        if let Some((re, im)) = entry {
+            if *trees.coupled() == last && i == rows - 1 && j == cols - 1 {
+                return D::from_parts(re, im);
+            }
+        }
+        let value = if i == j {
+            (rows + i) as f64
+        } else {
+            1.0 / (1.0 + i.abs_diff(j) as f64)
+        };
+        D::from_parts(value, 0.0)
+    })
+    .unwrap()
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy, Debug)]
+enum FiniteInputOp {
+    Qr,
+    Svd,
+    Eigh,
+}
+
+/// Runs `op` on the current split; the error is rendered for comparison.
+#[cfg(feature = "cuda")]
+fn run_finite_input_op<D, S>(
+    tensor: &TensorMap<U1FusionRule, D, S>,
+    op: FiniteInputOp,
+) -> Result<(), String>
+where
+    D: FactorizationScalar,
+    S: FactorExec<U1FusionRule, D>,
+{
+    let (rows, cols) = (codomain_axes(tensor), domain_axes(tensor));
+    match op {
+        FiniteInputOp::Qr => tensor.qr_compact(&rows, &cols).map(drop),
+        FiniteInputOp::Svd => tensor.svd_compact(&rows, &cols).map(drop),
+        FiniteInputOp::Eigh => tensor
+            .eigh_full(&rows, &cols, HermitianTol::DEFAULT)
+            .map(drop),
+    }
+    .map_err(|err| format!("{err:?}"))
+}
+
+#[cfg(feature = "cuda")]
+fn assert_device_refuses_nonfinite_input_like_the_host<D: NonfiniteFixture>(runtime: &Runtime) {
+    let mut entries = vec![
+        (f64::NAN, 0.0),
+        (f64::INFINITY, 0.0),
+        (f64::NEG_INFINITY, 0.0),
+    ];
+    if <D as tenet_dense::CudaScalar>::IS_COMPLEX {
+        entries.extend([(0.0, f64::INFINITY), (0.0, f64::NAN)]);
+    }
+    let mut cases = vec![
+        (FiniteInputOp::Qr, 8, 8),
+        (FiniteInputOp::Svd, 8, 8),
+        (FiniteInputOp::Eigh, 8, 8),
+    ];
+    if <D as tenet_dense::CudaScalar>::IS_COMPLEX && <D as FactorScalar>::epsilon() < 1e-10 {
+        // Above 1024 rows cuSOLVER's SVD is `gesvd`, which returned NaN
+        // factors for a nonfinite input before #2038.
+        cases.push((FiniteInputOp::Svd, 1100, 4));
+    }
+    for (op, rows, cols) in cases {
+        for entry in &entries {
+            let host = finite_input_fixture::<D>(runtime, rows, cols, Some(*entry));
+            let expected = run_finite_input_op(&host, op).unwrap_err();
+            assert!(
+                expected.contains("input components must be finite"),
+                "{op:?} {entry:?}: Host {expected}"
+            );
+            let device = host.to_cuda().unwrap();
+            let before = tenet_dense::cuda_transfer_stats();
+            let refused = run_finite_input_op(&device, op).unwrap_err();
+            let after = tenet_dense::cuda_transfer_stats();
+            assert_eq!(refused, expected, "{op:?} {rows}x{cols} {entry:?}");
+            // No solver ran and no output was uploaded or allocated: the
+            // scan's one scalar is the only transfer.
+            assert_eq!(
+                (
+                    after.solver_calls - before.solver_calls,
+                    after.h2d_calls - before.h2d_calls,
+                    after.device_allocs - before.device_allocs,
+                    after.d2h_calls - before.d2h_calls,
+                ),
+                (0, 0, 0, 1),
+                "{op:?} {rows}x{cols} {entry:?}"
+            );
+        }
+        // The extremes of the finite range pass the check; whatever the
+        // solver then does, the call is not refused as nonfinite input.
+        let mut finite = vec![(D::MAX, 0.0), (-D::MAX, 0.0), (D::SUBNORMAL, 0.0)];
+        if <D as tenet_dense::CudaScalar>::IS_COMPLEX {
+            finite.push((D::MAX, D::MAX));
+        }
+        for entry in finite {
+            let device = finite_input_fixture::<D>(runtime, rows, cols, Some(entry))
+                .to_cuda()
+                .unwrap();
+            if let Err(err) = run_finite_input_op(&device, op) {
+                assert!(
+                    !err.contains("input components must be finite"),
+                    "{op:?} {entry:?}: {err}"
+                );
+            }
+        }
+        // A subnormal entry is an ordinary finite input: the device result
+        // is the Host's.
+        let host = finite_input_fixture::<D>(runtime, rows, cols, Some((D::SUBNORMAL, 0.0)));
+        let device = host.to_cuda().unwrap();
+        let before = tenet_dense::cuda_transfer_stats();
+        run_finite_input_op(&device, op).unwrap();
+        let after = tenet_dense::cuda_transfer_stats();
+        assert!(after.solver_calls > before.solver_calls, "{op:?}");
+        run_finite_input_op(&host, op).unwrap();
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_factorizations_refuse_nonfinite_input_with_the_host_error() {
+    // What: eager device QR, SVD and EIGH refuse a NaN or infinite real or
+    // imaginary component with the Host's error (#1986, #2038), before any
+    // solver call or output upload; EIGH reports it ahead of Hermiticity.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    assert_device_refuses_nonfinite_input_like_the_host::<f32>(&runtime);
+    assert_device_refuses_nonfinite_input_like_the_host::<f64>(&runtime);
+    assert_device_refuses_nonfinite_input_like_the_host::<num_complex::Complex32>(&runtime);
+    assert_device_refuses_nonfinite_input_like_the_host::<Complex64>(&runtime);
 }

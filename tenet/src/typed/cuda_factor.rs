@@ -207,6 +207,22 @@ pub(crate) fn cuda_hermitian_regions<D: CudaPayload>(
     dense_cuda_hermitian_regions::<D>(cuda, source, regions, relative_tolerance).map_err(dense_err)
 }
 
+/// The Host finite-input stage of the eager factorizations (#1986) on a
+/// device payload: one device scan and one scalar D2H, so a nonfinite input
+/// is refused with the Host error before any output or solver call.
+#[cfg(feature = "cuda")]
+pub(crate) fn require_finite_cuda_input<D: CudaPayload>(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    family: tenet_matrixalgebra::seam::FactorFamily,
+) -> Result<(), Error> {
+    if tenet_dense::cuda_all_finite::<D>(cuda, source).map_err(dense_err)? {
+        Ok(())
+    } else {
+        Err(tenet_matrixalgebra::seam::nonfinite_factor_input(family).into())
+    }
+}
+
 #[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn typed_cuda_eigh_region<D: CudaPayload>(

@@ -70,7 +70,12 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             s.to_host().unwrap(),
             vh.to_host().unwrap(),
         );
-        assert_eq!((svd.d2h_calls, svd.d2h_bytes), (0, 0), "{charges} sectors");
+        // Only the finite-input scan's one real scalar (#2038) comes back.
+        assert_eq!(
+            (svd.d2h_calls, svd.d2h_bytes),
+            (1, bytes(1)),
+            "{charges} sectors"
+        );
         // Exactly the three zero uploads plus one upload of the gauge's
         // row weights (every route has 3 rows), so `s` adds nothing beyond
         // its zero initialization.

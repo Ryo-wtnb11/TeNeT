@@ -209,6 +209,11 @@ where
         let (left_data, middle_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
+            require_finite_cuda_input::<D>(
+                cuda,
+                &source.0,
+                tenet_matrixalgebra::seam::FactorFamily::Svd,
+            )?;
             let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
@@ -387,10 +392,16 @@ where
         let plan = self.compact_factor_plan()?;
 
         // Admission is complete. Validate every block before the first EIGH so
-        // a late non-Hermitian sector cannot trigger partial numerical work.
+        // a late nonfinite or non-Hermitian sector cannot trigger partial
+        // numerical work; finiteness first, as on the Host.
         {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
+            require_finite_cuda_input::<D>(
+                cuda,
+                &source.0,
+                tenet_matrixalgebra::seam::FactorFamily::Eigh,
+            )?;
             let regions: Vec<_> = plan
                 .source_regions()
                 .iter()
@@ -698,6 +709,11 @@ where
         let (left_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
+            require_finite_cuda_input::<D>(
+                cuda,
+                &source.0,
+                tenet_matrixalgebra::seam::FactorFamily::Qr,
+            )?;
             let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();

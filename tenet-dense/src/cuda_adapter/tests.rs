@@ -599,3 +599,127 @@ fn cuda_errors_are_labelled_as_the_cuda_backend() {
         "must not mislabel as Tenferro: {text}"
     );
 }
+
+/// Builds a payload element from widened components (the imaginary part is
+/// dropped for a real payload).
+trait FiniteFixture: CudaScalar {
+    const MAX: f64;
+    const SUBNORMAL: f64;
+    fn from_parts(re: f64, im: f64) -> Self;
+}
+impl FiniteFixture for f32 {
+    const MAX: f64 = f32::MAX as f64;
+    const SUBNORMAL: f64 = (f32::MIN_POSITIVE / 4.0) as f64;
+    fn from_parts(re: f64, _: f64) -> Self {
+        re as f32
+    }
+}
+impl FiniteFixture for f64 {
+    const MAX: f64 = f64::MAX;
+    const SUBNORMAL: f64 = f64::MIN_POSITIVE / 4.0;
+    fn from_parts(re: f64, _: f64) -> Self {
+        re
+    }
+}
+impl FiniteFixture for Complex32 {
+    const MAX: f64 = f32::MAX as f64;
+    const SUBNORMAL: f64 = (f32::MIN_POSITIVE / 4.0) as f64;
+    fn from_parts(re: f64, im: f64) -> Self {
+        Complex32::new(re as f32, im as f32)
+    }
+}
+impl FiniteFixture for Complex64 {
+    const MAX: f64 = f64::MAX;
+    const SUBNORMAL: f64 = f64::MIN_POSITIVE / 4.0;
+    fn from_parts(re: f64, im: f64) -> Self {
+        Complex64::new(re, im)
+    }
+}
+
+fn assert_finite_scan_decides_every_component<D: FiniteFixture>(ctx: &mut CudaDenseContext) {
+    let (max, tiny) = (D::MAX, D::SUBNORMAL);
+    let mut cases = vec![
+        ((f64::NAN, 0.0), false),
+        ((f64::INFINITY, 0.0), false),
+        ((f64::NEG_INFINITY, 0.0), false),
+        ((max, 0.0), true),
+        ((-max, 0.0), true),
+        ((tiny, 0.0), true),
+        ((-0.0, 0.0), true),
+    ];
+    if D::IS_COMPLEX {
+        cases.extend([
+            ((0.0, f64::INFINITY), false),
+            ((0.0, f64::NEG_INFINITY), false),
+            ((0.0, f64::NAN), false),
+            ((f64::NEG_INFINITY, 1.0), false),
+            ((max, max), true),
+            ((-max, -max), true),
+            ((0.0, tiny), true),
+        ]);
+    }
+    for len in [1_usize, 1_000, 100_000] {
+        let base: Vec<D> = (0..len)
+            .map(|i| D::from_parts((i % 97) as f64 - 48.5, (i % 13) as f64 * 0.25))
+            .collect();
+        let src = CudaDenseStorage::upload(ctx, &base).unwrap();
+        assert!(cuda_all_finite::<D>(ctx, &src).unwrap(), "{len}: finite");
+        for &((re, im), finite) in &cases {
+            for at in [0, len / 2, len - 1] {
+                let mut data = base.clone();
+                data[at] = D::from_parts(re, im);
+                let src = CudaDenseStorage::upload_owned(ctx, data).unwrap();
+                reset_cuda_transfer_stats();
+                let decided = cuda_all_finite::<D>(ctx, &src).unwrap();
+                let stats = cuda_transfer_stats();
+                assert_eq!(decided, finite, "{len} [{at}] = ({re}, {im})");
+                assert_eq!(
+                    (stats.h2d_calls, stats.d2h_calls, stats.d2h_bytes),
+                    (0, 1, std::mem::size_of::<D::Real>() as u64),
+                    "one real-lane scalar download, nothing uploaded"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_finite_scan_refuses_exactly_nan_and_infinite_components() {
+    // What: `cuda_all_finite` is false exactly when some real or imaginary
+    // component is NaN or infinite, wherever it lies, and true for the
+    // extremes of the finite range (MAX, MAX+MAX*i, subnormals, -0), at the
+    // cost of one real-lane scalar download.
+    let mut ctx = CudaDenseContext::new(0).unwrap();
+    assert_finite_scan_decides_every_component::<f32>(&mut ctx);
+    assert_finite_scan_decides_every_component::<f64>(&mut ctx);
+    assert_finite_scan_decides_every_component::<Complex32>(&mut ctx);
+    assert_finite_scan_decides_every_component::<Complex64>(&mut ctx);
+    reset_cuda_transfer_stats();
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_finite_scan_reads_only_the_active_payload() {
+    // What: a grow-only scratch is judged on its active prefix; a NaN past
+    // the active length is stale and ignored, one inside it is refused. An
+    // empty payload is finite without a transfer, and a payload of another
+    // dtype is a dtype error.
+    let mut ctx = CudaDenseContext::new(0).unwrap();
+    let mut src = CudaDenseStorage::upload(&ctx, &[1.0, 2.0, f64::NAN, 4.0]).unwrap();
+    src.set_active_len(2).unwrap();
+    assert!(cuda_all_finite::<f64>(&mut ctx, &src).unwrap());
+    src.set_active_len(3).unwrap();
+    assert!(!cuda_all_finite::<f64>(&mut ctx, &src).unwrap());
+
+    src.set_active_len(0).unwrap();
+    reset_cuda_transfer_stats();
+    assert!(cuda_all_finite::<f64>(&mut ctx, &src).unwrap());
+    assert_eq!(cuda_transfer_stats(), CudaTransferStats::default());
+
+    assert!(matches!(
+        cuda_all_finite::<f32>(&mut ctx, &src),
+        Err(DenseError::DTypeMismatch { .. })
+    ));
+    reset_cuda_transfer_stats();
+}

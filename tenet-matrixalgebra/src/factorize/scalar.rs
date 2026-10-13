@@ -312,8 +312,9 @@ pub struct SectorSpectrum<V = f64> {
 
 /// The factorization a finite-input check guards; it names the operation in
 /// the error.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FactorFamily {
+pub enum FactorFamily {
     Svd,
     Qr,
     Lq,
@@ -345,7 +346,14 @@ pub(crate) fn require_finite_factor_input<D: FactorScalar>(
     if finite {
         return Ok(());
     }
-    Err(OperationError::InvalidArgument {
+    Err(nonfinite_factor_input(family))
+}
+
+/// The one error of [`require_finite_factor_input`], for a storage that
+/// decides finiteness itself (a CUDA payload scans on its device).
+#[doc(hidden)]
+pub fn nonfinite_factor_input(family: FactorFamily) -> OperationError {
+    OperationError::InvalidArgument {
         message: match family {
             FactorFamily::Svd => "svd input components must be finite",
             FactorFamily::Qr => "qr input components must be finite",
@@ -355,5 +363,5 @@ pub(crate) fn require_finite_factor_input<D: FactorScalar>(
             FactorFamily::Eig => "eig input components must be finite",
             FactorFamily::Eigh => "eigh input components must be finite",
         },
-    })
+    }
 }
