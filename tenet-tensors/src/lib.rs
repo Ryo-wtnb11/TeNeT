@@ -13,7 +13,6 @@ mod adjoint;
 mod admission;
 mod backend_trace;
 mod bound_tensor;
-mod cache;
 mod contract;
 mod facade;
 mod lowering;
@@ -34,9 +33,6 @@ pub use adjoint::{
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;
-pub use cache::OperationCachePolicy;
-#[cfg(test)]
-pub(crate) use cache::{TensorContractStructureCache, TensorContractStructureCacheKey};
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use contract::tensorcontract_structure;
@@ -60,14 +56,11 @@ pub use contract::{
 };
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
-    tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_into,
-    tensorcontract_into_with, tensorcontract_into_with_context, tensorproduct_into,
-    tensorproduct_into_with_conjugation, zero_copy_contract_order_for_output_permute,
-    FusionContractOrientation, FusionContractPlan, HostTensorContractBackend,
-    HostTensorContractWorkspace, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
-    TensorContractBackend, TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
-    TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractFusionProfile, TensorContractPlanKey, TensorContractStructure,
+    tensorcontract_execute_with, tensorcontract_fusion_block_specs,
+    zero_copy_contract_order_for_output_permute, FusionContractOrientation, FusionContractPlan,
+    HostTensorContractBackend, HostTensorContractWorkspace, HostTreeFusionExecutionContext,
+    PreparedTensorContractFusion, TensorContractBackend, TensorContractBlockSpec,
+    TensorContractFusionExecutionContext, TensorContractFusionProfile, TensorContractStructure,
     TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use contract::{

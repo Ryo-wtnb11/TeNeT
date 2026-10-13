@@ -5,8 +5,8 @@
 //! change. Every name below is used by another workspace crate, by an
 //! integration test or example of this crate, or by a retained public
 //! signature, or belongs to the static-rank eager facade (`contract/api.rs`,
-//! `facade.rs`, `TensorContractExecutionContext`), which decision A14 keeps
-//! public until a separate static-API decision. The structure caches, the
+//! `facade.rs`), which decision A14 keeps public until a separate static-API
+//! decision. The structure caches, the
 //! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
 //! `tenet_operations` internals were narrowed to `pub(crate)`.
 //!
@@ -173,8 +173,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "TensorTraceOperationsBackend",
         // bound_tensor
         "BoundDynamicTensorRef",
-        // cache
-        "OperationCachePolicy",
         // tree_transform: the process-global completed-transformer owner
         // (doc-hidden cross-crate seams, #2014-3)
         "TreeTransformOperationView",
@@ -189,11 +187,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "prepare_tensorcontract_fusion_plan_dyn",
         "tensorcontract_execute_with",
         "tensorcontract_fusion_block_specs",
-        "tensorcontract_into",
-        "tensorcontract_into_with",
-        "tensorcontract_into_with_context",
-        "tensorproduct_into",
-        "tensorproduct_into_with_conjugation",
         "try_compile_storage_contract_core_route",
         "zero_copy_contract_order_for_output_permute",
         "copy_c_output_transform",
@@ -223,12 +216,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "StorageContractResolution",
         "TensorContractBackend",
         "TensorContractBlockSpec",
-        "TensorContractCache",
-        "TensorContractCacheStats",
-        "TensorContractExecutionContext",
         "TensorContractFusionExecutionContext",
         "TensorContractFusionProfile",
-        "TensorContractPlanKey",
         "TensorContractStructure",
         "TensorContractStructureTerm",
         "TensorContractWorkspace",

@@ -162,8 +162,6 @@ caches 1 and 4.
   Generic transforms publish their groups only after the destination commit.
 - The four share `StructureCache` and one public control, `tenet::cache`
   (`stats`, `clear`, `configure_budgets`).
-- `tenet-tensors` keeps an operation-cache policy for the dense
-  `TensorContractCache` only.
 
 ### 3. tenferro and strided-rs (dense backend)
 
@@ -288,7 +286,6 @@ Outside the four, by design:
 
 | Cache | Crate | Why separate |
 | --- | --- | --- |
-| `TensorContractCache` (dense contraction structure) | `tenet-tensors` | non-symmetric dense path |
 | Network plan cache | `tenet-network` | execution level: keyed by network topology |
 | CUDA prepared tree-transform structures | `tenet-operations` | execution level: device copies of cached structures |
 | cuTENSOR plan ledger | `tenet-dense` | execution level: tenferro's plan cache |
