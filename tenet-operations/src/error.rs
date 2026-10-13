@@ -79,6 +79,20 @@ pub enum OperationError {
         expected: usize,
         actual: usize,
     },
+    /// A tree transform (permute, braid or transpose) rejected the rule's
+    /// fusion style at its admission.
+    ///
+    /// Each layer reports its own fusion-style error (#1950): every
+    /// tree-transform entry of `tenet-tensors` and `tenet-operations`,
+    /// multiplicity-free, Unique-only or checked Generic, reports this
+    /// operation-carrying variant, while `tenet-core` APIs report
+    /// [`CoreError::UnsupportedFusionStyle`]. Operations without a
+    /// [`TreeTransformOperation`] (contraction admission and checked-Generic
+    /// space construction) pass the core provider requirement through as
+    /// [`Self::Core`], as does a provider whose style changes after
+    /// admission. Why not one variant for both layers: the core error cannot
+    /// name the operation, and wrapping it here would drop that context
+    /// from every tree-transform caller.
     UnsupportedFusionStyle {
         operation: Box<TreeTransformOperation>,
         style: FusionStyleKind,

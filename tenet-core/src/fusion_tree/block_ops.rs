@@ -684,6 +684,10 @@ where
     multiplicity_free_braid_tree_pair_block_columns_validated(group, &prepared)
 }
 
+/// Style-admitted seam of the `tenet-tensors` oriented tree-transform miss
+/// path: the caller has already rejected the rule's fusion style with its own
+/// `OperationError::UnsupportedFusionStyle` gate, so this checks the style
+/// only in debug builds (#1950).
 #[doc(hidden)]
 pub fn multiplicity_free_braid_tree_pair_block_ordered_indexed<R>(
     rule: &R,
@@ -696,7 +700,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    validate_multiplicity_free_execution_style(rule)?;
+    debug_assert!(rule.fusion_style().is_multiplicity_free());
     prepared.validate_block_preflight(rule, PreparedTreePairFamily::BraidLike)?;
     let Some(group) =
         validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
@@ -710,6 +714,10 @@ where
     multiplicity_free_braid_tree_pair_block_ordered_validated(group, prepared)
 }
 
+/// Style-admitted seam of the `tenet-tensors` oriented tree-transform miss
+/// path: the caller has already rejected the rule's fusion style with its own
+/// `OperationError::UnsupportedFusionStyle` gate, so this checks the style
+/// only in debug builds (#1950).
 #[doc(hidden)]
 pub fn multiplicity_free_transpose_tree_pair_block_ordered_indexed<R>(
     rule: &R,
@@ -722,7 +730,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    validate_multiplicity_free_execution_style(rule)?;
+    debug_assert!(rule.fusion_style().is_multiplicity_free());
     prepared.validate_block_preflight(rule, PreparedTreePairFamily::Transpose)?;
     let Some(group) =
         validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?

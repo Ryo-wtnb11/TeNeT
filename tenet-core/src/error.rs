@@ -44,6 +44,12 @@ pub enum CoreError {
         actual_position: usize,
     },
     UnitLayoutCorrespondence,
+    /// A `tenet-core` API rejected the rule's fusion style.
+    ///
+    /// Each layer reports its own fusion-style error (#1950): `tenet-core`
+    /// APIs report this variant, while tree-transform entries in
+    /// `tenet-tensors` and `tenet-operations` report the operation-carrying
+    /// `OperationError::UnsupportedFusionStyle`.
     UnsupportedFusionStyle {
         expected: FusionStyleKind,
         actual: FusionStyleKind,

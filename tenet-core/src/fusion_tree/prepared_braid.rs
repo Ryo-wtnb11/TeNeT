@@ -996,12 +996,8 @@ impl<'operation> PreparedTreePairOperation<'operation> {
     {
         self.validate_source(validated.key)?;
         self.validate_rule_capabilities(validated.rule)?;
-        if !validated.rule.fusion_style().is_multiplicity_free() {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Simple,
-                actual: validated.rule.fusion_style(),
-            });
-        }
+        // The sole caller already checked the style (#1950).
+        debug_assert!(validated.rule.fusion_style().is_multiplicity_free());
         self.execute_multiplicity_free_validated(validated)
     }
 
