@@ -556,3 +556,73 @@ fn concurrent_cold_misses_build_without_waiting_and_admit_once() {
         }
     }
 }
+
+#[test]
+fn structure_cache_clear_does_not_reuse_content_ids() {
+    // What: the clear-all races any test that assumes the shared
+    // tenet-core structure caches stay stable across two builds. See
+    // `test_support` for why this is a shared lock.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Content ids are never reused across a clear: id-keyed completed
+    // transformers could otherwise alias.
+    let base = 700_000_000usize;
+    let before = BlockStructure::trivial(&[base]).unwrap();
+    let id_before = before.content_id();
+    tenet_core::clear_structure_caches();
+    assert_eq!(before.required_len().unwrap(), base);
+    let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
+    assert!(
+        id_after > id_before,
+        "reset chain must not reuse content ids, got before={id_before} after={id_after}"
+    );
+}
+
+#[test]
+fn core_and_racah_resets_have_separate_owners() {
+    use tenet_core::{FusionRule, MultiplicityFreeFusionSymbols, SU2FusionRule, SectorId};
+
+    if crate::test_support::run_isolated_or_return(
+        "TENET_CORE_RACAH_OWNERS_ISOLATED",
+        "tree_transform::cache::owner_tests::core_and_racah_resets_have_separate_owners",
+    ) {
+        return;
+    }
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    racah::cache::reset();
+
+    let rule = SU2FusionRule;
+    let identity = rule.rule_identity();
+    let structure = BlockStructure::trivial(&[700_000_001]).unwrap();
+    let structure_id = structure.content_id();
+    let sector = SectorId::new;
+    let _ = rule.f_symbol_scalar(
+        sector(1),
+        sector(1),
+        sector(1),
+        sector(1),
+        sector(0),
+        sector(0),
+    );
+    racah::cache::reset();
+    assert_eq!(rule.rule_identity(), identity);
+    let rebuilt = BlockStructure::trivial(&[700_000_001]).unwrap();
+    assert_eq!(rebuilt, structure);
+    assert_ne!(rebuilt.content_id(), structure_id);
+
+    let _ = rule.f_symbol_scalar(
+        sector(1),
+        sector(1),
+        sector(1),
+        sector(1),
+        sector(0),
+        sector(0),
+    );
+    let populated = racah::cache::base_cache_stats();
+    assert_ne!(populated.total().entries, 0);
+    tenet_core::clear_structure_caches();
+    assert_eq!(racah::cache::base_cache_stats(), populated);
+}

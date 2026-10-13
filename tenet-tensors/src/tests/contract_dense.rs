@@ -20,15 +20,6 @@ fn host_tensor_contract_workspace_is_explicit_host_workspace() {
 }
 
 #[test]
-fn tensor_contract_execution_context_reports_host_placement() {
-    let context = TensorContractExecutionContext::<f64>::default();
-
-    assert_eq!(context.backend_placement(), Placement::Host);
-    assert_eq!(context.workspace_placement(), Placement::Host);
-    assert!(context.is_host_context());
-}
-
-#[test]
 fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
@@ -70,7 +61,7 @@ fn tensorcontract_default_host_api_accepts_custom_host_storage() {
     let rhs = test_host_read_tensor_map(vec![7.0_f64, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space);
     let mut dst = test_host_tensor_map(vec![1.0_f64; 4], dst_space);
 
-    tensorcontract_into(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
@@ -114,7 +105,7 @@ fn tensorcontract_structure_precomputes_core_dense_descriptor() {
 }
 
 #[test]
-fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
+fn dense_contract_uses_dense_backend_for_matmul_and_alpha_beta() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -124,7 +115,7 @@ fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
         TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
     let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
 
-    tensorcontract_into(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
@@ -214,7 +205,7 @@ fn tensorcontract_dense_route_sorted_by_rhs_matches_independent_oracle() {
     assert_eq!(lhs_route_axes, &[2, 0]);
     assert_eq!(rhs_route_axes, &[1, 3]);
 
-    tensorcontract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    dense_contract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
     let expected = rank4_contract_oracle(
         &lhs_data,
         &lhs_shape,
@@ -284,7 +275,7 @@ fn tensorcontract_dense_route_reverse_ba_matches_independent_oracle() {
     assert_eq!(lhs_route_axes, &[1, 2]);
     assert_eq!(rhs_route_axes, &[0, 2]);
 
-    tensorcontract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    dense_contract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
     let expected = rank3_by_rank4_contract_oracle(
         &lhs_data,
         &lhs_shape,
@@ -502,224 +493,6 @@ fn tensorcontract_backend_rank2_matmul_uses_matmul_boundary_not_descriptor_repla
 }
 
 #[test]
-fn tensorcontract_execution_context_replays_without_recompiling() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let lhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
-    let rhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
-    let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
-    let mut context = TensorContractExecutionContext::<f64>::default();
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-        2.0,
-        3.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
-
-    dst.data_mut().fill(1.0);
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-        2.0,
-        3.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 1);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
-}
-
-#[test]
-fn tensorcontract_structure_caches_do_not_promote_across_contexts() {
-    // What: ordinary contraction structures remain local to the cache that
-    // compiled them while each cache still replays its own entry.
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let lhs = TensorMap::<f64, 2, 0>::filled(1.0, lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 2, 0>::filled(1.0, rhs_space).unwrap();
-    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
-    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
-
-    let mut first = TensorContractCache::new();
-    let first_ptr = first.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
-    let mut second = TensorContractCache::new();
-    let second_ptr = second.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
-    assert_ne!(first_ptr, second_ptr);
-    assert_eq!(first.stats().structure_misses(), 1);
-    assert_eq!(second.stats().structure_misses(), 1);
-    let replay_ptr = first.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
-    assert_eq!(first_ptr, replay_ptr);
-    assert_eq!(first.stats().structure_hits(), 1);
-}
-
-#[test]
-fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_structure() {
-    crate::cache::reset_tensor_contract_structure_cache_key_build_count();
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let lhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
-    let rhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
-    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
-    let mut context = TensorContractExecutionContext::<f64>::default();
-    context
-        .cache_mut()
-        .set_policy(OperationCachePolicy::NoCache);
-
-    for expected_misses in 1..=2 {
-        tensorcontract_into_with_context(
-            &mut context,
-            &mut dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1.0,
-            0.0,
-        )
-        .unwrap();
-        assert_eq!(context.cache().structure_len(), 0);
-        assert_eq!(context.cache().stats().structure_hits(), 0);
-        assert_eq!(context.cache().stats().structure_misses(), expected_misses);
-    }
-    assert_eq!(
-        crate::cache::tensor_contract_structure_cache_key_build_count(),
-        0
-    );
-    // What: the counter observes real structure-key construction while the
-    // eager NoCache calls above leave it untouched.
-    TensorContractStructureCacheKey::from_structures(
-        (),
-        dst.structure(),
-        lhs.structure(),
-        rhs.structure(),
-    )
-    .unwrap();
-    assert_eq!(
-        crate::cache::tensor_contract_structure_cache_key_build_count(),
-        1
-    );
-}
-
-#[test]
-fn tensorcontract_execution_context_task_local_lru_evicts_old_structure() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let lhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
-    let rhs =
-        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
-    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
-    let mut context = TensorContractExecutionContext::<f64>::default();
-    context
-        .cache_mut()
-        .set_policy(OperationCachePolicy::task_local_lru(1));
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-        1.0,
-        0.0,
-    )
-    .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_misses(), 1);
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::new(&[1], &[0], OutputAxisOrder::from_axes(&[1, 0])),
-        1.0,
-        0.0,
-    )
-    .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_misses(), 2);
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-        1.0,
-        0.0,
-    )
-    .unwrap();
-    assert_eq!(context.cache().structure_len(), 1);
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 3);
-}
-
-#[test]
-fn tensorcontract_execution_context_keys_conjugation_flags() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let lhs =
-        TensorMap::<Complex64, 2, 0>::from_vec(vec![Complex64::new(1.0, 1.0)], lhs_space).unwrap();
-    let rhs =
-        TensorMap::<Complex64, 2, 0>::from_vec(vec![Complex64::new(2.0, 3.0)], rhs_space).unwrap();
-    let mut dst =
-        TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
-    let mut context = TensorContractExecutionContext::<Complex64>::default();
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 0.0),
-    )
-    .unwrap();
-    assert_eq!(dst.data(), &[Complex64::new(-1.0, 5.0)]);
-
-    tensorcontract_into_with_context(
-        &mut context,
-        &mut dst,
-        &lhs,
-        &rhs,
-        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[0], true, false),
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 0.0),
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[Complex64::new(5.0, 1.0)]);
-    assert_eq!(context.cache().structure_len(), 2);
-    assert_eq!(context.cache().stats().structure_hits(), 0);
-    assert_eq!(context.cache().stats().structure_misses(), 2);
-}
-
-#[test]
 fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
@@ -789,7 +562,7 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
     let mut dst =
         TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
 
-    tensorcontract_into(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
@@ -815,7 +588,7 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
         ]
     );
 
-    tensorcontract_into(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
@@ -959,7 +732,7 @@ fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
 }
 
 #[test]
-fn tensorproduct_into_is_checked_no_contraction_wrapper() {
+fn tensorcontract_with_no_contracted_axes_is_the_outer_product() {
     let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
     let rhs_space = TensorMapSpace::<1, 0>::from_dims([3], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
@@ -967,13 +740,21 @@ fn tensorproduct_into_is_checked_no_contraction_wrapper() {
     let rhs = TensorMap::<f64, 1, 0>::from_vec(vec![5.0, 7.0, 11.0], rhs_space).unwrap();
     let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
 
-    tensorproduct_into(&mut dst, &lhs, &rhs, OutputAxisOrder::identity(), 2.0, 3.0).unwrap();
+    dense_contract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::new(&[], &[], OutputAxisOrder::identity()),
+        2.0,
+        3.0,
+    )
+    .unwrap();
 
     assert_eq!(dst.data(), &[23.0, 33.0, 31.0, 45.0, 47.0, 69.0]);
 }
 
 #[test]
-fn tensorproduct_with_conjugation_is_empty_contract_wrapper() {
+fn tensorcontract_outer_product_conjugates_lhs() {
     let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
     let rhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -990,13 +771,17 @@ fn tensorproduct_with_conjugation_is_empty_contract_wrapper() {
     let mut dst =
         TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
 
-    tensorproduct_into_with_conjugation(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
-        OutputAxisOrder::identity(),
-        true,
-        false,
+        TensorContractSpec::new_with_conjugation(
+            &[],
+            &[],
+            OutputAxisOrder::identity(),
+            true,
+            false,
+        ),
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
     )
@@ -1200,7 +985,7 @@ fn plain_tensorcontract_rejects_one_block_fusion_tensor_instead_of_dense_contrac
     let mut dst: TensorMap<f64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![10.0], space()).unwrap();
 
-    let err = tensorcontract_into(
+    let err = dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
@@ -1332,25 +1117,6 @@ fn prepared_structure_scales_inactive_destination_once_for_each_beta() {
         &issue311_contract_specs(),
     )
     .unwrap();
-    let key = TensorContractStructureCacheKey::from_structures(
-        issue311_contract_specs()
-            .iter()
-            .map(|term| {
-                (
-                    term.dst_block(),
-                    term.lhs_block(),
-                    term.rhs_block(),
-                    term.coefficient().to_bits(),
-                )
-            })
-            .collect::<Vec<_>>(),
-        &dst_structure,
-        &lhs_structure,
-        &rhs_structure,
-    )
-    .unwrap();
-    let mut cache = TensorContractStructureCache::new();
-    cache.insert(key.clone(), structure);
     let dst_structure = Arc::new(dst_structure);
     let lhs_structure = Arc::new(lhs_structure);
     let rhs_structure = Arc::new(rhs_structure);
@@ -1363,7 +1129,7 @@ fn prepared_structure_scales_inactive_destination_once_for_each_beta() {
             crate::contract::tensorcontract_structure_with_dense_executor_raw(
                 &mut tenet_dense::DefaultDenseExecutor::new(),
                 &mut TensorContractWorkspace::default(),
-                cache.get(&key).unwrap(),
+                &structure,
                 &dst_structure,
                 &lhs_structure,
                 &rhs_structure,

@@ -69,10 +69,7 @@ mod scratch;
 mod storage_contract_tests;
 mod structure;
 
-pub use api::{
-    tensorcontract_execute_with, tensorcontract_into, tensorcontract_into_with, tensorproduct_into,
-    tensorproduct_into_with_conjugation,
-};
+pub use api::tensorcontract_execute_with;
 #[cfg(test)]
 pub(crate) use backend::tensorcontract_structure_with_dense_executor_raw;
 pub use backend::{
@@ -83,10 +80,8 @@ pub use checked_generic::CheckedContractStage;
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
-    plan_compose, tensorcontract_into_with_context, try_compile_storage_contract_core_route,
-    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractCache,
-    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractPlanKey,
+    plan_compose, try_compile_storage_contract_core_route, HostTreeFusionExecutionContext,
+    PreparedTensorContractFusion, TensorContractFusionExecutionContext,
 };
 pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]

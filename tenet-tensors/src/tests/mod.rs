@@ -93,6 +93,49 @@ where
     .tensorcontract_fusion_into(rule, dst, lhs, rhs, axes, alpha, beta)
 }
 
+/// Dense (non-fusion) contraction through the compiled structure on the
+/// default executor, for fixtures that pin contraction semantics.
+pub(crate) fn dense_contract_into<
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    axes: TensorContractSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let structure = tensorcontract_structure(dst, lhs, rhs, axes)?;
+    tensorcontract_execute_with(
+        &mut DenseTreeTransformOperations::default_executor(),
+        &mut TensorContractWorkspace::default(),
+        &structure,
+        dst,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
+}
+
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use std::fmt::Debug;
@@ -1501,7 +1544,7 @@ where
     let rhs = TensorMap::<D, 2, 0>::from_vec(vec![rhs_value], rhs_space).unwrap();
     let mut dst = TensorMap::<D, 2, 0>::filled(fill, dst_space).unwrap();
 
-    tensorcontract_into(
+    dense_contract_into(
         &mut dst,
         &lhs,
         &rhs,
