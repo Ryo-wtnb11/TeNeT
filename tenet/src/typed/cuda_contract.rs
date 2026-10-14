@@ -97,22 +97,19 @@ fn cuda_trace_source<R, D: CudaPayload>(
 
 /// The device lease a prepared stack replay holds from its output upload
 /// through its replay. Nominally public only to name
-/// [`ContractExec::MembersLease`]; it is not reachable outside the crate.
+/// [`PreparedExec::MembersLease`]; it is not reachable outside the crate.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub struct CudaMembersLease<'r>(crate::runtime::CudaLease<'r>);
 
-/// The device contraction kernel: the route planned on the Host, replayed on
-/// the device. Every transform structure, core plan, borrow decision and the
-/// destination come from the one planner the Host uses, with the
-/// fully-direct-core capabilities of the device executor.
+/// The device prepared-batch kernels: the members' plan entries, lease,
+/// upload and replay of the one prepared plan body.
 #[cfg(feature = "cuda")]
-impl<R, D> ContractExec<R, D> for CudaStorage<D>
+impl<R, D> PreparedExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    type Caps = tenet_tensors::DirectCoreExecutor;
     type MembersLease<'r> = CudaMembersLease<'r>;
 
     fn reserve_members(
@@ -179,6 +176,19 @@ where
     fn retained_payload_bytes(_: ExecToken, _payload: &Self, len: usize) -> usize {
         len.saturating_mul(std::mem::size_of::<D>())
     }
+}
+
+/// The device contraction kernel: the route planned on the Host, replayed on
+/// the device. Every transform structure, core plan, borrow decision and the
+/// destination come from the one planner the Host uses, with the
+/// fully-direct-core capabilities of the device executor.
+#[cfg(feature = "cuda")]
+impl<R, D> ContractExec<R, D> for CudaStorage<D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    type Caps = tenet_tensors::DirectCoreExecutor;
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
         _: ExecToken,

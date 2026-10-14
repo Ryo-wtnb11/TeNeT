@@ -335,6 +335,7 @@ const TYPED: &[&str] = &[
     "PersistedScalar",
     "PhysicalDense",
     "PhysicalDenseError",
+    "PreparedExec",
     "Qr",
     "RecouplingCoefficientAction",
     "ReduceExec",

@@ -409,7 +409,7 @@ mod contract_ops;
 pub use checked_generic_contract::TraceExec;
 use contract_ops::contract_request;
 pub use contract_ops::ContractSpec;
-pub use contract_ops::{ContractExec, ContractReplay};
+pub use contract_ops::{ContractExec, ContractReplay, PreparedExec};
 /// The seam `tenet-network` drives; not part of the facade.
 #[doc(hidden)]
 pub mod __network;

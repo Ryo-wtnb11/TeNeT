@@ -1,7 +1,7 @@
 //! Restricted binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
-use crate::typed::ContractExec;
+use crate::typed::PreparedExec;
 use tenet_tensors::{HostContractMembersWorkspace, OutputAxisOrder, StorageContractResolution};
 
 #[cfg(test)]
@@ -71,7 +71,7 @@ impl<R, D, S> ContractPlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
-    S: ContractExec<R, D>,
+    S: PreparedExec<R, D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
     /// CUDA admits exact-sign direct Core/SwappedCore, nonzero Single CopyC,
@@ -431,7 +431,7 @@ impl<R, D, S> ComposePlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
-    S: ContractExec<R, D>,
+    S: PreparedExec<R, D>,
 {
     /// Prepares the composition of stacks with `lhs`'s and `rhs`'s
     /// signatures. Their payloads are not read, and `B` is not fixed.
@@ -512,7 +512,7 @@ impl<R, D, S> ContractWorkspace<R, D, S> {
     }
 }
 
-impl<R, D, S: ContractExec<R, D>> ContractWorkspace<R, D, S> {
+impl<R, D, S: PreparedExec<R, D>> ContractWorkspace<R, D, S> {
     /// Retained output payload and replay scratch (on CUDA, device payload
     /// and Host layout scratch), excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
