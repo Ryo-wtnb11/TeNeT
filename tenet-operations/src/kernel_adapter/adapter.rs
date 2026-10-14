@@ -1,5 +1,9 @@
 use super::*;
 
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 /// Backend-neutral low-level kernel adapter for host-slice replay.
 ///
 /// Replay drivers (tree-transform pack/recoupling/scatter, fusion-block
@@ -20,7 +24,10 @@ use super::*;
 /// zero fills pass the one-sided normalized view of the destination block.
 /// Every primitive is elementwise without reduction, so an adapter that
 /// iterates the views it receives produces the same values.
-pub trait HostKernelAdapter<T> {
+///
+/// Sealed: the `testing` feature adds a method, so an implementor outside this
+/// crate could not compile in both feature configurations.
+pub trait HostKernelAdapter<T>: sealed::Sealed {
     /// `dst = alpha * op(src) + beta * dst` over strided views, where `op` is
     /// conjugation when `source_conjugate` is set (tensoradd / single-block
     /// tree replay primitive).
@@ -449,6 +456,8 @@ impl StridedHostKernelAdapter {
         }
     }
 }
+
+impl sealed::Sealed for StridedHostKernelAdapter {}
 
 impl<T> HostKernelAdapter<T> for StridedHostKernelAdapter
 where
