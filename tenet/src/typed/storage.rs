@@ -10,7 +10,7 @@ pub(super) mod sealed {
     ///
     /// Why not sealing alone: sealing stops external impls, not external
     /// calls through `<S as XExec<R, D>>::method`, and a kernel skips the
-    /// admission its typed body owns (`ContractExec::lease_members` would
+    /// admission its typed body owns (`PreparedExec::lease_members` would
     /// hand out the device lease). The field is private and [`EXEC`] is
     /// `pub(crate)`, so no value of this type exists outside the crate.
     #[derive(Clone, Copy)]
@@ -33,19 +33,19 @@ impl<D> sealed::Sealed for Vec<D> {}
 ///
 /// ```
 /// use tenet::sector::U1FusionRule;
-/// use tenet::typed::{ContractExec, Runtime};
+/// use tenet::typed::{PreparedExec, Runtime};
 ///
 /// fn call(_runtime: &Runtime) {
-///     let _kernel = <Vec<f64> as ContractExec<U1FusionRule, f64>>::lease_members;
+///     let _kernel = <Vec<f64> as PreparedExec<U1FusionRule, f64>>::lease_members;
 /// }
 /// ```
 ///
 /// ```compile_fail,E0061
 /// use tenet::sector::U1FusionRule;
-/// use tenet::typed::{ContractExec, Runtime};
+/// use tenet::typed::{PreparedExec, Runtime};
 ///
 /// fn call(runtime: &Runtime) {
-///     let _lease = <Vec<f64> as ContractExec<U1FusionRule, f64>>::lease_members(runtime);
+///     let _lease = <Vec<f64> as PreparedExec<U1FusionRule, f64>>::lease_members(runtime);
 /// }
 /// ```
 #[doc(hidden)]

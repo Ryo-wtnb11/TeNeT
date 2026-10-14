@@ -820,7 +820,15 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     ) -> Result<(), TransformExecError>
     where
         D: RecouplingCoefficientAction<C>;
+}
 
+/// The storage kernels of the prepared batches ([`ContractPlan`],
+/// [`ComposePlan`]): one plan body, with each storage supplying its lease,
+/// output payload, member replay and retained-bytes accounting. Kept apart
+/// from [`ContractExec`] so the eager execution traits carry no
+/// prepared-batch lifecycle.
+#[doc(hidden)]
+pub trait PreparedExec<R, D>: TypedStorage<R, D> {
     /// What a prepared stack replay holds from its output allocation through
     /// its replay: the device lease on CUDA; nothing on Host, whose replay
     /// takes its context lease itself.
@@ -869,8 +877,7 @@ pub trait ContractExec<R, D>: TypedStorage<R, D> {
     fn retained_payload_bytes(_: ExecToken, payload: &Self, len: usize) -> usize;
 }
 
-impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
-    type Caps = tenet_tensors::HostEagerExecutor;
+impl<R, D: TensorScalar> PreparedExec<R, D> for Vec<D> {
     type MembersLease<'r> = ();
 
     fn reserve_members(
@@ -929,6 +936,10 @@ impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
     fn retained_payload_bytes(_: ExecToken, payload: &Self, _len: usize) -> usize {
         payload.capacity().saturating_mul(std::mem::size_of::<D>())
     }
+}
+
+impl<R, D: TensorScalar> ContractExec<R, D> for Vec<D> {
+    type Caps = tenet_tensors::HostEagerExecutor;
 
     fn contract_owned<C: tenet_tensors::DenseBlockScalar>(
         _: ExecToken,
