@@ -3,8 +3,7 @@ use super::*;
 /// Left polar factors `W` (phase) and `P` (magnitude) of the compact diagonal
 /// `spectrum` on `space`, in fusion mode `M`; both stay compact on the input
 /// space.
-#[doc(hidden)]
-pub fn left_polar_of_diagonal<M, R, D>(
+fn left_polar_of_diagonal<M, R, D>(
     space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<LeftPolar<FactorOutput<R, D>>, M::Error>
@@ -26,21 +25,6 @@ where
         w: on_input(w),
         p: on_input(p),
     })
-}
-
-/// Right polar factors `P` (magnitude) and `Wh` (phase) of a compact
-/// diagonal; see [`left_polar_of_diagonal`].
-#[doc(hidden)]
-pub fn right_polar_of_diagonal<M, R, D>(
-    space: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<RightPolar<FactorOutput<R, D>>, M::Error>
-where
-    M: FactorMode<R>,
-    D: FactorScalar,
-{
-    left_polar_of_diagonal::<M, R, D>(space, spectrum)
-        .map(|LeftPolar { w, p }| RightPolar { p, wh: w })
 }
 
 #[cfg(test)]

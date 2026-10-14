@@ -138,17 +138,19 @@ pub use bound::BoundDynFactor;
 pub use compact_plan::CheckedGenericFactorPlanError;
 pub use dense_stage::in_linalg_scope;
 pub use eig::{
-    ascending_eigh_order, eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source,
-    eigh_full_dyn, eigh_full_from_source, eigh_sector_into, eigh_vals_dyn, eigh_vals_from_source,
-    require_finite_eigh_input, validate_hermitian_regions, EigFullDyn, EighFullDyn, EighScratch,
-    HermitianTol, EIGH_EIGENVALUE_CHECK,
+    ascending_eigh_order, eig_full_dyn, eig_full_from_source, eig_vals_from_source, eigh_full_dyn,
+    eigh_full_from_source, eigh_sector_into, eigh_vals_from_source, require_finite_eigh_input,
+    validate_hermitian_regions, EigFullDyn, EighFullDyn, EighScratch, HermitianTol,
+    EIGH_EIGENVALUE_CHECK,
 };
+#[cfg(test)]
+pub(crate) use eig::{eig_vals_dyn, eigh_vals_dyn};
+#[cfg(feature = "diagnostics")]
+pub use matricize::sector_matricization_diagnostic;
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
     EIGH_FULL_STACKING,
 };
-#[cfg(feature = "diagnostics")]
-pub use matricize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
 #[cfg(test)]
 pub(crate) use null_space::{
     left_null, left_null_dyn_checked_generic, right_null, right_null_dyn_checked_generic,
@@ -162,8 +164,8 @@ pub(crate) use polar::{
     right_polar_dyn_checked_generic,
 };
 pub use polar::{
-    left_polar_adjoint_from_parent, left_polar_from_source, left_polar_of_diagonal,
-    right_polar_adjoint_from_parent, right_polar_from_source, right_polar_of_diagonal,
+    left_polar_adjoint_from_parent, left_polar_from_source, right_polar_adjoint_from_parent,
+    right_polar_from_source,
 };
 pub use qr_lq::{
     lq_compact_adjoint_from_parent, lq_compact_from_source, lq_full_adjoint_from_parent,

@@ -68,6 +68,8 @@ impl<F: FnMut(KernelCall)> ObservedKernels<F> {
     }
 }
 
+impl<F> super::adapter::sealed::Sealed for ObservedKernels<F> {}
+
 impl<T, F> HostKernelAdapter<T> for ObservedKernels<F>
 where
     StridedHostKernelAdapter: HostKernelAdapter<T>,
