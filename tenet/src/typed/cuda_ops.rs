@@ -168,15 +168,32 @@ where
         Ok(compact_factor_routes(self.logical_space())?)
     }
 
-    /// The device kernel of [`TensorMap::svd_compact`] on the current split.
-    fn svd_compact_matrix(&self) -> Result<Svd<Self>, Error> {
-        let source = self.direct_cuda_storage("svd_compact")?;
+    /// The admission every device factorization shares, in one order:
+    /// dense storage, the matrix algebra's endomorphism admission of
+    /// `endomorphism` (if any), regions, placement, then the Host compact
+    /// factor plan. No device lock is taken and no output exists yet.
+    fn cuda_factor_preflight(
+        &self,
+        operation: &'static str,
+        endomorphism: Option<tenet_matrixalgebra::seam::EndomorphismFamily>,
+    ) -> Result<(&CudaStorage<D>, CompactFactorPlan), Error> {
+        let source = self.direct_cuda_storage(operation)?;
         let source_space = self.logical_space().space();
+        if let Some(family) = endomorphism {
+            family.require_endomorphism(source_space.homspace())?;
+        }
         let required_len = source_space.required_len()?;
         // Region admission precedes the placement preflight; the plan reads
         // the same cached regions.
-        sector_regions(source_space.structure(), source_space.nout())?;
-
+        let regions = sector_regions(source_space.structure(), source_space.nout())?;
+        if let Some(family) = endomorphism {
+            if regions.iter().any(|region| region.rows() != region.cols()) {
+                return Err(internal_layout_error(
+                    "CUDA EIGH source contains a non-square coupled-sector region",
+                ));
+            }
+            tenet_matrixalgebra::seam::validate_endomorphism_region_stacking(&regions, family)?;
+        }
         {
             // Preflight only: the ordinal is immutable, so this placement
             // check takes no device lock at all.
@@ -188,9 +205,14 @@ where
                 source.len(),
             )?;
         }
+        Ok((source, self.compact_factor_plan()?))
+    }
+
+    /// The device kernel of [`TensorMap::svd_compact`] on the current split.
+    fn svd_compact_matrix(&self) -> Result<Svd<Self>, Error> {
         // As for typed CUDA QR, all provider work and final-space admission
         // complete before the execution lock and before any output exists.
-        let plan = self.compact_factor_plan()?;
+        let (source, plan) = self.cuda_factor_preflight("svd_compact", None)?;
         #[cfg(test)]
         let treewise = CUDA_SVD_TREEWISE.with(std::cell::Cell::get);
         #[cfg(not(test))]
@@ -352,44 +374,12 @@ where
 
     /// The device kernel of [`TensorMap::eigh_full`] on the current split.
     fn eigh_full_matrix(&self, hermitian_tol: HermitianTol) -> Result<Eigh<Self>, Error> {
-        let source = self.direct_cuda_storage("eigh_full")?;
-        let source_space = self.logical_space().space();
-        if source_space.homspace().codomain() != source_space.homspace().domain() {
-            return Err(tenet_tensors::OperationError::SpaceMismatch {
-                message: "eigh requires an endomorphism (codomain == domain)",
-            }
-            .into());
-        }
-        let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
-        if source_regions
-            .iter()
-            .any(|region| region.rows() != region.cols())
-        {
-            return Err(internal_layout_error(
-                "CUDA EIGH source contains a non-square coupled-sector region",
-            ));
-        }
-        tenet_matrixalgebra::seam::validate_endomorphism_region_stacking(
-            &source_regions,
-            tenet_matrixalgebra::seam::EIGH_FULL_STACKING,
-        )?;
-
-        {
-            // Preflight only: the ordinal is immutable, so this placement
-            // check takes no device lock at all.
-            let device = self.runtime.cuda_device_ordinal_checked()?;
-            Self::validate_cuda_owned_metadata(
-                Placement::Cuda(device),
-                source.placement(),
-                required_len,
-                source.len(),
-            )?;
-        }
-
         // The Host compact factor plan: an endomorphism's compact bond keeps
         // every eigenpair (`min(n, n) = n`), so its left route is EIGH's.
-        let plan = self.compact_factor_plan()?;
+        let (source, plan) = self.cuda_factor_preflight(
+            "eigh_full",
+            Some(tenet_matrixalgebra::seam::EndomorphismFamily::EighFull),
+        )?;
 
         // Admission is complete. Validate every block before the first EIGH so
         // a late nonfinite or non-Hermitian sector cannot trigger partial
@@ -410,7 +400,7 @@ where
             let tol = hermitian_tol.resolve(<D as FactorScalar>::epsilon());
             if cuda_hermitian_regions::<D>(cuda, &source.0, &regions, tol)?.contains(&false) {
                 return Err(tenet_tensors::OperationError::InvalidArgument {
-                    message: "eigh requires Hermitian coupled-sector blocks",
+                    message: tenet_matrixalgebra::seam::EIGH_NOT_HERMITIAN,
                 }
                 .into());
             }
@@ -679,28 +669,9 @@ where
 {
     /// The device kernel of [`TensorMap::qr_compact`] on the current split.
     fn qr_compact_matrix(&self) -> Result<Qr<Self>, Error> {
-        let source = self.direct_cuda_storage("qr_compact")?;
-        let source_space = self.logical_space().space();
-        let required_len = source_space.required_len()?;
-        // Region admission precedes the placement preflight; the plan reads
-        // the same cached regions.
-        sector_regions(source_space.structure(), source_space.nout())?;
-
-        {
-            // Preflight only: the ordinal is immutable, so this placement
-            // check takes no device lock at all.
-            let device = self.runtime.cuda_device_ordinal_checked()?;
-            Self::validate_cuda_owned_metadata(
-                Placement::Cuda(device),
-                source.placement(),
-                required_len,
-                source.len(),
-            )?;
-        }
-
         // Provider queries and final HomSpace admission belong outside the
         // execution lock; the plan owns every source-to-factor route.
-        let plan = self.compact_factor_plan()?;
+        let (source, plan) = self.cuda_factor_preflight("qr_compact", None)?;
         let left_space = plan.left_space(self.logical_space())?;
         let right_space = plan.right_space(self.logical_space())?;
         let left_len = left_space.space().required_len()?;

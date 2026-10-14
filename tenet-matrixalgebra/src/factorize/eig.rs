@@ -212,23 +212,25 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "eigh requires an endomorphism (codomain == domain)",
-        });
-    }
+    EndomorphismFamily::EighFull.require_endomorphism(space.homspace())?;
     if let Some(plan) = compact_factor_plan(input.space())? {
         // The plan proves the stacking.
         require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
         return eigh_full_direct_regions(dense, input, &plan, hermitian_tol);
     }
-    let matricizations =
-        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
-    #[cfg(test)]
-    if let InputMatricizations::Packed(matrices) = &matricizations {
-        record_eigh_input_pack(matrices);
-    }
-    matricizations.validate_endomorphism_stacking(EIGH_FULL_STACKING)?;
+    let matricizations = admit_endomorphism_stacking(
+        space,
+        input.data(),
+        EndomorphismFamily::EighFull,
+        |structure, data, nout| {
+            let matricizations = multiplicity_free_input_matricizations(structure, data, nout)?;
+            #[cfg(test)]
+            if let InputMatricizations::Packed(matrices) = &matricizations {
+                record_eigh_input_pack(matrices);
+            }
+            Ok(matricizations)
+        },
+    )?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matricizations.validate_hermitian(hermitian_tol)?;
     with_input_geometry!(&matricizations, |geometry| eigh_full_scattered(
@@ -323,7 +325,10 @@ where
 {
     let space = input.space().space();
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
-    validate_endomorphism_tree_stacking(plan.source_regions.as_ref(), EIGH_FULL_STACKING)?;
+    validate_endomorphism_tree_stacking(
+        plan.source_regions.as_ref(),
+        EndomorphismFamily::EighFull,
+    )?;
     validate_hermitian_regions(input.data(), &plan.source_regions, hermitian_tol)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
@@ -583,15 +588,11 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "eig requires an endomorphism (codomain == domain)",
-        });
-    }
-    let matricizations =
-        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
-    matricizations.validate_endomorphism_stacking(
-        "eig_full requires identical endomorphism row/column fusion-tree stacking",
+    let matricizations = admit_endomorphism(
+        space,
+        input.data(),
+        EndomorphismFamily::EigFull,
+        multiplicity_free_input_matricizations,
     )?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eig)?;
 
@@ -808,7 +809,7 @@ where
         };
         if !hermitian {
             return Err(OperationError::InvalidArgument {
-                message: "eigh requires Hermitian coupled-sector blocks",
+                message: EIGH_NOT_HERMITIAN,
             }
             .into());
         }
@@ -914,14 +915,11 @@ where
     // LAPACK `job='N'`) and publish the spectrum ascending. Skips the
     // eigenvector space/buffer, the vector reorder, gauge-fixing, and the block
     // scatter that `eigh_full_dyn` did only to discard here.
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "eigh requires an endomorphism (codomain == domain)",
-        });
-    }
-    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
-    matricizations.validate_endomorphism_stacking(
-        "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
+    let matricizations = admit_endomorphism(
+        space,
+        input.data(),
+        EndomorphismFamily::EighVals,
+        value_matricizations,
     )?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matricizations.validate_hermitian(hermitian_tol)?;
@@ -957,14 +955,11 @@ where
     // `job='N'`) and publish the complex spectrum in lexicographic order.
     // Skips the eigenvector reorder, gauge-fixing, and the factor-pair block
     // assembly that `eig_full_dyn` did only to discard here.
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "eig requires an endomorphism (codomain == domain)",
-        });
-    }
-    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
-    matricizations.validate_endomorphism_stacking(
-        "eig_vals requires identical endomorphism row/column fusion-tree stacking",
+    let matricizations = admit_endomorphism(
+        space,
+        input.data(),
+        EndomorphismFamily::EigVals,
+        value_matricizations,
     )?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eig)?;
     eig_vals_spectra(dense, &matricizations)
@@ -1440,7 +1435,7 @@ pub(super) fn validate_hermitian_matrix_shape<D>(
     }
     if rows != cols {
         return Err(OperationError::SpaceMismatch {
-            message: "eigh requires square coupled-sector matrices",
+            message: EIGH_NOT_SQUARE,
         });
     }
     Ok(())
@@ -1470,7 +1465,7 @@ pub(super) fn validate_hermitian_matrix_contents<D: FactorScalar>(
 ) -> Result<(), OperationError> {
     if !hermitian_matrix_contents(data, n, hermitian_tol.resolve(D::epsilon())) {
         return Err(OperationError::InvalidArgument {
-            message: "eigh requires Hermitian coupled-sector blocks",
+            message: EIGH_NOT_HERMITIAN,
         });
     }
     Ok(())
@@ -1542,11 +1537,9 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "eigh requires an endomorphism (codomain == domain)",
-        });
-    }
+    // `exp` asks its own endomorphism question first, so this refusal is
+    // reached only by a direct caller.
+    EndomorphismFamily::EighFull.require_endomorphism(space.homspace())?;
     let exp_route_tol = EXP_SPECTRAL_ROUTE_EPSILONS * D::epsilon();
     // Why `checked_sector_regions` and not `compact_factor_plan` as
     // `eigh_full_dyn` does: the plan is `Some` exactly when the regions are
@@ -1554,7 +1547,7 @@ where
     // also builds the factor bond spaces — work a yes/no question must not pay
     // for on the retained Hermitian route.
     if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
-        validate_endomorphism_tree_stacking(regions.as_ref(), EXP_STACKING)?;
+        validate_endomorphism_tree_stacking(regions.as_ref(), EndomorphismFamily::Exp)?;
         for region in regions.iter() {
             let range = region.range();
             let matrix = data_region(input.data(), &range)?;
@@ -1570,7 +1563,7 @@ where
         return Ok(true);
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
-    validate_endomorphism_tree_stacking(&matricizations, EXP_STACKING)?;
+    validate_endomorphism_tree_stacking(&matricizations, EndomorphismFamily::Exp)?;
     for matrix in &matricizations {
         validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
     }
@@ -1657,21 +1650,16 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::SpaceMismatch {
-                message: "eigh requires an endomorphism (codomain == domain)",
-            },
-        ));
-    }
-    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
     // Why not trust equal product spaces alone: outer-multiplicity vertices
     // are part of a tree key, so Hermitian coordinates require identical full
     // tree stacking, not merely equal coupled-sector dimensions.
-    matrices
-        .validate_endomorphism_stacking(EIGH_FULL_STACKING)
-        .map_err(CheckedGenericFactorPlanError::from)?;
+    let matrices = admit_endomorphism(
+        space,
+        input.data(),
+        EndomorphismFamily::EighFull,
+        generic_input_matricizations,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matrices
         .validate_hermitian(hermitian_tol)
@@ -1738,20 +1726,13 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::SpaceMismatch {
-                message: "eig requires an endomorphism (codomain == domain)",
-            },
-        ));
-    }
-    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    matrices
-        .validate_endomorphism_stacking(
-            "eig_full requires identical endomorphism row/column fusion-tree stacking",
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
+    let matrices = admit_endomorphism(
+        space,
+        input.data(),
+        EndomorphismFamily::EigFull,
+        generic_input_matricizations,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     // Every sector is read before the shared finite-input stage reports, so
     // a matricization error still precedes it.
     let mut finite = Ok(());
