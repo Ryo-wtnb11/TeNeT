@@ -36,10 +36,10 @@ fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
     let transform =
         TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 3.0)])
             .unwrap();
-    let mut backend = HostTensorOperations;
+    let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &transform,
@@ -66,10 +66,10 @@ fn tree_transform_overwrite_execute_ignores_custom_host_destination_bits() {
     let transform =
         TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 3.0)])
             .unwrap();
-    let mut backend = HostTensorOperations;
+    let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_overwrite_execute_with(
+    replay_overwrite_into(
         &mut backend,
         &mut workspace,
         &transform,
@@ -503,7 +503,7 @@ fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() 
     let mut backend = DenseTreeTransformOperations::new(CountingDenseExecutor::default());
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -559,7 +559,7 @@ fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &transform,
@@ -582,7 +582,7 @@ fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
     backend.set_recoupling_threads(std::num::NonZeroUsize::new(2).unwrap());
     backend.set_transform_parallel_min_len(0);
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &transform,

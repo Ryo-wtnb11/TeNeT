@@ -827,90 +827,9 @@ where
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     B: TreeTransformBackend<D, C>,
 {
-    pub fn tree_transform_into<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>,
-    {
-        let structure = self.tree_structure(
-            rule,
-            &operation,
-            dst.structure(),
-            TreeStructureSource::Stored {
-                structure: src.structure(),
-                storage_conjugate: false,
-            },
-        )?;
-        self.backend.tree_transform_structure_into(
-            &mut self.workspace,
-            &structure,
-            dst,
-            src,
-            alpha,
-            beta,
-        )
-    }
-
-    pub fn tree_transform_overwrite_into<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>,
-    {
-        let dst_structure = Arc::clone(dst.structure());
-        let src_structure = Arc::clone(src.structure());
-        self.tree_transform_overwrite_into_raw_with_storage_conjugation(
-            rule,
-            operation,
-            &dst_structure,
-            &src_structure,
-            dst.data_mut(),
-            src.data(),
-            false,
-            alpha,
-        )
-    }
-
     /// Dynamic-rank tree transform (permute / braid / transpose): operates
-    /// on raw slices plus their block structures, through the same
-    /// structure-compile cache as the typed facade. `dst_data` must be
+    /// on raw slices plus their block structures, through this context's
+    /// structure-compile cache. `dst_data` must be
     /// zero-filled (or carry the `beta`-scaled accumuland) and sized for
     /// `dst_structure.required_len()`.
     #[allow(clippy::too_many_arguments)]
@@ -1078,75 +997,6 @@ where
             src_data,
             alpha,
             beta,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_transform_into_raw_oriented<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &std::sync::Arc<BlockStructure>,
-        source: &crate::contract::FusionOperandLayout<'_>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    {
-        let structure = self.tree_structure(
-            rule,
-            &operation,
-            dst_structure,
-            TreeStructureSource::Oriented(source),
-        )?;
-        self.backend.tree_transform_structure_into_raw(
-            &mut self.workspace,
-            &structure,
-            dst_structure,
-            source.storage_space().structure(),
-            dst_data,
-            src_data,
-            alpha,
-            beta,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_transform_overwrite_into_raw_with_storage_conjugation<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &std::sync::Arc<BlockStructure>,
-        src_structure: &std::sync::Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        storage_conjugate: bool,
-        alpha: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: RecouplingCoefficientAction<C>,
-    {
-        self.compile_and_replay_overwrite(
-            |context| {
-                context.tree_structure(
-                    rule,
-                    &operation,
-                    dst_structure,
-                    TreeStructureSource::Stored {
-                        structure: src_structure,
-                        storage_conjugate,
-                    },
-                )
-            },
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
         )
     }
 

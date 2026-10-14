@@ -163,7 +163,7 @@ fn alternating_bicharacter_permute_and_braid_apply_source_order_r_symbol() {
     for operation in operations {
         let src = single_block([V, W], [VW], value);
         let mut dst = single_block([W, V], [VW], Complex64::zero());
-        tree_transform_into(
+        eager_tree_transform_into(
             &rule,
             operation,
             &mut dst,
@@ -185,7 +185,7 @@ fn alternating_bicharacter_permute_and_braid_apply_source_order_r_symbol() {
     for operation in operations {
         let src = single_block([V, W, X], [VWX], value);
         let mut dst = single_block([X, W, V], [VWX], Complex64::zero());
-        tree_transform_into(
+        eager_tree_transform_into(
             &rule,
             operation,
             &mut dst,

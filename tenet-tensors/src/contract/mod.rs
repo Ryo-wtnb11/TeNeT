@@ -80,8 +80,8 @@ pub use checked_generic::CheckedContractStage;
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
-    plan_compose, try_compile_storage_contract_core_route, HostTreeFusionExecutionContext,
-    PreparedTensorContractFusion, TensorContractFusionExecutionContext,
+    plan_compose, try_compile_storage_contract_core_route, PreparedTensorContractFusion,
+    TensorContractFusionExecutionContext,
 };
 pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]

@@ -31,8 +31,9 @@ pub use self::schedule::*;
 /// tree keys, block layouts, offsets, and pack/scatter descriptors against
 /// concrete source and destination structures. Matrix-valued categorical
 /// coefficients may be shared across compatible layout bindings. Hot paths
-/// should build this once and replay it with `tree_transform_execute_with`
-/// while reusing a backend and workspace.
+/// should build this once and replay it through
+/// [`crate::TreeTransformBackend::tree_transform_structure_into_raw`] while reusing a
+/// backend and workspace.
 ///
 /// The compiled payload is a [`TreeTransformReplay`] core that holds no
 /// structure: TensorKit's `AbelianTreeTransformer`/`GenericTreeTransformer`

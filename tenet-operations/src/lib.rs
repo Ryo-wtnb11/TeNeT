@@ -52,7 +52,6 @@ pub mod storage_scratch;
 pub mod strided;
 pub mod structure_identity;
 mod task_view;
-pub mod tensoradd;
 mod transform_helpers;
 mod transform_key;
 pub mod transform_plan;
@@ -78,6 +77,7 @@ pub use fusion_replay::{
     FusionScaleBlockLayout, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
     HostFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };
+pub(crate) use host_scalar_kernels::tensoradd_raw_strided_kernel_trusted;
 pub use host_scalar_kernels::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel,
@@ -88,9 +88,6 @@ pub use host_scalar_kernels::{
     tensortrace_raw_strided_kernel_add_with_coefficient_trusted,
     tensortrace_raw_strided_kernel_trusted,
 };
-pub(crate) use host_scalar_kernels::{
-    copy_block_with_strided_kernel, tensoradd_raw_strided_kernel_trusted,
-};
 pub use kernel_adapter::{BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
@@ -100,7 +97,6 @@ pub use scalar::{
     RealStructuralCoefficient, RecouplingCoefficientAction, TransformScale, TreeTransformScalar,
     WideScalar,
 };
-pub use tensoradd::*;
 pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};
 pub use transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,

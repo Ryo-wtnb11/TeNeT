@@ -256,14 +256,12 @@ fn tenet_operations_root_exports_exactly_the_pinned_names() {
         "mod storage_scratch",
         "mod strided",
         "mod structure_identity",
-        "mod tensoradd",
         "mod transform_plan",
         "mod transform_replay",
         "mod transform_structure",
         // glob re-exports
         "axis::*",
         "replay_backend::*",
-        "tensoradd::*",
         "transform_replay::*",
         "transform_structure::*",
         // checked block layout (hidden)
@@ -354,7 +352,6 @@ fn tenet_operations_root_exports_exactly_the_pinned_names() {
 const CRATE_INTERNAL: &[&str] = &[
     // Raw kernels; the `_trusted` drivers are the routed entries.
     "axpby_raw_strided_kernel",
-    "copy_block_with_strided_kernel",
     "tensoradd_raw_strided_kernel_trusted",
     "tensortrace_raw_strided_kernel",
     "tensortrace_raw_strided_kernel_add_with_coefficient",
@@ -367,11 +364,9 @@ const CRATE_INTERNAL: &[&str] = &[
     "fusion_tree_pairs_share_group",
     // Misc.
     "direct_group_matrix_offset",
-    "permutation_axes",
     "validate_recoupling_lens",
     "with_host_pool",
     // Unrouted replay entries.
-    "tensoradd_structure_with_strided_kernel",
     "tree_transform_structure_with_structural_recoupling",
     "tree_transform_structure_overwrite_with_structural_recoupling",
     "tree_transform_structure_with_structural_recoupling_raw",

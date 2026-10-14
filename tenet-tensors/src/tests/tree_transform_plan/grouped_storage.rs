@@ -26,10 +26,10 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
             false,
         )
         .unwrap();
-        let mut backend = HostTensorOperations;
+        let mut backend = DenseTreeTransformOperations::default();
         let mut workspace = TreeTransformWorkspace::default();
 
-        tree_transform_execute_with(
+        replay_into(
             &mut backend,
             &mut workspace,
             &replay,
@@ -86,10 +86,10 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     .unwrap()])
     .compile(&dst, &src)
     .unwrap();
-    let mut backend = HostTensorOperations;
+    let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -320,12 +320,12 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
         dst_structure.as_ref().clone(),
     )
     .unwrap();
-    let mut grouped_backend = HostTensorOperations;
+    let mut grouped_backend = DenseTreeTransformOperations::default();
     let mut grouped_workspace = TreeTransformWorkspace::default();
-    let mut direct_backend = HostTensorOperations;
+    let mut direct_backend = DenseTreeTransformOperations::default();
     let mut direct_workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut grouped_backend,
         &mut grouped_workspace,
         &grouped,
@@ -335,7 +335,7 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tree_transform_execute_with(
+    replay_into(
         &mut direct_backend,
         &mut direct_workspace,
         &direct,

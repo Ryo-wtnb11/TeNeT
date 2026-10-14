@@ -16,8 +16,8 @@ use crate::mode::{
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{TreeTransformPlanning, TreeTransformRuleCacheKey};
 use crate::{
-    DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
-    OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend, ZeroBytes,
+    DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
+    RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend, ZeroBytes,
 };
 use tenet_operations::{
     ContractDestinationInit, OutputAxisOrder, TensorContractSpec, TreeTransformWorkspace,
@@ -70,13 +70,6 @@ pub struct TensorContractFusionExecutionContext<
     #[cfg(test)]
     last_top_level_resolution_orientation: Option<FusionContractOrientation>,
 }
-
-pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
-    D,
-    RuleKey,
-    HostTensorOperations,
-    DenseTreeTransformOperations,
->;
 
 impl<D, RuleKey, C>
     TensorContractFusionExecutionContext<

@@ -1,7 +1,6 @@
 use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockView, BlockViewMut};
 
 use strided_kernel::{
     axpy_conj_raw, axpy_raw, copy_scale_conj_raw, copy_scale_raw, CopyPlan, MaybeSendSync,
@@ -9,7 +8,7 @@ use strided_kernel::{
 };
 
 use crate::scalar::scale_value;
-use crate::strided::{error as strided_error, read as strided_read, write as strided_write};
+use crate::strided::error as strided_error;
 use crate::{ConjugateValue, OperationError};
 
 /// Host scalar strided kernel boundary.
@@ -17,20 +16,6 @@ use crate::{ConjugateValue, OperationError};
 /// This module owns the current host-slice scalar kernels used by tensoradd,
 /// pack, scatter, and scale replay. Higher-level tree/fusion algorithms should
 /// call these primitives instead of embedding raw strided loops directly.
-pub(crate) fn copy_block_with_strided_kernel<T>(
-    dst: BlockViewMut<'_, T>,
-    src: BlockView<'_, T>,
-) -> Result<(), OperationError>
-where
-    T: Copy + strided_kernel::MaybeSendSync,
-{
-    let mut dst = strided_write(dst)?;
-    let src = strided_read(src)?;
-    let len = dst.dims().iter().product();
-    crate::host_pool::strided(len, || strided_kernel::copy_into(&mut dst, &src))
-        .map_err(strided_error)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn tensoradd_raw_strided_kernel<T>(
     zero_strides: &mut Vec<isize>,

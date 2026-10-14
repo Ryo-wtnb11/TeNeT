@@ -555,7 +555,7 @@ fn typed_fz2_trace_scales_each_logical_destination_without_touching_padding() {
         )
         .unwrap();
 
-        tensortrace_fusion_into(
+        dynamic_tensortrace_fusion_into(
             &rule,
             &mut dst,
             &src,
@@ -580,7 +580,7 @@ fn typed_fz2_trace_beta_zero_overwrites_logical_nan_without_reading_padding() {
     let mut dst: TensorMap<f64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![f64::NAN; 7], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -621,7 +621,7 @@ fn typed_fz2_zero_term_trace_scales_all_logical_destinations() {
     )
     .unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -663,10 +663,10 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
         vec![vec![1, 1]; dst_key_count],
     )
     .unwrap();
-    let full_structure = TensorTraceFusionStructure::<f64>::compile_fusion_spaces(
+    let full_structure = TensorTraceFusionStructure::<f64>::compile_fusion_dyn_raw(
         &rule,
-        &canonical_dst,
-        &canonical_src,
+        &DynamicFusionMapSpace::from_typed(&canonical_dst),
+        &DynamicFusionMapSpace::from_typed(&canonical_src),
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
     )
     .unwrap();
@@ -761,7 +761,7 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
     .unwrap();
     let mut dst: TensorMap<f64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![10.0, 99.0, 30.0], dst_space).unwrap();
-    let structure = tensortrace_fusion_structure(
+    let structure = dynamic_tensortrace_fusion_structure(
         &rule,
         &dst,
         &src,
@@ -780,19 +780,7 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
         .collect::<Vec<_>>();
     coefficients.sort_by(f64::total_cmp);
     assert_eq!(coefficients, vec![-1.0, 1.0]);
-    let mut backend = HostTensorOperations;
-    let mut allocator = HostAllocator::default();
-
-    tensortrace_fusion_execute_with(
-        &mut backend,
-        &mut allocator,
-        &structure,
-        &mut dst,
-        &src,
-        1.0,
-        0.5,
-    )
-    .unwrap();
+    replay_tensortrace_fusion_into(&structure, &mut dst, &src, 1.0, 0.5).unwrap();
 
     let expected = if active_block == 0 {
         vec![4.0, 99.0, 15.0]
@@ -841,170 +829,13 @@ fn typed_fz2_trace_admits_only_injective_destination_spaces() {
 
     // What: intersecting bounds are valid when exact logical footprints remain
     // disjoint, including coupled-style even/odd interleaving.
-    TensorTraceFusionStructure::<f64>::compile_fusion_spaces(
+    TensorTraceFusionStructure::<f64>::compile_fusion_dyn_raw(
         &rule,
-        &interleaved_dst,
-        &full_src,
+        &DynamicFusionMapSpace::from_typed(&interleaved_dst),
+        &DynamicFusionMapSpace::from_typed(&full_src),
         TensorTraceAxisSpec::new(&[0, 1], &[], &[]),
     )
     .unwrap();
-}
-
-#[test]
-fn plain_trace_rejects_self_overlapping_destination_layout() {
-    let dst = BlockStructure::from_blocks_with_rank(
-        1,
-        vec![BlockSpec::new(vec![2], vec![0], 0).unwrap()],
-    )
-    .unwrap();
-    let src = BlockStructure::trivial(&[2]).unwrap();
-
-    let error = TensorTraceStructure::compile_structures(
-        &dst,
-        &src,
-        TensorTraceAxisSpec::new(&[0], &[], &[]),
-    )
-    .unwrap_err();
-
-    // What: the plain compiler cannot publish a replay descriptor that writes
-    // more than one logical output to the same destination element.
-    assert_eq!(
-        error,
-        OperationError::InvalidArgument {
-            message: "tensor trace destination layouts overlap",
-        }
-    );
-}
-
-#[test]
-fn plain_strided_trace_updates_logical_output_without_touching_padding() {
-    let src_space = TensorMapSpace::<2, 1>::from_dims([2, 2], [2]).unwrap();
-    let src: TensorMap<f64, 2, 1, Trivial> =
-        TensorMap::from_vec((1..=8).map(f64::from).collect(), src_space).unwrap();
-    let dst_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let dst_structure = BlockStructure::from_blocks_with_rank(
-        1,
-        vec![BlockSpec::new(vec![2], vec![2], 0).unwrap()],
-    )
-    .unwrap();
-    let mut dst: TensorMap<f64, 1, 0, Trivial> =
-        TensorMap::from_vec_with_structure(vec![10.0, 999.0, 20.0], dst_space, dst_structure)
-            .unwrap();
-
-    tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new(&[0], &[1], &[2]),
-        1.0,
-        1.0,
-    )
-    .unwrap();
-
-    // What: successful plain replay updates only the strided logical view;
-    // exact-length storage padding is not part of the tensortrace output.
-    assert_eq!(dst.data(), &[18.0, 999.0, 30.0]);
-}
-
-#[test]
-fn plain_trace_validates_host_slice_extents_before_mutation() {
-    struct Case {
-        name: &'static str,
-        dst: Vec<f64>,
-        src: Vec<f64>,
-        expected: usize,
-        actual: usize,
-    }
-
-    let dst_structure = BlockStructure::from_blocks_with_rank(
-        1,
-        vec![BlockSpec::new(vec![2], vec![2], 0).unwrap()],
-    )
-    .unwrap();
-    let src_structure = BlockStructure::trivial(&[2]).unwrap();
-    let cases = [
-        Case {
-            name: "short destination",
-            dst: vec![10.0, 99.0],
-            src: vec![1.0, 2.0],
-            expected: 3,
-            actual: 2,
-        },
-        Case {
-            name: "oversized destination",
-            dst: vec![10.0, 99.0, 20.0, 77.0],
-            src: vec![1.0, 2.0],
-            expected: 3,
-            actual: 4,
-        },
-        Case {
-            name: "short source",
-            dst: vec![10.0, 99.0, 20.0],
-            src: vec![1.0],
-            expected: 2,
-            actual: 1,
-        },
-        Case {
-            name: "oversized source",
-            dst: vec![10.0, 99.0, 20.0],
-            src: vec![1.0, 2.0, 3.0],
-            expected: 2,
-            actual: 3,
-        },
-    ];
-
-    for case in cases {
-        let initial_dst = case.dst.clone();
-        let mut dst: TensorMap<f64, 1, 0, Trivial, ReportedLenHostStorage<f64>> =
-            TensorMap::from_storage_with_structure(
-                ReportedLenHostStorage {
-                    data: case.dst,
-                    reported_len: 3,
-                },
-                TensorMapSpace::from_dims([2], []).unwrap(),
-                dst_structure.clone(),
-            )
-            .unwrap();
-        let src: TensorMap<f64, 1, 0, Trivial, ReportedLenHostStorage<f64>> =
-            TensorMap::from_storage_with_structure(
-                ReportedLenHostStorage {
-                    data: case.src,
-                    reported_len: 2,
-                },
-                TensorMapSpace::from_dims([2], []).unwrap(),
-                src_structure.clone(),
-            )
-            .unwrap();
-        let structure =
-            tensortrace_structure(&dst, &src, TensorTraceAxisSpec::new(&[0], &[], &[])).unwrap();
-        let mut backend = HostTensorOperations;
-        let mut allocator = HostAllocator::default();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tensortrace_execute_with(
-                &mut backend,
-                &mut allocator,
-                &structure,
-                &mut dst,
-                &src,
-                1.0,
-                0.5,
-            )
-        }))
-        .expect("plain trace extent mismatch must return an error, not panic");
-
-        // What: destination length has precedence, and either mismatch leaves
-        // even the first reachable logical destination unchanged.
-        assert_eq!(
-            result,
-            Err(OperationError::ElementCountMismatch {
-                expected: case.expected,
-                actual: case.actual,
-            }),
-            "{}",
-            case.name
-        );
-        assert_eq!(dst.data(), initial_dst, "{}", case.name);
-    }
 }
 
 #[test]
@@ -1072,7 +903,7 @@ fn typed_fz2_trace_validates_host_slice_extents_before_mutation() {
             )
             .unwrap();
 
-        let result = tensortrace_fusion_into(
+        let result = dynamic_tensortrace_fusion_into(
             &rule,
             &mut dst,
             &src,
@@ -1159,188 +990,50 @@ fn fz2_lowered_dynamic_trace_matches_encoded_data_oracle() {
 }
 
 #[test]
-fn tensortrace_default_host_api_accepts_custom_host_storage() {
-    let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let src = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0], src_space);
-    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let mut dst = test_host_tensor_map(vec![10.0_f64], dst_space);
+fn tensortrace_fusion_rejects_invalid_axis_sets_at_compile_time() {
+    let rule = FermionParityFusionRule;
+    let parity = [(SectorId::new(0), 1), (SectorId::new(1), 1)];
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(parity, false)]),
+            FusionProductSpace::new([SectorLeg::new(parity, false)]),
+        ),
+        &rule,
+        [vec![1, 1], vec![1, 1]],
+    )
+    .unwrap();
+    let src: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![2.0, 3.0], src_space).unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        ),
+        &rule,
+        [vec![]],
+    )
+    .unwrap();
+    let dst: TensorMap<f64, 0, 0> =
+        TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
 
-    tensortrace_into(
-        &mut dst,
+    let err = dynamic_tensortrace_fusion_structure(
+        &rule,
+        &dst,
         &src,
-        TensorTraceAxisSpec::new(&[], &[0], &[1]),
-        2.0,
-        3.0,
+        TensorTraceAxisSpec::new(&[], &[0], &[0]),
     )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[40.0]);
-}
-
-#[test]
-fn tensortrace_repeated_dense_axis_matches_tensoroperations_trace_lowering() {
-    let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let src: TensorMap<f64, 1, 1, Trivial> =
-        TensorMap::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0], src_space).unwrap();
-    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let mut dst: TensorMap<f64, 0, 0, Trivial> =
-        TensorMap::from_vec(vec![10.0_f64], dst_space).unwrap();
-
-    tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new(&[], &[0], &[1]),
-        2.0,
-        3.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[40.0]);
-}
-
-#[test]
-fn tensortrace_with_conjugation_applies_dense_source_conj() {
-    let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let src: TensorMap<Complex64, 1, 1, Trivial> = TensorMap::from_vec(
-        vec![
-            Complex64::new(1.0, 1.0),
-            Complex64::new(2.0, 10.0),
-            Complex64::new(3.0, -4.0),
-            Complex64::new(4.0, -2.0),
-        ],
-        src_space,
-    )
-    .unwrap();
-    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let mut dst: TensorMap<Complex64, 0, 0, Trivial> =
-        TensorMap::from_vec(vec![Complex64::new(0.0, 0.0)], dst_space).unwrap();
-
-    tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new_with_conjugation(&[], &[0], &[1], true),
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 0.0),
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[Complex64::new(5.0, 1.0)]);
-}
-
-#[test]
-fn tensortrace_with_conjugation_keeps_requested_dense_output_axes() {
-    let src_space = TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap();
-    let src: TensorMap<Complex64, 2, 2, Trivial> = TensorMap::from_vec(
-        (1..=16)
-            .map(|value| Complex64::new(value as f64, value as f64))
-            .collect(),
-        src_space,
-    )
-    .unwrap();
-    let dst_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let mut dst: TensorMap<Complex64, 1, 1, Trivial> =
-        TensorMap::from_vec(vec![Complex64::new(0.0, 0.0); 4], dst_space).unwrap();
-
-    tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new_with_conjugation(&[3, 0], &[1], &[2], true),
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 0.0),
-    )
-    .unwrap();
-
-    assert_eq!(
-        dst.data(),
-        &[
-            Complex64::new(8.0, -8.0),
-            Complex64::new(24.0, -24.0),
-            Complex64::new(10.0, -10.0),
-            Complex64::new(26.0, -26.0),
-        ]
-    );
-}
-
-#[test]
-fn tensortrace_keeps_output_axes_and_sums_diagonal_trace_axes() {
-    let src_space = TensorMapSpace::<2, 1>::from_dims([2, 3], [3]).unwrap();
-    let src: TensorMap<f64, 2, 1, Trivial> =
-        TensorMap::from_vec((0..18).map(|value| value as f64).collect(), src_space).unwrap();
-    let dst_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let mut dst: TensorMap<f64, 1, 0, Trivial> =
-        TensorMap::from_vec(vec![100.0_f64, 200.0], dst_space).unwrap();
-
-    tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new(&[0], &[1], &[2]),
-        1.5,
-        0.5,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[86.0, 140.5]);
-}
-
-#[test]
-fn tensortrace_structure_replays_without_recompiling() {
-    let src_space = TensorMapSpace::<2, 1>::from_dims([2, 3], [3]).unwrap();
-    let src1: TensorMap<f64, 2, 1, Trivial> = TensorMap::from_vec(
-        (0..18).map(|value| value as f64).collect(),
-        src_space.clone(),
-    )
-    .unwrap();
-    let src2: TensorMap<f64, 2, 1, Trivial> =
-        TensorMap::from_vec((100..118).map(|value| value as f64).collect(), src_space).unwrap();
-    let dst_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let mut dst1: TensorMap<f64, 1, 0, Trivial> =
-        TensorMap::from_vec(vec![0.0_f64, 0.0], dst_space.clone()).unwrap();
-    let mut dst2: TensorMap<f64, 1, 0, Trivial> =
-        TensorMap::from_vec(vec![0.0_f64, 0.0], dst_space).unwrap();
-    let structure =
-        tensortrace_structure(&dst1, &src1, TensorTraceAxisSpec::new(&[0], &[1], &[2])).unwrap();
-    let mut backend = HostTensorOperations;
-    let mut allocator = HostAllocator::default();
-
-    tensortrace_execute_with(
-        &mut backend,
-        &mut allocator,
-        &structure,
-        &mut dst1,
-        &src1,
-        1.0,
-        0.0,
-    )
-    .unwrap();
-    tensortrace_execute_with(
-        &mut backend,
-        &mut allocator,
-        &structure,
-        &mut dst2,
-        &src2,
-        1.0,
-        0.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst1.data(), &[24.0, 27.0]);
-    assert_eq!(dst2.data(), &[324.0, 327.0]);
-}
-
-#[test]
-fn tensortrace_rejects_invalid_axis_sets_at_compile_time() {
-    let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let src: TensorMap<f64, 1, 1, Trivial> =
-        TensorMap::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0], src_space).unwrap();
-    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let dst: TensorMap<f64, 0, 0, Trivial> = TensorMap::from_vec(vec![0.0_f64], dst_space).unwrap();
-
-    let err =
-        tensortrace_structure(&dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[0])).unwrap_err();
+    .unwrap_err();
     assert!(matches!(err, OperationError::InvalidAxisSet { .. }));
 
-    let err =
-        tensortrace_structure(&dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[])).unwrap_err();
+    let err = dynamic_tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[], &[0], &[]),
+    )
+    .unwrap_err();
     assert_eq!(
         err,
         OperationError::TraceAxisCountMismatch { lhs: 1, rhs: 0 }
@@ -1459,41 +1152,6 @@ fn categorical_adjoint_axis_map_matches_tensorkit_adjointtensorindex() {
 }
 
 #[test]
-fn tensortrace_rejects_block_sparse_trace_until_categorical_trace_is_implemented() {
-    let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-    let src_structure = packed_fixture_structure(
-        2,
-        [
-            (BlockKey::ordinal(0), vec![1, 1]),
-            (BlockKey::ordinal(1), vec![1, 1]),
-        ],
-    )
-    .unwrap();
-    let src: TensorMap<f64, 1, 1, Trivial> =
-        TensorMap::from_vec_with_structure(vec![2.0, 3.0], src_space, src_structure).unwrap();
-    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let dst_structure = packed_fixture_structure(
-        0,
-        [
-            (BlockKey::ordinal(0), vec![]),
-            (BlockKey::ordinal(1), vec![]),
-        ],
-    )
-    .unwrap();
-    let dst: TensorMap<f64, 0, 0, Trivial> =
-        TensorMap::from_vec_with_structure(vec![0.0, 0.0], dst_space, dst_structure).unwrap();
-
-    let err =
-        tensortrace_structure(&dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[1])).unwrap_err();
-    assert_eq!(
-        err,
-        OperationError::UnsupportedTensorContractScope {
-            message: "block-sparse tensortrace enumeration is not implemented yet"
-        }
-    );
-}
-
-#[test]
 fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
     let rule = FermionParityFusionRule;
     let even = SectorId::new(0);
@@ -1527,9 +1185,13 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
         TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
 
     crate::tensortrace::reset_trace_transform_invocations();
-    let structure =
-        tensortrace_fusion_structure(&rule, &dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[1]))
-            .unwrap();
+    let structure = dynamic_tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    )
+    .unwrap();
     assert_eq!(structure.terms().len(), 2);
     // What: Unique fusion retains the scalar direct path instead of constructing
     // a fusion-group recoupling matrix.
@@ -1538,16 +1200,7 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
         src.structure().block_count()
     );
 
-    tensortrace_fusion_execute_with(
-        &mut HostTensorOperations,
-        &mut HostAllocator::default(),
-        &structure,
-        &mut dst,
-        &src,
-        1.0,
-        0.0,
-    )
-    .unwrap();
+    replay_tensortrace_fusion_into(&structure, &mut dst, &src, 1.0, 0.0).unwrap();
 
     assert_eq!(dst.data(), &[-1.0]);
 }
@@ -1582,7 +1235,7 @@ fn tensortrace_fusion_default_host_api_accepts_custom_host_storage() {
     .unwrap();
     let mut dst = test_host_fusion_tensor_map(vec![0.0_f64], dst_space);
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -1634,7 +1287,7 @@ fn tensortrace_fusion_fermion_supertrace_uses_degeneracy_diagonals() {
     let mut dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![10.0], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -1683,7 +1336,7 @@ fn tensortrace_fusion_with_conjugation_lowers_lazy_adjoint_supertrace() {
         TensorMap::from_vec_with_fusion_space(vec![Complex64::new(10.0, 20.0)], dst_space).unwrap();
 
     crate::lowering::reset_adjoint_view_build_count();
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -1721,7 +1374,7 @@ fn tensortrace_fusion_rank_zero_adjoint_keeps_parent_structure() {
         TensorMap::from_vec_with_fusion_space(vec![Complex64::new(0.0, 0.0)], space()).unwrap();
 
     crate::lowering::reset_adjoint_view_build_count();
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -1798,7 +1451,7 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
     crate::lowering::reset_adjoint_view_build_count();
     let mut typed: TensorMap<Complex64, 0, 1> =
         TensorMap::from_vec_with_fusion_space(initial.clone(), dst_fusion).unwrap();
-    tensortrace_fusion_into(&rule, &mut typed, &src, axes, alpha, beta).unwrap();
+    dynamic_tensortrace_fusion_into(&rule, &mut typed, &src, axes, alpha, beta).unwrap();
     assert_eq!(typed.data(), expected);
 
     let provider = std::sync::Arc::new(rule);
@@ -2182,7 +1835,7 @@ fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
     let mut dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![10.0], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -2232,7 +1885,7 @@ fn tensortrace_fusion_fermion_open_output_matches_tensorkit_oracle() {
     let mut dst: TensorMap<f64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -2283,7 +1936,7 @@ fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
     let mut dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![5.0], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -2319,9 +1972,13 @@ fn tensortrace_fusion_rejects_nonsymmetric_braiding_like_tensorkit_tensortrace()
     let dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
 
-    let err =
-        tensortrace_fusion_structure(&rule, &dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[1]))
-            .unwrap_err();
+    let err = dynamic_tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    )
+    .unwrap_err();
 
     assert_eq!(
         err,
@@ -2363,7 +2020,7 @@ fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
     let mut dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
 
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         &rule,
         &mut dst,
         &src,
@@ -2535,7 +2192,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
     );
 
     crate::tensortrace::reset_trace_transform_invocations();
-    let structure = tensortrace_fusion_structure(
+    let structure = dynamic_tensortrace_fusion_structure(
         &rule,
         &dst,
         &src,
@@ -2583,7 +2240,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
     let adjoint_src =
         crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let lowered_axes =
-        crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
+        crate::lowering::lower_tensortrace_source_adjoint_axes_dyn(2, 2, conjugate_axes).unwrap();
     let lowered_axes = lowered_axes.as_spec();
     let conjugate_dst_hom = adjoint_src
         .homspace()
@@ -2608,7 +2265,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
     .unwrap();
     crate::lowering::reset_adjoint_view_build_count();
     let conjugate_structure =
-        tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
+        dynamic_tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
     // What: source-conjugate lowering still batches the logical adjoint tree
     // groups while retaining the scalar adjoint-axis trace semantics.
     assert_trace_terms_match_scalar_oracle(
@@ -2674,7 +2331,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
     )
     .unwrap();
 
-    let structure = tensortrace_fusion_structure(
+    let structure = dynamic_tensortrace_fusion_structure(
         &rule,
         &dst,
         &src,
@@ -2696,7 +2353,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
     let adjoint_src =
         crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let lowered_axes =
-        crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
+        crate::lowering::lower_tensortrace_source_adjoint_axes_dyn(2, 2, conjugate_axes).unwrap();
     let lowered_axes = lowered_axes.as_spec();
     let conjugate_dst_hom = adjoint_src
         .homspace()
@@ -2721,7 +2378,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
     .unwrap();
     crate::lowering::reset_adjoint_view_build_count();
     let conjugate_structure =
-        tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
+        dynamic_tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
 
     // What: the Simple product path preserves source-conjugate adjoint lowering,
     // asymmetric U(1), half-integer SU(2), and the fZ2 odd supertrace sign.
@@ -2845,7 +2502,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
     )
     .unwrap();
 
-    let structure = tensortrace_fusion_structure(
+    let structure = dynamic_tensortrace_fusion_structure(
         &rule,
         &dst,
         &src,
@@ -2983,57 +2640,6 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         malformed_error,
         tenet_core::CoreError::MalformedFusionTree { .. }
     ));
-}
-
-#[test]
-fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
-    let rule = SU2FusionRule;
-    let half = SU2Irrep::from_twice_spin(1).sector_id();
-    let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
-        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
-    );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        src_hom,
-        &rule,
-        [vec![1, 1]],
-    )
-    .unwrap();
-    let src: TensorMap<f64, 1, 1> =
-        TensorMap::from_vec_with_fusion_space(vec![7.0], src_space).unwrap();
-
-    let dst_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new(Vec::<SectorLeg>::new()),
-        FusionProductSpace::new(Vec::<SectorLeg>::new()),
-    );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-        dst_hom,
-        &rule,
-        [vec![]],
-    )
-    .unwrap();
-    let mut dst: TensorMap<f64, 0, 0> =
-        TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
-
-    let err = tensortrace_into(
-        &mut dst,
-        &src,
-        TensorTraceAxisSpec::new(&[], &[0], &[1]),
-        1.0,
-        0.0,
-    )
-    .unwrap_err();
-
-    assert_eq!(
-        err,
-        OperationError::UnsupportedTensorContractScope {
-            message:
-                "plain tensortrace does not lower fusion-tree blocks; use tensortrace_fusion_*"
-        }
-    );
-    assert_eq!(dst.data(), &[0.0]);
 }
 
 #[test]

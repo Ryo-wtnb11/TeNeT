@@ -1,5 +1,7 @@
 use core::mem::MaybeUninit;
-use core::ops::{Add, Mul};
+#[cfg(any(test, feature = "testing"))]
+use core::ops::Add;
+use core::ops::Mul;
 use std::sync::{Arc, Weak};
 
 #[cfg(test)]
@@ -8,10 +10,7 @@ use allocation_oracle::join as pool_join;
 use rayon::join as pool_join;
 
 use num_traits::{One, Zero};
-use tenet_core::{
-    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
-    TensorMap,
-};
+use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
 #[cfg(test)]
 use tenet_dense::DefaultDenseExecutor;
 use tenet_dense::{strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob};
@@ -23,17 +22,14 @@ use crate::scalar::scale_value;
 use crate::storage_scratch::TreeTransformScratchBuffers;
 use crate::strided::offset_to_isize;
 use crate::task_view::TreeTransformTaskView;
-use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
     TreeTransformPackReplay, TreeTransformParallelSchedule, TreeTransformScatterGroupReplay,
     TreeTransformScatterReplay,
 };
 use crate::{
-    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
-    ConjugateValue, DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
-    RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TransformScale,
-    TreeTransformBlock, TreeTransformLayoutTable, TreeTransformReplayProfile,
-    TreeTransformStructure,
+    BakedFusedLayout, ConjugateValue, DenseRecouplingScalar, HostKernelAdapter, OperationError,
+    RecouplingCoefficientAction, ReportsPlacement, TransformScale, TreeTransformBlock,
+    TreeTransformLayoutTable, TreeTransformReplayProfile, TreeTransformStructure,
 };
 
 mod batched;
@@ -48,7 +44,7 @@ mod tests;
 use batched::*;
 use coefficients::*;
 pub use entry::*;
-pub use kernels::*;
+pub(crate) use kernels::*;
 pub use member::*;
 pub use owned::*;
 

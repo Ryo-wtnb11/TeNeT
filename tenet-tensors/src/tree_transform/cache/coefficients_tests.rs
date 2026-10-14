@@ -332,14 +332,15 @@ fn degeneracy_only_change_recomposes_no_group_and_matches_the_uncached_producer(
             (group_count, 0, 0),
             "degeneracy {degeneracy}, conjugate {storage_conjugate}"
         );
-        let eager = crate::tree_transform::compile_multiplicity_free_tree_pair_structure(
-            &SU2FusionRule,
-            &operation,
-            Arc::clone(&dst),
-            Arc::clone(&src),
-            storage_conjugate,
-        )
-        .unwrap();
+        let eager =
+            crate::build_tree_pair_transform_group_plan(&SU2FusionRule, operation.clone(), &src)
+                .unwrap()
+                .compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(&dst),
+                    Arc::clone(&src),
+                    storage_conjugate,
+                )
+                .unwrap();
         assert_eq!(warm, eager);
         let bits = |structure: &crate::TreeTransformStructure<f64>| {
             let mut coefficients = Vec::new();
@@ -388,14 +389,10 @@ fn degeneracy_only_bindings_of_one_group_set_share_one_coefficient_payload() {
             .collect::<Vec<_>>()
     };
     let source = su2_structure(47);
-    let eager = crate::tree_transform::compile_multiplicity_free_tree_pair_structure(
-        &SU2FusionRule,
-        &operation,
-        Arc::clone(&source),
-        source,
-        false,
-    )
-    .unwrap();
+    let eager = crate::build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &source)
+        .unwrap()
+        .compile_shared_structures_with_storage_conjugation(Arc::clone(&source), source, false)
+        .unwrap();
     assert!(!eager.shares_coefficients_with(&second));
     assert_eq!(bits(&second), bits(&eager));
 

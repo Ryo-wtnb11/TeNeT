@@ -413,7 +413,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         }
     );
 
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
         &mut expected_lhs_core,
@@ -422,7 +422,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         0.0,
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
         &mut expected_rhs_core,
@@ -441,7 +441,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         0.0,
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,
@@ -886,7 +886,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             }
         );
 
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([3], [0, 1, 2]),
         &mut lhs_core,
@@ -895,7 +895,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         0.0,
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 2, 3], [0]),
         &mut rhs_core,

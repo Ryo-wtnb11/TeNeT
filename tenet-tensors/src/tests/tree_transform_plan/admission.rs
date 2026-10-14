@@ -687,7 +687,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
     let mut oriented_dst = make_dst();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &old,
@@ -697,7 +697,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
         0.0,
     )
     .unwrap();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &oriented,
@@ -1450,7 +1450,7 @@ fn direct_tree_pair_rejects_nonalias_malformed_destination_without_writing() {
     let (mut dst, src) = valid_simple_source_and_nonalias_malformed_destination();
     let before = dst.data().to_vec();
 
-    let error = tree_transform_into(
+    let error = eager_tree_transform_into(
         &SU2FusionRule,
         TreeTransformOperation::permute([0, 1], []),
         &mut dst,

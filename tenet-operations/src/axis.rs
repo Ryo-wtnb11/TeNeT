@@ -219,13 +219,6 @@ impl TensorContractSpecOwned {
     }
 }
 
-pub(crate) fn permutation_axes(
-    permutation: OutputAxisOrder<'_>,
-    rank: usize,
-) -> Result<Vec<usize>, OperationError> {
-    permutation_axes_inline(permutation, rank).map(AxisVec::into_vec)
-}
-
 pub(crate) fn validate_permutation(axes: &[usize], rank: usize) -> Result<(), OperationError> {
     tenet_core::axes::validate_permutation(axes, rank).map_err(|_| {
         OperationError::InvalidPermutation {
@@ -235,7 +228,8 @@ pub(crate) fn validate_permutation(axes: &[usize], rank: usize) -> Result<(), Op
     })
 }
 
-/// `permutation_axes` without a heap allocation up to rank 8.
+/// The axes of `permutation` over `rank` axes, without a heap allocation up
+/// to rank 8.
 pub fn permutation_axes_inline(
     permutation: OutputAxisOrder<'_>,
     rank: usize,
@@ -304,6 +298,13 @@ impl<'a> TensorTraceAxisSpec<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn permutation_axes(
+        permutation: OutputAxisOrder<'_>,
+        rank: usize,
+    ) -> Result<Vec<usize>, OperationError> {
+        permutation_axes_inline(permutation, rank).map(AxisVec::into_vec)
+    }
 
     fn vec_permutation_axes(
         permutation: OutputAxisOrder<'_>,

@@ -11,10 +11,8 @@
 
 mod adjoint;
 mod admission;
-mod backend_trace;
 mod bound_tensor;
 mod contract;
-mod facade;
 mod lowering;
 mod mode;
 mod oriented_elementwise;
@@ -31,7 +29,6 @@ pub use adjoint::{
     adjoint, adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn,
     AdjointBlockMap, AdjointBlockSource, AdjointScalar,
 };
-pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
@@ -58,18 +55,14 @@ pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
     tensorcontract_execute_with, tensorcontract_fusion_block_specs,
     zero_copy_contract_order_for_output_permute, FusionContractOrientation, FusionContractPlan,
-    HostTensorContractBackend, HostTensorContractWorkspace, HostTreeFusionExecutionContext,
-    PreparedTensorContractFusion, TensorContractBackend, TensorContractBlockSpec,
-    TensorContractFusionExecutionContext, TensorContractFusionProfile, TensorContractStructure,
-    TensorContractStructureTerm, TensorContractWorkspace,
+    HostTensorContractBackend, HostTensorContractWorkspace, PreparedTensorContractFusion,
+    TensorContractBackend, TensorContractBlockSpec, TensorContractFusionExecutionContext,
+    TensorContractFusionProfile, TensorContractStructure, TensorContractStructureTerm,
+    TensorContractWorkspace,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
-};
-pub use facade::{
-    braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
-    permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
 #[doc(hidden)]
 pub use mode::ContractRequest;
@@ -97,23 +90,6 @@ pub use contract::{
     execute_storage_contract_members_cuda, execute_storage_contract_resolution_on_cuda,
     CudaContractMembersWorkspace, CudaContractScratch,
 };
-#[cfg(any(test, feature = "testing"))]
-pub use facade::{
-    braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
-    tree_transform_into_with_generic, tree_transform_structure_generic,
-};
-pub use facade::{
-    copy_into, scaled_add_into, scaled_assign_into, tensoradd_add_into, tensoradd_assign_into,
-    tensoradd_execute_with, tensoradd_fusion_into, tensoradd_fusion_into_with,
-    tensoradd_fusion_into_with_context, tensoradd_into, tensoradd_into_with,
-    tensoradd_into_with_backend_and_conjugation, tensoradd_into_with_conjugation, tensorcopy_into,
-    tensorcopy_into_with, tensortrace_execute_with, tensortrace_fusion_execute_with,
-    tensortrace_fusion_into, tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
-    tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
-    tree_transform_into_with_context, tree_transform_overwrite_execute_with,
-    tree_transform_overwrite_into, tree_transform_overwrite_into_with,
-    tree_transform_overwrite_into_with_context, tree_transform_structure,
-};
 #[doc(hidden)]
 pub use physical::{expand_physical_host, project_physical_host, PhysicalConversionError};
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
@@ -127,8 +103,6 @@ pub(crate) use tenet_operations::HostTreeTransformWorkspace;
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
 pub(crate) use tenet_operations::StridedHostKernelAdapter;
-pub use tenet_operations::TensorAddStructure;
-pub use tenet_operations::TensorOperationsBackend;
 pub(crate) use tenet_operations::TreeTransformReplayProfile;
 pub use tenet_operations::TreeTransformStructure;
 pub use tenet_operations::TreeTransformWorkspace;
@@ -141,9 +115,7 @@ pub use tenet_operations::{ConjugateValue, RealStructuralCoefficient, TreeTransf
 pub use tenet_operations::{
     DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, WideScalar,
 };
-pub use tenet_operations::{
-    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TreeTransformBackend,
-};
+pub use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
@@ -159,12 +131,10 @@ pub use tensortrace::{
     tensortrace_into_multiplicity_free_with, tensortrace_multiplicity_free_in,
     tensortrace_multiplicity_free_with, tensortrace_stage_checked_generic,
     tensortrace_stage_multiplicity_free, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStage, TensorTraceStructure,
-    TensorTraceStructureTerm, TracePreflight,
+    TensorTraceFusionStructureTerm, TensorTraceStage, TracePreflight,
 };
 #[cfg(test)]
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
-pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
 pub use tree_context::{
     CheckedTreeTransformStage, StagedTreeTransform, StructureOutcome, TreeTransformExecutionContext,
 };

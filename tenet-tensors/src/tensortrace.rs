@@ -6,28 +6,22 @@ use tenet_core::{
     multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree,
     split_fusion_tree_generic_checked, BlockKey, BlockStructure, CheckedFusionAlgebra,
     CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericPivotal,
-    CheckedGenericSymbolError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg, TensorMap, TensorStorage,
+    CheckedGenericSymbolError, FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairKey, FusionTreePairOrientation, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg,
 };
 
 use crate::contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace,
 };
-use crate::lowering::{
-    lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
-};
+use crate::lowering::lower_tensortrace_source_adjoint_axes_dyn;
 use crate::strided::offset_to_isize;
 use crate::tree_transform::{CheckedGenericPlanError, CheckedPendingCoefficients};
 use tenet_operations::structure_identity::validate_structure_identity;
+use tenet_operations::tensortrace_raw_strided_kernel_add_with_coefficient_trusted;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
 use tenet_operations::TensorTraceAxisSpec;
 use tenet_operations::{axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted};
-use tenet_operations::{
-    tensortrace_raw_strided_kernel_add_with_coefficient_trusted,
-    tensortrace_raw_strided_kernel_trusted,
-};
 use tenet_operations::{try_tensortrace_owned_raw, OperationError, OwnedTraceTerm};
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
@@ -39,114 +33,6 @@ mod pipeline;
 pub use cuda::tensortrace_fusion_structure_into_on_cuda;
 use pipeline::{build_trace_terms, trace_geometry, trace_preflight};
 use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TensorTraceStructure {
-    dst_rank: usize,
-    src_rank: usize,
-    output_axes: Vec<usize>,
-    trace_lhs_axes: Vec<usize>,
-    trace_rhs_axes: Vec<usize>,
-    terms: Vec<TensorTraceStructureTerm>,
-    descriptor: TensorTraceDescriptor,
-    dst_structure: Arc<BlockStructure>,
-    src_structure: Arc<BlockStructure>,
-}
-
-pub fn tensortrace_structure<
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    axes: TensorTraceAxisSpec<'_>,
-) -> Result<TensorTraceStructure, OperationError>
-where
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
-{
-    TensorTraceStructure::compile(dst, src, axes)
-}
-
-/// Compiles a fusion-aware trace into reusable structural terms.
-///
-/// Valid terms and their source accumulation follow global source-block order.
-/// For expert layouts built from an incomplete explicit block structure,
-/// errors between distinct external-sector groups likewise follow the first
-/// source block encountered globally. On the non-`Unique` grouped path
-/// (currently `Simple` fusion), one external-sector group is transformed and
-/// lowered atomically at its first member, so a symbol, tree-transform or
-/// split error from a later member of that group can precede an earlier
-/// member's destination [`OperationError::MissingBlockKey`].
-///
-/// This uses the same block-level lowering granularity as TensorKit and QSpace;
-/// those references do not establish identical malformed-layout error
-/// ordering. Why not recover per-source error precedence within a group: doing
-/// so would replay the same F/R traversal for every source tree.
-///
-/// A fusion group whose lowered terms are resident in the process-global
-/// transformation-coefficient cache makes no symbol queries and no split;
-/// only a whole successful compile publishes the groups it built.
-pub fn tensortrace_fusion_structure<
-    R,
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    rule: &R,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    axes: TensorTraceAxisSpec<'_>,
-) -> Result<TensorTraceFusionStructure<R::Scalar>, OperationError>
-where
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone
-        + Add<Output = R::Scalar>
-        + Mul<Output = R::Scalar>
-        + Zero
-        + RealStructuralCoefficient,
-{
-    let dst_fusion = dst
-        .fusion_space()
-        .ok_or(tenet_core::CoreError::MissingFusionSpace)?;
-    let src_fusion = src
-        .fusion_space()
-        .ok_or(tenet_core::CoreError::MissingFusionSpace)?;
-    if axes.source_conjugate() {
-        let adjoint_axes = lower_tensortrace_source_adjoint_axes::<SRC_NOUT, SRC_NIN>(axes)?;
-        TensorTraceFusionStructure::compile_fusion_spaces_oriented(
-            rule,
-            dst_fusion,
-            src_fusion,
-            FusionTreePairOrientation::Adjoint,
-            adjoint_axes.as_spec(),
-        )
-    } else {
-        TensorTraceFusionStructure::compile_fusion_spaces(rule, dst_fusion, src_fusion, axes)
-    }
-}
-
-pub(crate) const PLAIN_TENSORTRACE_FUSION_REQUIRES_FUSION_API: &str =
-    "plain tensortrace does not lower fusion-tree blocks; use tensortrace_fusion_*";
-pub(crate) const PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED: &str =
-    "block-sparse tensortrace enumeration is not implemented yet";
 
 #[derive(Clone, Copy)]
 struct OrientedTraceSource<'a> {
@@ -285,8 +171,23 @@ fn record_trace_selected_homspace_derivation() {
 
 /// A compiled fusion-aware trace whose valid terms retain global source order.
 ///
-/// See `tensortrace_fusion_structure` for the non-`Unique` grouped path's
-/// block-atomic error-ordering contract for expert incomplete layouts.
+/// Valid terms and their source accumulation follow global source-block order.
+/// For expert layouts built from an incomplete explicit block structure,
+/// errors between distinct external-sector groups likewise follow the first
+/// source block encountered globally. On the non-`Unique` grouped path
+/// (currently `Simple` fusion), one external-sector group is transformed and
+/// lowered atomically at its first member, so a symbol, tree-transform or
+/// split error from a later member of that group can precede an earlier
+/// member's destination [`OperationError::MissingBlockKey`].
+///
+/// This uses the same block-level lowering granularity as TensorKit and QSpace;
+/// those references do not establish identical malformed-layout error
+/// ordering. Why not recover per-source error precedence within a group: doing
+/// so would replay the same F/R traversal for every source tree.
+///
+/// A fusion group whose lowered terms are resident in the process-global
+/// transformation-coefficient cache makes no symbol queries and no split;
+/// only a whole successful compile publishes the groups it built.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructure<C> {
     dst_rank: usize,
@@ -301,69 +202,6 @@ pub struct TensorTraceFusionStructure<C> {
 }
 
 impl<C> TensorTraceFusionStructure<C> {
-    pub fn compile_fusion_spaces<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-    >(
-        rule: &R,
-        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-        src: &FusionTensorMapSpace<SRC_NOUT, SRC_NIN>,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-    {
-        dst.validate_rule(rule).map_err(OperationError::Core)?;
-        src.validate_rule(rule).map_err(OperationError::Core)?;
-        Self::compile_fusion_spaces_oriented(
-            rule,
-            dst,
-            src,
-            FusionTreePairOrientation::Direct,
-            axes,
-        )
-    }
-
-    fn compile_fusion_spaces_oriented<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-    >(
-        rule: &R,
-        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-        src: &FusionTensorMapSpace<SRC_NOUT, SRC_NIN>,
-        orientation: FusionTreePairOrientation,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-    {
-        dst.validate_rule(rule)?;
-        src.validate_rule(rule)?;
-        let source = OrientedTraceSource::new(
-            src.homspace(),
-            src.subblock_structure(),
-            SRC_NOUT,
-            SRC_NIN,
-            orientation,
-        );
-        Self::compile_fusion_parts(
-            rule,
-            dst.homspace(),
-            Arc::clone(dst.subblock_structure()),
-            source,
-            DST_NOUT,
-            axes,
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn compile_fusion_dyn_raw<R>(
         rule: &R,
@@ -461,31 +299,6 @@ impl<C> TensorTraceFusionStructure<C> {
             dst.nout(),
             lowered_axes.as_spec(),
             preflight,
-        )
-    }
-
-    /// Rank-runtime core shared by the const-generic and dynamic compiles.
-    #[allow(clippy::too_many_arguments)]
-    fn compile_fusion_parts<R>(
-        rule: &R,
-        dst_homspace: &FusionTreeHomSpace,
-        dst_structure: Arc<BlockStructure>,
-        src: OrientedTraceSource<'_>,
-        dst_codomain_rank: usize,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-    {
-        Self::compile_fusion_parts_with_preflight(
-            rule,
-            dst_homspace,
-            dst_structure,
-            src,
-            dst_codomain_rank,
-            axes,
-            |_, _| Ok(TraceAdmission::Unchecked),
         )
     }
 
@@ -646,44 +459,6 @@ impl<C> TensorTraceFusionStructure<C> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("src", &self.src_structure, src_structure)
     }
-
-    pub fn execute_with<
-        B,
-        T,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &self,
-        backend: &mut B,
-        allocator: &mut B::Allocator,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        B: crate::TensorTraceOperationsBackend,
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + RecouplingCoefficientAction<C>
-            + strided_kernel::MaybeSendSync,
-        C: Copy,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>,
-    {
-        backend.tensortrace_fusion_structure_into(allocator, self, dst, src, alpha, beta)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -719,195 +494,6 @@ impl<C> TensorTraceFusionStructureTerm<C> {
     #[inline]
     pub fn coefficient(&self) -> &C {
         &self.coefficient
-    }
-}
-
-impl TensorTraceStructure {
-    pub fn compile<
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        if dst.fusion_space().is_some() || src.fusion_space().is_some() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: PLAIN_TENSORTRACE_FUSION_REQUIRES_FUSION_API,
-            });
-        }
-        Self::compile_shared_structures(
-            Arc::clone(dst.structure()),
-            Arc::clone(src.structure()),
-            axes,
-        )
-    }
-
-    pub fn compile_structures(
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures(
-            Arc::new(dst_structure.clone()),
-            Arc::new(src_structure.clone()),
-            axes,
-        )
-    }
-
-    fn compile_shared_structures(
-        dst_structure: Arc<BlockStructure>,
-        src_structure: Arc<BlockStructure>,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError> {
-        if dst_structure.block_count() != 1 || src_structure.block_count() != 1 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED,
-            });
-        }
-
-        let axis_plan =
-            TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
-        let dst_block = dst_structure.block(0)?;
-        let terms = vec![TensorTraceStructureTerm {
-            key: dst_block.key().clone(),
-            dst_block: 0,
-            src_block: 0,
-        }];
-        let descriptor =
-            TensorTraceDescriptor::compile(&axis_plan, &terms, &dst_structure, &src_structure)?;
-        validate_destination_layouts_injective(
-            &dst_structure,
-            "tensor trace destination layouts overlap",
-        )?;
-
-        Ok(Self {
-            dst_rank: dst_structure.rank(),
-            src_rank: src_structure.rank(),
-            output_axes: axis_plan.output_axes,
-            trace_lhs_axes: axis_plan.trace_lhs_axes,
-            trace_rhs_axes: axis_plan.trace_rhs_axes,
-            terms,
-            descriptor,
-            dst_structure,
-            src_structure,
-        })
-    }
-
-    #[inline]
-    pub fn dst_rank(&self) -> usize {
-        self.dst_rank
-    }
-
-    #[inline]
-    pub fn src_rank(&self) -> usize {
-        self.src_rank
-    }
-
-    #[inline]
-    pub fn output_axes(&self) -> &[usize] {
-        &self.output_axes
-    }
-
-    #[inline]
-    pub fn trace_lhs_axes(&self) -> &[usize] {
-        &self.trace_lhs_axes
-    }
-
-    #[inline]
-    pub fn trace_rhs_axes(&self) -> &[usize] {
-        &self.trace_rhs_axes
-    }
-
-    #[inline]
-    pub fn terms(&self) -> &[TensorTraceStructureTerm] {
-        &self.terms
-    }
-
-    #[inline]
-    pub(crate) fn descriptor(&self) -> &TensorTraceDescriptor {
-        &self.descriptor
-    }
-
-    pub(crate) fn validate_replay_structures(
-        &self,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-    ) -> Result<(), OperationError> {
-        validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
-        validate_structure_identity("src", &self.src_structure, src_structure)
-    }
-
-    pub fn execute_with<
-        B,
-        T,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &self,
-        backend: &mut B,
-        allocator: &mut B::Allocator,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        B: crate::TensorTraceOperationsBackend,
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>,
-    {
-        backend.tensortrace_structure_into(allocator, self, dst, src, alpha, beta)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TensorTraceStructureTerm {
-    key: BlockKey,
-    dst_block: usize,
-    src_block: usize,
-}
-
-impl TensorTraceStructureTerm {
-    #[inline]
-    pub fn key(&self) -> &BlockKey {
-        &self.key
-    }
-
-    #[inline]
-    pub fn dst_block(&self) -> usize {
-        self.dst_block
-    }
-
-    #[inline]
-    pub fn src_block(&self) -> usize {
-        self.src_block
     }
 }
 
@@ -982,23 +568,6 @@ impl TensorTraceDescriptor {
 
     fn destination_producer_indices(&self) -> &[usize] {
         &self.destination_producers[self.destination_layouts.len() + 1..]
-    }
-
-    fn compile(
-        axis_plan: &TensorTraceAxisPlan,
-        terms: &[TensorTraceStructureTerm],
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-    ) -> Result<Self, OperationError> {
-        Self::compile_with_source_axis_map(
-            axis_plan,
-            terms
-                .iter()
-                .map(|term| (term.dst_block(), term.src_block())),
-            dst_structure,
-            src_structure,
-            |axis| axis,
-        )
     }
 
     fn compile_oriented<I>(
@@ -2243,6 +1812,7 @@ enum TraceAdmission {
     /// This compile's checked preflight: compare it with the destination.
     Checked(TracePreflight),
     /// No preflight ran: select and check here.
+    #[cfg(test)]
     Unchecked,
 }
 
@@ -2263,6 +1833,7 @@ where
             selected_homspace,
             trace_pairs_match,
         }) => (selected_homspace, Some(trace_pairs_match)),
+        #[cfg(test)]
         TraceAdmission::Unchecked => {
             record_trace_selected_homspace_derivation();
             (
@@ -2352,106 +1923,6 @@ where
         })
 }
 
-pub(crate) fn tensortrace_structure_with_strided_kernel<
-    T,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    _allocator: &mut crate::HostAllocator,
-    structure: &TensorTraceStructure,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
-    DDst: HostWritableStorage<T>,
-    DSrc: HostReadableStorage<T>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    let src_structure = Arc::clone(src.structure());
-    structure.validate_replay_structures(&dst_structure, &src_structure)?;
-    let dst_len = dst.data_mut().len();
-    validate_trace_data_extents(&dst_structure, dst_len, &src_structure, src.data().len())?;
-    let descriptor = structure.descriptor();
-    for term in descriptor.terms() {
-        tensortrace_raw_strided_kernel_trusted(
-            dst.data_mut(),
-            src.data(),
-            descriptor.output_shape(term),
-            descriptor.trace_shape(term),
-            descriptor.dst_strides(term),
-            descriptor.src_output_strides(term),
-            descriptor.src_trace_strides(term),
-            term.dst_offset,
-            term.src_offset,
-            descriptor.source_conjugate(),
-            alpha,
-            beta,
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn tensortrace_fusion_structure_with_strided_kernel<
-    T,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    _allocator: &mut crate::HostAllocator,
-    structure: &TensorTraceFusionStructure<C>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<C>
-        + strided_kernel::MaybeSendSync,
-    C: Copy,
-    DDst: HostWritableStorage<T>,
-    DSrc: HostReadableStorage<T>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    replay_fusion_trace_host(
-        structure,
-        &dst_structure,
-        dst.data_mut(),
-        src.structure(),
-        src.data(),
-        alpha,
-        beta,
-    )
-}
-
 /// The one Host replay of a compiled fusion trace: structure identity and
 /// data extents, the `beta` pass over every destination layout, then one
 /// strided add per term.
@@ -2503,10 +1974,9 @@ where
 /// Dynamic-rank fusion tensortrace: partial (or full) trace of `src` over
 /// the `axes` trace pairs into caller-allocated `dst_data`
 /// (`dst = beta * dst + alpha * trace(src)`), operating on
-/// provider-bound dynamic spaces plus raw coupled-layout slices —
-/// the dynamic analog of [`crate::tensortrace_fusion_into`], sharing the
-/// same term compilation (TensorKit `tensortrace!` semantics: quantum
-/// dimension factors and twists, i.e. the fermionic supertrace).
+/// provider-bound dynamic spaces plus raw coupled-layout slices (TensorKit
+/// `tensortrace!` semantics: quantum dimension factors and twists, i.e. the
+/// fermionic supertrace).
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_fusion_dyn_into<R, D>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
