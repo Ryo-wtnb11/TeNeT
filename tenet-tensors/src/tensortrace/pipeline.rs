@@ -277,8 +277,8 @@ pub(super) trait TraceTermMode<R> {
         rank: usize,
     ) -> Result<(FusionTreeKey, FusionTreeKey), Self::Error>;
 
-    /// `dim(coupled)/dim(first) · Π twist(non-dual)`, in the mode's own
-    /// arithmetic (the two modes round differently, see F4 of #1856).
+    /// `dim(coupled)/dim(first) · Π twist(non-dual)`: one division of the
+    /// provider's dimensions, as TensorKit's `_trace_permute!` forms it.
     fn channel_factor(rule: &R, trace_tree: &FusionTreeKey) -> Result<Self::Scalar, Self::Error>;
 }
 
@@ -652,7 +652,10 @@ where
             },
         );
         let first = first.map_err(OperationError::from_core_preserving_context)?;
-        let mut factor = rule.dim_scalar(coupled) * rule.inv_dim_scalar(first);
+        // Why not `dim(c) · inv_dim(first)`: the reciprocal rounds twice
+        // (SU(2) `5 · fl(1/3)` is an ulp below `5/3`, Fibonacci
+        // `φ · fl(1/φ) = 1 - 2⁻⁵³`), unlike TensorKit and the checked mode.
+        let mut factor = rule.dim_scalar(coupled) / rule.dim_scalar(first);
         for (&sector, &is_dual) in trace_tree
             .uncoupled()
             .iter()
@@ -757,5 +760,53 @@ where
             }
         }
         Ok(factor)
+    }
+}
+
+#[cfg(test)]
+mod channel_factor_tests {
+    use super::*;
+    use num_complex::Complex64;
+    use tenet_core::FibonacciFusionRule;
+
+    /// Fibonacci `(τ) → τ` and `(τ, τ) → τ` trace trees, where TensorKit's
+    /// `dim(τ)/dim(τ)` is exactly 1 and a non-dual second `τ` contributes
+    /// `twist(τ) = cispi(-4/5)` (hand values). The previous `φ · fl(1/φ)`
+    /// factor gave `1 - 2⁻⁵³`.
+    #[test]
+    fn multiplicity_free_channel_factor_is_the_dimension_quotient() {
+        let rule = FibonacciFusionRule;
+        let twist = Complex64::from_polar(1.0, std::f64::consts::PI * -4.0 / 5.0);
+        let tree = |uncoupled: &[usize], coupled, dual: &[bool], vertices: &[usize]| {
+            FusionTreeKey::try_from_sector_ids_for_rule(
+                &rule,
+                uncoupled.iter().copied(),
+                coupled,
+                dual.iter().copied(),
+                [],
+                vertices.iter().copied(),
+            )
+            .unwrap()
+        };
+        let cases = [
+            (tree(&[1], 1, &[false], &[]), Complex64::new(1.0, 0.0)),
+            (
+                tree(&[1, 1], 1, &[false, true], &[1]),
+                Complex64::new(1.0, 0.0),
+            ),
+            (tree(&[1, 1], 1, &[false, false], &[1]), twist),
+        ];
+        for (trace_tree, want) in cases {
+            let actual = <MultiplicityFreeAdmissionMode as TraceTermMode<_>>::channel_factor(
+                &rule,
+                &trace_tree,
+            )
+            .unwrap();
+            assert_eq!(
+                (actual.re.to_bits(), actual.im.to_bits()),
+                (want.re.to_bits(), want.im.to_bits()),
+                "{trace_tree:?}: {actual} != {want}"
+            );
+        }
     }
 }

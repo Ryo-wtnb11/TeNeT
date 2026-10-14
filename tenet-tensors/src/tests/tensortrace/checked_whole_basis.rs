@@ -810,3 +810,103 @@ fn checked_trace_channel_factor_is_the_exact_dimension_quotient() {
         assert_eq!(sum, weyl(b), "Σ dim(c)/dim(a) over b = {b:?}");
     }
 }
+
+/// SU(2) `V ⊗ V ← V ⊗ V`, `V = 1 ⊕ 2²` (dims 3, 5), traced over the second
+/// leg pair, once through the multiplicity-free `SU2FusionRule` and once
+/// through the checked `SUNFusionRule::new(2)`. The permutation is the
+/// identity and SU(2) twists are 1, so each term is the bare factor of its
+/// source tree `(a, b) → c`, and both modes must return the hand quotient
+/// `(2j_c+1)/(2j_a+1)` bit for bit. The previous MF `dim · inv_dim` missed
+/// `5/3, 7/3, 3/5, 7/5` by one ulp while the checked mode divided (#2209).
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn multiplicity_free_and_checked_trace_factors_agree_bitwise() {
+    let axes = TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]);
+    let homspace = |spin_one: SectorId, spin_two: SectorId| {
+        let v = || SectorLeg::new([(spin_one, 1), (spin_two, 2)], false);
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v(), v()]),
+            FusionProductSpace::new([v(), v()]),
+        )
+    };
+
+    let mf_provider = Arc::new(SU2FusionRule);
+    let mf_src = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+        Arc::clone(&mf_provider),
+        homspace(
+            SU2Irrep::from_twice_spin(2).sector_id(),
+            SU2Irrep::from_twice_spin(4).sector_id(),
+        ),
+    )
+    .unwrap();
+    let mf_dst = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+        Arc::clone(&mf_provider),
+        crate::tensortrace_fusion_dyn_preflight_checked(&mf_src, axes, 1)
+            .unwrap()
+            .into_selected_homspace(),
+    )
+    .unwrap();
+    let mf =
+        TensorTraceFusionStructure::compile_fusion_dyn_checked(&mf_dst, &mf_src, axes).unwrap();
+
+    let sun = SUNFusionRule::new(2).unwrap();
+    let checked_src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(sun.clone()),
+        homspace(
+            sun.encode_dynkin(&[2]).unwrap(),
+            sun.encode_dynkin(&[4]).unwrap(),
+        ),
+    )
+    .unwrap();
+    let checked_dst = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(checked_src.provider_arc()),
+        crate::tensortrace_fusion_dyn_preflight_generic_checked(&checked_src, axes, 1)
+            .unwrap()
+            .into_selected_homspace(),
+    )
+    .unwrap();
+    let checked = crate::tensortrace::compile_fusion_dyn_generic_checked(
+        &checked_dst,
+        &checked_src,
+        axes,
+        &mut crate::tree_transform::CheckedPendingCoefficients::new(),
+    )
+    .unwrap();
+
+    // Hand dimensions `2j + 1`, independent of either provider.
+    let mf_dim = |s: SectorId| (SU2Irrep::from_sector_id(s).twice_spin() + 1) as f64;
+    let sun_dim = |s: SectorId| (sun.decode_dynkin(s).unwrap()[0] + 1) as f64;
+    let factors = |structure: &TensorTraceFusionStructure<f64>,
+                   src: &BlockStructure,
+                   dim: &dyn Fn(SectorId) -> f64| {
+        let mut factors: Vec<_> = structure
+            .terms()
+            .iter()
+            .map(|term| {
+                let tree = source_key(src, term.src_block()).codomain_tree();
+                let (a, b, c) = (
+                    dim(tree.uncoupled()[0]),
+                    dim(tree.uncoupled()[1]),
+                    dim(tree.coupled()),
+                );
+                assert_eq!(
+                    term.coefficient().to_bits(),
+                    (c / a).to_bits(),
+                    "{c}/{a}: {} != {}",
+                    term.coefficient(),
+                    c / a
+                );
+                (a as u64, b as u64, c as u64, term.coefficient().to_bits())
+            })
+            .collect();
+        factors.sort_unstable();
+        factors
+    };
+    let mf_factors = factors(&mf, mf_src.space().structure(), &mf_dim);
+    let checked_factors = factors(&checked, checked_src.space().structure(), &sun_dim);
+    assert_eq!(mf_factors, checked_factors);
+    // The fixture exercises quotients the old reciprocal rounded off by an ulp.
+    assert!(mf_factors
+        .iter()
+        .any(|&(a, _, c, _)| (c as f64) * (1.0 / a as f64) != c as f64 / a as f64));
+}

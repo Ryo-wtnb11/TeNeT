@@ -2423,7 +2423,7 @@ where
 
             let coupled = trace_codomain_tree.coupled();
             let first = trace_codomain_tree.uncoupled()[0];
-            let mut trace_factor = rule.dim_scalar(coupled) * rule.inv_dim_scalar(first);
+            let mut trace_factor = rule.dim_scalar(coupled) / rule.dim_scalar(first);
             for (&sector, &is_dual) in trace_codomain_tree
                 .uncoupled()
                 .iter()
