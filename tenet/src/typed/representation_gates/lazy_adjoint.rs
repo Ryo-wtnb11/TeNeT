@@ -23,7 +23,7 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
     .unwrap();
     let lazy = source.adjoint().unwrap();
     let eager = lazy.materialized_tensor_uncached().unwrap();
-    UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+    let adjoint = probe::record();
 
     let outputs = [
         (
@@ -49,7 +49,7 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
     };
     // Read before the checks below: a transformed adjoint stays lazy, and
     // they materialize it on purpose.
-    assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
+    assert_eq!(adjoint.get(Event::AdjointMaterialization), 0);
     for (actual, expected) in outputs {
         assert!(matches!(&actual.repr, TypedTensorRepr::Adjoint(_)));
         assert_eq!(
@@ -338,9 +338,9 @@ fn checked_generic_lazy_adjoint_factorizations_follow_the_rule_table() {
         .unwrap();
     let lazy = source.adjoint().unwrap();
     let materializations = |op: &dyn Fn()| {
-        UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+        let adjoint = probe::record();
         op();
-        UNCACHED_ADJOINT_MATERIALIZATIONS.get()
+        adjoint.get(Event::AdjointMaterialization)
     };
 
     assert_eq!(
@@ -1186,7 +1186,7 @@ where
         spec(&[2], &[0], &[0, 1], &[2, 3]),
         spec(&[1], &[0], &[0, 1], &[2, 3]),
     );
-    UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+    let adjoint = probe::record();
     let outputs = [
         (
             lazy.contract(source, &core).unwrap(),
@@ -1205,7 +1205,7 @@ where
             eager.contract(&eager, &both).unwrap(),
         ),
     ];
-    assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
+    assert_eq!(adjoint.get(Event::AdjointMaterialization), 0);
     assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
     let close = |actual: &TensorMap<_, D>, expected: &TensorMap<_, D>| {
         assert_eq!(
@@ -1674,7 +1674,7 @@ fn lazy_adjoint_constructor_rejects_a_compact_diagonal_parent() {
 
 #[test]
 fn compact_adjoint_never_enters_the_lazy_representation() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
@@ -1711,7 +1711,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
     assert_eq!(real_adjoint.spectrum().unwrap()[0].values, [1.0, 2.0]);
     // TensorKit's real `adjoint(d) = d`: the body is shared, not copied.
     assert!(Arc::ptr_eq(owned(&real_adjoint), owned(&real)));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let spectrum = complex_adjoint.spectrum().unwrap();
     assert_eq!(
         spectrum[0].values,
@@ -1720,7 +1720,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
             num_complex::Complex64::new(3.0, 4.0)
         ]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let complex_restored = complex_adjoint.adjoint().unwrap();
     assert!(matches!(&complex_restored.repr, TypedTensorRepr::Owned(_)));
@@ -1735,7 +1735,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
             num_complex::Complex64::new(3.0, -4.0)
         ]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]

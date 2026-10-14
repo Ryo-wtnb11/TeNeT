@@ -1,4 +1,44 @@
 use super::*;
+#[cfg(feature = "cuda")]
+use crate::typed::probe::{Fault, Gauge, RoutePolicy};
+
+/// `(qr calls, factor copies, selector uploads, output uploads, assembly
+/// GEMMs, live route scratch, peak route scratch)` in `recording`.
+#[cfg(feature = "cuda")]
+fn qr_counts(recording: &probe::Recording) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let (live, peak) = recording.gauge(Gauge::CudaQrScratch);
+    (
+        recording.get(Event::CudaQrDecomposition),
+        recording.get(Event::CudaFactorCopy),
+        recording.get(Event::CudaSelectorUpload),
+        recording.get(Event::CudaQrOutputUpload),
+        recording.get(Event::CudaAssemblyGemm),
+        live,
+        peak,
+    )
+}
+
+/// `(successful results, spectrum scalars, output uploads, live route
+/// scratch, peak route scratch)` of device SVD in `recording`.
+#[cfg(feature = "cuda")]
+fn svd_counts(recording: &probe::Recording) -> (usize, usize, usize, usize, usize) {
+    let (live, peak) = recording.gauge(Gauge::CudaSvdScratch);
+    (
+        recording.get(Event::CudaSvdDecomposition),
+        recording.get(Event::CudaSvdSpectrumScalar),
+        recording.get(Event::CudaSvdOutputUpload),
+        live,
+        peak,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn svd_routes(treewise: bool) -> RoutePolicy {
+    RoutePolicy {
+        svd_treewise: treewise,
+        ..RoutePolicy::DEFAULT
+    }
+}
 
 /// `(factor_copies, selector_uploads, assembly_gemms)` a compact QR or
 /// compact SVD assembly must perform for this plan: an aligned side is one
@@ -346,7 +386,7 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
 
     let input_before_failure = device.to_host().unwrap();
     for failure in [("decomposition", 2), ("assembly", 2)] {
-        CUDA_EIGH_FAILURE.with(|injected| injected.set(Some(failure)));
+        probe::arm(Fault::CudaEigh(failure.0), failure.1);
         assert!(device
             .eigh_full(
                 &codomain_axes(&device),
@@ -354,7 +394,7 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
                 HermitianTol::DEFAULT
             )
             .is_err());
-        CUDA_EIGH_FAILURE.with(|injected| injected.set(None));
+        probe::disarm();
         assert_typed_map_close(
             &device.to_host().unwrap(),
             &input_before_failure,
@@ -529,28 +569,24 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
         (false, true, 1, 0, sectors.len()),
         (true, true, 1, 0, trees),
     ] {
-        CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
-        CUDA_EIGH_FORCE_SELECTOR.with(|flag| flag.set(forced));
-        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
-        let Eigh { d, v } = device
-            .eigh_full(
-                &codomain_axes(&device),
-                &domain_axes(&device),
-                HermitianTol::DEFAULT,
-            )
-            .unwrap();
-        CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
-        CUDA_EIGH_FORCE_SELECTOR.with(|flag| flag.set(false));
-        assert_eq!(
-            CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
-            Some(uploads)
-        );
-        CUDA_QR_OBSERVATION.with(|observation| {
-            let (_, factor_copies, _, _, assembly_gemms, _, _) = observation.get().unwrap();
-            assert_eq!((factor_copies, assembly_gemms), (copies, gemms));
-            observation.set(None);
+        let routes = RoutePolicy {
+            eigh_treewise: treewise,
+            eigh_force_selector: forced,
+            ..RoutePolicy::DEFAULT
+        };
+        let recording = probe::record();
+        let Eigh { d, v } = probe::with_routes(routes, || {
+            device
+                .eigh_full(
+                    &codomain_axes(&device),
+                    &domain_axes(&device),
+                    HermitianTol::DEFAULT,
+                )
+                .unwrap()
         });
+        assert_eq!(recording.get(Event::CudaSelectorUpload), uploads);
+        let (_, factor_copies, _, _, assembly_gemms, _, _) = qr_counts(&recording);
+        assert_eq!((factor_copies, assembly_gemms), (copies, gemms));
         outputs.push((d.to_host().unwrap(), v.to_host().unwrap()));
     }
     let bits = |map: &TensorMap<U1FusionRule, f64>| {
@@ -630,22 +666,16 @@ fn typed_cuda_eigh_selector_applies_a_non_identity_order() {
     );
 
     for (treewise, gemms) in [(false, sectors.len()), (true, trees)] {
-        CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
-        CUDA_EIGH_REVERSE_ODD_SECTORS.with(|flag| flag.set(true));
-        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
-        let (d, v) = eigh(&device);
-        CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
-        CUDA_EIGH_REVERSE_ODD_SECTORS.with(|flag| flag.set(false));
-        assert_eq!(
-            CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
-            Some(1)
-        );
-        CUDA_QR_OBSERVATION.with(|observation| {
-            let (_, factor_copies, _, _, assembly_gemms, _, _) = observation.get().unwrap();
-            assert_eq!((factor_copies, assembly_gemms), (0, gemms));
-            observation.set(None);
-        });
+        let routes = RoutePolicy {
+            eigh_treewise: treewise,
+            eigh_reverse_odd_sectors: true,
+            ..RoutePolicy::DEFAULT
+        };
+        let recording = probe::record();
+        let (d, v) = probe::with_routes(routes, || eigh(&device));
+        assert_eq!(recording.get(Event::CudaSelectorUpload), 1);
+        let (_, factor_copies, _, _, assembly_gemms, _, _) = qr_counts(&recording);
+        assert_eq!((factor_copies, assembly_gemms), (0, gemms));
         for ((entry, want), &reverse) in d.diagview().unwrap().iter().zip(&ascending).zip(&reversed)
         {
             let mut want = want.values.clone();
@@ -699,7 +729,7 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     // so every route takes the whole-factor copy and the assembly uploads
     // and downloads nothing. The non-aligned fallback is a layout
     // property, not a workload one: the Host plan's tree-order predicate
-    // decides it, and the `CUDA_*_TREEWISE` gates force it on the device.
+    // decides it, and the test `RoutePolicy` forces it on the device.
     assert!(
         executed_routes(&plan)
             .all(|(route, _, _)| plan.left_preserves_trees(route)
@@ -717,26 +747,23 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
         (2 * routes, 0, 0)
     );
 
-    CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+    let recording = probe::record();
     source_device
         .qr_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
         .unwrap()
         .pair();
-    CUDA_QR_OBSERVATION.with(|observation| {
-        assert_eq!(
-            observation.get(),
-            Some((
-                nonempty,
-                factor_copies,
-                selector_uploads,
-                2,
-                assembly_gemms,
-                0,
-                usize::from(nonempty != 0),
-            ))
-        );
-        observation.set(None);
-    });
+    assert_eq!(
+        qr_counts(&recording),
+        (
+            nonempty,
+            factor_copies,
+            selector_uploads,
+            2,
+            assembly_gemms,
+            0,
+            usize::from(nonempty != 0),
+        )
+    );
 
     let malformed_storage = {
         let lease = runtime.lease_cuda().unwrap();
@@ -749,16 +776,12 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
             malformed_storage,
         )),
     };
-    let sentinel = (usize::MAX, 0, 0, 0, 0, 0, 0);
-    CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
+    let recording = probe::record();
     assert!(matches!(
         malformed.qr_compact(&codomain_axes(&malformed), &domain_axes(&malformed)),
         Err(Error::InvalidArgument(message)) if message.contains("payload length")
     ));
-    CUDA_QR_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(sentinel));
-        observation.set(None);
-    });
+    assert_eq!(qr_counts(&recording), (0, 0, 0, 0, 0, 0, 0));
 
     let stranded_storage = {
         let lease = runtime.lease_cuda().unwrap();
@@ -771,32 +794,26 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
             stranded_storage,
         )),
     };
-    CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
+    let recording = probe::record();
     assert!(matches!(
         stranded.qr_compact(&codomain_axes(&stranded), &domain_axes(&stranded)),
         Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
     ));
-    CUDA_QR_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(sentinel));
-        observation.set(None);
-    });
+    assert_eq!(qr_counts(&recording), (0, 0, 0, 0, 0, 0, 0));
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
     let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
-    CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+    let recording = probe::record();
     empty
         .to_cuda()
         .unwrap()
         .qr_compact(&codomain_axes(&empty), &domain_axes(&empty))
         .unwrap()
         .pair();
-    CUDA_QR_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some((0, 0, 0, 2, 0, 0, 0)));
-        observation.set(None);
-    });
+    assert_eq!(qr_counts(&recording), (0, 0, 0, 2, 0, 0, 0));
 }
 
 #[cfg(feature = "cuda")]
@@ -835,28 +852,21 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     // and shares its copy/selector/GEMM observation.
     let plan = source_device.compact_factor_plan().unwrap();
     let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
-    CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
-    CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+    let recording = probe::record();
     source_device
         .svd_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
         .unwrap();
-    CUDA_SVD_OBSERVATION.with(|observation| {
-        assert_eq!(
-            observation.get(),
-            Some((nonempty, singular_values, 3, 0, usize::from(nonempty != 0),))
-        );
-        observation.set(None);
-    });
-    CUDA_QR_OBSERVATION.with(|observation| {
-        // No device QR and no QR output upload happen here; the shared
-        // slots record only this assembly's copies and GEMMs. The SVD
-        // builds its gauge selectors on the device, so it uploads none.
-        assert_eq!(
-            observation.get(),
-            Some((0, factor_copies, 0, 0, assembly_gemms, 0, 0))
-        );
-        observation.set(None);
-    });
+    assert_eq!(
+        svd_counts(&recording),
+        (nonempty, singular_values, 3, 0, usize::from(nonempty != 0))
+    );
+    // No device QR and no QR output upload happen here; the shared events
+    // record only this assembly's copies and GEMMs. The SVD builds its gauge
+    // selectors on the device, so it uploads none.
+    assert_eq!(
+        qr_counts(&recording),
+        (0, factor_copies, 0, 0, assembly_gemms, 0, 0)
+    );
 
     let malformed_storage = {
         let lease = runtime.lease_cuda().unwrap();
@@ -870,17 +880,14 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
         )),
     };
     for lazy in [false, true] {
-        CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+        let recording = probe::record();
         let rejected = if lazy {
             source_device.adjoint().unwrap().svd_compact(&[0], &[1, 2])
         } else {
             malformed.svd_compact(&codomain_axes(&malformed), &domain_axes(&malformed))
         };
         assert!(rejected.is_err());
-        CUDA_SVD_OBSERVATION.with(|observation| {
-            assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
-            observation.set(None);
-        });
+        assert_eq!(svd_counts(&recording), (0, 0, 0, 0, 0));
     }
 
     let stranded_storage = {
@@ -894,14 +901,11 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
             stranded_storage,
         )),
     };
-    CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+    let recording = probe::record();
     assert!(stranded
         .svd_compact(&codomain_axes(&stranded), &domain_axes(&stranded))
         .is_err());
-    CUDA_SVD_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
-        observation.set(None);
-    });
+    assert_eq!(svd_counts(&recording), (0, 0, 0, 0, 0));
 }
 
 #[cfg(feature = "cuda")]
@@ -935,19 +939,14 @@ fn typed_cuda_svd_non_aligned_routes_upload_no_selector_and_the_same_diagonal() 
     .count();
     let mut diagonals = Vec::new();
     for (treewise, selectors) in [(false, 0), (true, 0)] {
-        CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
-        CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
-        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        let Svd { s, .. } = device
-            .svd_compact(&codomain_axes(&device), &domain_axes(&device))
-            .unwrap();
-        CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
-        let (_, _, creations, _, _) = CUDA_SVD_OBSERVATION
-            .with(|observation| observation.replace(None))
-            .unwrap();
-        let (_, _, selector_uploads, _, _, _, _) = CUDA_QR_OBSERVATION
-            .with(|observation| observation.replace(None))
-            .unwrap();
+        let recording = probe::record();
+        let Svd { s, .. } = probe::with_routes(svd_routes(treewise), || {
+            device
+                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap()
+        });
+        let (_, _, creations, _, _) = svd_counts(&recording);
+        let (_, _, selector_uploads, _, _, _, _) = qr_counts(&recording);
         assert_eq!(
             (creations, selector_uploads),
             (3, selectors),
@@ -1205,12 +1204,12 @@ fn typed_cuda_svd_follows_the_host_gauge_with_and_without_degenerate_spectra() {
             TensorMap::<R, Complex64>::rand_with_seed(runtime, [leg, leg], [leg], 22).unwrap();
         let mut entrywise = 0;
         for treewise in [false, true] {
-            CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
-            entrywise += assert_device_svd_gauge_matches_host(&real);
-            entrywise += assert_device_svd_gauge_matches_host(&complex);
-            assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&real));
-            assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&complex));
-            CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
+            probe::with_routes(svd_routes(treewise), || {
+                entrywise += assert_device_svd_gauge_matches_host(&real);
+                entrywise += assert_device_svd_gauge_matches_host(&complex);
+                assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&real));
+                assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&complex));
+            });
         }
         entrywise
     }
@@ -1330,17 +1329,15 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_only_the_finite_scan_downlo
                         + u64::from(<D as tenet_dense::CudaScalar>::IS_COMPLEX)
                 })
                 .sum();
-            CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
-            CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            let recording = probe::record();
             let before = tenet_dense::cuda_transfer_stats();
-            let Svd { u, s, vh } = device
-                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
-                .unwrap();
+            let Svd { u, s, vh } = probe::with_routes(svd_routes(treewise), || {
+                device
+                    .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                    .unwrap()
+            });
             let after = tenet_dense::cuda_transfer_stats();
-            CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
-            let (_, _, selector_uploads, _, _, _, _) = CUDA_QR_OBSERVATION
-                .with(|observation| observation.replace(None))
-                .unwrap();
+            let (_, _, selector_uploads, _, _, _, _) = qr_counts(&recording);
             assert_eq!(selector_uploads, 0, "treewise {treewise}");
             assert_eq!(
                 after.gauge_ops - before.gauge_ops,

@@ -20,14 +20,14 @@ fn compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels() {
     )
     .unwrap();
     for operation in 0..4 {
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let (left, right) = match operation {
             0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
             1 => input.qr_full(&[0], &[1]).unwrap().pair(),
             2 => input.lq_compact(&[0], &[1]).unwrap().pair(),
             _ => input.lq_full(&[0], &[1]).unwrap().pair(),
         };
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         for factor in [&left, &right] {
             assert_eq!(factor.codomain(), input.codomain());
             assert_eq!(factor.domain(), input.domain());
@@ -139,13 +139,13 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let left = input.left_polar(&[0], &[1]).unwrap();
     assert!(left.w.diagview().is_ok());
     assert!(left.p.diagview().is_ok());
     assert!(left.w.dense_data().is_err());
     assert!(left.p.dense_data().is_err());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
     // Hand oracle: phase and magnitude of -2, 0 and 3i, with unit phase at 0.
@@ -170,13 +170,13 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
         assert_eq!(actual_w, if on_diagonal { phase[row] } else { zero });
         assert_eq!(actual_p, if on_diagonal { magnitude[row] } else { zero });
     }
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let right = input.right_polar(&[0], &[1]).unwrap();
     assert!(right.wh.diagview().is_ok());
     assert!(right.p.diagview().is_ok());
     assert!(right.wh.dense_data().is_err());
     assert!(right.p.dense_data().is_err());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 }
@@ -491,7 +491,7 @@ fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
         .unwrap();
         let first =
             |tensor: &TensorMap<U1FusionRule, Complex64>| tensor.diagview().unwrap()[0].values[0];
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         if value.re.is_finite() {
             for Qr { q, r } in [
                 input.qr_compact(&[0], &[1]).unwrap(),
@@ -516,7 +516,7 @@ fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
                 assert!(report(&error).contains(&expected), "{error}");
             }
         }
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     }
     let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
         &runtime,
@@ -531,12 +531,12 @@ fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
         let value = tensor.diagview().unwrap()[0].values[0];
         Complex64::new(f64::from(value.re), f64::from(value.im))
     };
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Qr { q, r } = input.qr_compact(&[0], &[1]).unwrap();
     assert_overflow_phase_magnitude(widen(&q), widen(&r), 4.0 * f64::from(f32::EPSILON));
     let Lq { l, q } = input.lq_full(&[0], &[1]).unwrap();
     assert_overflow_phase_magnitude(widen(&q), widen(&l), 4.0 * f64::from(f32::EPSILON));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -677,10 +677,10 @@ fn compact_diagonal_polar_preserves_sectors_and_changed_roles() {
                 let dense = permuted.materialize().unwrap();
                 let expected_left = dense.left_polar(&[0], &[1]).unwrap();
                 let expected_right = dense.right_polar(&[0], &[1]).unwrap();
-                DIAGONAL_MATERIALIZATIONS.set(0);
+                let densified = probe::record();
                 let left = input.left_polar(&rows, &cols).unwrap();
                 let right = input.right_polar(&rows, &cols).unwrap();
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
                 if permuted.spectrum().is_some() {
                     for factor in [&left.w, &left.p, &right.p, &right.wh] {
                         assert!(factor.diagview().is_ok());
@@ -837,7 +837,7 @@ fn compact_diagonal_polar_refuses_nonfinite_and_is_direct_when_overflowing() {
         .unwrap();
         let first =
             |tensor: &TensorMap<U1FusionRule, Complex64>| tensor.diagview().unwrap()[0].values[0];
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         if value.re.is_finite() {
             let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
             assert_overflow_phase_magnitude(first(&w), first(&p), 4.0 * f64::EPSILON);
@@ -854,7 +854,7 @@ fn compact_diagonal_polar_refuses_nonfinite_and_is_direct_when_overflowing() {
                 );
             }
         }
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     }
 }
 

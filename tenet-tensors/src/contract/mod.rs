@@ -85,8 +85,8 @@ pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]
 pub(crate) use dynamic_space::{
     checked_layout_primer, checked_metadata_dispatcher, fusion_operand_projection_prepares,
-    reset_fusion_operand_projection_prepares, reset_scratch_publication_observations,
-    scratch_publication_observations, MetadataOutput, MetadataRequest,
+    reset_fusion_operand_projection_prepares, reset_scratch_structure_builds,
+    scratch_structure_builds, MetadataOutput, MetadataRequest,
 };
 pub(crate) use dynamic_space::{
     dispatch_prepare, tree_transform_operation_axes, FusionOperandLayout, LayoutKeyBuilder,

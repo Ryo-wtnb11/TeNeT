@@ -808,11 +808,6 @@ pub(crate) struct HostPoolEntry {
     _probe: HostPoolDepth,
 }
 
-#[cfg(test)]
-thread_local! {
-    static HOST_POOL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Test mirror of the entered runtime pools on this thread, so a probe can
 /// ask whether a data-movement site runs inside one.
 #[cfg(test)]
@@ -821,7 +816,7 @@ struct HostPoolDepth;
 #[cfg(test)]
 impl HostPoolDepth {
     fn enter() -> Self {
-        HOST_POOL_DEPTH.set(HOST_POOL_DEPTH.get() + 1);
+        crate::typed::probe::enter(crate::typed::probe::Gauge::HostPool);
         Self
     }
 }
@@ -829,20 +824,8 @@ impl HostPoolDepth {
 #[cfg(test)]
 impl Drop for HostPoolDepth {
     fn drop(&mut self) {
-        HOST_POOL_DEPTH.set(HOST_POOL_DEPTH.get() - 1);
+        crate::typed::probe::leave(crate::typed::probe::Gauge::HostPool);
     }
-}
-
-/// Whether a runtime Host pool is entered on this thread.
-#[cfg(test)]
-pub(crate) fn host_pool_entered() -> bool {
-    HOST_POOL_DEPTH.get() > 0
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Dense leases taken on this thread: the #1996 lease-count probe.
-    pub(crate) static DENSE_LEASES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// RAII lease of a pooled execution context (#155). Returns it to the
@@ -1165,7 +1148,7 @@ impl Runtime {
     /// injected executor (which cannot be reproduced for a pool).
     pub(crate) fn lease_dense(&self) -> DenseLease<'_> {
         #[cfg(test)]
-        DENSE_LEASES.set(DENSE_LEASES.get() + 1);
+        crate::typed::probe::hit(crate::typed::probe::Event::DenseLease);
         if !self.inner.executor_mintable {
             return DenseLease::Locked {
                 state: self.lock(),

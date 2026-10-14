@@ -52,29 +52,6 @@ pub(crate) enum TensorOrientation {
     Adjoint,
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(crate) static CAT_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Forces the conservative decline of an adjoint-oriented cat plan, which
-    /// no public geometry is known to reach, so its fallback can be tested.
-    pub(crate) static CAT_PLAN_DECLINES_ORIENTED: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(super) fn observe_cat_result_layout_build() {
-    CAT_RESULT_LAYOUT_BUILDS.with(|observation| {
-        if let Some(builds) = observation.get() {
-            observation.set(Some(builds + 1));
-        }
-    });
-}
-
 /// Structure-level description of one concatenation operand.
 pub(crate) struct CatOperandLayout<'a> {
     structure: &'a Arc<BlockStructure>,
@@ -278,10 +255,7 @@ pub(crate) fn compile_cat_plan(
     axis: usize,
     side: Side,
 ) -> Result<Option<CatCopyPlan>, Error> {
-    #[cfg(test)]
-    observe_cat_result_layout_build();
-    #[cfg(test)]
-    if CAT_PLAN_DECLINES_ORIENTED.get()
+    if probe::RoutePolicy::current().cat_declines_oriented
         && (matches!(operands[0].orientation, TensorOrientation::Adjoint)
             || matches!(operands[1].orientation, TensorOrientation::Adjoint))
     {

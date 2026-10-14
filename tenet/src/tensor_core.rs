@@ -365,38 +365,6 @@ where
         .collect()
 }
 
-// Test-only observability at the two multiplicity-free execution seams: the
-// contraction into-slice seam (owned and lazy-adjoint operands alike) and the
-// owned tree-transform hook. Armed thread-locals count executions of the seam
-// the current thread runs through. A gate over these counters pins "one fused
-// contraction, no separate permute transform". Observability only: nothing
-// behavioral reads them.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static CONTRACT_SEAM_CALLS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-    pub(crate) static TREE_TRANSFORM_SEAM_CALLS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn observe_contract_seam_call() {
-    CONTRACT_SEAM_CALLS.with(|observation| {
-        if let Some(calls) = observation.get() {
-            observation.set(Some(calls + 1));
-        }
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn observe_tree_transform_seam_call() {
-    TREE_TRANSFORM_SEAM_CALLS.with(|observation| {
-        if let Some(calls) = observation.get() {
-            observation.set(Some(calls + 1));
-        }
-    });
-}
-
 /// TensorKit tensor product: merge codomain trees with codomain trees and
 /// domain trees with domain trees, without crossing either pair of legs.
 pub(crate) fn tensorproduct_owned_multiplicity_free<R, D, C>(
@@ -562,20 +530,6 @@ type CheckedGenericTensorProductResult<R, D> = Result<
     CheckedGenericTensorProductError<<R as CheckedGenericFusion>::Error>,
 >;
 
-#[cfg(test)]
-static FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static CHECKED_TENSOR_PRODUCT_COMMIT_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-std::thread_local! {
-    static CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE:
-        std::cell::RefCell<Option<tenet_core::BlockStructure>> = const {
-            std::cell::RefCell::new(None)
-        };
-}
-
 fn validate_tensor_product_source_structure<E>(
     tensor: &'static str,
     structure: &tenet_core::BlockStructure,
@@ -630,16 +584,9 @@ fn validate_tensor_product_source_structures<E>(
 ) -> Result<(), CheckedGenericTensorProductError<E>> {
     validate_tensor_product_source_structure("lhs", lhs)?;
     #[cfg(test)]
-    {
-        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
-            let override_structure = override_structure.borrow();
-            validate_tensor_product_source_structure(
-                "rhs",
-                override_structure.as_ref().unwrap_or(rhs),
-            )
-        })
+    if let Some(rhs) = crate::typed::probe::tensor_product_rhs() {
+        return validate_tensor_product_source_structure("rhs", &rhs);
     }
-    #[cfg(not(test))]
     validate_tensor_product_source_structure("rhs", rhs)
 }
 
@@ -779,8 +726,7 @@ where
     // is the final operation below.
     let mut data = vec![D::from_real(0.0); prepared.required_len()];
     #[cfg(test)]
-    if FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER.swap(false, std::sync::atomic::Ordering::Relaxed)
-    {
+    if crate::typed::probe::fires(crate::typed::probe::Fault::TensorProductScatter) {
         return Err(tenet_tensors::OperationError::StructureMismatch {
             tensor: "forced late tensor-product scatter failure",
         }
@@ -805,7 +751,7 @@ where
         .space()
         .commit_final_homspace_generic_bound_checked(prepared)?;
     #[cfg(test)]
-    CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::typed::probe::hit(crate::typed::probe::Event::TensorProductCommit);
     Ok((destination, data))
 }
 
@@ -941,12 +887,9 @@ mod tests {
         BoundDynamicFusionMapSpace, FusionOperand, OutputAxisOrder, TreeTransformOperation,
     };
 
-    use super::{
-        scatter_tensor_product_block, tensorproduct_owned_checked_generic,
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
-    };
+    use super::{scatter_tensor_product_block, tensorproduct_owned_checked_generic};
     use crate::runtime::Ctx;
+    use crate::typed::probe::{self, Event, Fault};
 
     struct CheckedTensorProductSpy {
         algebra_queries: AtomicUsize,
@@ -1093,17 +1036,14 @@ mod tests {
             1,
         )
         .unwrap();
-        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
-            *override_structure.borrow_mut() =
-                Some(BlockStructure::from_blocks(vec![valid, malformed]).unwrap());
-        });
+        probe::override_tensor_product_rhs(Some(
+            BlockStructure::from_blocks(vec![valid, malformed]).unwrap(),
+        ));
         provider.reset();
 
         let error =
             tensorproduct_owned_checked_generic(&source, &data, &source, &data).unwrap_err();
-        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
-            override_structure.borrow_mut().take();
-        });
+        probe::override_tensor_product_rhs(None);
 
         assert!(matches!(
             error,
@@ -1124,8 +1064,8 @@ mod tests {
         });
         let (source, data) = checked_tensor_product_source(Arc::clone(&provider));
         provider.reset();
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.store(0, Ordering::Relaxed);
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER.store(true, Ordering::Relaxed);
+        let commits = probe::record();
+        probe::arm(Fault::TensorProductScatter, 1);
 
         let error =
             tensorproduct_owned_checked_generic(&source, &data, &source, &data).unwrap_err();
@@ -1136,10 +1076,7 @@ mod tests {
         ));
         assert!(provider.algebra_queries.load(Ordering::Relaxed) > 0);
         assert!(provider.f_queries.load(Ordering::Relaxed) > 0);
-        assert_eq!(
-            CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(commits.get(Event::TensorProductCommit), 0);
     }
 
     #[test]
@@ -1742,19 +1679,14 @@ mod tests {
         (runtime, tensor)
     }
 
-    /// Arms both seam counters, runs `operation`, and returns
+    /// Runs `operation` and returns
     /// `(contract seam calls, tree-transform seam calls)`.
     fn seam_calls<T>(operation: impl FnOnce() -> T) -> (usize, usize) {
-        super::CONTRACT_SEAM_CALLS.with(|observation| observation.set(Some(0)));
-        super::TREE_TRANSFORM_SEAM_CALLS.with(|observation| observation.set(Some(0)));
+        let calls = probe::record();
         let _output = operation();
         (
-            super::CONTRACT_SEAM_CALLS
-                .with(|observation| observation.replace(None))
-                .unwrap(),
-            super::TREE_TRANSFORM_SEAM_CALLS
-                .with(|observation| observation.replace(None))
-                .unwrap(),
+            calls.get(Event::ContractSeamCall),
+            calls.get(Event::TreeTransformSeamCall),
         )
     }
 

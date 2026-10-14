@@ -1381,10 +1381,11 @@ where
         let mut spectrum_offsets = Vec::with_capacity(routes.len());
         let mut copies = Vec::with_capacity(routes.len());
         let mut spectrum_len = 0usize;
+        let policy = super::probe::RoutePolicy::current();
         for route in &routes {
             spectrum_offsets.push(spectrum_len);
             spectrum_len += route.rank();
-            copies.push(route_copies(&plan, route)?);
+            copies.push(route_copies(&plan, route, policy)?);
         }
         let diagonals = route_diagonals(&routes, &middle_space)?;
         let placement = source.signature.placement;
@@ -1421,14 +1422,10 @@ where
 fn route_copies(
     plan: &tenet_matrixalgebra::seam::CompactFactorPlan,
     route: &tenet_matrixalgebra::seam::CompactFactorRoute,
+    policy: super::probe::RoutePolicy,
 ) -> Result<Vec<(usize, usize, usize)>, Error> {
     let target = &plan.left_regions()[left_region(route)?];
-    #[cfg(test)]
-    let aligned =
-        plan.left_preserves_trees(route) && !tests::FORCE_TREEWISE.with(std::cell::Cell::get);
-    #[cfg(not(test))]
-    let aligned = plan.left_preserves_trees(route);
-    if aligned {
+    if plan.left_preserves_trees(route) && !policy.eigh_treewise {
         return Ok(vec![(0, 0, target.rows())]);
     }
     let source = &plan.source_regions()[route.source_region()];
@@ -1767,12 +1764,15 @@ mod tests {
     use super::super::Runtime;
     use super::super::{owned_repr, GradedSpace, TensorMap, TypedTensorBody};
 
-    thread_local! {
-        /// Forces every eigh route onto the per-tree copies, so the branch
-        /// the fixtures' aligned routes never take is exercised.
-        pub(super) static FORCE_TREEWISE: std::cell::Cell<bool> = const {
-            std::cell::Cell::new(false)
-        };
+    use super::super::probe::{self, RoutePolicy};
+
+    /// Forces every eigh route onto the per-tree copies, so the branch the
+    /// fixtures' aligned routes never take is exercised.
+    fn eigh_routes(treewise: bool) -> RoutePolicy {
+        RoutePolicy {
+            eigh_treewise: treewise,
+            ..RoutePolicy::DEFAULT
+        }
     }
 
     #[test]
@@ -1871,10 +1871,9 @@ mod tests {
             .collect();
         let stack = super::StackedTensorMap::pack(&members).unwrap();
         let run = |treewise: bool| {
-            FORCE_TREEWISE.with(|flag| flag.set(treewise));
-            let plan =
-                EighFullPlan::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
-            FORCE_TREEWISE.with(|flag| flag.set(false));
+            let plan = probe::with_routes(eigh_routes(treewise), || {
+                EighFullPlan::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap()
+            });
             let mut workspace = plan.workspace().unwrap();
             let copies: usize = plan.routes.copies.iter().map(Vec::len).sum();
             let routes = plan.routes.copies.len();
@@ -1932,11 +1931,10 @@ mod tests {
             .to_cuda()
             .unwrap();
         let run = |treewise: bool| {
-            FORCE_TREEWISE.with(|flag| flag.set(treewise));
-            let plan =
-                EighFullPlan::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
+            let plan = probe::with_routes(eigh_routes(treewise), || {
+                EighFullPlan::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap()
+            });
             let mut workspace = plan.workspace().unwrap();
-            FORCE_TREEWISE.with(|flag| flag.set(false));
             let copies: usize = plan.routes.copies.iter().map(Vec::len).sum();
             let routes = plan.routes.copies.len();
             let output = plan.execute(&stack, &mut workspace).unwrap();
@@ -1957,11 +1955,10 @@ mod tests {
             .unwrap()
             .to_cuda()
             .unwrap();
-        FORCE_TREEWISE.with(|flag| flag.set(true));
-        let plan =
-            EighFullPlan::new(&single, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
+        let plan = probe::with_routes(eigh_routes(true), || {
+            EighFullPlan::new(&single, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap()
+        });
         let mut workspace = plan.workspace().unwrap();
-        FORCE_TREEWISE.with(|flag| flag.set(false));
         let v = plan
             .execute(&single, &mut workspace)
             .unwrap()

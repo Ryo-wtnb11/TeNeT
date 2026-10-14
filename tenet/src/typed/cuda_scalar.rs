@@ -51,7 +51,7 @@ where
         )?;
         let output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
-        observe_cuda_arithmetic(1, 0);
+        probe::hit(probe::Event::CudaZeroUpload);
         Ok(output)
     }
 
@@ -297,7 +297,7 @@ where
         // correctly and wins a bench.
         let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
-        observe_cuda_arithmetic(1, 0);
+        probe::hit(probe::Event::CudaZeroUpload);
         let mut mode = tenet_dense::CudaRegionBeta::Overwrite;
         for (read, coefficient) in reads.iter().filter(|(_, c)| !c.is_zero()) {
             for (source_region, output_region) in &read.moves {
@@ -315,7 +315,7 @@ where
                 .map_err(dense_err)?;
                 #[cfg(test)]
                 if !source_region.is_empty() {
-                    observe_cuda_arithmetic(0, 1);
+                    probe::hit(probe::Event::CudaArithmeticKernel);
                 }
             }
             mode = tenet_dense::CudaRegionBeta::Accumulate;

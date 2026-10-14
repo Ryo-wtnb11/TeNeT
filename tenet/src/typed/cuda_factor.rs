@@ -1,139 +1,5 @@
 use super::*;
 
-#[cfg(all(test, feature = "cuda"))]
-thread_local! {
-    /// `(download_calls, device_partials_len, host_partials_len)`.
-    pub(super) static CUDA_REDUCTION_BUFFER_OBSERVATION:
-        std::cell::Cell<Option<(usize, usize, usize)>> = const {
-            std::cell::Cell::new(None)
-        };
-    /// `(payload_zero_uploads, kernels)`.
-    pub(super) static CUDA_ARITHMETIC_OBSERVATION:
-        std::cell::Cell<Option<(usize, usize)>> = const {
-            std::cell::Cell::new(None)
-        };
-    /// `(qr_calls, factor_copies, selector_uploads, output_uploads,
-    /// assembly_gemms, live_route_scratch, peak_route_scratch)`.
-    pub(super) static CUDA_QR_OBSERVATION: std::cell::Cell<Option<CudaQrObservation>> = const {
-            std::cell::Cell::new(None)
-        };
-    /// `(successful_results, spectrum_scalars, final_storage_creations,
-    /// live_route_scratch, peak_route_scratch)`.
-    pub(super) static CUDA_SVD_OBSERVATION: std::cell::Cell<Option<CudaSvdObservation>> = const {
-            std::cell::Cell::new(None)
-        };
-    /// `(stage, one-based ordinal)` for operation-local failure injection.
-    pub(super) static CUDA_EIGH_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
-        std::cell::Cell::new(None)
-    };
-    /// Forces the per-tree EIGH assembly on aligned routes, so the general
-    /// path can be compared with the aligned one on the same input.
-    pub(super) static CUDA_EIGH_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Marks every compact-SVD route non-aligned, so the selector-GEMM
-    /// assembly runs on a layout whose public constructions are all aligned.
-    pub(super) static CUDA_SVD_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Forces the selector-GEMM EIGH assembly even when every order is the
-    /// identity, so the column-copy path can be compared with it.
-    pub(super) static CUDA_EIGH_FORCE_SELECTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Reverses the published order of every odd-indexed source sector of
-    /// device `eigh_full`, so the selector assembly runs a non-identity
-    /// permutation on solver output that is already ascending.
-    pub(super) static CUDA_EIGH_REVERSE_ODD_SECTORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Selector uploads made by device `eigh_full` assembly.
-    pub(super) static CUDA_EIGH_SELECTOR_UPLOADS: std::cell::Cell<Option<usize>> = const {
-        std::cell::Cell::new(None)
-    };
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) type CudaQrObservation = (usize, usize, usize, usize, usize, usize, usize);
-#[cfg(all(test, feature = "cuda"))]
-pub(super) type CudaSvdObservation = (usize, usize, usize, usize, usize);
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) fn update_cuda_svd_observation(
-    update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation,
-) {
-    CUDA_SVD_OBSERVATION.with(|observation| {
-        if let Some(current) = observation.get() {
-            observation.set(Some(update(current)));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_svd_decomposition(values: usize) {
-    update_cuda_svd_observation(|(results, total, creations, live, peak)| {
-        (results + 1, total + values, creations, live, peak)
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) fn observe_cuda_svd_final_storage_creation() {
-    update_cuda_svd_observation(|(results, total, creations, live, peak)| {
-        (results, total, creations + 1, live, peak)
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) fn observe_cuda_arithmetic(zero_uploads: usize, kernels: usize) {
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        if let Some((zeros, calls)) = observation.get() {
-            observation.set(Some((zeros + zero_uploads, calls + kernels)));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) fn update_cuda_qr_observation(
-    update: impl FnOnce(CudaQrObservation) -> CudaQrObservation,
-) {
-    CUDA_QR_OBSERVATION.with(|observation| {
-        if let Some(current) = observation.get() {
-            observation.set(Some(update(current)));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_qr_decomposition() {
-    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-        (qr + 1, copies, selectors, outputs, gemms, live, peak)
-    });
-}
-
-/// One whole-factor device copy on a layout-aligned assembly route.
-///
-/// Shared by compact QR and compact SVD: both assemble through
-/// [`copy_whole_factor`], so both gate tests arm and assert this observation.
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_factor_copy() {
-    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-        (qr, copies + 1, selectors, outputs, gemms, live, peak)
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_qr_selector_upload() {
-    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-        (qr, copies, selectors + 1, outputs, gemms, live, peak)
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_factor_assembly_gemm() {
-    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-        (qr, copies, selectors, outputs, gemms + 1, live, peak)
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(super) fn observe_cuda_qr_output_upload() {
-    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-        (qr, copies, selectors, outputs + 1, gemms, live, peak)
-    });
-}
-
 #[cfg(feature = "cuda")]
 pub(crate) fn dense_err(err: tenet_dense::DenseError) -> Error {
     Error::from(tenet_tensors::OperationError::Dense(err))
@@ -154,7 +20,7 @@ pub(crate) fn upload_selector<D: CudaPayload>(
     }
     let selector = CudaStorage::upload_owned(cuda, data).map_err(Error::from)?;
     #[cfg(test)]
-    observe_cuda_qr_selector_upload();
+    probe::hit(probe::Event::CudaSelectorUpload);
     Ok(selector)
 }
 
@@ -169,7 +35,7 @@ pub(crate) fn cuda_qr_region<D: CudaPayload>(
 ) -> Result<(CudaDenseStorage, CudaDenseStorage), Error> {
     let factors = dense_cuda_qr_region::<D>(cuda, source, offset, rows, cols).map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_qr_decomposition();
+    probe::hit(probe::Event::CudaQrDecomposition);
     Ok(factors)
 }
 
@@ -192,7 +58,10 @@ pub(crate) fn cuda_svd_region<D: CudaPayload>(
     let factors =
         dense_cuda_svd_region::<D>(cuda, source, offset, rows, cols).map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_svd_decomposition(factors.1.len());
+    {
+        probe::hit(probe::Event::CudaSvdDecomposition);
+        probe::add(probe::Event::CudaSvdSpectrumScalar, factors.1.len());
+    }
     Ok(factors)
 }
 
@@ -291,7 +160,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
         )
         .map_err(dense_err)?;
         #[cfg(test)]
-        observe_cuda_factor_assembly_gemm();
+        probe::hit(probe::Event::CudaAssemblyGemm);
     }
     Ok(())
 }
@@ -340,7 +209,7 @@ pub(crate) fn assemble_aligned_left_factor<D: CudaPayload>(
     )
     .map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_factor_assembly_gemm();
+    probe::hit(probe::Event::CudaAssemblyGemm);
     Ok(())
 }
 
@@ -389,7 +258,7 @@ pub(crate) fn assemble_right_factor<D: CudaPayload>(
         )
         .map_err(dense_err)?;
         #[cfg(test)]
-        observe_cuda_factor_assembly_gemm();
+        probe::hit(probe::Event::CudaAssemblyGemm);
     }
     Ok(())
 }
@@ -427,7 +296,7 @@ pub(crate) fn copy_whole_factor<D: CudaPayload>(
     )
     .map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_factor_copy();
+    probe::hit(probe::Event::CudaFactorCopy);
     Ok(())
 }
 
@@ -470,7 +339,7 @@ pub(crate) fn copy_left_factor_treewise<D: CudaPayload>(
         )
         .map_err(dense_err)?;
         #[cfg(test)]
-        observe_cuda_factor_copy();
+        probe::hit(probe::Event::CudaFactorCopy);
     }
     Ok(())
 }
@@ -529,10 +398,7 @@ impl<D: CudaPayload> TypedCudaQrScratch<D> {
         selector: Option<CudaStorage<D>>,
     ) -> Self {
         #[cfg(test)]
-        update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-            let live = live + 1;
-            (qr, copies, selectors, outputs, gemms, live, peak.max(live))
-        });
+        probe::enter(probe::Gauge::CudaQrScratch);
         Self {
             left,
             right,
@@ -544,9 +410,7 @@ impl<D: CudaPayload> TypedCudaQrScratch<D> {
 #[cfg(all(test, feature = "cuda"))]
 impl<D: CudaPayload> Drop for TypedCudaQrScratch<D> {
     fn drop(&mut self) {
-        update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
-            (qr, copies, selectors, outputs, gemms, live - 1, peak)
-        });
+        probe::leave(probe::Gauge::CudaQrScratch);
     }
 }
 
@@ -569,10 +433,7 @@ impl<D: CudaPayload> TypedCudaSvdScratch<D> {
         right_selector: Option<CudaDenseStorage>,
     ) -> Self {
         #[cfg(test)]
-        update_cuda_svd_observation(|(results, total, creations, live, peak)| {
-            let live = live + 1;
-            (results, total, creations, live, peak.max(live))
-        });
+        probe::enter(probe::Gauge::CudaSvdScratch);
         Self {
             left,
             right,
@@ -594,9 +455,7 @@ impl<D: CudaPayload> TypedCudaSvdScratch<D> {
 #[cfg(all(test, feature = "cuda"))]
 impl<D: CudaPayload> Drop for TypedCudaSvdScratch<D> {
     fn drop(&mut self) {
-        update_cuda_svd_observation(|(results, total, creations, live, peak)| {
-            (results, total, creations, live - 1, peak)
-        });
+        probe::leave(probe::Gauge::CudaSvdScratch);
     }
 }
 
@@ -662,21 +521,12 @@ pub(super) fn download_cuda_reduction_partials<D: CudaPayload>(
     cuda: &CudaDenseContext,
 ) -> Result<Vec<D>, Error> {
     #[cfg(test)]
-    let device_len = partials.len();
-    #[cfg(test)]
-    let observed_call = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-        observation.get().map(|(calls, _, _)| {
-            let calls = calls + 1;
-            observation.set(Some((calls, device_len, 0)));
-            calls
-        })
-    });
+    {
+        probe::hit(probe::Event::CudaReductionDownload);
+        probe::add(probe::Event::CudaReductionDevicePartials, partials.len());
+    }
     let values = partials.download(cuda)?;
     #[cfg(test)]
-    if let Some(calls) = observed_call {
-        CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-            observation.set(Some((calls, device_len, values.len())));
-        });
-    }
+    probe::add(probe::Event::CudaReductionHostPartials, values.len());
     Ok(values)
 }

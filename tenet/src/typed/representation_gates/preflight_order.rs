@@ -41,12 +41,9 @@ fn text<T, E: std::error::Error + 'static>(result: &Result<T, E>) -> String {
 /// Runs `f`, returning its value and the adjoint payload materializations it
 /// made.
 fn materializations<T>(f: impl FnOnce() -> T) -> (T, usize) {
-    super::ADJOINT_MATERIALIZATIONS.set(Some(0));
+    let adjoint = probe::record();
     let value = f();
-    (
-        value,
-        super::ADJOINT_MATERIALIZATIONS.replace(None).unwrap(),
-    )
+    (value, adjoint.get(Event::AdjointMaterialization))
 }
 
 fn spectrum<R, D>(

@@ -251,6 +251,7 @@ fn network_scatter_seals_authority_split_and_zero_block_legs_before_mutation() {
 
 #[test]
 fn network_scatter_reads_complex_lazy_adjoint_parent_without_materializing() {
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let plus = U1Irrep::new(1);
@@ -275,5 +276,5 @@ fn network_scatter_reads_complex_lazy_adjoint_parent_without_materializing() {
         })
         .collect::<Vec<_>>();
     assert_eq!(destination.dense_data().unwrap(), expected);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }

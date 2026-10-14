@@ -779,7 +779,7 @@ fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
 
 #[test]
 fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjoint() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -823,7 +823,7 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
     }
 
     let Svd { u, s, .. } = lhs.svd_compact(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let expected = u
         .contract(
             &s,
@@ -845,12 +845,12 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
     );
     // #1870 B1: the compact operand scales `u`'s leg into the destination,
     // as eager's arm does, and is never densified.
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
 fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)]).unwrap();
@@ -1045,12 +1045,12 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
 
     let mut compact_destination = lhs.svd_compact(&[0], &[1]).unwrap().s;
     let payload = Arc::clone(&owned(&compact_destination).data);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert!(lhs
         .contract_into(&rhs, &RANK_TWO_COMPOSE, &mut compact_destination, 1.0, 0.0)
         .is_err());
     assert!(Arc::ptr_eq(&owned(&compact_destination).data, &payload));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
     let z3 = Arc::new(ZNFusionRule::new(3).unwrap());

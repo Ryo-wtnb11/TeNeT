@@ -586,7 +586,7 @@ where
 {
     let output_axes = spec.output_axes();
     #[cfg(test)]
-    crate::tensor_core::observe_contract_seam_call();
+    super::probe::hit(super::probe::Event::ContractSeamCall);
     contract_owned_multiplicity_free(lhs, rhs, |lhs, rhs| {
         contract_request(lhs, rhs, spec, &output_axes)
     })
@@ -752,6 +752,8 @@ where
 #[cfg(test)]
 mod copy_c_scratch_tests {
     use std::sync::Arc;
+
+    use crate::typed::probe::{self, Event};
 
     use tenet_core::{U1FusionRule, U1Irrep};
 
@@ -973,10 +975,10 @@ mod copy_c_scratch_tests {
         let d = TensorMap::diagonal(&runtime, &c, spectra).unwrap();
         let mut destination = t.contract(&d, &MOVED).unwrap().scale(1.0).unwrap();
         mark_scratch(&runtime);
-        crate::typed::DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         t.contract_into(&d, &MOVED, &mut destination, 1.0, 0.0)
             .unwrap();
-        assert_eq!(crate::typed::DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert_eq!(retained_len(&runtime), MARKER_LEN, "no contraction ran");
         let expected = t.contract(&d.materialize().unwrap(), &MOVED).unwrap();
         assert_eq!(

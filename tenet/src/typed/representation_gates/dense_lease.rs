@@ -7,8 +7,6 @@
 //! pool.
 
 use super::*;
-use crate::runtime::DENSE_LEASES;
-use crate::typed::MATERIALIZATION_POOLS;
 use num_complex::Complex64;
 #[cfg(feature = "racah-generated")]
 use tenet_core::SUNFusionRule;
@@ -16,15 +14,13 @@ use tenet_core::SUNFusionRule;
 /// What `f` did on this thread: whether it succeeded, its dense leases,
 /// and its materializations inside and outside a runtime Host pool.
 fn leases<T, E>(f: impl FnOnce() -> Result<T, E>) -> Probe {
-    DENSE_LEASES.set(0);
-    MATERIALIZATION_POOLS.set((0, 0));
+    let recording = probe::record();
     let ok = f().is_ok();
-    let (pooled, unpooled) = MATERIALIZATION_POOLS.get();
     Probe {
         ok,
-        leases: DENSE_LEASES.get(),
-        pooled,
-        unpooled,
+        leases: recording.get(Event::DenseLease),
+        pooled: recording.get(Event::PooledMaterialization),
+        unpooled: recording.get(Event::UnpooledMaterialization),
     }
 }
 

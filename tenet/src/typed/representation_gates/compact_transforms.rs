@@ -81,7 +81,7 @@ fn absorb_merge_matches_only_complete_asymmetric_interleaved_keys() {
 
 #[test]
 fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
@@ -109,7 +109,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         reverse.dense_data().unwrap(),
         expected_reverse.dense_data().unwrap()
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     for (lhs, rhs, eager_lhs, eager_rhs) in [
         (&diagonal, &lazy, &diagonal, &eager),
@@ -142,7 +142,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
             .unwrap();
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     numerics::assert_close(
         "diagonal.inner(&lazy)",
@@ -156,7 +156,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         eager.inner(&diagonal).unwrap(),
         GATE_TERMS,
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn mixed_compact_dense_inner_does_not_materialize_the_diagonal() {
     )
     .unwrap();
 
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     numerics::assert_close(
         "diagonal.inner(&dense)",
         diagonal.inner(&dense).unwrap(),
@@ -208,7 +208,7 @@ fn mixed_compact_dense_inner_does_not_materialize_the_diagonal() {
         Complex64::new(-7.5, 10.0),
         GATE_TERMS,
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -248,12 +248,12 @@ fn mixed_compact_dense_inner_weights_sectors_and_skips_structural_zeros() {
     .unwrap();
     let lazy = dense.adjoint().unwrap();
 
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     for dense in [&dense, &lazy] {
         assert_eq!(diagonal.inner(dense).unwrap(), 50.0);
         assert_eq!(dense.inner(&diagonal).unwrap(), 50.0);
     }
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let nonfinite_diagonal =
         TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
@@ -289,10 +289,10 @@ fn mixed_compact_dense_inner_accepts_an_empty_bond() {
     let dense: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, _| unreachable!()).unwrap();
 
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(diagonal.inner(&dense).unwrap(), 0.0);
     assert_eq!(dense.inner(&diagonal).unwrap(), 0.0);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -341,18 +341,16 @@ fn mixed_compact_lazy_inner_maps_non_self_dual_parent_blocks() {
     .unwrap();
     let lazy = dense.adjoint().unwrap();
 
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(diagonal.inner(&lazy).unwrap(), 500.0);
     assert_eq!(lazy.inner(&diagonal).unwrap(), 500.0);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 fn transform_seam_calls<T>(operation: impl FnOnce() -> T) -> usize {
-    crate::tensor_core::TREE_TRANSFORM_SEAM_CALLS.with(|observation| observation.set(Some(0)));
+    let calls = crate::typed::probe::record();
     let _output = operation();
-    crate::tensor_core::TREE_TRANSFORM_SEAM_CALLS
-        .with(|observation| observation.replace(None))
-        .unwrap()
+    calls.get(crate::typed::probe::Event::TreeTransformSeamCall)
 }
 
 #[test]
@@ -465,10 +463,10 @@ fn high_rank_identity_has_no_inline_capacity_boundary() {
 
 #[test]
 fn compact_identity_transforms_do_not_materialize() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let factor = fixture().svd_compact(&[0], &[1]).unwrap().s;
     assert!(matches!(&*owned(&factor).data, TypedData::Diagonal(_)));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let calls = transform_seam_calls(|| {
         for output in [
@@ -479,11 +477,11 @@ fn compact_identity_transforms_do_not_materialize() {
         ] {
             assert!(Arc::ptr_eq(owned(&factor), owned(&output)));
             assert!(matches!(&*owned(&output).data, TypedData::Diagonal(_)));
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         }
     });
     assert_eq!(calls, 0);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -635,7 +633,7 @@ fn compact_arms_never_densify_their_spectrum_operand() {
         .svd_compact(&[0], &[1])
         .unwrap()
         .s;
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
 
     let _ = d.scale(0.5).unwrap();
     let _ = d.adjoint().unwrap();
@@ -707,11 +705,11 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     let _ = complex_d.im();
     let _ = d.trace_pairs(&[(0, 1)]).unwrap();
     let _ = d.diagview().unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     // A one-term rank-(1,1) braid reads the compact source directly.
     let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -729,7 +727,7 @@ fn checked_compact_arms_never_densify_their_spectrum_operand() {
         })
         .unwrap();
     let Svd { u, s: d, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
 
     let _ = d.compose(&d).unwrap();
     let _ = u.compose(&d).unwrap();
@@ -756,7 +754,7 @@ fn checked_compact_arms_never_densify_their_spectrum_operand() {
     // The full trace reads the spectrum from the compiled trace terms.
     let _ = d.trace_pairs(&[(0, 1)]).unwrap();
     let _ = d.trace_pairs(&[(1, 0)]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -811,9 +809,9 @@ fn compact_braid_off_diagonal_zeros_are_numerically_zero() {
                 assert_eq!(destination_block.shape()[0], destination_block.shape()[1]);
             }
             assert!(covered.iter().all(|&seen| seen));
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let result = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             let dense_oracle = diagonal
                 .materialize()
                 .unwrap()
@@ -969,15 +967,15 @@ fn compact_fermionic_braid_matches_hand_diagonal_and_complex_sign() {
 #[test]
 fn compact_cat_braid_absorb_avoid_dense_source_materializations() {
     let diagonal = fixture().svd_compact(&[0], &[1]).unwrap().s;
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let _ = diagonal.cat(&diagonal, Side::Domain).unwrap();
-    let cat = DIAGONAL_MATERIALIZATIONS.get();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let cat = densified.get(Event::DiagonalMaterialization);
+    let densified = probe::record();
     let _ = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
-    let braid = DIAGONAL_MATERIALIZATIONS.get();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let braid = densified.get(Event::DiagonalMaterialization);
+    let densified = probe::record();
     let _ = diagonal.absorb(&diagonal).unwrap();
-    let absorb = DIAGONAL_MATERIALIZATIONS.get();
+    let absorb = densified.get(Event::DiagonalMaterialization);
     assert_eq!([cat, braid, absorb], [0, 0, 0]);
 }
 
@@ -1199,11 +1197,11 @@ fn checked_compact_trace_reads_the_spectrum_after_admission() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(diagonal.trace_pairs(&[(0, 0)]).is_err());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let result = diagonal.trace_pairs(&[(0, 1)]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     // SU(3) fundamental quantum dimension is 3; vacuum dimension is 1.
     assert!((result.dense_data().unwrap()[0] - Complex64::new(19.0, 4.0)).norm() < 1e-12);
     assert!(matches!(

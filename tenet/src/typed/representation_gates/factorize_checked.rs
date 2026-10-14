@@ -28,7 +28,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         real.svd_vals(&[0], &[1]).unwrap(),
         vec![
@@ -42,7 +42,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
             },
         ]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(solver_calls.total(), 0);
 
     // A spectrum that does not cover the bond is misuse: a typed error.
@@ -85,7 +85,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let got = complex.svd_vals(&[0], &[1]).unwrap();
     assert_eq!(got[0].sector, vec![0, 0]);
     assert_eq!(got[0].values, [4.0, 0.0]);
@@ -93,7 +93,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     assert_eq!(got[1].values[0], 5.0);
     assert!((got[1].values[1] - 2.0_f64.sqrt()).abs() < 1e-12);
     assert_eq!(got[1].values[2], 0.0);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(solver_calls.total(), 0);
 
     let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
@@ -110,7 +110,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         dual.svd_vals(&[0], &[1]).unwrap(),
         vec![SectorSpectrum {
@@ -118,7 +118,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
             values: vec![2.0, 0.0]
         }]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(solver_calls.total(), 0);
 }
 
@@ -153,14 +153,14 @@ fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
     )
     .unwrap();
     for operation in 0..4 {
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let (left, right) = match operation {
             0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
             1 => input.qr_full(&[0], &[1]).unwrap().pair(),
             2 => input.lq_compact(&[0], &[1]).unwrap().pair(),
             _ => input.lq_full(&[0], &[1]).unwrap().pair(),
         };
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         for factor in [&left, &right] {
             assert_eq!(factor.codomain(), input.codomain());
             assert_eq!(factor.domain(), input.domain());
@@ -206,9 +206,9 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
@@ -217,10 +217,10 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     assert!(s.dense_data().is_err());
     assert!(vh.dense_data().is_ok());
 
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     svd_calls.reset();
     let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
@@ -409,7 +409,7 @@ fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work
             let RightPolar { p, wh } = dense_oracle.right_polar(&[0], &[1]).unwrap();
             (wh, p)
         };
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         svd_calls.reset();
         gemm_calls.reset();
         let (w, p) = if left {
@@ -419,7 +419,7 @@ fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work
             let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
             (wh, p)
         };
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert_eq!(svd_calls.of(POLAR_SVD), 0);
         assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
         assert!(std::ptr::eq(w.provider(), provider.as_ref()));
@@ -507,10 +507,10 @@ fn checked_compact_diagonal_null_is_empty_by_shape_without_dense_work() {
             )
             .unwrap();
             let dense_input = input.materialize().unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let left = input.left_null(&[0], &[1]).unwrap();
             let right = input.right_null(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(calls.of(POLAR_SVD), 0);
             assert!(std::ptr::eq(left.provider(), provider.as_ref()));
             assert!(std::ptr::eq(right.provider(), provider.as_ref()));
@@ -549,12 +549,12 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         real.svd_vals(&[0], &[1]).unwrap()[0].values,
         [1.000_000_1_f32 as f64, 0.0]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let complex: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
         &runtime,
@@ -568,12 +568,12 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         complex.svd_vals(&[0], &[1]).unwrap()[0].values,
         [5.0, (2.0_f64.sqrt() as f32) as f64]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     for value in [
         num_complex::Complex32::new(f32::NAN, 0.0),
@@ -592,9 +592,9 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
         // A nonfinite value is refused by the shared finite-input stage; a
         // finite one is MAK `svd_vals!(::DiagonalAlgorithm)`, `abs` then a
         // descending sort: `|0.75 MAX (1 + i)| = 1.06 MAX` overflows f32 to Inf.
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let result = input.svd_vals(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         if value.re.is_finite() {
             let values = result.unwrap().remove(0).values;
             assert_eq!(values, [f64::INFINITY, 0.0]);
@@ -634,9 +634,9 @@ fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let output = input.pinv(&[0], &[1], 0.25).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert!(output.dense_data().is_err());
     assert_eq!(output.diagview().unwrap()[0].values, [0.125, -0.25]);
 
@@ -713,13 +713,13 @@ fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let inverse = real.inv(&[0], &[1]).unwrap();
     let exponential = real.exp(&[0], &[1]).unwrap();
     let compact_solve = real.solve(&[0], &[1], &real, &[0], &[1]).unwrap();
     let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&bond], [&column], 7).unwrap();
     let dense_solve = real.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(
         compact_values!(&inverse),
         [vec![0.5, -0.25], vec![2.0, 1.0, -4.0]]
@@ -768,9 +768,9 @@ fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
     ];
     let dual_real: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &dual, dual_spectrum).unwrap();
     let dual_rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&dual], [&column], 11).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let dual_solve = dual_real.solve(&[0], &[1], &dual_rhs, &[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let lu = dual_real
         .materialize()
         .unwrap()
@@ -802,12 +802,12 @@ fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
     )
     .unwrap();
     let source = compact_values!(&complex);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let inverse = complex.inv(&[0], &[1]).unwrap();
     let exponential = complex.exp(&[0], &[1]).unwrap();
     let rhs = TensorMap::<_, Complex64>::rand_with_seed(&runtime, [&bond], [&column], 9).unwrap();
     let dense_solve = complex.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     for ((inv, exp), values) in compact_values!(&inverse)
         .iter()
         .zip(compact_values!(&exponential))
@@ -910,13 +910,13 @@ fn checked_compact_diagonal_spectrum_maps_match_multiplicity_free() {
                     .map_err(|error| error.to_string())
             };
         }
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let checked_results = [
             spectrum_of!(checked.inv(&[0], &[1])),
             spectrum_of!(checked.exp(&[0], &[1])),
             spectrum_of!(checked.solve(&[0], &[1], &checked, &[0], &[1])),
         ];
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         let free_results = [
             spectrum_of!(free.inv(&[0], &[1])),
             spectrum_of!(free.exp(&[0], &[1])),

@@ -111,7 +111,7 @@ where
                     return Err(borrowed_view_unsupported("the operation"));
                 }
                 #[cfg(test)]
-                observe_adjoint_materialization();
+                probe::hit(probe::Event::AdjointMaterialization);
                 (
                     dense(view.parent.data.as_ref())?,
                     Some(tenet_tensors::AdjointBlockMap::new(
@@ -160,10 +160,7 @@ impl<R, D: TensorScalar> MaterializeExec<R, D> for Vec<D> {
         };
         let _host_pool = t.runtime.enter_host_pool();
         #[cfg(test)]
-        observe_materialization_pool();
-        #[cfg(test)]
-        UNCACHED_ADJOINT_MATERIALIZATIONS
-            .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
+        probe::hit_materialization_pool();
         Ok(tenet_tensors::materialize_adjoint_data_dyn(
             map.parent_space(),
             map.adjoint_space(),
@@ -272,9 +269,9 @@ where
             TypedData::Dense(data) => std::borrow::Cow::Borrowed(data.as_slice()),
             TypedData::Diagonal(spectrum) => {
                 #[cfg(test)]
-                DIAGONAL_MATERIALIZATIONS.set(DIAGONAL_MATERIALIZATIONS.get().saturating_add(1));
+                probe::hit(probe::Event::DiagonalMaterialization);
                 #[cfg(test)]
-                observe_materialization_pool();
+                probe::hit_materialization_pool();
                 std::borrow::Cow::Owned(
                     tenet_matrixalgebra::seam::diagonal_bond_data(
                         self.space.space(),

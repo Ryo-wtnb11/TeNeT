@@ -26,9 +26,9 @@ fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver(
     let old = dense.svd_full(&[0], &[1]).unwrap();
     assert!(calls.of(POLAR_SVD) > 0);
     calls.reset();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let out = input.svd_full(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.of(POLAR_SVD), 0);
     assert_eq!(out.u.codomain(), input.codomain());
     assert_eq!(out.vh.domain(), input.domain());
@@ -206,10 +206,10 @@ fn compact_diagonal_null_is_empty_by_shape_without_dense_work() {
                 ],
             )
             .unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             assert_empty_null_spaces(&input, &[0], &[1]);
             assert_empty_null_spaces(&input, &[1], &[0]);
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         }};
     }
     check_scalar!(f32);
@@ -235,9 +235,9 @@ fn compact_diagonal_null_is_empty_by_shape_without_dense_work() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_empty_null_spaces(&input, &[0], &[1]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
     let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
@@ -258,10 +258,10 @@ fn compact_diagonal_null_is_empty_by_shape_without_dense_work() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_empty_null_spaces(&input, &[0], &[1]);
     assert_empty_null_spaces(&input, &[1], &[0]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let dual = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 2)])
         .unwrap()
@@ -276,9 +276,9 @@ fn compact_diagonal_null_is_empty_by_shape_without_dense_work() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_empty_null_spaces(&input, &[0], &[1]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.of(POLAR_SVD), 0);
 
     // The materialized lazy adjoint takes the dense route, which agrees.
@@ -301,7 +301,7 @@ fn compact_diagonal_null_refuses_nonfinite_input() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     for error in [
         nonfinite.left_null(&[0], &[1]).unwrap_err(),
         nonfinite.right_null(&[0], &[1]).unwrap_err(),
@@ -311,7 +311,7 @@ fn compact_diagonal_null_refuses_nonfinite_input() {
             "{error}"
         );
     }
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -401,9 +401,9 @@ fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_refusal() {
                 .unwrap()
             };
             let input = make($value);
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let out = input.svd_full(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert!(out.s.diagview().unwrap()[0].values[0].widen_complex().re > 0.0);
             assert!(
                 (out.u.dense_data().unwrap()[0].widen_complex() - Complex64::new(1.0, 0.0)).norm()
@@ -425,9 +425,9 @@ fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_refusal() {
             // `S = abs(a) = Inf`. No materialization either way.
             for value in $bad {
                 let input = make(value);
-                DIAGONAL_MATERIALIZATIONS.set(0);
+                let densified = probe::record();
                 let result = input.svd_full(&[0], &[1]);
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
                 let widened = value.widen_complex();
                 if widened.re.is_finite() && widened.im.is_finite() {
                     let out = result.unwrap();
@@ -507,14 +507,14 @@ fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
         )
         .unwrap();
         let input = source.materialize().unwrap().dense_data().unwrap().to_vec();
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let Svd { u, s, vh } = (if full {
             source.svd_full(&[0], &[1])
         } else {
             source.svd_compact(&[0], &[1])
         })
         .unwrap();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert_eq!(
             s.diagview()
                 .unwrap()
@@ -562,7 +562,7 @@ fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
     )
     .unwrap();
     let before = input.diagview().unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         input.svd_vals(&[0], &[1]).unwrap(),
         vec![
@@ -576,7 +576,7 @@ fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
             },
         ]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(input.diagview().unwrap(), before);
 
     let dual_bond = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 2)])
@@ -592,9 +592,9 @@ fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(dual.svd_vals(&[0], &[1]).unwrap()[0].values, [2.0, 1.0]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(solver_calls.total(), 0);
 }
 
@@ -655,9 +655,9 @@ fn compact_diagonal_svd_vals_refuses_nonfinite_and_overflows_at_range_edges() {
         // A nonfinite value is refused by the shared finite-input stage; a
         // finite one is MAK `svd_vals!(::DiagonalAlgorithm)`, `abs(a)`:
         // `|0.75 MAX (1 + i)| = 1.06 MAX` overflows f32 to Inf.
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let result = input.svd_vals(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         if value.re.is_finite() {
             assert_eq!(result.unwrap()[0].values[0], f64::INFINITY);
         } else {
@@ -695,14 +695,14 @@ fn compact_diagonal_svd_complex_permutation_and_phase() {
             ],
         )
         .unwrap();
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let Svd { u, s, vh } = (if full {
             input.svd_full(&[0], &[1])
         } else {
             input.svd_compact(&[0], &[1])
         })
         .unwrap();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         let root2 = 2.0_f64.sqrt();
         assert_eq!(u.dense_data().unwrap().len(), 13);
         assert_eq!(vh.dense_data().unwrap().len(), 13);
@@ -773,9 +773,9 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
                 let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
                 let saved = input.diagview().unwrap();
                 let dense_values = input.materialize().unwrap().svd_vals(&[0], &[1]).unwrap();
-                DIAGONAL_MATERIALIZATIONS.set(0);
+                let densified = probe::record();
                 let compact_values = input.svd_vals(&[0], &[1]).unwrap();
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
                 assert_eq!(compact_values.len(), dense_values.len());
                 for (actual, expected) in compact_values.iter().zip(&dense_values) {
                     assert_eq!(actual.sector, expected.sector);
@@ -784,14 +784,14 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
                         assert!((a - b).abs() <= $tol * b.max(1.0));
                     }
                 }
-                DIAGONAL_MATERIALIZATIONS.set(0);
+                let densified = probe::record();
                 let Svd { u, s, vh } = (if full {
                     input.svd_full(&[0], &[1])
                 } else {
                     input.svd_compact(&[0], &[1])
                 })
                 .unwrap();
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
                 let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
                 assert!(rebuilt
                     .dense_data()
@@ -874,16 +874,16 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
         let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
         let input: TensorMap<_, f64> =
             TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         assert!(input.svd_vals(&[0], &[1]).unwrap().is_empty());
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         let Svd { u, s, vh } = (if full {
             input.svd_full(&[0], &[1])
         } else {
             input.svd_compact(&[0], &[1])
         })
         .unwrap();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert_eq!(
             u.dense_data().unwrap().len() + vh.dense_data().unwrap().len(),
             0
