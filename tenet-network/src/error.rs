@@ -84,12 +84,9 @@ pub enum SymmetricSliceExecutionError<E> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContractError {
-    EmptyEquation,
     EmptyInput,
-    UnsupportedEllipsis,
-    InvalidArrow,
-    InvalidLabel(String),
     DuplicateOutputLabel(String),
     UnknownOutputLabel(String),
     TensorCountMismatch {
@@ -111,8 +108,6 @@ pub enum ContractError {
         tensor_count: usize,
     },
     InvalidContractionPlan(String),
-    UnsupportedExecution(String),
-    TensorExecution(String),
     NotEnoughTensors,
     /// A label occurs more than once WITHIN a single operand (a diagonal /
     /// trace-on-one-tensor, e.g. `aa->a`). Not supported by the pairwise executor.
@@ -156,11 +151,7 @@ pub type Result<T> = std::result::Result<T, ContractError>;
 impl Display for ContractError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContractError::EmptyEquation => write!(f, "empty contraction equation"),
             ContractError::EmptyInput => write!(f, "contraction equation has an empty input"),
-            ContractError::UnsupportedEllipsis => write!(f, "ellipsis is not supported yet"),
-            ContractError::InvalidArrow => write!(f, "equation must contain at most one `->`"),
-            ContractError::InvalidLabel(label) => write!(f, "invalid temporary label `{label}`"),
             ContractError::DuplicateOutputLabel(label) => {
                 write!(f, "duplicate output label `{label}`")
             }
@@ -195,12 +186,6 @@ impl Display for ContractError {
             ),
             ContractError::InvalidContractionPlan(message) => {
                 write!(f, "invalid contraction plan: {message}")
-            }
-            ContractError::UnsupportedExecution(message) => {
-                write!(f, "unsupported contraction execution: {message}")
-            }
-            ContractError::TensorExecution(message) => {
-                write!(f, "tensor execution failed: {message}")
             }
             ContractError::NotEnoughTensors => write!(f, "need at least two active tensors"),
             ContractError::UnsupportedDiagonal { label, tensor } => write!(

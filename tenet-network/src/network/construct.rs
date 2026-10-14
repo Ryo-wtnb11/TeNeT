@@ -103,19 +103,13 @@ impl Network {
     ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
-        let plan = if ir.tensors().len() == 1 {
-            ContractionPlan::from_steps(&ir, Vec::new()).map_err(invalid)?
-        } else {
-            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
-            ContractionPlan::from_steps(&ir, optimizer.optimize(&ir, &cost).map_err(invalid)?)
-                .map_err(invalid)?
-        };
-        self.finish_typed_plan(tensors, ir, plan)
+        self.plan_searched(tensors, |ir, cost| {
+            ContractionPlan::from_steps(ir, optimizer.optimize(ir, cost)?)
+        })
     }
 
     #[cfg(feature = "opt-path")]
@@ -127,17 +121,13 @@ impl Network {
     ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
-        let plan = if ir.tensors().len() == 1 {
-            ContractionPlan::from_steps(&ir, Vec::new()).map_err(invalid)?
-        } else {
-            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+        self.plan_searched(tensors, |ir, cost| {
             let try_plan = |optimizer: &dyn DenseContractionOptimizer| {
-                ContractionPlan::from_steps(&ir, optimizer.optimize(&ir, &cost)?)
+                ContractionPlan::from_steps(ir, optimizer.optimize(ir, cost)?)
             };
             let mut result = try_plan(optimizer);
             for optimizer in fallbacks {
@@ -146,7 +136,29 @@ impl Network {
                 }
                 result = try_plan(*optimizer);
             }
-            result.map_err(invalid)?
+            result
+        })
+    }
+
+    /// Lowers `tensors` and runs `search` for a multi-operand network; a
+    /// single operand has the empty order and is not searched.
+    fn plan_searched<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        search: impl FnOnce(&NetworkIR, &DenseCostModel) -> crate::Result<ContractionPlan>,
+    ) -> Result<PlannedNetwork, FacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: NetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
+        let plan = if ir.tensors().len() == 1 {
+            ContractionPlan::from_steps(&ir, Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            search(&ir, &cost).map_err(invalid)?
         };
         self.finish_typed_plan(tensors, ir, plan)
     }
@@ -166,7 +178,7 @@ impl Network {
     ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -189,7 +201,7 @@ impl Network {
     ) -> std::result::Result<SymmetricSlicedPlan, SymmetricSliceLowerError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -216,7 +228,7 @@ impl Network {
     ) -> std::result::Result<BoundSymmetricSlicedPlan<R>, SymmetricSliceLowerError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -346,7 +358,7 @@ impl Network {
     >
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
     {
         // Slicing reads each input once per slice; a compact diagonal would be
@@ -479,7 +491,7 @@ impl Network {
     ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -530,7 +542,7 @@ impl Network {
     ) -> Result<LoweredTypedNetwork<R>, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -557,7 +569,7 @@ impl Network {
         let mut infos = Vec::with_capacity(tensors.len());
         let mut lowered_spaces = Vec::with_capacity(tensors.len());
         for ((&tensor, labels), &conj) in tensors.iter().zip(&self.inputs).zip(&self.conj) {
-            let dims = <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?;
+            let dims = <R::Mode as NetworkModeDispatch<R, D>>::leg_dims(tensor)?;
             let split = tensor.codomain_rank();
             if conj {
                 lowered_labels.push(rotate(labels, split));

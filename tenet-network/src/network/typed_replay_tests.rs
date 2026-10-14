@@ -1494,7 +1494,7 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
             .execute(&host_refs, &mut Default::default())
             .unwrap();
         let device = cuda_edited
-            .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+            .execute(&refs, &mut NetworkExecutionWorkspace::default())
             .unwrap()
             .to_host()
             .unwrap();
@@ -1533,7 +1533,7 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
         .unwrap();
     NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
     assert!(planned
-        .execute_cuda(
+        .execute(
             &[&tensors[0], &bad_rhs],
             &mut NetworkExecutionWorkspace::default()
         )
@@ -1553,7 +1553,7 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     .unwrap();
     NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
     assert!(planned
-        .execute_cuda(
+        .execute(
             &[&tensors[0], &foreign],
             &mut NetworkExecutionWorkspace::default()
         )
