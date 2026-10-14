@@ -236,6 +236,10 @@ jobs:
       # (e.g. the racah-generated `obfuscated_if_else`s in typed.rs) never ran
       # in CI. Clippy uses `--all-targets`, mirroring that step's scope, while
       # a test step may filter to fewer targets.
+      - name: clippy tenet-core (racah-generated)
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p tenet-core --no-default-features --features "racah-generated" --all-targets -- -D warnings
+        working-directory: tenet
       - name: clippy tenet-sectors (racah-generated)
         if: ${{ !cancelled() }}
         run: cargo clippy --locked -p tenet-sectors --no-default-features --features "racah-generated" --all-targets -- -D warnings
@@ -256,6 +260,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo clippy --locked -p tenet-network --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
+      - name: test tenet-core (racah-generated)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p tenet-core --no-default-features --features "racah-generated"
+        working-directory: tenet
+        env:
+          CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: test tenet-sectors (racah-generated)
         if: ${{ !cancelled() }}
         run: cargo test --locked -p tenet-sectors --no-default-features --features "racah-generated"
@@ -435,6 +445,12 @@ jobs:
       - name: Clippy all CUDA-feature targets
         working-directory: tenet
         run: cargo clippy --locked --workspace --all-targets --no-default-features --features cuda,cpu-faer -- -D warnings
+      # GPU-free: the cuda-gated doctests (the compile_fail capability guards
+      # and the bound-only examples) only compile; `test-linux` runs doctests
+      # with default features, where these blocks do not exist (#2211).
+      - name: Run CUDA-feature doctests
+        working-directory: tenet
+        run: cargo test --locked -p tenet-rs -p tenet-network --doc --no-default-features --features cuda,cpu-faer
 
   test-linux:
     name: cargo test (ubuntu-latest)
