@@ -8,6 +8,12 @@ pub(crate) struct BlockStructureRegionState {
     /// Set once: admission links only a freshly built wrapper, so a warm
     /// reader takes no lock.
     owner: OnceLock<Weak<crate::fusion_space::DegeneracyStructureEntry>>,
+    /// The checked Generic provider identity that admitted every fusion-tree
+    /// key of this wrapper's content (#2233). Why it may outlive cache resets:
+    /// admission is a pure function of the identity and the keys, whose
+    /// answers [`crate::CheckedGenericFusion`] requires to be immutable;
+    /// a reset drops only memoized provider state, never those answers.
+    checked_generic_admitted: OnceLock<RuleIdentity>,
 }
 
 pub struct BlockStructure {
@@ -721,6 +727,17 @@ impl BlockStructure {
         &self,
     ) -> Option<Arc<crate::fusion_space::DegeneracyStructureEntry>> {
         self.regions.owner.get()?.upgrade()
+    }
+
+    /// Whether a provider of `identity` already admitted every key.
+    pub(crate) fn is_checked_generic_admitted(&self, identity: &RuleIdentity) -> bool {
+        self.regions.checked_generic_admitted.get() == Some(identity)
+    }
+
+    /// Records that a provider of `identity` admitted every key. The first
+    /// identity wins; another provider keeps validating per call.
+    pub(crate) fn record_checked_generic_admitted(&self, identity: RuleIdentity) {
+        let _ = self.regions.checked_generic_admitted.set(identity);
     }
 
     /// Heap bytes of the region memos materialized so far.

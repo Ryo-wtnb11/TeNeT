@@ -2587,7 +2587,8 @@ mod tests {
             ),
             (
                 "lhs_only",
-                [[34, 10, 103, 14, 3, 76, 263], [34, 20, 113, 14, 3, 76, 292]],
+                // The adjoint row admits its source structure once (#2233).
+                [[34, 10, 103, 14, 3, 76, 263], [34, 10, 103, 14, 3, 76, 267]],
                 [
                     vec![i, s, b, i, s, i, s, i, s],
                     vec![i, s, b, i, s, i, i, s, i, s],
@@ -2595,7 +2596,9 @@ mod tests {
             ),
             (
                 "three_stages",
-                [[105, 55, 706, 72, 66, 225, 1322]; 2],
+                // Both operands share one canonical source structure, whose
+                // trees are admitted once per call (#2233).
+                [[105, 45, 696, 72, 66, 225, 1297]; 2],
                 [
                     vec![i, s, b, i, d, d, s, i, s, i, i, s, i, i, s, i, s],
                     vec![i, s, b, i, d, d, s, i, s, i, i, s, i, i, s, i, s],

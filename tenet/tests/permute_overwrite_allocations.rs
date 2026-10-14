@@ -196,6 +196,35 @@ fn warm_checked_generic_permute_into_allocations_do_not_grow_with_block_count() 
     assert_eq!(large_calls, small_calls);
 }
 
+/// A source that outlives its structure-cache entry (here by `clear`, as by
+/// eviction) loses the destination memo, so every warm permute derives its
+/// destination; its trees were admitted once and are not re-admitted per
+/// call (#2233). Each SU(3) admission query allocates in Racah, so per-block
+/// re-admission would make the large case allocate more.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn warm_checked_generic_permute_of_an_evicted_source_does_not_readmit_its_trees() {
+    let _measurement = counting_alloc::serial();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let warm = |labels: &[Vec<i64>]| {
+        let space = GradedSpace::try_new(
+            Arc::clone(&provider),
+            labels.iter().map(|label| (label.clone(), 2)),
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 2233).unwrap();
+        tenet::cache::clear();
+        let calls = warm_calls(|| drop(black_box(source.permute(&[1, 3], &[0, 2]).unwrap())));
+        (source.subblock_count(), calls)
+    };
+    let (small_blocks, small_calls) = warm(&[vec![1, 0], vec![0, 1]]);
+    let (large_blocks, large_calls) = warm(&[vec![1, 0], vec![0, 1], vec![1, 1]]);
+    assert!(large_blocks > 3 * small_blocks);
+    assert_eq!(large_calls, small_calls);
+}
+
 #[test]
 fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
     let _measurement = counting_alloc::serial();
