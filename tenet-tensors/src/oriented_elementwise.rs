@@ -1076,7 +1076,6 @@ mod tests {
     /// once (it made two adapter calls, each converting and then normalizing
     /// its own layout), and restriction and adjoint materialization normalize
     /// once per block.
-    #[cfg(debug_assertions)]
     #[test]
     fn checked_block_paths_make_one_layout_pass_and_one_walk_per_block() {
         use tenet_operations::{

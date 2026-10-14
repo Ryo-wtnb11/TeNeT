@@ -24,8 +24,10 @@ use crate::{ConjugateValue, OperationError};
 
 /// Layout passes and span walks of the checked block entries on this thread.
 ///
-/// Why debug builds only: the probe would sit once per block on the eager
-/// path whose per-block fixed cost it exists to bound.
+/// Why test builds only (`cfg(test)` or the `testing` feature): the probe
+/// would sit once per block on the eager path whose per-block fixed cost it
+/// exists to bound.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CheckedBlockPasses {
@@ -33,14 +35,14 @@ pub struct CheckedBlockPasses {
     pub span_walks: usize,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "testing"))]
 thread_local! {
     static PASSES: core::cell::Cell<CheckedBlockPasses> =
         const { core::cell::Cell::new(CheckedBlockPasses { layout_passes: 0, span_walks: 0 }) };
 }
 
 /// Returns and resets this thread's [`CheckedBlockPasses`].
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn take_checked_block_passes() -> CheckedBlockPasses {
     PASSES.with(|passes| passes.take())
@@ -48,7 +50,7 @@ pub fn take_checked_block_passes() -> CheckedBlockPasses {
 
 #[inline]
 pub(crate) fn record_checked_block_passes(_layout_passes: usize, _span_walks: usize) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "testing"))]
     PASSES.with(|passes| {
         let mut value = passes.get();
         value.layout_passes += _layout_passes;

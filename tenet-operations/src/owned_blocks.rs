@@ -23,7 +23,7 @@ use tenet_core::{BlockRef, BlockStructure};
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::{CheckedBlockLayout, ConjugateValue, OperationError};
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "testing"))]
 thread_local! {
     static PREFILLED_ELEMENTS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
@@ -32,8 +32,8 @@ thread_local! {
 /// before an owned block overwrite because the layout was not proved to tile
 /// its storage.
 ///
-/// Why debug builds only: as `take_checked_block_passes`, a probe for tests.
-#[cfg(debug_assertions)]
+/// Why test builds only: as `take_checked_block_passes`, a probe for tests.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn take_owned_block_prefills() -> usize {
     PREFILLED_ELEMENTS.with(core::cell::Cell::take)
@@ -648,7 +648,7 @@ where
     if allow_uninit && blocks_tile_storage(destination, member_len)? {
         return initialize_owned(len, |dst| write_all(Storage::Uninit(dst)));
     }
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "testing"))]
     PREFILLED_ELEMENTS.with(|count| count.set(count.get() + len));
     let mut data = vec![D::zero(); len];
     write_all(Storage::Zeroed(&mut data))?;
@@ -838,14 +838,11 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        #[cfg(debug_assertions)]
         take_owned_block_prefills();
         let uninit = run(true);
-        #[cfg(debug_assertions)]
         assert_eq!(take_owned_block_prefills(), 0);
         assert_eq!(bits(&uninit), bits(&expected));
         let zeroed = run(false);
-        #[cfg(debug_assertions)]
         assert_eq!(take_owned_block_prefills(), 23 * MEMBERS);
         assert_eq!(bits(&zeroed), bits(&expected));
 
@@ -874,13 +871,10 @@ mod tests {
         let scaled = Complex64::new(0.5, -0.25);
         for conjugate in [false, true] {
             for alpha in [one, scaled, zero] {
-                #[cfg(debug_assertions)]
                 take_owned_block_prefills();
                 let uninit = write_copy(true, conjugate, alpha).unwrap();
-                #[cfg(debug_assertions)]
                 assert_eq!(take_owned_block_prefills(), 0);
                 let base = write_copy(false, conjugate, alpha).unwrap();
-                #[cfg(debug_assertions)]
                 assert_eq!(take_owned_block_prefills(), 23);
                 assert_eq!(bits(&uninit), bits(&base));
             }
@@ -892,10 +886,8 @@ mod tests {
             (scaled, zero),
             (zero, zero),
         ] {
-            #[cfg(debug_assertions)]
             take_owned_block_prefills();
             let uninit = write_add(true, alpha, beta);
-            #[cfg(debug_assertions)]
             assert_eq!(take_owned_block_prefills(), 0);
             assert_eq!(bits(&uninit), bits(&write_add(false, alpha, beta)));
         }
@@ -983,10 +975,8 @@ mod tests {
             (zero, zero, 1),
             (zero, zero, 2),
         ] {
-            #[cfg(debug_assertions)]
             take_owned_block_prefills();
             let uninit = run(true, alpha, beta, mode);
-            #[cfg(debug_assertions)]
             assert_eq!(take_owned_block_prefills(), 0);
             assert_eq!(
                 bits(&uninit),
@@ -1015,13 +1005,11 @@ mod tests {
             // A padded block.
             (structure(&[(&[2, 2, 1], &[1, 3, 1], 0)]), 5),
         ] {
-            #[cfg(debug_assertions)]
             take_owned_block_prefills();
             let data = overwrite_owned_blocks(&layout, |_, writer| {
                 writer.copy(|_| Ok(1), &source, 0, false, 1.0)
             })
             .unwrap();
-            #[cfg(debug_assertions)]
             assert_eq!(take_owned_block_prefills(), len);
             assert_eq!(data.len(), len);
             assert_eq!(data.iter().filter(|&&value| value == 0.0).count(), len - 4);
@@ -1165,7 +1153,6 @@ mod tests {
             &[None, None],
         ];
         for runs in invalid {
-            #[cfg(debug_assertions)]
             crate::take_checked_block_passes();
             for allow_uninit in [true, false] {
                 assert!(matches!(
@@ -1173,16 +1160,13 @@ mod tests {
                     Err(OperationError::InvalidArgument { .. })
                 ));
             }
-            #[cfg(debug_assertions)]
             assert_eq!(crate::take_checked_block_passes(), Default::default());
         }
-        #[cfg(debug_assertions)]
         crate::take_checked_block_passes();
         assert!(matches!(
             write_gather(true, None, &source, &[Some(&far[..]), None, None]),
             Err(OperationError::OffsetOverflow { .. })
         ));
-        #[cfg(debug_assertions)]
         assert_eq!(crate::take_checked_block_passes(), Default::default());
     }
 
