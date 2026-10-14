@@ -7,7 +7,7 @@ pub(super) fn typed_operand_identity<R, D, S>(
 ) -> Result<Option<RuleIdentity>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -52,7 +52,7 @@ pub(super) fn network_operand_preflight<R, D, S, L, C>(
 ) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
     L: PartialEq + std::fmt::Display,
@@ -229,14 +229,14 @@ pub(super) fn reject_non_symmetric_network<R, D, S>(
 ) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
     let Some(first) = tensors.first().filter(|_| contracts) else {
         return Ok(());
     };
-    let braiding = <R::Mode as HostNetworkModeDispatch<R, D, S>>::braiding_style(first.provider());
+    let braiding = <R::Mode as NetworkModeDispatch<R, D, S>>::braiding_style(first.provider());
     tenet::typed::reject_non_symmetric_contraction(braiding)
         .map_err(|error| FacadeError::<R>::from(Error::from(error)))
 }
@@ -247,7 +247,7 @@ pub(super) fn validate_typed_contracted_pairs<R, D, S>(
 ) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {

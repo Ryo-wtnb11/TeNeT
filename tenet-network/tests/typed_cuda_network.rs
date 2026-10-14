@@ -63,7 +63,7 @@ where
         .unwrap();
     assert_eq!(host_plan.plan().steps(), cuda_plan.plan().steps());
     let actual = cuda_plan
-        .execute_cuda(&cuda_refs, &mut NetworkExecutionWorkspace::default())
+        .execute(&cuda_refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let before_cached = plan_cache_stats(runtime);
     let cached_actual = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
@@ -264,7 +264,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     .unwrap();
     let planned = chain.plan_with(&refs, chain_order).unwrap();
     let actual = planned
-        .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+        .execute(&refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let manual = tensors[0]
         .contract(
@@ -325,7 +325,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let conj_actual = conj_network
         .plan(&conj_refs, &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&conj_refs, &mut NetworkExecutionWorkspace::default())
+        .execute(&conj_refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let conj_manual = tensors[0]
         .adjoint()
@@ -373,7 +373,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let single_actual = single
         .plan(&[&tensors[0]], &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&[&tensors[0]], &mut NetworkExecutionWorkspace::default())
+        .execute(&[&tensors[0]], &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let single_expected = tensors[0].adjoint().unwrap();
     let single_cached = net(&[conj(op(&["k"], &["i"]))], &["i"], &["k"])
@@ -447,7 +447,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let scalar = scalar_network
         .plan(&[&ket, &bra], &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&[&ket, &bra], &mut NetworkExecutionWorkspace::default())
+        .execute(&[&ket, &bra], &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let scalar_cached = net(&[op(&[], &["k"]), op(&["k"], &[])], &[], &[])
         .contract(&[&ket, &bra])
@@ -510,7 +510,7 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         [&device[0], &device[1]];
     let planned = pair_network().plan(&refs, &GreedyDenseOptimizer).unwrap();
     let executed = planned
-        .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+        .execute(&refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let host_oracle = host[0]
         .contract(
@@ -2293,7 +2293,7 @@ fn non_symmetric_cuda_network_contraction_rejects_like_host_before_device_work()
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn cuda_execution_reuses_a_caller_owned_workspace_and_network_contract_caches() {
-    // What (#2022): `execute_cuda` takes a caller-owned workspace that
+    // What (#2022): device `execute` takes a caller-owned workspace that
     // repeated calls can pass again with the same result, and
     // `Network::contract` runs device operands through the Runtime's plan
     // cache like Host ones, leasing its pooled workspace on a hit.
@@ -2341,7 +2341,7 @@ fn cuda_execution_reuses_a_caller_owned_workspace_and_network_contract_caches() 
     let mut workspace = NetworkExecutionWorkspace::default();
     for call in 0..3 {
         let actual = planned
-            .execute_cuda(&device_refs, &mut workspace)
+            .execute(&device_refs, &mut workspace)
             .unwrap()
             .to_host()
             .unwrap();

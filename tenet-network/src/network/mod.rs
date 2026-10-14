@@ -70,11 +70,11 @@ use execute::*;
 use preflight::*;
 use schedule::*;
 
-// `HostNetworkModeDispatch` was directly in this module before the split and
-// `crate::plancache` names it at `crate::network::HostNetworkModeDispatch`;
+// `NetworkModeDispatch` was directly in this module before the split and
+// `crate::plancache` names it at `crate::network::NetworkModeDispatch`;
 // plancache is not a descendant of `network`, so it needs a crate-visible
 // (not just intra-`network`) path back to it.
-pub(crate) use dispatch::HostNetworkModeDispatch;
+pub(crate) use dispatch::NetworkModeDispatch;
 
 pub use eager::NetworkOperand;
 pub(crate) use eager::NetworkOperandStorage;
@@ -88,8 +88,8 @@ pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 /// [`Network::new`], then either contract eagerly through the Runtime's plan
 /// cache with [`Network::contract`], or plan explicitly with
 /// [`Network::plan`] / [`Network::plan_with`] and run
-/// [`PlannedNetwork::execute`] (Host) or `PlannedNetwork::execute_cuda`
-/// (device) with a caller-owned [`NetworkExecutionWorkspace`].
+/// [`PlannedNetwork::execute`] (Host or device) with a caller-owned
+/// [`NetworkExecutionWorkspace`].
 ///
 /// # Intra-operand traces
 ///
@@ -158,7 +158,7 @@ thread_local! {
 // Steps of every storage, counted per thread like
 // `tenet_dense::cuda_transfer_stats`: steps run on the caller's thread, so a
 // concurrent test cannot perturb the count (#1568). The device rejection tests
-// read it around a single `execute_cuda`.
+// read it around a single device `execute`.
 #[cfg(all(test, feature = "cuda"))]
 thread_local! {
     static NETWORK_CONTRACT_STEP_CALLS: std::cell::Cell<usize> =

@@ -45,7 +45,7 @@ pub use config::{
 
 use crate::labels::TemporaryLabel;
 use crate::network::{
-    FacadeError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    FacadeError, Network, NetworkExecutionWorkspace, NetworkModeDispatch, PlannedNetwork,
 };
 use crate::optimizer::GreedyDenseOptimizer;
 use tenet::typed::__network::{self, NetworkPayloadStorage};
@@ -199,7 +199,7 @@ struct WorkspacePools {
 struct WorkspacePool<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -212,7 +212,7 @@ where
 struct IdleWorkspace<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -232,7 +232,7 @@ trait ErasedWorkspacePool: Any + Send + Sync {
 struct WorkspaceLease<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -265,10 +265,7 @@ impl WorkspacePools {
 
     fn deactivate_all(&self) {
         self.accepting.store(false, Ordering::SeqCst);
-        let mut pools = self.pools.lock().expect("network pool registry poisoned");
-        while let Some((_, pool)) = pools.pop_lru() {
-            pool.deactivate();
-        }
+        self.rotate_all();
     }
 
     fn rotate_all(&self) {
@@ -286,7 +283,7 @@ impl WorkspacePools {
     fn pool<R, D, S>(&self) -> Arc<WorkspacePool<R, D, S>>
     where
         R: TypedSectorAdmission + Send + Sync,
-        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        R::Mode: NetworkModeDispatch<R, D, S>,
         D: TensorScalar + Send + Sync + 'static,
         S: NetworkPayloadStorage<D> + Send + Sync,
     {
@@ -332,7 +329,7 @@ impl WorkspacePools {
 impl<R, D, S> ErasedWorkspacePool for WorkspacePool<R, D, S>
 where
     R: TypedSectorAdmission + Send + Sync,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar + Send + Sync + 'static,
     S: NetworkPayloadStorage<D> + Send + Sync,
 {
@@ -357,7 +354,7 @@ where
 impl<R, D, S> WorkspacePool<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -397,7 +394,7 @@ where
 impl<R, D, S> WorkspaceLease<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -415,7 +412,7 @@ where
 impl<R, D, S> Drop for WorkspaceLease<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D, S>,
     D: TensorScalar,
     S: NetworkPayloadStorage<D>,
 {
@@ -426,7 +423,7 @@ where
         }
         if let Some(mut workspace) = self.workspace.take() {
             workspace.clear_slots();
-            <R::Mode as HostNetworkModeDispatch<R, D, S>>::park_workspace(&mut workspace);
+            <R::Mode as NetworkModeDispatch<R, D, S>>::park_workspace(&mut workspace);
             let mut available = self
                 .pool
                 .available
@@ -462,17 +459,19 @@ pub(crate) struct CachedPlan {
 }
 
 impl CachedPlan {
+    /// Runs the plan for [`Network::contract`](crate::Network::contract),
+    /// which decided the operand count and admission before the lookup.
     pub(crate) fn execute<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
     ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission + Send + Sync,
-        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        R::Mode: NetworkModeDispatch<R, D, S>,
         D: TensorScalar + Send + Sync + 'static,
         S: crate::network::NetworkOperandStorage<R, D>,
     {
-        self.execute_leased(tensors, S::execute_planned)
+        self.execute_leased(tensors, PlannedNetwork::execute_admitted)
     }
 
     /// One lease lifecycle for every placement: take a workspace from this
@@ -489,7 +488,7 @@ impl CachedPlan {
     ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission + Send + Sync,
-        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        R::Mode: NetworkModeDispatch<R, D, S>,
         D: TensorScalar + Send + Sync + 'static,
         S: NetworkPayloadStorage<D> + Send + Sync,
     {
@@ -618,7 +617,7 @@ pub(crate) fn get_or_plan_network<R, D, S>(
 ) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -837,22 +836,20 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
         let Some(cache) = existing_cache_mut(slot) else {
             return;
         };
+        // Before the shrink rotation, so no recycle reserves against the old
+        // limit after the idle storage is released.
+        cache
+            .workspace_budget
+            .set_limit(next.workspace_budget_bytes);
 
         if previous.enabled && !next.enabled {
             cache.map.clear();
             cache.network_aliases.clear();
         } else {
             if next.workspace_budget_bytes < previous.workspace_budget_bytes {
-                cache
-                    .workspace_budget
-                    .set_limit(next.workspace_budget_bytes);
                 for (_, entry) in cache.map.iter() {
                     entry.workspaces.rotate_all();
                 }
-            } else if next.workspace_budget_bytes > previous.workspace_budget_bytes {
-                cache
-                    .workspace_budget
-                    .set_limit(next.workspace_budget_bytes);
             }
 
             if next.capacity < previous.capacity {
@@ -862,9 +859,6 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
                 cache.disk.resize(capacity);
             }
         }
-        cache
-            .workspace_budget
-            .set_limit(next.workspace_budget_bytes);
     });
 }
 
@@ -1078,7 +1072,7 @@ fn needs_replan_tensors<R, D, S>(
 ) -> Result<bool, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -1106,7 +1100,7 @@ where
     let mut changed = false;
     let mut exceeds_factor = false;
     for (operand, dims) in snapshot.iter().enumerate() {
-        let current_dims = <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensors[operand])?;
+        let current_dims = <R::Mode as NetworkModeDispatch<R, D>>::leg_dims(tensors[operand])?;
         for (&snap, current) in dims.iter().zip(current_dims) {
             changed |= snap != current;
             if snap != current {
@@ -1169,7 +1163,7 @@ fn plan_fresh<R, D, S>(
 ) -> Result<PlannedNetwork, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -1211,15 +1205,6 @@ where
             tensors,
             &crate::cotengra_python::CotengraPythonOptimizer::new(config.clone()),
         ),
-        // `Optimizer` is #[non_exhaustive] and defined in `tenet`; variants
-        // this build has no search for (e.g. Optimal without `opt-path`)
-        // are an explicit error rather than a silent greedy fallback.
-        #[allow(unreachable_patterns)]
-        other => Err(Error::InvalidArgument(format!(
-            "optimizer {other:?} is not available in this build \
-             (is the matching planner feature enabled?)"
-        ))
-        .into()),
     }
 }
 
@@ -1278,7 +1263,7 @@ fn plan_uncached<R, D, S>(
 ) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -1307,13 +1292,13 @@ fn plan_through_topology<R, D, S>(
 ) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
     let dims: Vec<Vec<usize>> = tensors
         .iter()
-        .map(|tensor| <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor))
+        .map(|tensor| <R::Mode as NetworkModeDispatch<R, D>>::leg_dims(tensor))
         .collect::<Result<_, _>>()?;
     let topology = topology_for(network, tensors, optimizer);
 

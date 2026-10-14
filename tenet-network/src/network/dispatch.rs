@@ -1,6 +1,6 @@
 use super::*;
 
-mod host_mode_sealed {
+mod mode_sealed {
     pub trait Sealed {}
 
     impl Sealed for tenet::sector::MultiplicityFreeAdmissionMode {}
@@ -10,13 +10,13 @@ mod host_mode_sealed {
 /// Internal network policy selected by the provider's admission mode and the
 /// operand payload storage.
 ///
-/// `S` defaults to Host `Vec<D>`, so `HostNetworkModeDispatch<R, D>` keeps
+/// `S` defaults to Host `Vec<D>`, so `NetworkModeDispatch<R, D>` keeps
 /// naming the Host policy. A second instantiation per storage carries the
 /// device policy: which primitives exist there, whether destinations may be
 /// reused, and how an idle workspace is parked.
 #[doc(hidden)]
-pub trait HostNetworkModeDispatch<R, D, S = Vec<D>>:
-    host_mode_sealed::Sealed
+pub trait NetworkModeDispatch<R, D, S = Vec<D>>:
+    mode_sealed::Sealed
     + TypedTensorModeDispatch<R>
     + TypedSpaceModeDispatch<R>
     + TypedAdjointSpace<R>
@@ -137,8 +137,8 @@ where
 /// output. Slots, producers, input snapshots and parking are the same on
 /// every storage, which is what lets one pool serve both placements. Device
 /// admission is decided before the first step by
-/// `PlannedNetwork::validate_cuda_admission`.
-impl<R, D, S> HostNetworkModeDispatch<R, D, S> for MultiplicityFreeAdmissionMode
+/// `PlannedNetwork::execute` (`cuda_operand_admission`).
+impl<R, D, S> NetworkModeDispatch<R, D, S> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -179,7 +179,7 @@ where
     }
 }
 
-impl<R, D> HostNetworkModeDispatch<R, D> for CheckedGenericAdmissionMode
+impl<R, D> NetworkModeDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,

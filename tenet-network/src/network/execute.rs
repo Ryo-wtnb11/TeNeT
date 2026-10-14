@@ -371,67 +371,18 @@ impl PlannedNetwork {
     pub fn plan(&self) -> &ContractionPlan {
         &self.plan
     }
-
-    /// Executes the compiled schedule on device tensors with reusable private
-    /// replay state, the device twin of [`Self::execute`]: the Host step
-    /// sequence, each step through the device twin of the Host typed
-    /// operation. Every device rejection — another placement, a compact
-    /// operand, non-symmetric braiding — is decided before any allocation or
-    /// kernel, and nothing falls back to Host or transfers.
-    ///
-    /// Device admission is checked here; everything after it — operand count,
-    /// Runtime and rule identity, topology drift, contracted-leg spaces,
-    /// replay-state revalidation, the step loop and the workspace lifecycle —
-    /// is the same storage-generic body Host runs. Pass the same `workspace`
-    /// to repeated calls to reuse its device intermediates.
-    #[cfg(feature = "cuda")]
-    pub fn execute_cuda<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-        workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
-    where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
-        D: CudaPayload,
-    {
-        self.validate_cuda_admission(tensors)?;
-        self.execute(tensors, workspace)
-    }
-
-    /// The device network preflight: every rejection class a device step
-    /// could raise that the storage-generic body would not already raise
-    /// before its first step, decided from the compiled schedule and the
-    /// operands' metadata alone — no allocation, no lock, no device work.
-    ///
-    /// Classes: an operand on another placement ([`Error::PlacementMismatch`])
-    /// or a Runtime without a device; then [`device_operand_admission`] — a
-    /// compact (diagonal) operand and non-symmetric braiding. The device
-    /// contraction's own remaining boundaries are unreachable from a compiled
-    /// schedule: every step passes `alpha = 1`, every retained destination is
-    /// a canonical device result of the same step, and schedules are produced
-    /// only by `compile_schedule`. [`Network::contract`] decides the same
-    /// classes from its operand count, before the plan lookup
-    /// ([`cuda_operand_admission`]).
-    #[cfg(feature = "cuda")]
-    fn validate_cuda_admission<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-    ) -> Result<(), Error>
-    where
-        R: TypedSectorAdmission + tenet::sector::FusionRule,
-        D: CudaPayload,
-    {
-        cuda_operand_admission(tensors, !self.schedule.steps.is_empty())
-    }
 }
 
-/// The operand half of the device network preflight, shared with
-/// [`Network::contract`], which runs it before the plan lookup: a Runtime with
-/// a device, every operand on it, then
-/// [`device_operand_admission`].
+/// The device network preflight [`PlannedNetwork::execute`] and
+/// [`Network::contract`] run through `NetworkOperandStorage::admit_operands`:
+/// a Runtime with a device, every operand on it, then
+/// [`device_operand_admission`]. These are every rejection class a device
+/// step could raise that the storage-generic body would not already raise
+/// before its first step, decided from operand metadata alone — no
+/// allocation, no lock, no device work. The device contraction's remaining
+/// boundaries are unreachable from a compiled schedule: every step passes
+/// `alpha = 1`, every retained destination is a canonical device result of
+/// the same step, and schedules are produced only by `compile_schedule`.
 #[cfg(feature = "cuda")]
 pub(super) fn cuda_operand_admission<R, D>(
     tensors: &[&TensorMap<R, D, CudaStorage<D>>],
@@ -494,7 +445,17 @@ pub(super) fn device_operand_admission(
 }
 
 impl PlannedNetwork {
-    /// Executes this plan with reusable private Host replay state.
+    /// Executes this plan on Host or device tensors with reusable private
+    /// replay state.
+    ///
+    /// The operand count and the storage's operand admission — the one
+    /// [`Network::contract`] decides before its plan lookup — run first:
+    /// non-symmetric braiding for a schedule with steps and, on a device, a
+    /// Runtime without a device, an operand on another placement
+    /// ([`Error::PlacementMismatch`]) or a compact (diagonal) operand. Every
+    /// rejection is decided before any allocation or kernel, and nothing
+    /// falls back to Host or transfers. Pass the same `workspace` to repeated
+    /// calls to reuse its intermediates.
     ///
     /// This does not accept or preserve a caller-owned output destination;
     /// successful execution returns a new owned tensor.
@@ -505,7 +466,33 @@ impl PlannedNetwork {
     ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        R::Mode: NetworkModeDispatch<R, D, S>,
+        D: TensorScalar,
+        S: NetworkOperandStorage<R, D>,
+    {
+        if tensors.len() != self.schedule.input_ranks.len() {
+            return Err(invalid(format!(
+                "plan has {} operands but {} tensors were given",
+                self.schedule.input_ranks.len(),
+                tensors.len()
+            ))
+            .into());
+        }
+        S::admit_operands(tensors, !self.schedule.steps.is_empty())?;
+        self.execute_admitted(tensors, workspace)
+    }
+
+    /// [`Self::execute`] after its operand count and admission, for callers
+    /// that decided both against this plan's network:
+    /// [`Network::contract`] before its plan lookup.
+    pub(crate) fn execute_admitted<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, S>,
+    ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: NetworkModeDispatch<R, D, S>,
         D: TensorScalar,
         S: NetworkPayloadStorage<D>,
     {
@@ -526,20 +513,12 @@ impl PlannedNetwork {
     ) -> std::result::Result<TensorMap<R, D, S>, MeteredNetworkError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        R::Mode: NetworkModeDispatch<R, D, S>,
         D: TensorScalar,
         S: NetworkPayloadStorage<D>,
     {
+        debug_assert_eq!(tensors.len(), self.schedule.input_ranks.len());
         let prepared: Result<_, FacadeError<R>> = (|| {
-            if tensors.len() != self.schedule.input_ranks.len() {
-                return Err(invalid(format!(
-                    "plan has {} operands but {} tensors were given",
-                    self.schedule.input_ranks.len(),
-                    tensors.len()
-                ))
-                .into());
-            }
-            reject_non_symmetric_network(tensors, !self.schedule.steps.is_empty())?;
             let runtime = tensors
                 .first()
                 .ok_or_else(|| {
@@ -590,7 +569,7 @@ impl PlannedNetwork {
                 .enumerate()
                 .map(|(index, tensor)| {
                     if self.conj[index] {
-                        <R::Mode as HostNetworkModeDispatch<R, D, S>>::adjoint_operand(tensor)
+                        <R::Mode as NetworkModeDispatch<R, D, S>>::adjoint_operand(tensor)
                     } else {
                         Ok((*tensor).clone())
                     }
@@ -618,7 +597,7 @@ impl PlannedNetwork {
                         .collect::<Vec<_>>(),
                 )
             };
-            let reuse_enabled = <R::Mode as HostNetworkModeDispatch<R, D, S>>::REUSE_DESTINATIONS
+            let reuse_enabled = <R::Mode as NetworkModeDispatch<R, D, S>>::REUSE_DESTINATIONS
                 && new_snapshot
                     .as_ref()
                     .unwrap_or(&workspace.input_snapshot)
@@ -634,7 +613,7 @@ impl PlannedNetwork {
         })();
         let (runtime_identity, rule_identity, lowered, new_snapshot, reuse_enabled) = prepared?;
         if new_snapshot.is_none() && reuse_enabled {
-            <R::Mode as HostNetworkModeDispatch<R, D, S>>::activate_parked(
+            <R::Mode as NetworkModeDispatch<R, D, S>>::activate_parked(
                 workspace,
                 tensors[0].runtime(),
                 tensors,
@@ -706,9 +685,8 @@ impl PlannedNetwork {
                 codomain: &step.codomain,
                 domain: &step.domain,
             };
-            let contracted = <R::Mode as HostNetworkModeDispatch<R, D, S>>::contract_step(
-                lhs, rhs, buffer, &spec,
-            )?;
+            let contracted =
+                <R::Mode as NetworkModeDispatch<R, D, S>>::contract_step(lhs, rhs, buffer, &spec)?;
             if let Some(meter) = meter.as_deref_mut() {
                 let mut payloads =
                     retained_payloads.expect("meter requires retained payload snapshot");
@@ -741,9 +719,8 @@ impl PlannedNetwork {
             .as_ref()
             .ok_or_else(|| FacadeError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
-            let output = <R::Mode as HostNetworkModeDispatch<R, D, S>>::permute_final(
-                result, codomain, domain,
-            )?;
+            let output =
+                <R::Mode as NetworkModeDispatch<R, D, S>>::permute_final(result, codomain, domain)?;
             if let Some(meter) = meter {
                 let mut payloads = intermediate_payloads(intermediates);
                 payloads.push(__network::network_owned_payload(&output));

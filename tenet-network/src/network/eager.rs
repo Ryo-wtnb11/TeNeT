@@ -63,7 +63,7 @@ impl Network {
     ) -> Result<(), FacadeError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: NetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -87,48 +87,31 @@ where
         .unwrap_or_default()
 }
 
-/// The storage half of [`NetworkOperand`]: the operand admission
-/// [`Network::contract`] decides before the plan lookup, and the planned
-/// execution it then runs. Host checks braiding and runs
-/// [`PlannedNetwork::execute`]; the device adds placement and dense-payload
-/// admission (`cuda_operand_admission`) and runs
-/// `PlannedNetwork::execute_cuda`. Everything else in the eager call is one
-/// body over the storage.
+/// The storage half of [`NetworkOperand`] and [`PlannedNetwork::execute`]:
+/// the operand admission decided before any plan lookup or step. Host
+/// checks braiding; the device adds Runtime device, placement and
+/// dense-payload admission (`cuda_operand_admission`).
 #[doc(hidden)]
 pub trait NetworkOperandStorage<R, D>: NetworkPayloadStorage<D> + Send + Sync + Sized
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D, Self>,
+    R::Mode: NetworkModeDispatch<R, D, Self>,
     D: TensorScalar,
 {
     fn admit_operands(
         tensors: &[&TensorMap<R, D, Self>],
         contracts: bool,
     ) -> Result<(), FacadeError<R>>;
-
-    fn execute_planned(
-        planned: &PlannedNetwork,
-        tensors: &[&TensorMap<R, D, Self>],
-        workspace: &mut NetworkExecutionWorkspace<R, D, Self>,
-    ) -> Result<TensorMap<R, D, Self>, FacadeError<R>>;
 }
 
 impl<R, D> NetworkOperandStorage<R, D> for Vec<D>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: NetworkModeDispatch<R, D>,
     D: TensorScalar + Send + Sync + 'static,
 {
     fn admit_operands(tensors: &[&TensorMap<R, D>], contracts: bool) -> Result<(), FacadeError<R>> {
         reject_non_symmetric_network(tensors, contracts)
-    }
-
-    fn execute_planned(
-        planned: &PlannedNetwork,
-        tensors: &[&TensorMap<R, D>],
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
-    ) -> Result<TensorMap<R, D>, FacadeError<R>> {
-        planned.execute(tensors, workspace)
     }
 }
 
@@ -144,14 +127,6 @@ where
     fn admit_operands(tensors: &[&TensorMap<R, D, Self>], contracts: bool) -> Result<(), Error> {
         cuda_operand_admission(tensors, contracts)
     }
-
-    fn execute_planned(
-        planned: &PlannedNetwork,
-        tensors: &[&TensorMap<R, D, Self>],
-        workspace: &mut NetworkExecutionWorkspace<R, D, Self>,
-    ) -> Result<TensorMap<R, D, Self>, Error> {
-        planned.execute_cuda(tensors, workspace)
-    }
 }
 
 impl<R, D, S> network_operand_sealed::Sealed for TensorMap<R, D, S>
@@ -159,7 +134,7 @@ where
     R: TypedSectorAdmission + Send + Sync,
     // The metadata preflight and plan lookup read leg dimensions through the
     // Host policy, which exists whenever a storage's policy does.
-    R::Mode: HostNetworkModeDispatch<R, D> + HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D> + NetworkModeDispatch<R, D, S>,
     D: TensorScalar + Send + Sync + 'static,
     S: NetworkOperandStorage<R, D>,
 {
@@ -170,7 +145,7 @@ where
     R: TypedSectorAdmission + Send + Sync,
     // The metadata preflight and plan lookup read leg dimensions through the
     // Host policy, which exists whenever a storage's policy does.
-    R::Mode: HostNetworkModeDispatch<R, D> + HostNetworkModeDispatch<R, D, S>,
+    R::Mode: NetworkModeDispatch<R, D> + NetworkModeDispatch<R, D, S>,
     D: TensorScalar + Send + Sync + 'static,
     S: NetworkOperandStorage<R, D>,
 {
