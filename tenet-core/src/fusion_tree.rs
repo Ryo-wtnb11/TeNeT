@@ -20,6 +20,7 @@ mod style_kernel;
 mod tree_ops;
 mod unique_braid;
 mod unique_rigid;
+mod view;
 
 pub(crate) use bend::*;
 pub use block_ops::*;
@@ -41,3 +42,4 @@ pub(crate) use style_kernel::*;
 pub use tree_ops::*;
 pub(crate) use unique_braid::*;
 pub(crate) use unique_rigid::*;
+pub use view::*;
