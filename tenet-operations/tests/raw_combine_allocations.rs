@@ -1,7 +1,7 @@
 //! Allocation gate for the host raw combine actions routed through Strided's
 //! raw kernels: `Copy`, `CopyScale` and `Axpy` stay allocation-free at every
-//! rank up to `RAW_FUSED_RANK_LIMIT`, and above it TeNeT's own loop keeps
-//! them allocation-free.
+//! fused rank up to `RAW_FUSED_RANK_LIMIT`, and above it TeNeT's own fused
+//! walk keeps them allocation-free through raw rank 16.
 
 use std::hint::black_box;
 
@@ -16,16 +16,17 @@ static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAl
 
 #[test]
 fn raw_combine_actions_allocate_nothing_at_any_rank() {
-    // What: for ranks 1..=10 (two above the fused limit) and a transposed
+    // What: for ranks 1..=16 (eight above the fused limit) and a transposed
     // source, conjugating copy, scale and axpy allocate nothing on the
-    // caller thread. 2^10 elements stay below Strided's parallel threshold.
+    // caller thread. Ranks above 8 stay unfused, so Strided's parallel
+    // threshold never applies to them.
     let (alpha, zero, one) = (
         Complex64::new(0.5, -1.0),
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0),
     );
     let mut zero_strides = Vec::new();
-    for rank in 1..=10usize {
+    for rank in 1..=16usize {
         let shape = vec![2usize; rank];
         let dst_strides: Vec<isize> = (0..rank).map(|axis| 1 << axis).collect();
         let src_strides: Vec<isize> = dst_strides.iter().rev().copied().collect();
@@ -139,6 +140,85 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
                     "conj {conjugate} ({row}, {col})"
                 );
             }
+        }
+    }
+}
+
+/// Logical axes `[4, 3, 2, 2, 3, 2, 2, 4]` with a padded destination and a
+/// reversed source (nothing fuses): the native rank-8 layout, and the same
+/// tensor at raw rank 12 with both extent-4 axes split into contiguous
+/// `(2, 2)` pairs and two unit axes inserted.
+fn native_and_raw_twelve() -> [(Vec<usize>, Vec<isize>, Vec<isize>); 2] {
+    let logical = [4usize, 3, 2, 2, 3, 2, 2, 4];
+    let mut dst = Vec::new();
+    let mut stride = 1isize;
+    for &dim in &logical {
+        dst.push(stride);
+        stride *= dim as isize + 1;
+    }
+    let mut src = vec![0isize; logical.len()];
+    let mut stride = 1isize;
+    for axis in (0..logical.len()).rev() {
+        src[axis] = stride;
+        stride *= logical[axis] as isize;
+    }
+    let mut raw = (Vec::new(), Vec::new(), Vec::new());
+    for axis in 0..logical.len() {
+        if logical[axis] == 4 {
+            raw.0.extend([2, 2]);
+            raw.1.extend([dst[axis], 2 * dst[axis]]);
+            raw.2.extend([src[axis], 2 * src[axis]]);
+        } else {
+            raw.0.push(logical[axis]);
+            raw.1.push(dst[axis]);
+            raw.2.push(src[axis]);
+        }
+        if axis == 2 || axis == 5 {
+            raw.0.push(1);
+            raw.1.push(11);
+            raw.2.push(3);
+        }
+    }
+    [(logical.to_vec(), dst, src), raw]
+}
+
+#[test]
+fn raw_rank_twelve_fusing_to_eight_allocates_like_native_rank_eight() {
+    // What: issue #2230. A raw rank-12 layout that fuses to rank 8 makes the
+    // same number of warm allocation calls on the caller thread as the
+    // native rank-8 layout, for copy, scale, axpy and axpby, plain and
+    // conjugating; both are allocation-free.
+    let alpha = Complex64::new(0.5, -1.0);
+    let (zero, one) = (Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0));
+    let mut zero_strides = Vec::new();
+    let src: Vec<Complex64> = (0..4608).map(|i| Complex64::new(i as f64, 0.5)).collect();
+    let mut dst = vec![zero; 5 * 4 * 3 * 3 * 4 * 3 * 3 * 5];
+    for conjugate in [false, true] {
+        for (a, b) in [(one, zero), (alpha, zero), (alpha, one), (alpha, alpha)] {
+            let calls = native_and_raw_twelve().map(|(shape, dst_strides, src_strides)| {
+                let mut run = || {
+                    tensoradd_raw_strided_kernel(
+                        &mut zero_strides,
+                        black_box(&mut dst),
+                        black_box(&src),
+                        &shape,
+                        &dst_strides,
+                        &src_strides,
+                        0,
+                        0,
+                        conjugate,
+                        a,
+                        b,
+                    )
+                    .unwrap()
+                };
+                run();
+                counting_alloc::start();
+                run();
+                counting_alloc::stop().calls
+            });
+            assert_eq!(calls[1], calls[0], "conj {conjugate} alpha {a} beta {b}");
+            assert_eq!(calls[0], 0, "conj {conjugate} alpha {a} beta {b}");
         }
     }
 }

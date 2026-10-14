@@ -4,9 +4,9 @@ use num_traits::{One, Zero};
 use smallvec::SmallVec;
 
 use crate::host_scalar_kernels::{
-    raw_strided_action, strided_raw_action, validate_raw_strided_bounds, RawStridedAction,
+    combine_fused_layout, raw_rank_within_strided_limit_routed, raw_strided_action,
+    validate_raw_strided_bounds,
 };
-use crate::scalar::scale_value;
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
