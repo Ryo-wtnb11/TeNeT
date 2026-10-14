@@ -1272,6 +1272,53 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
     }
 }
 
+/// #2233: a checked SU(3) source admits its trees once. A warm transform
+/// whose source outlived its structure-cache entry derives its destination
+/// again, yet asks the provider no admission query (channels or N).
+#[cfg(feature = "racah-generated")]
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn warm_checked_generic_transform_of_an_evicted_source_makes_no_admission_query() {
+    use tenet_sectors::SUNFusionRule;
+
+    let inner = SUNFusionRule::new(3).unwrap();
+    let adjoint = inner.encode_dynkin(&[1, 1]).unwrap();
+    let fundamental = inner.encode_dynkin(&[1, 0]).unwrap();
+    let provider = Arc::new(MeasurementProvider::new(inner));
+    let leg = || SectorLeg::new([(fundamental, 1), (adjoint, 2)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let operation = TreeTransformOperation::permute([0, 2, 3], [1, 4]);
+    let transform = || {
+        crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
+            .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
+            .unwrap()
+    };
+    drop(transform());
+    tenet_core::clear_structure_caches();
+    drop(transform());
+    // Why the fewest of three calls: a concurrent test's clear may make one
+    // call rebuild its destination layout; re-admission queries every call.
+    let admission_queries = (0..3)
+        .map(|_| {
+            provider.reset_calls();
+            drop(transform());
+            let calls = provider.calls.get();
+            calls[MeasurementProviderCall::Channels.index()]
+                + calls[MeasurementProviderCall::N.index()]
+        })
+        .min();
+    assert_eq!(admission_queries, Some(0));
+}
+
 #[cfg(feature = "racah-generated")]
 fn measured_provider_phase<T>(
     provider: &MeasurementProvider<tenet_sectors::SUNFusionRule>,
@@ -1341,6 +1388,7 @@ fn measure_checked_generic_transform_case(
             .unwrap();
         crate::tree_transform::validate_checked_generic_tree_pair_plan_preflight(
             provider.as_ref(),
+            &identity,
             &operation,
             source.space().structure(),
         )

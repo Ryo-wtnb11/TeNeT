@@ -1159,6 +1159,7 @@ where
             None => {
                 preflight = validate_checked_generic_tree_pair_plan_preflight(
                     rule,
+                    &identity,
                     operation,
                     logical.unwrap_or(structure),
                 )?;
@@ -1284,6 +1285,9 @@ where
                 || {
                     let proof = validate_checked_generic_tree_pair_plan_preflight(
                         provider,
+                        identity
+                            .get()
+                            .expect("checked admission precedes derivation"),
                         operation,
                         source.structure(),
                     )?;

@@ -18,7 +18,7 @@ use tenet_core::{
     FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
     LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
-    PreparedTreePairOperation,
+    PreparedTreePairOperation, RuleIdentity,
 };
 
 use crate::OperationError;
@@ -309,6 +309,7 @@ where
 
 fn validate_checked_generic_tree_pair_preflight<'provider, 'structure, P>(
     provider: &'provider P,
+    identity: Option<&RuleIdentity>,
     operation: &TreeTransformOperation,
     src_structure: &'structure BlockStructure,
 ) -> Result<
@@ -337,13 +338,23 @@ where
     validate_tree_transform_rank_syntax(operation, src_structure.rank())?;
     validate_fusion_tree_key_namespace(src_structure)?;
     validate_tree_transform_operation_syntax(operation, src_structure)?;
-    let admitted = CheckedGenericAdmittedFusionTreeBlockStructure::try_new(provider, src_structure)
-        .map_err(map_checked_generic_structure_error)?;
+    let admitted = match identity {
+        Some(identity) => CheckedGenericAdmittedFusionTreeBlockStructure::try_new_once(
+            provider,
+            identity,
+            src_structure,
+        ),
+        None => CheckedGenericAdmittedFusionTreeBlockStructure::try_new(provider, src_structure),
+    }
+    .map_err(map_checked_generic_structure_error)?;
     Ok(CheckedGenericTreePairPreflight { admitted })
 }
 
+/// The plan preflight of a caller that already read and checked `identity`,
+/// the provider's: its source admission runs once per structure (#2233).
 pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<'provider, 'structure, P>(
     provider: &'provider P,
+    identity: &RuleIdentity,
     operation: &TreeTransformOperation,
     src_structure: &'structure BlockStructure,
 ) -> Result<
@@ -353,7 +364,7 @@ pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<'provider, 'stru
 where
     P: CheckedGenericFusion,
 {
-    validate_checked_generic_tree_pair_preflight(provider, operation, src_structure)
+    validate_checked_generic_tree_pair_preflight(provider, Some(identity), operation, src_structure)
 }
 
 pub(crate) struct LocallyValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R> {
@@ -2220,7 +2231,7 @@ where
     P::Scalar: CategoricalScalar + Zero,
 {
     let source_proof =
-        validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
+        validate_checked_generic_tree_pair_preflight(provider, None, &operation, src_structure)?;
     let group_count = source_proof.structure().fusion_tree_group_slice().len();
     let groups = build_checked_generic_tree_pair_groups(
         &operation,

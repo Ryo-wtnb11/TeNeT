@@ -54,8 +54,10 @@ fn checked_transform_into_makes_the_eager_provider_queries() {
     let _cache = cache_exclusive();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(70));
-    let source = toy_source(&runtime, &provider);
     for (name, eager, into) in OPERATIONS {
+        // Why a fresh source per cold call: a source admits its trees once
+        // (#2233), so a reused one would make the second cold call cheaper.
+        let source = toy_source(&runtime, &provider);
         forget_cached_structures();
         reset_provider_queries(&provider);
         let expected = eager(&source).unwrap_or_else(|e| panic!("{name}: {e:?}"));
@@ -71,6 +73,7 @@ fn checked_transform_into_makes_the_eager_provider_queries() {
             |_, _| f64::NAN,
         )
         .unwrap();
+        let source = toy_source(&runtime, &provider);
         forget_cached_structures();
         reset_provider_queries(&provider);
         into(&source, &mut destination, 1.0, 0.0).unwrap();

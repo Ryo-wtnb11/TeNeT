@@ -1079,6 +1079,29 @@ where
         })
     }
 
+    /// [`Self::try_new`] for a caller that already read `identity` from
+    /// `provider`: a success is recorded on `structure`, and a later call
+    /// with an equal identity makes no provider query (#2233). TensorKit
+    /// (`cfaa073e`) likewise enumerates a HomSpace's trees once
+    /// (`src/spaces/structure.jl:sectorstructure`) and never re-validates
+    /// them per transform (`add_transform!`). Why not inside `try_new`: an
+    /// identity read there would add a provider query to every admission.
+    pub fn try_new_once(
+        provider: &'provider P,
+        identity: &RuleIdentity,
+        structure: &'structure BlockStructure,
+    ) -> Result<Self, CheckedGenericStructureError<P::Error>> {
+        if structure.is_checked_generic_admitted(identity) {
+            return Ok(Self {
+                provider,
+                structure,
+            });
+        }
+        let admitted = Self::try_new(provider, structure)?;
+        structure.record_checked_generic_admitted(identity.clone());
+        Ok(admitted)
+    }
+
     #[inline]
     pub fn structure(&self) -> &'structure BlockStructure {
         self.structure
