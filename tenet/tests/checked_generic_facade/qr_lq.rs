@@ -309,9 +309,7 @@ fn checked_compact_diagonal_qr_rejects_nonfinite_and_skips_the_provider_when_fin
     .unwrap();
     let error = nonfinite.qr_compact(&[0], &[1]).map(drop).unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("qr input components must be finite"),
+        report(&error).contains("qr input components must be finite"),
         "{error}"
     );
     assert_eq!(calls.of(Kernel::QR), 0);

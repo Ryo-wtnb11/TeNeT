@@ -334,8 +334,10 @@ pub enum CheckedFusionSpaceError {
 impl fmt::Display for CheckedFusionSpaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Core(error) => error.fmt(formatter),
-            Self::FusionAlgebra(error) => error.fmt(formatter),
+            Self::Core(_) => formatter.write_str("invalid tensor structure"),
+            Self::FusionAlgebra(_) => formatter.write_str(
+                "the fusion algebra cannot represent the requested dual or fusion output",
+            ),
         }
     }
 }

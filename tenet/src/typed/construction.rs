@@ -8,9 +8,9 @@ where
 {
     /// Returns the first leg's provider allocation after proving that every
     /// leg has the same categorical identity.
-    fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, TypedFacadeError<R>> {
+    fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, FacadeError<R>> {
         let (first, rest) = legs.split_first().ok_or_else(|| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(
+            FacadeError::<R>::from(Error::InvalidArgument(
                 "at least one leg is required to infer the fusion provider".into(),
             ))
         })?;
@@ -21,7 +21,7 @@ where
         for leg in rest {
             let actual_identity = TypedSectorAdmission::typed_rule_identity(leg.provider());
             if actual_identity != expected_identity {
-                return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+                return Err(FacadeError::<R>::from(Error::RuleMismatch));
             }
         }
         Ok(first.provider_arc())
@@ -33,7 +33,7 @@ where
         provider: Arc<R>,
         codomain: &[&GradedSpace<R>],
         domain: &[&GradedSpace<R>],
-    ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>> {
+    ) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>> {
         let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
             FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
@@ -49,11 +49,11 @@ where
         runtime: &Runtime,
         space: BoundDynamicFusionMapSpace<R>,
         fill: Fill<'_, D>,
-    ) -> Result<Self, TypedFacadeError<R>> {
-        let data = apply_fill(space.space(), fill).map_err(TypedFacadeError::<R>::from)?;
+    ) -> Result<Self, FacadeError<R>> {
+        let data = apply_fill(space.space(), fill).map_err(FacadeError::<R>::from)?;
         BoundDynamicTensorRef::try_new(&space, &data)
             .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
         Ok(Self {
             runtime: runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
@@ -66,7 +66,7 @@ where
         codomain: &[&GradedSpace<R>],
         domain: &[&GradedSpace<R>],
         fill: Fill<'_, D>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let space = Self::build_space(provider, codomain, domain)?;
         Self::fill_space(runtime, space, fill)
     }
@@ -100,7 +100,7 @@ where
         runtime: &Runtime,
         codomain: Codomain,
         domain: Domain,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -135,7 +135,7 @@ where
         codomain: Codomain,
         domain: Domain,
         mut fill: F,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -153,7 +153,7 @@ where
             let key = structure
                 .block(index)
                 .map_err(Error::from)
-                .map_err(TypedFacadeError::<R>::from)?
+                .map_err(FacadeError::<R>::from)?
                 .key()
                 .clone();
             let decoded = decode_block_fusion_trees(provider.as_ref(), &key)?;
@@ -193,7 +193,7 @@ where
         codomain: Codomain,
         domain: Domain,
         seed: u64,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -220,7 +220,7 @@ where
     fn fused_content(
         provider: &R,
         legs: &[&GradedSpace<R>],
-    ) -> Result<Vec<(tenet_core::SectorId, usize)>, TypedFacadeError<R>> {
+    ) -> Result<Vec<(tenet_core::SectorId, usize)>, FacadeError<R>> {
         let (first, rest) = legs.split_first().ok_or_else(|| {
             // Keep the empty-side failure local to the typed fusion fold.
             Error::InvalidArgument("fuse_all needs at least one space".into())
@@ -243,7 +243,7 @@ where
         codomain: C,
         domain: M,
         embed: bool,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         C: IntoIterator<Item = &'a GradedSpace<R>>,
         M: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -305,7 +305,7 @@ where
         runtime: &Runtime,
         codomain: C,
         domain: M,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         C: IntoIterator<Item = &'a GradedSpace<R>>,
         M: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -335,7 +335,7 @@ where
         runtime: &Runtime,
         codomain: C,
         domain: M,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         C: IntoIterator<Item = &'a GradedSpace<R>>,
         M: IntoIterator<Item = &'a GradedSpace<R>>,
@@ -357,7 +357,7 @@ where
     /// Dense and compact payloads are freshly initialized to exact positive
     /// zero, independently of non-finite source values. A lazy adjoint zeros
     /// its canonical parent and stays a lazy adjoint.
-    pub fn zeros_like(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn zeros_like(&self) -> Result<Self, FacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = self.parent_of(view).zeros_like()?;
             return Ok(parent.lazy_adjoint_on(&view.logical_space)?);

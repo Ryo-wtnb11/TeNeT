@@ -120,7 +120,7 @@ fn map_checked_generic_structure_error<E>(
 impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericPlanError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Provider(error) => error.fmt(f),
+            Self::Provider(_) => f.write_str("fusion provider failed"),
             Self::SymbolShape {
                 symbol,
                 expected,
@@ -129,8 +129,8 @@ impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericPlanError<E> {
                 f,
                 "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"
             ),
-            Self::Core(error) => error.fmt(f),
-            Self::Operation(error) => error.fmt(f),
+            Self::Core(_) => f.write_str("invalid tensor structure"),
+            Self::Operation(_) => f.write_str("tensor operation failed"),
         }
     }
 }

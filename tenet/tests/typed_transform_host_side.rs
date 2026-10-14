@@ -180,7 +180,14 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
     // and would trip the unique-ownership check instead.
     let destination = || source.permute(&[2, 0], &[1, 3]).unwrap();
 
-    let message = |error: tenet::typed::Error| error.to_string();
+    let message = |error: tenet::typed::Error| {
+        std::iter::successors(Some(&error as &dyn std::error::Error), |&error| {
+            error.source()
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+    };
 
     // Runtime mismatch precedes a rule mismatch.
     let other = Runtime::builder().build().unwrap();
@@ -253,7 +260,7 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
                 .permute_into(&[2, 0], &[1, 3], &mut wrong_space, 1.0, 0.0)
                 .unwrap_err()
         ),
-        "operation error: space mismatch: destination fusion space or block layout \
+        "tensor operation failed: space mismatch: destination fusion space or block layout \
          does not match the operation result"
     );
     drop(wrong_space_handle);

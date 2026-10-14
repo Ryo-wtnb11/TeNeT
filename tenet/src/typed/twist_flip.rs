@@ -57,7 +57,7 @@ where
     /// Non-unit NoBraiding legs are invalid. Checked-Generic pivotal failures
     /// retain their typed provider error, and no result is published until all
     /// selected twist values have been staged successfully.
-    pub fn twist(&self, legs: &[usize], direction: Direction) -> Result<Self, TypedFacadeError<R>> {
+    pub fn twist(&self, legs: &[usize], direction: Direction) -> Result<Self, FacadeError<R>> {
         let inverse = direction.is_inverse();
         let rank = self.rank();
         let name = if inverse { "inverse twist" } else { "twist" };
@@ -114,7 +114,7 @@ where
 
     /// The twist of an owned tensor on its own space: unless every twist value
     /// is one, one scaled copy of the compact spectrum or the dense payload.
-    fn twist_owned(&self, legs: &[usize], inverse: bool) -> Result<Self, TypedFacadeError<R>> {
+    fn twist_owned(&self, legs: &[usize], inverse: bool) -> Result<Self, FacadeError<R>> {
         let nout = self.codomain_rank();
         let space = self.logical_space();
         let Some(theta) = <R::Mode as TypedTensorTwistDispatch<R, D>>::twist_values(
@@ -237,7 +237,7 @@ where
     /// [`Error::Core`] from the layout derivation of the toggled hom space.
     /// Checked-Generic admission and pivotal failures retain their typed
     /// [`GenericTensorError`] variants.
-    pub fn flip(&self, legs: &[usize], direction: Direction) -> Result<Self, TypedFacadeError<R>> {
+    pub fn flip(&self, legs: &[usize], direction: Direction) -> Result<Self, FacadeError<R>> {
         let inverse = direction.is_inverse();
         let rank = self.rank();
         let name = if inverse { "inverse flip" } else { "flip" };
@@ -287,7 +287,7 @@ where
 
     /// The flip of an owned tensor: one scaled copy of its dense payload on
     /// the toggled space.
-    fn flip_owned(&self, legs: &[usize], inverse: bool) -> Result<Self, TypedFacadeError<R>> {
+    fn flip_owned(&self, legs: &[usize], inverse: bool) -> Result<Self, FacadeError<R>> {
         let nout = self.codomain_rank();
         let (space, occurrences) = self.flip_destination(legs)?;
         let data = {
@@ -323,7 +323,7 @@ where
     fn flip_destination(
         &self,
         legs: &[usize],
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<(usize, bool)>), TypedFacadeError<R>> {
+    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<(usize, bool)>), FacadeError<R>> {
         let (homspace, occurrences) =
             flip_toggled_homspace(self.logical_space().space().homspace(), legs);
         let space =

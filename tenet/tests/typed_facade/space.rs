@@ -705,7 +705,7 @@ fn graded_space_reports_an_unrepresentable_label() {
     let provider = Arc::new(ExternalZ3::new());
     let error = GradedSpace::try_new(provider, [(Z3Charge(7), 2)]).unwrap_err();
 
-    assert!(error.to_string().contains("Z3 charge 7"), "{error}");
+    assert!(error.report().contains("Z3 charge 7"), "{error}");
     let provider = Arc::new(ExternalZ3::new());
     let space = z3_leg(&provider, false);
     assert!(space.degeneracy(&Z3Charge(7)).is_err());

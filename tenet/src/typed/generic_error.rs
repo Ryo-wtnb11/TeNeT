@@ -14,13 +14,16 @@ pub enum GenericTensorError<E> {
     TensorProduct(CheckedGenericTensorProductError<E>),
 }
 
+// `Facade` is transparent: it carries the multiplicity-free mode's own
+// `Error` unchanged, so both modes render a facade failure identically. The
+// other variants name their stage and leave the cause to `source()`.
 impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Facade(error) => error.fmt(formatter),
-            Self::Structure(error) => error.fmt(formatter),
-            Self::Plan(error) => error.fmt(formatter),
-            Self::TensorProduct(error) => error.fmt(formatter),
+            Self::Structure(_) => formatter.write_str("checked Generic structure admission failed"),
+            Self::Plan(_) => formatter.write_str("checked Generic operation plan failed"),
+            Self::TensorProduct(_) => formatter.write_str("checked Generic tensor product failed"),
         }
     }
 }
@@ -28,7 +31,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for GenericTensorError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Facade(error) => Some(error),
+            Self::Facade(error) => std::error::Error::source(error),
             Self::Structure(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::TensorProduct(error) => Some(error),

@@ -74,7 +74,7 @@ impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericTensorProductErr
 impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericTensorProductError<E> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Provider(error) => error.fmt(formatter),
+            Self::Provider(_) => formatter.write_str("fusion provider failed"),
             Self::SymbolShape {
                 symbol,
                 expected,
@@ -83,8 +83,8 @@ impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericTensorProductEr
                 formatter,
                 "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"
             ),
-            Self::Core(error) => error.fmt(formatter),
-            Self::Operation(error) => error.fmt(formatter),
+            Self::Core(_) => formatter.write_str("invalid tensor structure"),
+            Self::Operation(_) => formatter.write_str("tensor operation failed"),
         }
     }
 }

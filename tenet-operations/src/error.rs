@@ -145,7 +145,9 @@ impl fmt::Display for OperationError {
         match self {
             Self::Core(err) => err.fmt(f),
             Self::Dense(err) => err.fmt(f),
-            Self::FusionAlgebra(err) => err.fmt(f),
+            Self::FusionAlgebra(_) => f.write_str(
+                "the fusion algebra cannot represent the requested dual or fusion output",
+            ),
             Self::BlockIndexOutOfBounds {
                 tensor,
                 index,

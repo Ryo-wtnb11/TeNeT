@@ -513,7 +513,7 @@ fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
                 (input.lq_full(&[0], &[1]).map(drop).unwrap_err(), "lq"),
             ] {
                 let expected = format!("{family} input components must be finite");
-                assert!(error.to_string().contains(&expected), "{error}");
+                assert!(report(&error).contains(&expected), "{error}");
             }
         }
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
@@ -849,9 +849,7 @@ fn compact_diagonal_polar_refuses_nonfinite_and_is_direct_when_overflowing() {
                 input.right_polar(&[0], &[1]).map(drop).unwrap_err(),
             ] {
                 assert!(
-                    error
-                        .to_string()
-                        .contains("polar input components must be finite"),
+                    report(&error).contains("polar input components must be finite"),
                     "{error}"
                 );
             }

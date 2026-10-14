@@ -357,7 +357,7 @@ impl fmt::Display for FusionAlgebraError {
                 formatter,
                 "fusion rule dual is not injective: two sectors share the dual {dual:?}"
             ),
-            Self::ProductCodec(error) => error.fmt(formatter),
+            Self::ProductCodec(_) => formatter.write_str("product sector codec failed"),
             Self::MultiplicityOverflow {
                 left,
                 right,
@@ -530,7 +530,7 @@ pub enum PhysicalBasisError<Coefficient> {
 impl<Coefficient: fmt::Display> fmt::Display for PhysicalBasisError<Coefficient> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FusionAlgebra(error) => error.fmt(formatter),
+            Self::FusionAlgebra(_) => formatter.write_str("fusion algebra error"),
             Self::CarrierIndexOutOfBounds {
                 sector,
                 index,
@@ -549,7 +549,7 @@ impl<Coefficient: fmt::Display> fmt::Display for PhysicalBasisError<Coefficient>
                 formatter,
                 "fusion multiplicity index {multiplicity} is out of bounds for ({left:?}, {right:?}) -> {coupled:?} of dimension {dimension}"
             ),
-            Self::Coefficient(error) => error.fmt(formatter),
+            Self::Coefficient(_) => formatter.write_str("basis coefficient provider failed"),
         }
     }
 }

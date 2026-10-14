@@ -502,7 +502,7 @@ impl PlannedNetwork {
         &self,
         tensors: &[&TensorMap<R, D, S>],
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,
-    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
+    ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D, S>,
@@ -523,14 +523,14 @@ impl PlannedNetwork {
         tensors: &[&TensorMap<R, D, S>],
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,
         mut meter: Option<&mut PayloadMeter>,
-    ) -> std::result::Result<TensorMap<R, D, S>, MeteredNetworkError<HostNetworkError<R>>>
+    ) -> std::result::Result<TensorMap<R, D, S>, MeteredNetworkError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D, S>,
         D: TensorScalar,
         S: NetworkPayloadStorage<D>,
     {
-        let prepared: Result<_, HostNetworkError<R>> = (|| {
+        let prepared: Result<_, FacadeError<R>> = (|| {
             if tensors.len() != self.schedule.input_ranks.len() {
                 return Err(invalid(format!(
                     "plan has {} operands but {} tensors were given",
@@ -543,7 +543,7 @@ impl PlannedNetwork {
             let runtime = tensors
                 .first()
                 .ok_or_else(|| {
-                    HostNetworkError::<R>::from(invalid(
+                    FacadeError::<R>::from(invalid(
                         "network execution requires at least one operand",
                     ))
                 })?
@@ -595,7 +595,7 @@ impl PlannedNetwork {
                         Ok((*tensor).clone())
                     }
                 })
-                .collect::<Result<Vec<_>, HostNetworkError<R>>>()?;
+                .collect::<Result<Vec<_>, FacadeError<R>>>()?;
             let new_snapshot = if snapshot_matches {
                 None
             } else {
@@ -693,12 +693,12 @@ impl PlannedNetwork {
         let intermediates = &mut workspace.intermediates;
         for (step_index, step) in self.schedule.steps.iter().enumerate() {
             let retained_payloads = meter.as_ref().map(|_| intermediate_payloads(intermediates));
-            let lhs = slots[step.lhs_slot].as_ref().ok_or_else(|| {
-                HostNetworkError::<R>::from(invalid("lhs operand already consumed"))
-            })?;
-            let rhs = slots[step.rhs_slot].as_ref().ok_or_else(|| {
-                HostNetworkError::<R>::from(invalid("rhs operand already consumed"))
-            })?;
+            let lhs = slots[step.lhs_slot]
+                .as_ref()
+                .ok_or_else(|| FacadeError::<R>::from(invalid("lhs operand already consumed")))?;
+            let rhs = slots[step.rhs_slot]
+                .as_ref()
+                .ok_or_else(|| FacadeError::<R>::from(invalid("rhs operand already consumed")))?;
             let buffer = &mut intermediates[step_index].output;
             let spec = ContractSpec {
                 lhs: &step.lhs_contract_axes,
@@ -739,7 +739,7 @@ impl PlannedNetwork {
         }
         let result = slots[self.schedule.final_slot]
             .as_ref()
-            .ok_or_else(|| HostNetworkError::<R>::from(invalid("no final tensor produced")))?;
+            .ok_or_else(|| FacadeError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
             let output = <R::Mode as HostNetworkModeDispatch<R, D, S>>::permute_final(
                 result, codomain, domain,

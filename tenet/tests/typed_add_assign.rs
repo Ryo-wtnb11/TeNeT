@@ -6,6 +6,9 @@ use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;
+#[path = "support/report.rs"]
+mod report;
+use report::Report;
 
 #[global_allocator]
 static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
@@ -59,7 +62,7 @@ fn axpby_into_rejects_a_layout_mismatch_without_mutating_the_destination() {
     let mut destination = tensor(&runtime, 2, 2.0);
     let x = tensor(&runtime, 3, 3.0);
     let error = x.axpby_into(&mut destination, 1.0, 1.0).unwrap_err();
-    assert!(error.to_string().contains("different spaces"));
+    assert!(error.report().contains("different spaces"));
     assert_eq!(destination.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
 }
 

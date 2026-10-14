@@ -34,6 +34,9 @@
 //! multiplicity-free twist needs `Scalar = f64`). Fibonacci contract is
 //! anyonic and asserted as the unchanged `contract` rejection.
 
+#[path = "support/report.rs"]
+mod report;
+use report::report;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -825,14 +828,14 @@ where
                 }
                 (Ok(got), Err(rejection)) => {
                     assert!(
-                        format!("{rejection}").contains("requires Bosonic braiding"),
+                        report(&rejection).contains("requires Bosonic braiding"),
                         "{what}: only the U15 boundary may separate the storages: {rejection}"
                     );
                     assert_eq!(got.dense_data().is_err(), *compact, "{what}: storage form");
                     Some(image(&got))
                 }
                 (Err(got), Err(want)) => {
-                    assert_eq!(format!("{got}"), format!("{want}"), "{what}");
+                    assert_eq!(report(&got), report(&want), "{what}");
                     None
                 }
                 (Err(got), Ok(_)) => panic!("{what}: compact failed where dense did not: {got}"),
@@ -3126,20 +3129,22 @@ fn checked_trace_pairs_into_reports_the_same_error_cold_and_warm() {
         index.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let eager = source.trace_pairs(&[(0, 2)]).unwrap_err().to_string();
+    let eager = report(&source.trace_pairs(&[(0, 2)]).unwrap_err());
     let mut right = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 0.0).unwrap();
     let mut wrong =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 0.0).unwrap();
     let mut seen = Vec::new();
     for pass in ["cold", "warm"] {
-        let right_error = source
-            .trace_pairs_into(&[(0, 2)], &mut right, 1.0, 0.5)
-            .unwrap_err()
-            .to_string();
-        let wrong_error = source
-            .trace_pairs_into(&[(0, 2)], &mut wrong, 1.0, 0.5)
-            .unwrap_err()
-            .to_string();
+        let right_error = report(
+            &source
+                .trace_pairs_into(&[(0, 2)], &mut right, 1.0, 0.5)
+                .unwrap_err(),
+        );
+        let wrong_error = report(
+            &source
+                .trace_pairs_into(&[(0, 2)], &mut wrong, 1.0, 0.5)
+                .unwrap_err(),
+        );
         assert_eq!(right_error, eager, "{pass}");
         assert!(
             wrong_error.contains("does not match"),

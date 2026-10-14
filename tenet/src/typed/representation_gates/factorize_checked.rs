@@ -602,7 +602,7 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
             let error = result.unwrap_err();
             assert!(
                 error
-                    .to_string()
+                    .report()
                     .contains("svd input components must be finite"),
                 "{error}"
             );

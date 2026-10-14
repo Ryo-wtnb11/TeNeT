@@ -102,7 +102,7 @@ where
         alpha: D,
         y: impl Into<TensorRef<'a, R, D, S>>,
         beta: D,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let y = y.into().operand()?;
         Ok(self.axpby_checked(alpha, &y, beta)?)
     }
@@ -148,7 +148,7 @@ where
     /// materialization is cached. A zero factor gives exact zeros whatever
     /// `self` holds (TensorKit's `scale(x, 0)`); signed-zero bits are
     /// storage-local.
-    pub fn scale(&self, factor: D) -> Result<Self, TypedFacadeError<R>> {
+    pub fn scale(&self, factor: D) -> Result<Self, FacadeError<R>> {
         if let Some(spectrum) = self.spectrum() {
             return Ok(self.with_spectrum(
                 spectrum
@@ -232,7 +232,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         Ok(axpby_into_checked(self, destination, alpha, beta)?)
     }
 }
@@ -565,7 +565,7 @@ where
     /// drop(shared);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn scale_assign(&mut self, factor: D) -> Result<(), TypedFacadeError<R>> {
+    pub fn scale_assign(&mut self, factor: D) -> Result<(), FacadeError<R>> {
         let (body, factor) = match &mut self.repr {
             TypedTensorRepr::Owned(body) => (Arc::get_mut(body), factor),
             TypedTensorRepr::Adjoint(view) => (

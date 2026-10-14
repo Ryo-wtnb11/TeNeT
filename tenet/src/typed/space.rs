@@ -107,7 +107,7 @@ where
     ///
     /// Returns an error for duplicate labels or two labels with the same
     /// encoded id.
-    pub fn try_new<Pairs>(provider: Arc<R>, pairs: Pairs) -> Result<Self, TypedFacadeError<R>>
+    pub fn try_new<Pairs>(provider: Arc<R>, pairs: Pairs) -> Result<Self, FacadeError<R>>
     where
         Pairs: IntoIterator<Item = (R::Sector, usize)>,
     {
@@ -150,13 +150,13 @@ where
             encoded.iter().map(|(id, _, degeneracy)| (*id, *degeneracy)),
             false,
         )
-        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
+        .map_err(|error| FacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self { provider, leg })
     }
 
     /// Returns sector labels parallel to [`Self::degeneracies`] in stored id
     /// order, or the provider's decode error.
-    pub fn sectors(&self) -> Result<Vec<R::Sector>, TypedFacadeError<R>> {
+    pub fn sectors(&self) -> Result<Vec<R::Sector>, FacadeError<R>> {
         self.leg
             .sectors()
             .iter()
@@ -169,7 +169,7 @@ where
 
     /// Returns a sector's degeneracy, or zero when the provider can encode the
     /// label but the space does not contain it.
-    pub fn degeneracy(&self, sector: &R::Sector) -> Result<usize, TypedFacadeError<R>> {
+    pub fn degeneracy(&self, sector: &R::Sector) -> Result<usize, FacadeError<R>> {
         let id = TypedSectorAdmission::try_encode_label(self.provider.as_ref(), sector)
             .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
         Ok(self.leg.degeneracy(id).unwrap_or(0))
@@ -185,7 +185,7 @@ where
     /// # Errors
     ///
     /// Returns [`Error::InvalidArgument`] when two sectors have the same dual.
-    pub fn try_dual(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn try_dual(&self) -> Result<Self, FacadeError<R>> {
         let sectors = self
             .leg
             .sectors()
@@ -207,9 +207,8 @@ where
             ))
             .into());
         }
-        let leg = SectorLeg::try_new(sectors, !self.leg.is_dual()).map_err(|error| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
-        })?;
+        let leg = SectorLeg::try_new(sectors, !self.leg.is_dual())
+            .map_err(|error| FacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self {
             provider: Arc::clone(&self.provider),
             leg,
@@ -252,7 +251,7 @@ where
 {
     /// Returns the quantum-dimension-weighted total dimension
     /// `sum_c degeneracy(c) * quantum_dimension(c)` without integer rounding.
-    pub fn dim(&self) -> Result<f64, TypedFacadeError<R>> {
+    pub fn dim(&self) -> Result<f64, FacadeError<R>> {
         let mut total = 0.0;
         for (&sector, &degeneracy) in self.leg.sectors().iter().zip(self.leg.degeneracies()) {
             total += degeneracy as f64
@@ -263,13 +262,12 @@ where
 
     /// Returns the non-dual unit space: the provider's vacuum sector with
     /// degeneracy one and the same provider instance as this space.
-    pub fn unitspace(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn unitspace(&self) -> Result<Self, FacadeError<R>> {
         let vacuum = <R::Mode as TypedSpaceModeDispatch<R>>::vacuum(self.provider());
         TypedSectorAdmission::try_decode_label(self.provider(), vacuum)
             .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
-        let leg = SectorLeg::try_new([(vacuum, 1)], false).map_err(|error| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
-        })?;
+        let leg = SectorLeg::try_new([(vacuum, 1)], false)
+            .map_err(|error| FacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self {
             provider: Arc::clone(self.provider_arc()),
             leg,
@@ -286,13 +284,13 @@ where
     ///
     /// Returns [`Error::RuleMismatch`] when the provider identities differ, or
     /// [`Error::InvalidArgument`] if a degeneracy overflows.
-    pub fn fuse(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn fuse(&self, other: &Self) -> Result<Self, FacadeError<R>> {
         self.require_same_identity(other)?;
         let mut fused = std::collections::BTreeMap::<SectorId, usize>::new();
         for (left, left_deg) in self.leg.iter() {
             for (right, right_deg) in other.leg.iter() {
                 let pair_deg = left_deg.checked_mul(right_deg).ok_or_else(|| {
-                    TypedFacadeError::<R>::from(Error::InvalidArgument(
+                    FacadeError::<R>::from(Error::InvalidArgument(
                         "fuse: degeneracy multiplication overflow".into(),
                     ))
                 })?;
@@ -308,13 +306,13 @@ where
                         coupled,
                     )?;
                     let contribution = pair_deg.checked_mul(multiplicity).ok_or_else(|| {
-                        TypedFacadeError::<R>::from(Error::InvalidArgument(
+                        FacadeError::<R>::from(Error::InvalidArgument(
                             "fuse: degeneracy multiplication overflow".into(),
                         ))
                     })?;
                     let entry = fused.entry(coupled).or_insert(0);
                     *entry = entry.checked_add(contribution).ok_or_else(|| {
-                        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                        FacadeError::<R>::from(Error::InvalidArgument(format!(
                             "fuse: degeneracy overflow for sector {coupled:?}"
                         )))
                     })?;
@@ -326,9 +324,8 @@ where
             TypedSectorAdmission::try_decode_label(self.provider(), sector)
                 .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
         }
-        let leg = SectorLeg::try_new(fused, false).map_err(|error| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
-        })?;
+        let leg = SectorLeg::try_new(fused, false)
+            .map_err(|error| FacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self {
             provider: Arc::clone(self.provider_arc()),
             leg,
@@ -341,20 +338,20 @@ where
     /// Returns [`Error::RuleMismatch`] when the provider identities differ, or
     /// `SpaceMismatch` when the dual flags differ, or
     /// [`Error::InvalidArgument`] when a degeneracy overflows.
-    pub fn oplus(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn oplus(&self, other: &Self) -> Result<Self, FacadeError<R>> {
         self.require_same_identity(other)?;
-        let leg = oplus_sector_legs(&self.leg, &other.leg).map_err(TypedFacadeError::<R>::from)?;
+        let leg = oplus_sector_legs(&self.leg, &other.leg).map_err(FacadeError::<R>::from)?;
         Ok(Self {
             provider: Arc::clone(self.provider_arc()),
             leg,
         })
     }
 
-    fn require_same_identity(&self, other: &Self) -> Result<(), TypedFacadeError<R>> {
+    fn require_same_identity(&self, other: &Self) -> Result<(), FacadeError<R>> {
         if TypedSectorAdmission::typed_rule_identity(self.provider())
             != TypedSectorAdmission::typed_rule_identity(other.provider())
         {
-            return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+            return Err(FacadeError::<R>::from(Error::RuleMismatch));
         }
         Ok(())
     }
@@ -399,7 +396,7 @@ where
     pub fn extend_spectrum<V>(
         &self,
         spectra: &[SectorSpectrum<R::Sector, V>],
-    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, TypedFacadeError<R>>
+    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, FacadeError<R>>
     where
         V: SpectrumMagnitude,
     {
@@ -408,7 +405,7 @@ where
             let sector = TypedSectorAdmission::try_encode_label(self.provider(), &entry.sector)
                 .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
             let degeneracy = self.leg.degeneracy(sector).ok_or_else(|| {
-                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                FacadeError::<R>::from(Error::InvalidArgument(format!(
                     "sector {:?} is absent from the extended leg",
                     entry.sector
                 )))
@@ -537,7 +534,7 @@ where
         &self,
         spectra: &[SectorSpectrum<R::Sector, V>],
         truncation: &Truncation,
-    ) -> Result<TruncatedSelection<R>, TypedFacadeError<R>>
+    ) -> Result<TruncatedSelection<R>, FacadeError<R>>
     where
         V: SpectrumMagnitude,
     {
@@ -554,7 +551,7 @@ where
             let sector = TypedSectorAdmission::try_encode_label(self.provider(), &entry.sector)
                 .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
             let degeneracy = self.leg.degeneracy(sector).ok_or_else(|| {
-                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                FacadeError::<R>::from(Error::InvalidArgument(format!(
                     "sector {:?} is absent from the truncated leg",
                     entry.sector
                 )))
@@ -755,10 +752,7 @@ where
     /// position, its positions are not strictly increasing, a sector is
     /// absent from `parent`, or a position is not below that sector's
     /// degeneracy.
-    pub fn try_new<Pairs, P>(
-        parent: &GradedSpace<R>,
-        pairs: Pairs,
-    ) -> Result<Self, TypedFacadeError<R>>
+    pub fn try_new<Pairs, P>(parent: &GradedSpace<R>, pairs: Pairs) -> Result<Self, FacadeError<R>>
     where
         Pairs: IntoIterator<Item = (R::Sector, P)>,
         P: IntoIterator<Item = usize>,
@@ -788,7 +782,7 @@ where
             let id = TypedSectorAdmission::try_encode_label(parent.provider(), &label)
                 .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
             let degeneracy = parent.leg().degeneracy(id).ok_or_else(|| {
-                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                FacadeError::<R>::from(Error::InvalidArgument(format!(
                     "sector {label:?} is absent from the selected leg"
                 )))
             })?;
@@ -845,7 +839,7 @@ where
     fn from_runs(
         parent: &GradedSpace<R>,
         entries: Vec<(SectorId, tenet_tensors::SelectedRuns)>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         // The subspace is built on the parent's own dual flag and stored ids:
         // going through `GradedSpace::try_new` + `try_dual` would dualise the
         // labels and name a different leg.
@@ -855,7 +849,7 @@ where
                 .map(|(id, runs)| (*id, runs.iter().map(ExactSizeIterator::len).sum())),
             parent.is_dual(),
         )
-        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
+        .map_err(|error| FacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self {
             parent: parent.clone(),
             subspace: GradedSpace {
@@ -882,7 +876,7 @@ where
     ///
     /// [`Error::InvalidArgument`] when `sector` is absent from the parent
     /// leg; provider label-encoding failures are returned unchanged.
-    pub fn positions(&self, sector: &R::Sector) -> Result<Vec<usize>, TypedFacadeError<R>> {
+    pub fn positions(&self, sector: &R::Sector) -> Result<Vec<usize>, FacadeError<R>> {
         let id = TypedSectorAdmission::try_encode_label(self.parent.provider(), sector)
             .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
         if self.parent.leg().degeneracy(id).is_none() {
@@ -907,7 +901,7 @@ pub(super) fn require_selected_leg_of<R>(
     axis: usize,
     expected: &GradedSpace<R>,
     operation: &str,
-) -> Result<(), TypedFacadeError<R>>
+) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -945,7 +939,7 @@ where
 pub(super) fn space_with_replaced_legs<'a, R>(
     space: &BoundDynamicFusionMapSpace<R>,
     replacement: impl Fn(usize) -> Option<&'a SectorLeg>,
-) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -988,7 +982,7 @@ pub(super) fn restriction_runs<'a, R>(
 pub(super) fn require_restriction_set<R>(
     space: &BoundDynamicFusionMapSpace<R>,
     legs: &[(usize, &LegSelection<R>)],
-) -> Result<(), TypedFacadeError<R>>
+) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -1017,7 +1011,7 @@ where
 pub(super) fn restricted_space<R>(
     space: &BoundDynamicFusionMapSpace<R>,
     legs: &[(usize, &LegSelection<R>)],
-) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,

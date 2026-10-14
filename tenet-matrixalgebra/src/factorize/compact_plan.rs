@@ -175,8 +175,8 @@ impl<E> From<DenseError> for CheckedGenericFactorPlanError<E> {
 impl<E: fmt::Display> fmt::Display for CheckedGenericFactorPlanError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Provider(error) => error.fmt(f),
-            Self::Operation(error) => error.fmt(f),
+            Self::Provider(_) => f.write_str("fusion provider failed"),
+            Self::Operation(_) => f.write_str("tensor operation failed"),
         }
     }
 }

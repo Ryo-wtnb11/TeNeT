@@ -37,6 +37,9 @@ mod support {
     use num_complex::{Complex32, Complex64};
     pub mod numerics;
 }
+#[path = "support/report.rs"]
+mod report;
+use report::Report;
 use support::numerics;
 #[macro_use]
 mod contract_cases;
@@ -618,8 +621,8 @@ fn rejections_happen_before_any_device_work_and_match_the_host() {
     let (errors, counters) = delta(|| {
         let mut errors = Vec::new();
         for spec in malformed_rank_five_specs() {
-            let expected = host_lhs.contract(host_rhs, &spec).unwrap_err().to_string();
-            let actual = lhs.contract(&rhs, &spec).unwrap_err().to_string();
+            let expected = host_lhs.contract(host_rhs, &spec).unwrap_err().report();
+            let actual = lhs.contract(&rhs, &spec).unwrap_err().report();
             assert_eq!(actual, expected, "device error text must be the Host's");
             errors.push(actual);
         }
@@ -951,11 +954,11 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         let expected = host_lhs
             .contract_into(host_rhs, &spec, &mut host_destination, 1.0, 0.0)
             .unwrap_err()
-            .to_string();
+            .report();
         let (actual, counters) = delta(|| {
             lhs.contract_into(&rhs, &spec, &mut destination, 1.0, 0.0)
                 .unwrap_err()
-                .to_string()
+                .report()
         });
         assert_eq!(actual, device_text(expected), "{spec:?}");
         assert_eq!(counters, CudaTransferStats::default(), "{actual}");

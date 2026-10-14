@@ -97,16 +97,16 @@ where
         &self,
         other: impl Into<TensorRef<'a, R, D>>,
         side: Side,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         let lhs_space = self.logical_space().space();
         let rhs_space = other.logical_space().space();
         if lhs_space.admission().rule_identity() != rhs_space.admission().rule_identity() {
-            return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+            return Err(FacadeError::<R>::from(Error::RuleMismatch));
         }
         if !self.runtime.same_runtime(&other.runtime) {
-            return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
+            return Err(FacadeError::<R>::from(Error::RuntimeMismatch));
         }
         let lhs = lhs_space.homspace();
         let rhs = rhs_space.homspace();
@@ -118,13 +118,13 @@ where
             rhs.domain(),
             side,
         )
-        .map_err(TypedFacadeError::<R>::from)?;
+        .map_err(FacadeError::<R>::from)?;
         let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
             Arc::clone(self.logical_space().provider_arc()),
             homspace,
         )?;
-        let (lhs_layout, lhs_data) = self.cat_operand().map_err(TypedFacadeError::<R>::from)?;
-        let (rhs_layout, rhs_data) = other.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+        let (lhs_layout, lhs_data) = self.cat_operand().map_err(FacadeError::<R>::from)?;
+        let (rhs_layout, rhs_data) = other.cat_operand().map_err(FacadeError::<R>::from)?;
         let data = if let Some(plan) = compile_cat_plan(
             space.space().structure(),
             space.space().nout(),
@@ -132,10 +132,10 @@ where
             axis,
             side,
         )
-        .map_err(TypedFacadeError::<R>::from)?
+        .map_err(FacadeError::<R>::from)?
         {
             plan.execute([lhs_data, rhs_data])
-                .map_err(TypedFacadeError::<R>::from)?
+                .map_err(FacadeError::<R>::from)?
         } else {
             // Why not recurse through `cat`: output admission has succeeded,
             // so retry only the local copy plan and never query the provider
@@ -144,25 +144,25 @@ where
             // after the output layout is admitted.
             other
                 .refuse_borrowed_view("cat")
-                .map_err(TypedFacadeError::<R>::from)?;
+                .map_err(FacadeError::<R>::from)?;
             // Only a lazy adjoint needs a logical payload; an owned operand
             // retains its borrowed dense or compact source.
             let lhs_local = self
                 .adjoint_logical_for_cat()
-                .map_err(TypedFacadeError::<R>::from)?;
+                .map_err(FacadeError::<R>::from)?;
             let rhs_local = other
                 .adjoint_logical_for_cat()
-                .map_err(TypedFacadeError::<R>::from)?;
+                .map_err(FacadeError::<R>::from)?;
             let (lhs_layout, lhs_data) = match &lhs_local {
                 Some(local) => local.cat_operand(),
                 None => self.owned_cat_layout().map(|layout| (layout, lhs_data)),
             }
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
             let (rhs_layout, rhs_data) = match &rhs_local {
                 Some(local) => local.cat_operand(),
                 None => other.owned_cat_layout().map(|layout| (layout, rhs_data)),
             }
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
             let plan = compile_cat_plan(
                 space.space().structure(),
                 space.space().nout(),
@@ -170,14 +170,14 @@ where
                 axis,
                 side,
             )
-            .map_err(TypedFacadeError::<R>::from)?
+            .map_err(FacadeError::<R>::from)?
             .ok_or_else(|| {
-                TypedFacadeError::<R>::from(internal_layout_error(
+                FacadeError::<R>::from(internal_layout_error(
                     "owned cat operands did not produce a copy plan",
                 ))
             })?;
             plan.execute([lhs_data, rhs_data])
-                .map_err(TypedFacadeError::<R>::from)?
+                .map_err(FacadeError::<R>::from)?
         };
         Ok(Self {
             runtime: self.runtime.clone(),

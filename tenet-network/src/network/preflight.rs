@@ -4,7 +4,7 @@ use super::*;
 /// every lowering and preflight; `None` for no operand.
 pub(super) fn typed_operand_identity<R, D, S>(
     tensors: &[&TensorMap<R, D, S>],
-) -> Result<Option<RuleIdentity>, HostNetworkError<R>>
+) -> Result<Option<RuleIdentity>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -49,7 +49,7 @@ pub(super) fn network_operand_preflight<R, D, S, L, C>(
     conj: &[bool],
     splits: &[Option<usize>],
     contracted: &[C],
-) -> Result<(), HostNetworkError<R>>
+) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -115,9 +115,9 @@ where
             axis
         };
         let stored = __network::network_source_leg(tensor, source).ok_or_else(|| {
-            HostNetworkError::<R>::from(invalid(format!("operand {operand} has no leg")))
+            FacadeError::<R>::from(invalid(format!("operand {operand} has no leg")))
         })?;
-        Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
+        Ok::<_, FacadeError<R>>((stored, (source >= codomain_rank) != adjoint))
     };
     // The cross-check of the pairing in debug builds: the partner a scan over
     // the earlier axes finds.
@@ -173,7 +173,7 @@ pub(super) fn legs_contract<R>(
     provider: &R,
     (lhs, lhs_dualised): (&SectorLeg, bool),
     (rhs, rhs_dualised): (&SectorLeg, bool),
-) -> Result<bool, HostNetworkError<R>>
+) -> Result<bool, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -190,11 +190,7 @@ where
 /// dual injective on `from`, so its image fills `into` exactly; a provider
 /// whose dual is not an involution is rejected with the error
 /// `GradedSpace::try_dual` raises for a non-injective dual, not accepted.
-fn is_dual_of<R>(
-    provider: &R,
-    from: &SectorLeg,
-    into: &SectorLeg,
-) -> Result<bool, HostNetworkError<R>>
+fn is_dual_of<R>(provider: &R, from: &SectorLeg, into: &SectorLeg) -> Result<bool, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -230,7 +226,7 @@ where
 pub(super) fn reject_non_symmetric_network<R, D, S>(
     tensors: &[&TensorMap<R, D, S>],
     contracts: bool,
-) -> Result<(), HostNetworkError<R>>
+) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D, S>,
@@ -242,13 +238,13 @@ where
     };
     let braiding = <R::Mode as HostNetworkModeDispatch<R, D, S>>::braiding_style(first.provider());
     tenet::typed::reject_non_symmetric_contraction(braiding)
-        .map_err(|error| HostNetworkError::<R>::from(Error::from(error)))
+        .map_err(|error| FacadeError::<R>::from(Error::from(error)))
 }
 
 pub(super) fn validate_typed_contracted_pairs<R, D, S>(
     tensors: &[TensorMap<R, D, S>],
     pairs: &[InputLegPair],
-) -> Result<(), HostNetworkError<R>>
+) -> Result<(), FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D, S>,
@@ -272,7 +268,7 @@ where
 
 fn typed_flat_spaces<R, D, S>(
     tensor: &TensorMap<R, D, S>,
-) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
+) -> Result<Vec<GradedSpace<R>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -293,7 +289,7 @@ where
 pub(super) fn typed_effective_spaces<R, D, S>(
     tensor: &TensorMap<R, D, S>,
     adjoint: bool,
-) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
+) -> Result<Vec<GradedSpace<R>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,

@@ -355,7 +355,7 @@ mod generic_error;
 pub use generic_error::GenericTensorError;
 mod dispatch;
 pub use dispatch::{
-    BondOutput, BondTransform, TypedAdjointSpace, TypedSpaceModeDispatch,
+    BondOutput, BondTransform, FacadeError, TypedAdjointSpace, TypedSpaceModeDispatch,
     TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorFlipDispatch,
     TypedTensorModeDispatch, TypedTensorProductDispatch, TypedTensorRootDispatch,
     TypedTensorTraceDispatch, TypedTensorTransformDispatch, TypedTensorTwistDispatch,
@@ -369,7 +369,6 @@ pub use factorize::FusionMode;
 mod checked_generic_contract;
 mod mode_dispatch;
 use checked_generic_contract::write_identity_blocks_generic;
-pub(crate) use checked_generic_contract::TypedFacadeError;
 #[doc(hidden)]
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;

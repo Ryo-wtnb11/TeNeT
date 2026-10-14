@@ -43,7 +43,7 @@ use crate::sector::{
     CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec, TypedSectorAdmission,
 };
 use crate::typed::{
-    Error, SectorSpectrum, TensorMap, TensorScalar, TypedFacadeError, TypedTensorRootDispatch,
+    Error, FacadeError, SectorSpectrum, TensorMap, TensorScalar, TypedTensorRootDispatch,
 };
 
 /// Returns the compact diagonal spectrum without materializing dense data.
@@ -57,7 +57,7 @@ use crate::typed::{
 )]
 pub fn diagonal_spectrum<R, D>(
     tensor: &TensorMap<R, D>,
-) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>>
+) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,

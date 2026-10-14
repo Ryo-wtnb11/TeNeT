@@ -36,9 +36,9 @@ use tenet_tensors::{FusionOperand, OperationError};
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};
 use super::{
     owned_repr, require_restriction_set, restricted_space, restriction_runs,
-    BoundDynamicFusionMapSpace, ExecToken, FactorExec, FactorizationScalar, LegSelection, Runtime,
-    SectorSpectrum, TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission,
-    TypedTensorBody, TypedTensorRepr, TypedTensorRootDispatch, EXEC,
+    BoundDynamicFusionMapSpace, ExecToken, FacadeError, FactorExec, FactorizationScalar,
+    LegSelection, Runtime, SectorSpectrum, TensorMap, TensorScalar, TypedData,
+    TypedSectorAdmission, TypedTensorBody, TypedTensorRepr, TypedTensorRootDispatch, EXEC,
 };
 use crate::error::Error;
 use crate::runtime::RuntimeIdentity;
@@ -471,10 +471,7 @@ where
     /// other than [`LegSelection::parent`] is an [`Error::InvalidArgument`],
     /// a selection of another rule is [`Error::RuleMismatch`]. Nothing is
     /// allocated before every check.
-    pub fn restrict_leg(
-        &self,
-        legs: &[(usize, &LegSelection<R>)],
-    ) -> Result<Self, TypedFacadeError<R>>
+    pub fn restrict_leg(&self, legs: &[(usize, &LegSelection<R>)]) -> Result<Self, FacadeError<R>>
     where
         R::Mode: TypedTensorRootDispatch<R>,
     {
@@ -665,10 +662,11 @@ impl std::fmt::Display for BatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MemberRejected { members } => write!(f, "batch members rejected: {members:?}"),
-            Self::Solver { block, source } => {
-                write!(f, "solver failed on coupled-sector block {block}: {source}")
+            Self::Solver { block, .. } => {
+                write!(f, "solver failed on coupled-sector block {block}")
             }
-            Self::Operation(error) => write!(f, "{error}"),
+            // Transparent: the eager operation's own error, reported as is.
+            Self::Operation(error) => error.fmt(f),
         }
     }
 }
@@ -677,7 +675,8 @@ impl std::error::Error for BatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MemberRejected { .. } => None,
-            Self::Solver { source, .. } | Self::Operation(source) => Some(source),
+            Self::Solver { source, .. } => Some(source),
+            Self::Operation(error) => std::error::Error::source(error),
         }
     }
 }

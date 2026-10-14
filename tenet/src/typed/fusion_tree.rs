@@ -207,18 +207,18 @@ where
     /// The codomain fusion trees in row order, each with its row range.
     ///
     /// Decodes labels and allocates the returned list; reads no payload.
-    pub fn row_trees(&self) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
+    pub fn row_trees(&self) -> Result<TreeExtents<R::Sector>, FacadeError<R>> {
         self.trees(false)
     }
 
     /// The domain fusion trees in column order, each with its column range.
     ///
     /// Decodes labels and allocates the returned list; reads no payload.
-    pub fn col_trees(&self) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
+    pub fn col_trees(&self) -> Result<TreeExtents<R::Sector>, FacadeError<R>> {
         self.trees(true)
     }
 
-    fn trees(&self, columns: bool) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
+    fn trees(&self, columns: bool) -> Result<TreeExtents<R::Sector>, FacadeError<R>> {
         let Some((regions, index, swapped)) = &self.region else {
             return Ok(Vec::new());
         };
@@ -279,7 +279,7 @@ where
 pub(super) fn decode_sectors<R>(
     provider: &R,
     ids: &[tenet_core::SectorId],
-) -> Result<Vec<R::Sector>, TypedFacadeError<R>>
+) -> Result<Vec<R::Sector>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -300,13 +300,13 @@ where
 pub(super) fn decode_block_fusion_trees<R>(
     provider: &R,
     key: &BlockKey,
-) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>>
+) -> Result<BlockFusionTrees<R::Sector>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
 {
     let pair = key.as_fusion_tree_pair().ok_or_else(|| {
-        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+        FacadeError::<R>::from(Error::InvalidArgument(format!(
             "block key is {}, not a fusion-tree pair",
             key.kind()
         )))

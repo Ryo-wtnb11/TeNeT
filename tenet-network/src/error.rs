@@ -308,9 +308,9 @@ impl std::error::Error for SliceError {}
 impl<E: Display> Display for SymmetricSliceLowerError<E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tensor(error) => write!(f, "typed network lowering failed: {error}"),
-            Self::InvalidPlan(error) => write!(f, "invalid sliced contraction plan: {error}"),
-            Self::InvalidSlice(error) => write!(f, "invalid symmetric slice: {error}"),
+            Self::Tensor(_) => f.write_str("typed network lowering failed"),
+            Self::InvalidPlan(_) => f.write_str("invalid sliced contraction plan"),
+            Self::InvalidSlice(_) => f.write_str("invalid symmetric slice"),
             Self::RuleMismatch { expected, actual } => write!(
                 f,
                 "symmetric slice rule mismatch: expected {expected:?}, got {actual:?}"
@@ -351,8 +351,8 @@ where
 impl<E: Display> Display for SymmetricSliceExecutionError<E> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Bind(error) => write!(formatter, "symmetric slice binding failed: {error}"),
-            Self::Tensor(error) => write!(formatter, "symmetric slice execution failed: {error}"),
+            Self::Bind(_) => formatter.write_str("symmetric slice binding failed"),
+            Self::Tensor(_) => formatter.write_str("symmetric slice execution failed"),
             Self::WorkspaceLimitExceeded { limit, required } => write!(
                 formatter,
                 "symmetric sliced execution observed {required} network-owned payload bytes, measured ceiling is {limit}"
@@ -364,4 +364,15 @@ impl<E: Display> Display for SymmetricSliceExecutionError<E> {
     }
 }
 
-impl<E> std::error::Error for SymmetricSliceExecutionError<E> where E: std::error::Error + 'static {}
+impl<E> std::error::Error for SymmetricSliceExecutionError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Bind(error) => Some(error),
+            Self::Tensor(error) => Some(error),
+            Self::WorkspaceLimitExceeded { .. } | Self::WorkspaceArithmeticOverflow => None,
+        }
+    }
+}

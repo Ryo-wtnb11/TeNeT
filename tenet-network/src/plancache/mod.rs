@@ -45,7 +45,7 @@ pub use config::{
 
 use crate::labels::TemporaryLabel;
 use crate::network::{
-    HostNetworkError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    FacadeError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
 };
 use crate::optimizer::GreedyDenseOptimizer;
 use tenet::typed::__network::{self, NetworkPayloadStorage};
@@ -465,7 +465,7 @@ impl CachedPlan {
     pub(crate) fn execute<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
-    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
+    ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission + Send + Sync,
         R::Mode: HostNetworkModeDispatch<R, D, S>,
@@ -485,8 +485,8 @@ impl CachedPlan {
             &PlannedNetwork,
             &[&TensorMap<R, D, S>],
             &mut NetworkExecutionWorkspace<R, D, S>,
-        ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>,
-    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
+        ) -> Result<TensorMap<R, D, S>, FacadeError<R>>,
+    ) -> Result<TensorMap<R, D, S>, FacadeError<R>>
     where
         R: TypedSectorAdmission + Send + Sync,
         R::Mode: HostNetworkModeDispatch<R, D, S>,
@@ -615,7 +615,7 @@ pub(crate) fn get_or_plan_network<R, D, S>(
     network: &Network,
     tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Result<CachedPlan, HostNetworkError<R>>
+) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -630,37 +630,35 @@ where
     };
     let topology_optimizer = topology_optimizer(optimizer);
     let key = network_alias_hash(network, &topology_optimizer);
-    let lookup = with_plan_cache(
-        runtime,
-        |config, slot| -> Result<Lookup, HostNetworkError<R>> {
-            if !config.enabled {
-                return Ok(Lookup::Disabled);
-            }
-            let Some(cache) = existing_cache_mut(slot) else {
-                return Ok(Lookup::Miss);
-            };
-            let Some(aliases) = cache.network_aliases.peek(&key) else {
-                return Ok(Lookup::Miss);
-            };
-            let Some(alias) = aliases.iter().find(|alias| {
-                topology_matches(&alias.topology, network, tensors, &topology_optimizer)
-            }) else {
-                return Ok(Lookup::Miss);
-            };
-            if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-                return Ok(Lookup::Miss);
-            }
-            let Some(cached) = alias.cached() else {
-                return Ok(Lookup::Miss);
-            };
-            let topology = alias.topology.clone();
-            cache.network_aliases.promote(&key);
-            Ok(match promote_if_resident(cache, &topology, cached) {
-                Some(cached) => Lookup::Hit(cached),
-                None => Lookup::Miss,
-            })
-        },
-    )?;
+    let lookup = with_plan_cache(runtime, |config, slot| -> Result<Lookup, FacadeError<R>> {
+        if !config.enabled {
+            return Ok(Lookup::Disabled);
+        }
+        let Some(cache) = existing_cache_mut(slot) else {
+            return Ok(Lookup::Miss);
+        };
+        let Some(aliases) = cache.network_aliases.peek(&key) else {
+            return Ok(Lookup::Miss);
+        };
+        let Some(alias) = aliases
+            .iter()
+            .find(|alias| topology_matches(&alias.topology, network, tensors, &topology_optimizer))
+        else {
+            return Ok(Lookup::Miss);
+        };
+        if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
+            return Ok(Lookup::Miss);
+        }
+        let Some(cached) = alias.cached() else {
+            return Ok(Lookup::Miss);
+        };
+        let topology = alias.topology.clone();
+        cache.network_aliases.promote(&key);
+        Ok(match promote_if_resident(cache, &topology, cached) {
+            Some(cached) => Lookup::Hit(cached),
+            None => Lookup::Miss,
+        })
+    })?;
     match lookup {
         Lookup::Hit(cached) => return Ok(cached),
         Lookup::Disabled => return plan_uncached(network, tensors, optimizer),
@@ -1077,7 +1075,7 @@ fn needs_replan_tensors<R, D, S>(
     policy: ReplanPolicy,
     snapshot: &[Vec<usize>],
     tensors: &[&TensorMap<R, D, S>],
-) -> Result<bool, HostNetworkError<R>>
+) -> Result<bool, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -1168,7 +1166,7 @@ fn plan_fresh<R, D, S>(
     network: &Network,
     tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Result<PlannedNetwork, HostNetworkError<R>>
+) -> Result<PlannedNetwork, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -1277,7 +1275,7 @@ fn plan_uncached<R, D, S>(
     network: &Network,
     tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Result<CachedPlan, HostNetworkError<R>>
+) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -1306,7 +1304,7 @@ fn plan_through_topology<R, D, S>(
         &CachedPlan,
         NonZeroUsize,
     ),
-) -> Result<CachedPlan, HostNetworkError<R>>
+) -> Result<CachedPlan, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
@@ -1328,31 +1326,28 @@ where
         Replan,
         Miss,
     }
-    let outcome = with_plan_cache(
-        runtime,
-        |config, slot| -> Result<Outcome, HostNetworkError<R>> {
-            let Some(cache) = existing_cache_mut(slot) else {
-                return Ok(Outcome::Miss);
-            };
-            // `peek` inspects without touching LRU order, so a stale entry that will
-            // be replanned does not count as a use; a genuine hit is promoted to
-            // most-recently-used with an O(1) `promote`.
-            match cache.map.peek(&topology) {
-                Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
-                    let planned = CachedPlan {
-                        planned: Arc::clone(&entry.planned),
-                        workspaces: Arc::clone(&entry.workspaces),
-                    };
-                    let snapshot = entry.dims_snapshot.clone();
-                    cache.hits += 1;
-                    cache.map.promote(&topology);
-                    Ok(Outcome::Hit(planned, snapshot))
-                }
-                Some(_) => Ok(Outcome::Replan),
-                None => Ok(Outcome::Miss),
+    let outcome = with_plan_cache(runtime, |config, slot| -> Result<Outcome, FacadeError<R>> {
+        let Some(cache) = existing_cache_mut(slot) else {
+            return Ok(Outcome::Miss);
+        };
+        // `peek` inspects without touching LRU order, so a stale entry that will
+        // be replanned does not count as a use; a genuine hit is promoted to
+        // most-recently-used with an O(1) `promote`.
+        match cache.map.peek(&topology) {
+            Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                let planned = CachedPlan {
+                    planned: Arc::clone(&entry.planned),
+                    workspaces: Arc::clone(&entry.workspaces),
+                };
+                let snapshot = entry.dims_snapshot.clone();
+                cache.hits += 1;
+                cache.map.promote(&topology);
+                Ok(Outcome::Hit(planned, snapshot))
             }
-        },
-    )?;
+            Some(_) => Ok(Outcome::Replan),
+            None => Ok(Outcome::Miss),
+        }
+    })?;
     if let Outcome::Hit(planned, snapshot) = outcome {
         with_plan_cache(runtime, |config, slot| {
             install_alias(
@@ -1404,7 +1399,7 @@ where
     };
     let winner = with_plan_cache(
         runtime,
-        |config, slot| -> Result<CachedPlan, HostNetworkError<R>> {
+        |config, slot| -> Result<CachedPlan, FacadeError<R>> {
             let cache = cache_mut(slot, config.workspace_budget_bytes);
             if !config.enabled {
                 candidate.workspaces.deactivate_all();

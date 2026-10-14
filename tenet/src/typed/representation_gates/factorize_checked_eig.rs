@@ -246,7 +246,7 @@ fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_direct
         .unwrap_err();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(compact_error
-        .to_string()
+        .report()
         .contains("eigh input components must be finite"));
 }
 
@@ -1465,7 +1465,7 @@ fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_direct
         .unwrap_err();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(compact_error
-        .to_string()
+        .report()
         .contains("eigh input components must be finite"));
 }
 
