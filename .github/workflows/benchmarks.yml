@@ -69,11 +69,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --locked --release -p tenet-operations --lib -- --ignored --exact transform_replay::member::tests::member_batch_measurement --nocapture
         working-directory: tenet
-        # Why not plain release: sibling unit tests call the debug-only
-        # `take_checked_block_passes` probe, so the lib test target only
-        # compiles with debug assertions on.
-        env:
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
       - name: checked-Generic public transform measurement (racah-generated)
         if: ${{ !cancelled() }}
         run: cargo test --locked --release -p tenet-rs --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture

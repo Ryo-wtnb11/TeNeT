@@ -61,11 +61,11 @@ pub mod transform_structure;
 mod tree_profile;
 
 pub use axis::*;
-#[cfg(debug_assertions)]
 #[doc(hidden)]
-pub use checked_block_layout::take_checked_block_passes;
+pub use checked_block_layout::CheckedBlockLayout;
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub use checked_block_layout::{CheckedBlockLayout, CheckedBlockPasses};
+pub use checked_block_layout::{take_checked_block_passes, CheckedBlockPasses};
 #[cfg(feature = "cuda")]
 pub use cuda_transform::{
     CudaTreeTransformDestination, CudaTreeTransformExecutor, DEFAULT_COEFFICIENT_BUDGET_BYTES,
@@ -118,7 +118,7 @@ mod owned_blocks;
 mod owned_cat;
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use owned_blocks::take_owned_block_prefills;
 #[doc(hidden)]

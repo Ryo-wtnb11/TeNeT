@@ -20,7 +20,9 @@
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
+#[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Mutex;
 
 use strided_kernel::{with_execution_policy, ExecutionPolicy};
@@ -157,6 +159,7 @@ pub enum HostPoolSite {
 }
 
 /// One observation of the pool a Host parallel site ran in.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostPoolObservation {
@@ -168,30 +171,43 @@ pub struct HostPoolObservation {
     pub worker_pool_threads: Option<usize>,
 }
 
+#[cfg(any(test, feature = "testing"))]
 static OBSERVING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(test, feature = "testing"))]
 static OBSERVATIONS: Mutex<Vec<HostPoolObservation>> = Mutex::new(Vec::new());
 
 /// Test hook: starts or stops recording [`HostPoolObservation`]s. Off by
-/// default; when off a site pays one relaxed atomic load.
+/// default; when off a site pays one relaxed atomic load. Only test builds
+/// (`cfg(test)` or the `testing` feature) record; others compile the sites
+/// to nothing.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn observe_host_pools(enabled: bool) {
     OBSERVING.store(enabled, Ordering::Relaxed);
 }
 
 /// Test hook: drains the recorded observations.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn take_host_pool_observations() -> Vec<HostPoolObservation> {
     std::mem::take(&mut *OBSERVATIONS.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 /// Records where a dense linear-algebra scope body runs (it is installed by
-/// Tenferro, not by [`install_region`]).
+/// Tenferro, not by [`install_region`]). A no-op outside test builds; it
+/// stays callable there because production dense stages call it.
 #[doc(hidden)]
+#[inline]
 pub fn observe_dense_site() {
-    let pool = current_pool();
-    observe(HostPoolSite::Dense, pool.as_ref());
+    #[cfg(any(test, feature = "testing"))]
+    observe(HostPoolSite::Dense, current_pool().as_ref());
 }
 
+#[cfg(not(any(test, feature = "testing")))]
+#[inline(always)]
+fn observe(_site: HostPoolSite, _pool: Option<&SharedCpuContext>) {}
+
+#[cfg(any(test, feature = "testing"))]
 fn observe(site: HostPoolSite, pool: Option<&SharedCpuContext>) {
     if !OBSERVING.load(Ordering::Relaxed) {
         return;
