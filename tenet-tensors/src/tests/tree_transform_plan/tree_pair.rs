@@ -51,7 +51,15 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
             .unwrap();
-    permute_into(&SU2FusionRule, [1], [0], &mut dst, &src, 3.0, 5.0).unwrap();
+    eager_tree_transform_into(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([1], [0]),
+        &mut dst,
+        &src,
+        3.0,
+        5.0,
+    )
+    .unwrap();
 
     assert_eq!(dst.structure().block(0).unwrap().key(), &expected_dst_key);
     assert!((dst.data()[0] - 31.0).abs() < 1.0e-12);
@@ -86,7 +94,7 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
     .unwrap();
     let operation = TreeTransformOperation::permute([1], [0]);
 
-    tree_transform_into(
+    eager_tree_transform_into(
         &SU2FusionRule,
         operation,
         &mut dst,
@@ -356,7 +364,7 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
         TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
             .unwrap();
 
-    tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
+    eager_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
 
     assert_eq!(dst.structure().block(0).unwrap().key(), &dst_key);
     assert_eq!(dst.data(), &[3.0 * coefficient * 7.0 + 5.0 * 2.0]);
@@ -392,7 +400,7 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
         TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, wrong_dst_structure)
             .unwrap();
 
-    let err = tree_transform_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
+    let err = uncached_tree_pair_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
 
     assert_eq!(
         err,
@@ -680,7 +688,7 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
         TensorMap::<f64, 9, 0>::from_vec_with_structure(vec![0.0; 3], space, structure).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -690,7 +698,7 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
         0.0,
     )
     .unwrap();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &oracle_compiled,
@@ -811,7 +819,7 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
     let mut legacy_backend = DenseTreeTransformOperations::default();
     let mut direct_workspace = TreeTransformWorkspace::default();
     let mut legacy_workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut direct_backend,
         &mut direct_workspace,
         &direct_structure,
@@ -821,7 +829,7 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
         0.0,
     )
     .unwrap();
-    tree_transform_execute_with(
+    replay_into(
         &mut legacy_backend,
         &mut legacy_workspace,
         &legacy_structure,
@@ -909,7 +917,7 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
             2.0 * spec.recoupling_coefficients_dst_src()[0] * src.data()[src_offset];
     }
 
-    tree_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
+    eager_tree_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
 
     assert_eq!(dst.structure(), dst_space.subblock_structure());
     for (actual, expected) in dst.data().iter().zip(expected) {
@@ -1006,7 +1014,7 @@ fn recoupling_threads_do_not_change_cached_tree_transform_result() {
     let mut eager_backend = DenseTreeTransformOperations::default();
     let mut cached_workspace = TreeTransformWorkspace::default();
     let mut eager_workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut cached_backend,
         &mut cached_workspace,
         &cached,
@@ -1016,7 +1024,7 @@ fn recoupling_threads_do_not_change_cached_tree_transform_result() {
         3.0,
     )
     .unwrap();
-    tree_transform_execute_with(
+    replay_into(
         &mut eager_backend,
         &mut eager_workspace,
         &eager,
@@ -1060,7 +1068,7 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data.clone(), src_space).unwrap();
     let mut dst =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
-    tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0).unwrap();
+    eager_tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0).unwrap();
     let expected = dst.data().to_vec();
 
     tenet_core::clear_structure_caches();
@@ -1082,7 +1090,7 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data, rebuilt_src_space).unwrap();
     let mut rebuilt_dst =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst, rebuilt_dst_space).unwrap();
-    tree_transform_into(&rule, operation, &mut rebuilt_dst, &rebuilt_src, 2.0, 3.0).unwrap();
+    eager_tree_transform_into(&rule, operation, &mut rebuilt_dst, &rebuilt_src, 2.0, 3.0).unwrap();
 
     assert_eq!(rebuilt_dst.data(), expected.as_slice());
 }
@@ -1122,7 +1130,7 @@ fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
             * alpha;
     }
 
-    tree_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
+    eager_tree_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.structure(), dst_space.subblock_structure());
     assert_eq!(dst.data(), expected.as_slice());
@@ -1140,7 +1148,7 @@ fn tree_transform_structure_replays_product_without_recompiling() {
             .unwrap();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
-    let structure = tree_transform_structure(&rule, operation, &dst, &src).unwrap();
+    let structure = uncached_tree_pair_structure(&rule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
@@ -1157,7 +1165,7 @@ fn tree_transform_structure_replays_product_without_recompiling() {
         2.0,
         3.0,
     );
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1187,7 +1195,7 @@ fn tree_transform_structure_replays_product_without_recompiling() {
         -1.0,
         0.5,
     );
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1225,8 +1233,7 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
     );
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
 
-    tree_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0)
-        .unwrap();
+    context_tree_transform_into(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
 
     for (actual, expected) in dst.data().iter().zip(expected) {
         assert!(
@@ -1237,7 +1244,7 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
 }
 
 #[test]
-fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
+fn tree_transform_overwrite_context_ignores_destination_bits() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
@@ -1248,15 +1255,7 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
         dst_space.clone(),
     )
     .unwrap();
-    tree_transform_into(&rule, operation.clone(), &mut expected, &src, 2.0, 0.0).unwrap();
-
-    let mut one_shot = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
-        vec![f64::NAN; dst_space.required_len().unwrap()],
-        dst_space.clone(),
-    )
-    .unwrap();
-    tree_transform_overwrite_into(&rule, operation.clone(), &mut one_shot, &src, 2.0).unwrap();
-    assert_eq!(one_shot.data(), expected.data());
+    eager_tree_transform_into(&rule, operation.clone(), &mut expected, &src, 2.0, 0.0).unwrap();
 
     let mut cached = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         vec![f64::NAN; dst_space.required_len().unwrap()],
@@ -1266,7 +1265,7 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
     for _ in 0..2 {
         cached.data_mut().fill(f64::NAN);
-        tree_transform_overwrite_into_with_context(
+        context_tree_transform_overwrite_into(
             &mut context,
             &rule,
             operation.clone(),
@@ -1298,8 +1297,8 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
         assert_eq!(cached.data(), expected.data());
     }
 
-    // What: the borrowed-operation accumulating entry point matches the typed
-    // facade without adding another completed structure.
+    // What: the borrowed-operation accumulating entry point matches the eager
+    // transform without adding another completed structure.
     cached.data_mut().fill(0.0);
     context
         .tree_transform_dyn_into_ref(
@@ -1371,7 +1370,7 @@ fn product_resolution_compiles_distinct_degeneracy_shapes() {
     );
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1417,9 +1416,16 @@ fn tree_transform_execution_context_replays_product_tree_pair_transforms() {
         3.0,
     );
 
-    context
-        .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0)
-        .unwrap();
+    context_tree_transform_into(
+        &mut context,
+        &rule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
 
     for (actual, expected) in dst.data().iter().zip(expected_first) {
         assert!(
@@ -1439,7 +1445,7 @@ fn tree_transform_execution_context_replays_product_tree_pair_transforms() {
         -1.0,
         0.5,
     );
-    tree_transform_into_with_context(
+    context_tree_transform_into(
         &mut context,
         &equivalent_rule,
         operation,
@@ -1478,16 +1484,30 @@ fn tree_transform_execution_context_separates_tree_pair_operations() {
     let braid = TreeTransformOperation::braid([1, 0], [2], [1, 0], [2]);
     for operation in [&permute, &braid] {
         dst.data_mut().copy_from_slice(&[1.0, 2.0]);
-        context
-            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-            .unwrap();
+        context_tree_transform_into(
+            &mut context,
+            &rule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
     }
     crate::tree_transform::take_completed_transformer_activity();
     for operation in [&permute, &braid] {
         dst.data_mut().copy_from_slice(&[1.0, 2.0]);
-        context
-            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-            .unwrap();
+        context_tree_transform_into(
+            &mut context,
+            &rule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
     }
 
     // What: the operation is a key determinant: each operation has its own
@@ -1569,7 +1589,7 @@ macro_rules! assert_rank5_compact_transpose_replays_like_per_pair {
                 dst_structure.clone(),
             )
             .unwrap();
-            tree_transform_execute_with(
+            replay_into(
                 &mut DenseTreeTransformOperations::default(),
                 &mut TreeTransformWorkspace::default(),
                 compiled,

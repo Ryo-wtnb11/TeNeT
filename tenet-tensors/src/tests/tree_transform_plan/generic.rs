@@ -1007,7 +1007,7 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
             .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -1524,4 +1524,25 @@ fn measure_checked_generic_transform_phases() {
             measure_checked_generic_transform_case(n, adjoint_labels, &case, operation);
         }
     }
+}
+
+// Multiplicity-free styles cannot enter the generic path: the compile-time
+// guarantee is trait disjointness (`GenericRigidSymbols` vs
+// `MultiplicityFreeRigidSymbols`); this is its runtime sibling — the generic
+// builder rejects a rule that reports a multiplicity-free style, mirroring the
+// multiplicity-free builders' `UnsupportedFusionStyle` guards.
+#[test]
+fn generic_builder_rejects_multiplicity_free_style() {
+    let mf = ToyGenericRule {
+        style: FusionStyleKind::Simple,
+    };
+    let structure =
+        packed_fixture_structure(2, [(BlockKey::from(b2c_toy_src_pair()), vec![1, 1])]).unwrap();
+    let err = build_generic_tree_pair_transform_group_plan(
+        &mf,
+        TreeTransformOperation::permute([1, 0], []),
+        &structure,
+    )
+    .unwrap_err();
+    assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
 }

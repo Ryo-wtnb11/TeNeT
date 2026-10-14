@@ -95,7 +95,6 @@ mod checked_failure_order;
 mod checked_generic;
 mod context_cache;
 mod generic;
-mod generic_facade;
 mod grouped_storage;
 mod plan_builder;
 mod tree_pair;

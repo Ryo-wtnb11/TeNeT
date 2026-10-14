@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 use std::{borrow::Cow, collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use tenet_core::{
     generic_braid_tree_pair_block_ordered, generic_permute_tree_pair_block_ordered,
     generic_transpose_tree_pair_block_ordered, GenericRigidSymbols,
@@ -271,7 +271,7 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(crate) fn validate_generic_tree_pair_preflight<'rule, 'structure, R>(
     rule: &'rule R,
     operation: &TreeTransformOperation,
@@ -624,49 +624,6 @@ where
     } else {
         build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, src_structure)
     }
-}
-
-fn build_tree_pair_transform_group_plan_validated<R>(
-    source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
-    operation: TreeTransformOperation,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-{
-    if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
-    } else {
-        build_multiplicity_free_tree_pair_transform_group_plan_validated(source_proof, operation)
-    }
-}
-
-/// The uncached tree-pair producer behind the generic expert facade: the
-/// mathematics the completed-transformer owner caches, under the facade's
-/// own bounds. Why not the owner: its type-erased entries need
-/// `Send + Sync + 'static` coefficients, which the expert generic APIs do
-/// not require (#2014).
-pub(crate) fn compile_multiplicity_free_tree_pair_structure<R>(
-    rule: &R,
-    operation: &TreeTransformOperation,
-    dst_structure: Arc<BlockStructure>,
-    src_structure: Arc<BlockStructure>,
-    storage_conjugate: bool,
-) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-{
-    let source_proof =
-        validate_multiplicity_free_tree_pair_preflight(rule, operation, &src_structure)?;
-    LocallyValidatedFusionTreeBlockStructure::try_new(rule, &dst_structure)
-        .map_err(OperationError::from_core_preserving_context)?;
-    build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?
-        .compile_shared_structures_with_storage_conjugation(
-            dst_structure,
-            src_structure,
-            storage_conjugate,
-        )
 }
 
 /// The categorical half of a completed multiplicity-free tree-pair build:
@@ -2399,7 +2356,7 @@ where
 /// Fusion-tree block keys in `src_structure` follow
 /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -2413,7 +2370,7 @@ where
     build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(crate) fn build_generic_tree_pair_transform_group_plan_validated<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,

@@ -4,9 +4,11 @@
 //! at once, so adding or removing one fails here and is reviewed as an API
 //! change. Every name below is used by another workspace crate, by an
 //! integration test or example of this crate, or by a retained public
-//! signature, or belongs to the static-rank eager facade (`contract/api.rs`,
-//! `facade.rs`), which decision A14 keeps public until a separate static-API
-//! decision. The structure caches, the
+//! signature, or belongs to the remaining static-rank contraction entries
+//! (`contract/api.rs`). The 2026-10-14 maintainer decision (#2222, superseding
+//! A14) deletes the static-rank layer; the `facade.rs` entries and their
+//! backend traits are gone, and the remaining static names leave with leaves
+//! (b) and (c). The structure caches, the
 //! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
 //! `tenet_operations` internals were narrowed to `pub(crate)`.
 //!
@@ -170,7 +172,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "AdjointBlockSource",
         "AdjointScalar",
         // backend_trace
-        "TensorTraceOperationsBackend",
         // bound_tensor
         "BoundDynamicTensorRef",
         // tree_transform: the process-global completed-transformer owner
@@ -208,7 +209,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "FusionOperand",
         "HostTensorContractBackend",
         "HostTensorContractWorkspace",
-        "HostTreeFusionExecutionContext",
         "MultiplicityFreeContractStage",
         "PreparedCheckedGenericDynamicSpace",
         "PreparedTensorContractFusion",
@@ -223,45 +223,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "TensorContractWorkspace",
         "ValidatedDynamicFusionLayout",
         // facade
-        "braid_into",
-        "braid_into_with",
-        "braid_into_with_context",
-        "copy_into",
-        "permute_into",
-        "permute_into_with",
-        "permute_into_with_context",
-        "scaled_add_into",
-        "scaled_assign_into",
-        "tensoradd_add_into",
-        "tensoradd_assign_into",
-        "tensoradd_execute_with",
-        "tensoradd_fusion_into",
-        "tensoradd_fusion_into_with",
-        "tensoradd_fusion_into_with_context",
-        "tensoradd_into",
-        "tensoradd_into_with",
-        "tensoradd_into_with_backend_and_conjugation",
-        "tensoradd_into_with_conjugation",
-        "tensorcopy_into",
-        "tensorcopy_into_with",
-        "tensortrace_execute_with",
-        "tensortrace_fusion_execute_with",
-        "tensortrace_fusion_into",
-        "tensortrace_fusion_into_with",
-        "tensortrace_into",
-        "tensortrace_into_with",
-        "transpose_into",
-        "transpose_into_with",
-        "transpose_into_with_context",
-        "tree_transform_execute_with",
-        "tree_transform_into",
-        "tree_transform_into_with",
-        "tree_transform_into_with_context",
-        "tree_transform_overwrite_execute_with",
-        "tree_transform_overwrite_into",
-        "tree_transform_overwrite_into_with",
-        "tree_transform_overwrite_into_with_context",
-        "tree_transform_structure",
         // oriented_elementwise
         "fusion_scatter_add_assign",
         "oriented_fusion_add_owned",
@@ -289,8 +250,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "DenseBlockScalar",
         "DenseRecouplingScalar",
         "DenseTreeTransformOperations",
-        "HostAllocator",
-        "HostTensorOperations",
         "OperationError",
         "OutputAxisOrder",
         "OwnedCatCopy",
@@ -299,9 +258,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "RecouplingCoefficientAction",
         "RigidCoefficientAlgebra",
         "ReportsPlacement",
-        "TensorAddStructure",
         "TensorContractSpec",
-        "TensorOperationsBackend",
         "TensorTraceAxisSpec",
         "TreeTransformBackend",
         "TreeTransformScalar",
@@ -310,8 +267,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "WideScalar",
         "ZeroBytes",
         // tensortrace
-        "tensortrace_fusion_structure",
-        "tensortrace_structure",
         "tensortrace_fusion_dyn_into_checked",
         "tensortrace_fusion_dyn_owned_checked",
         "tensortrace_fusion_dyn_owned_generic_checked",
@@ -343,8 +298,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "require_symmetric_braiding",
         "TensorTraceFusionStructure",
         "TensorTraceFusionStructureTerm",
-        "TensorTraceStructure",
-        "TensorTraceStructureTerm",
         // tree_context
         "CheckedTreeTransformStage",
         "CoefficientAlgebra",
@@ -380,19 +333,10 @@ fn exported(testing: bool) -> BTreeSet<String> {
         .collect()
 }
 
-/// The infallible-Generic entries are test oracles only: production Generic
-/// is checked only (#1854).
+/// Nothing is exported behind `testing`: production Generic is checked only
+/// (#1854), and the infallible-Generic oracles left with the static-rank
+/// facade (#2222).
 #[test]
-fn infallible_generic_entries_are_exported_only_behind_testing() {
-    let expected = [
-        "braid_into_generic",
-        "permute_into_generic",
-        "transpose_into_generic",
-        "tree_transform_into_generic",
-        "tree_transform_into_with_generic",
-        "tree_transform_structure_generic",
-    ]
-    .map(str::to_owned)
-    .into();
-    assert_eq!(exported(true), expected);
+fn no_entries_are_exported_only_behind_testing() {
+    assert_eq!(exported(true), BTreeSet::new());
 }

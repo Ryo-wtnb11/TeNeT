@@ -96,12 +96,11 @@ where
     let mut add_destination =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
             .unwrap();
-    tensoradd_fusion_into(
+    eager_tree_transform_into(
         rule,
+        TreeTransformOperation::permute([0], [1]),
         &mut add_destination,
         &source,
-        TreeTransformOperation::permute([0], [1]),
-        false,
         ALPHA,
         BETA,
     )
@@ -111,7 +110,7 @@ where
     let mut trace_destination =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
             .unwrap();
-    tensortrace_fusion_into(
+    dynamic_tensortrace_fusion_into(
         rule,
         &mut trace_destination,
         &source,

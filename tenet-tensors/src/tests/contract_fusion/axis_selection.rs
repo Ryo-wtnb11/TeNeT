@@ -97,7 +97,7 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     assert_eq!(selected.rhs_transform().codomain_permutation(), &[1, 0]);
     let mut rhs_permuted =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone()).unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 0], [2, 3]),
         &mut rhs_permuted,
@@ -849,7 +849,7 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
         space.clone(),
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 0], [2, 3]),
         &mut rhs_permuted,
@@ -1059,7 +1059,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
         build_space([1, 1, 3, 2]),
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([0, 1], [3, 2]),
         &mut lhs_permuted,

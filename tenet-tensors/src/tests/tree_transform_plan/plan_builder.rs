@@ -537,7 +537,7 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -702,7 +702,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
     assert!(!compiled.has_pack_gemm_scatter_blocks());
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -724,7 +724,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
     dst.data_mut().fill(f64::NAN);
     backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
-    tree_transform_overwrite_execute_with(
+    replay_overwrite_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -862,7 +862,7 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -917,14 +917,11 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
-    let compiled = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let compiled = uncached_tree_pair_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     assert!(compiled.has_pack_gemm_scatter_blocks());
-    braid_into(
+    eager_tree_transform_into(
         &SU2FusionRule,
-        [0, 2, 1, 3],
-        [],
-        [0, 1, 2, 3],
-        [],
+        TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []),
         &mut dst,
         &src,
         1.0,
@@ -977,11 +974,11 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let compiled = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let compiled = uncached_tree_pair_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -996,7 +993,7 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
     assert_eq!(workspace.destination_len(), 2);
 
     dst.data_mut().fill(Complex64::new(0.0, 0.0));
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -1100,7 +1097,7 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let structure = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let structure = uncached_tree_pair_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     let expected = |initial: [f64; 2], source: [f64; 2], alpha: f64, beta: f64| {
@@ -1112,7 +1109,7 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     };
 
     assert!(structure.has_pack_gemm_scatter_blocks());
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1130,7 +1127,7 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
 
     src.data_mut().copy_from_slice(&[3.0, -4.0]);
     dst.data_mut().copy_from_slice(&[1.0, 2.0]);
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1442,7 +1439,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     let compiled = serial.compile(&dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &compiled,
@@ -1457,7 +1454,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     dst.data_mut().fill(f64::NAN);
     backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
-    tree_transform_overwrite_execute_with(
+    replay_overwrite_into(
         &mut backend,
         &mut workspace,
         &compiled,

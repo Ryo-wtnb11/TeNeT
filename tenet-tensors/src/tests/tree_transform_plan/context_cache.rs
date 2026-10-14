@@ -53,8 +53,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
             block_structure.clone(),
         )
         .unwrap();
-        context
-            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, -1.0)
+        context_tree_transform_into(context, &rule, operation.clone(), &mut dst, &src, 2.0, -1.0)
             .unwrap();
         dst.data().to_vec()
     };
@@ -132,7 +131,8 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     let planning = crate::tree_transform::TreeTransformPlanning::default();
 
     reset_tree_pair_lowering_calls();
-    let direct = tree_transform_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
+    let direct =
+        uncached_tree_pair_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
@@ -188,7 +188,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
         let mut output = dst.clone();
         let mut backend = DenseTreeTransformOperations::default();
         let mut workspace = TreeTransformWorkspace::default();
-        tree_transform_execute_with(
+        replay_into(
             &mut backend,
             &mut workspace,
             structure,
@@ -324,7 +324,7 @@ fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
     let structure = resolve(&dst, &src);
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -442,9 +442,16 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 
-    context
-        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
-        .unwrap();
+    context_tree_transform_into(
+        &mut context,
+        &SU2FusionRule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
     let tree_pair = dst.data().to_vec();
 
     dst.data_mut().copy_from_slice(&[0.0, 0.0]);

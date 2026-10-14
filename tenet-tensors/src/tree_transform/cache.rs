@@ -20,10 +20,8 @@
 //!   structure content and a hit rebinds a by-value handle to the caller's
 //!   structures without allocating;
 //! - entries are byte-weighted; values are erased (`dyn Any`, with the
-//!   coefficient `TypeId` in the key) in one cache for every coefficient type;
-//!   erasure needs `Send + Sync + 'static` coefficients, so the expert
-//!   generic facade (`tree_transform_structure` and its `*_into` siblings)
-//!   keeps its own bounds and the uncached producer;
+//!   coefficient `TypeId` in the key) in one cache for every coefficient type,
+//!   which needs `Send + Sync + 'static` coefficients;
 //! - no single-flight: a miss builds with no cache lock or placeholder held,
 //!   then publishes transactionally. A build may run Rayon regions, and a
 //!   thread waiting on a placeholder inside one could steal a job that wants

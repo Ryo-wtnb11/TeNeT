@@ -1,10 +1,11 @@
+use std::sync::Arc;
+
 use tenet_core::{
     BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
-    prepare_tensorcontract_fusion_plan, tree_transform_into_with_context, OutputAxisOrder,
-    RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformExecutionContext,
+    prepare_tensorcontract_fusion_plan, OutputAxisOrder, RuleIdentity,
+    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformExecutionContext,
 };
 
 fn main() {
@@ -119,26 +120,32 @@ fn main() {
     )
     .unwrap();
     let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    tree_transform_into_with_context(
-        &mut tree_context,
-        &rule,
-        plan.lhs_transform().clone(),
-        &mut lhs_core,
-        &lhs,
-        1.0,
-        0.0,
-    )
-    .unwrap();
-    tree_transform_into_with_context(
-        &mut tree_context,
-        &rule,
-        plan.rhs_transform().clone(),
-        &mut rhs_core,
-        &rhs,
-        1.0,
-        0.0,
-    )
-    .unwrap();
+    let lhs_core_structure = Arc::clone(lhs_core.structure());
+    tree_context
+        .tree_transform_dyn_into(
+            &rule,
+            plan.lhs_transform().clone(),
+            &lhs_core_structure,
+            lhs.structure(),
+            lhs_core.data_mut(),
+            lhs.data(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    let rhs_core_structure = Arc::clone(rhs_core.structure());
+    tree_context
+        .tree_transform_dyn_into(
+            &rule,
+            plan.rhs_transform().clone(),
+            &rhs_core_structure,
+            rhs.structure(),
+            rhs_core.data_mut(),
+            rhs.data(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
     println!("lhs_core_data {:?}", lhs_core.data());
     println!("rhs_core_data {:?}", rhs_core.data());
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()

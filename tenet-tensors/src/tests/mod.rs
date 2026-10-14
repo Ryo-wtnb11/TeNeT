@@ -136,16 +136,441 @@ where
     )
 }
 
+/// Replays a compiled tree transform on static-rank fixtures through the
+/// backend's raw (rank-free) entry.
+pub(crate) fn replay_into<
+    B,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, C>,
+    D: TreeTransformScalar,
+    C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    backend.tree_transform_structure_into_raw(
+        workspace,
+        structure,
+        &dst_structure,
+        src.structure(),
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
+/// Overwrite form of [`replay_into`].
+pub(crate) fn replay_overwrite_into<
+    B,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, C>,
+    D: TreeTransformScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    backend.tree_transform_structure_overwrite_into_raw(
+        workspace,
+        structure,
+        &dst_structure,
+        src.structure(),
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        &[],
+    )
+}
+
+/// The multiplicity-free tree-pair transformer built directly from the
+/// public group-plan builder, bypassing the completed-transformer cache: the
+/// uncached oracle for fixtures that compare against cached resolution.
+pub(crate) fn uncached_tree_pair_structure<
+    R,
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
+    build_tree_pair_transform_group_plan(rule, operation, src.structure())?
+        .compile_shared_structures_with_storage_conjugation(
+            std::sync::Arc::clone(dst.structure()),
+            std::sync::Arc::clone(src.structure()),
+            false,
+        )
+}
+
+/// The eager multiplicity-free tree transform `dst = beta * dst + alpha *
+/// operation(src)` through `context`'s dynamic entry.
+pub(crate) fn context_tree_transform_into<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, R::Scalar, B>,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    context.tree_transform_dyn_into(
+        rule,
+        operation,
+        &dst_structure,
+        src.structure(),
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
+/// Overwrite form of [`context_tree_transform_into`].
+pub(crate) fn context_tree_transform_overwrite_into<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, R::Scalar, B>,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
+    D: TreeTransformScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    context.tree_transform_dyn_overwrite_into_ref(
+        rule,
+        &operation,
+        &dst_structure,
+        src.structure(),
+        dst.data_mut(),
+        src.data(),
+        alpha,
+    )
+}
+
+/// [`context_tree_transform_into`] on a fresh default context, for fixtures
+/// that need no context reuse.
+pub(crate) fn eager_tree_transform_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    context_tree_transform_into(
+        &mut TreeTransformExecutionContext::<
+            D,
+            RuleIdentity,
+            R::Scalar,
+            DenseTreeTransformOperations,
+        >::default(),
+        rule,
+        operation,
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// The dynamic fusion trace of static-rank fixtures that carry a fusion space.
+pub(crate) fn dynamic_trace_spaces<
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+) -> Result<(DynamicFusionMapSpace, DynamicFusionMapSpace), OperationError>
+where
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
+    let missing = || OperationError::Core(CoreError::MissingFusionSpace);
+    let dst_space = dst.fusion_space().ok_or_else(missing)?;
+    let src_space = src.fusion_space().ok_or_else(missing)?;
+    Ok((
+        DynamicFusionMapSpace::from_typed(dst_space),
+        DynamicFusionMapSpace::from_typed(src_space),
+    ))
+}
+
+/// The fusion trace `dst = beta * dst + alpha * trace(src)` through the
+/// dynamic trace entry.
+pub(crate) fn dynamic_tensortrace_fusion_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let (dst_space, src_space) = dynamic_trace_spaces(dst, src)?;
+    crate::tensortrace::tensortrace_fusion_dyn_into_raw(
+        rule,
+        &dst_space,
+        dst.data_mut(),
+        &src_space,
+        src.data(),
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+/// The compiled fusion trace the dynamic trace entry replays.
+pub(crate) fn dynamic_tensortrace_fusion_structure<
+    R,
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+) -> Result<TensorTraceFusionStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + RealStructuralCoefficient,
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
+    let (dst_space, src_space) = dynamic_trace_spaces(dst, src)?;
+    TensorTraceFusionStructure::compile_fusion_dyn_raw(rule, &dst_space, &src_space, axes)
+}
+
+/// Replays a compiled fusion trace on static-rank fixtures through the
+/// host trace replay.
+pub(crate) fn replay_tensortrace_fusion_into<
+    C,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tensortrace_fusion_structure_into_host(
+        structure,
+        dst.data_mut(),
+        src.structure(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
 use tenet_core::{
     multiplicity_free_permute_tree_pair, multiplicity_free_repartition_tree_pair, BlockKey,
-    BlockSpec, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
-    DegeneracyStructure, FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
+    BlockSpec, BlockStructure, BraidingStyleKind, CoreError, DegeneracyStructure,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement, ProductFusionRule, SU2FusionRule,
     SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, TensorMap, TensorMapSpace,
@@ -783,86 +1208,6 @@ impl MultiplicityFreeRigidSymbols for AsymmetricAnyonicPointedRule {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnitaryPhaseAnyonicRule;
-
-impl FusionRule for UnitaryPhaseAnyonicRule {
-    fn rule_identity(&self) -> tenet_core::RuleIdentity {
-        tenet_core::RuleIdentity::of_type::<Self>()
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Unique
-    }
-
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Anyonic
-    }
-
-    fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
-    }
-
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
-
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        vec![SectorId::new((left.id() + right.id()) % 4)].into()
-    }
-}
-
-impl MultiplicityFreeFusionRule for UnitaryPhaseAnyonicRule {}
-
-impl MultiplicityFreeFusionSymbols for UnitaryPhaseAnyonicRule {
-    type Scalar = Complex64;
-
-    fn f_symbol_scalar(
-        &self,
-        _left: SectorId,
-        _middle: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-        _left_coupled: SectorId,
-        _right_coupled: SectorId,
-    ) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
-        if matches!((left.id(), right.id()), (1, 1) | (1, 3) | (3, 1)) {
-            Complex64::new(0.0, 1.0)
-        } else {
-            Complex64::new(1.0, 0.0)
-        }
-    }
-}
-
-impl MultiplicityFreeRigidSymbols for UnitaryPhaseAnyonicRule {
-    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 struct UniquePlanarRule;
 
 impl FusionRule for UniquePlanarRule {
@@ -1063,110 +1408,9 @@ impl GenericRigidSymbols for GenericMultiplicityRule {
     }
 }
 
-fn assert_tensorcopy_dtype<T>(values: Vec<T>, fill: T)
-where
-    T: Copy + Clone + Debug + PartialEq + strided_kernel::MaybeSendSync,
-{
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec(values.clone(), space.clone()).unwrap();
-    let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
-
-    tensorcopy_into(&mut dst, &src).unwrap();
-
-    assert_eq!(dst.data(), values.as_slice());
-}
-
-fn assert_tensoradd_dtype<T>(
-    values: Vec<T>,
-    fill: T,
-    alpha: T,
-    assign_expected: Vec<T>,
-    add_expected: Vec<T>,
-) where
-    T: Copy
-        + Clone
-        + Debug
-        + PartialEq
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
-{
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec(values.clone(), space.clone()).unwrap();
-
-    let mut assign_dst = TensorMap::<T, 2, 0>::filled(fill, space.clone()).unwrap();
-    tensoradd_assign_into(&mut assign_dst, &src, alpha).unwrap();
-    assert_eq!(assign_dst.data(), assign_expected.as_slice());
-
-    let mut add_dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
-    tensoradd_add_into(&mut add_dst, &src, alpha).unwrap();
-    assert_eq!(add_dst.data(), add_expected.as_slice());
-}
-
-fn assert_tensoradd_general_dtype<T>(values: Vec<T>, fill: T, alpha: T, beta: T, expected: Vec<T>)
-where
-    T: Copy
-        + Clone
-        + Debug
-        + PartialEq
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
-{
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
-    let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
-
-    tensoradd_into(&mut dst, &src, OutputAxisOrder::identity(), alpha, beta).unwrap();
-
-    assert_eq!(dst.data(), expected.as_slice());
-}
-
-fn assert_tensoradd_permuted_general_dtype<T>(
-    values: Vec<T>,
-    fill: T,
-    alpha: T,
-    beta: T,
-    expected: Vec<T>,
-) where
-    T: Copy
-        + Clone
-        + Debug
-        + PartialEq
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
-{
-    let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec(values, src_space).unwrap();
-    let mut dst = TensorMap::<T, 2, 0>::filled(fill, dst_space).unwrap();
-
-    tensoradd_into(
-        &mut dst,
-        &src,
-        OutputAxisOrder::from_axes(&[1, 0]),
-        alpha,
-        beta,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), expected.as_slice());
-}
-
 /// Runs the per-block strided reference driver (`tenet-operations/testing`).
-/// `HostTensorOperations` now delegates to the batched-GEMM path, which only
-/// admits dense float scalars; the integer-dtype replay cases stay on the
-/// reference driver.
+/// The host backend's batched-GEMM path only admits dense float scalars; the
+/// integer-dtype replay cases stay on the reference driver.
 fn reference_tree_transform<
     D,
     C,
@@ -1445,7 +1689,7 @@ fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
-    tree_transform_execute_with(
+    replay_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1753,15 +1997,11 @@ mod adjoint_memo;
 
 mod alternating_bicharacter;
 
-mod copy;
-
 mod contract_dense;
 
 mod contract_fusion;
 
 mod subset_cross_operations;
-
-mod tensoradd;
 
 mod tensortrace;
 

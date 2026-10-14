@@ -1,21 +1,15 @@
-use core::ops::{Add, Mul};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use num_traits::{One, Zero};
-use tenet_core::{
-    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
-    TensorMap,
-};
+use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
 use tenet_dense::{CpuBackendKind, DefaultDenseExecutor, DenseExecutor};
 
 use crate::ReportsPlacement;
 
 use crate::{
-    copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
     tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
     HostKernelAdapter, OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter,
-    TensorAddStructure, TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
+    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
     TreeTransformWorkspace,
 };
 
@@ -254,88 +248,6 @@ where
 {
 }
 
-pub trait TensorOperationsBackend {
-    type Allocator;
-
-    fn copy_block_into<T>(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        dst: BlockViewMut<'_, T>,
-        src: BlockView<'_, T>,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy + strided_kernel::MaybeSendSync;
-
-    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorAddStructure,
-        dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
-        src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>;
-}
-
-/// Host scratch workspace for tensoradd/tensortrace/copy replay.
-///
-/// This is not a general allocator: it currently owns host-side scratch used
-/// by strided replay. The legacy `HostAllocator` name remains as a type alias
-/// for source compatibility.
-#[derive(Clone, Debug, Default)]
-pub struct HostTensorOperationsWorkspace {
-    pub(crate) zero_strides: Vec<isize>,
-}
-
-impl HostTensorOperationsWorkspace {
-    #[inline]
-    pub fn placement(&self) -> Placement {
-        Placement::Host
-    }
-
-    #[inline]
-    pub fn is_host_workspace(&self) -> bool {
-        self.placement() == Placement::Host
-    }
-}
-
-impl ReportsPlacement for HostTensorOperationsWorkspace {
-    #[inline]
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-pub type HostAllocator = HostTensorOperationsWorkspace;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HostTensorOperations;
-
-impl HostTensorOperations {
-    #[inline]
-    pub fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-impl ReportsPlacement for HostTensorOperations {
-    #[inline]
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
 /// Default minimum destination length before a `recoupling_threads > 1`
 /// setting actually goes parallel; below it the replay stays serial.
 ///
@@ -503,140 +415,6 @@ impl<E> ReportsPlacement for DenseTreeTransformOperations<E> {
 impl Default for DenseTreeTransformOperations<DefaultDenseExecutor> {
     fn default() -> Self {
         Self::default_executor()
-    }
-}
-
-/// Explicit marker for the current host-slice tensor operation backend family.
-///
-/// `TensorOperationsBackend` keeps the existing method-bearing public trait for
-/// source compatibility. This marker makes host-only bounds explicit without
-/// forcing downstream custom backends to rewrite their existing impls.
-pub trait HostTensorOperationsBackend: TensorOperationsBackend {}
-
-impl<B> HostTensorOperationsBackend for B where B: TensorOperationsBackend + ?Sized {}
-
-impl TensorOperationsBackend for HostTensorOperations {
-    type Allocator = HostTensorOperationsWorkspace;
-
-    fn copy_block_into<T>(
-        &mut self,
-        _allocator: &mut Self::Allocator,
-        dst: BlockViewMut<'_, T>,
-        src: BlockView<'_, T>,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy + strided_kernel::MaybeSendSync,
-    {
-        copy_block_with_strided_kernel(dst, src)
-    }
-
-    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorAddStructure,
-        dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
-        src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>,
-    {
-        tensoradd_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
-    }
-}
-
-/// Delegates to a fresh serial [`DenseTreeTransformOperations`] per call, so
-/// Multi blocks run the one batched-GEMM replay. The unit struct carries no
-/// executor to reuse; callers replaying repeatedly own a
-/// `DenseTreeTransformOperations` (the production pairing) and reuse it.
-impl<D, C> TreeTransformBackend<D, C> for HostTensorOperations
-where
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
-    C: Copy + Sync,
-{
-    type Workspace = TreeTransformWorkspace<D>;
-
-    fn tree_transform_structure_into<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>,
-    {
-        DenseTreeTransformOperations::default_executor()
-            .tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
-    }
-
-    fn tree_transform_structure_into_raw(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<C>,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError> {
-        DenseTreeTransformOperations::default_executor().tree_transform_structure_into_raw(
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-            beta,
-        )
-    }
-
-    fn tree_transform_structure_overwrite_into_raw(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<C>,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        destination_scales: &[(usize, C)],
-    ) -> Result<(), OperationError> {
-        DenseTreeTransformOperations::default_executor()
-            .tree_transform_structure_overwrite_into_raw(
-                workspace,
-                structure,
-                dst_structure,
-                src_structure,
-                dst_data,
-                src_data,
-                alpha,
-                destination_scales,
-            )
     }
 }
 
@@ -849,7 +627,7 @@ mod tests {
             DDst: HostWritableStorage<f64>,
             DSrc: HostReadableStorage<f64>,
         {
-            HostTensorOperations
+            DenseTreeTransformOperations::default_executor()
                 .tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
         }
 
@@ -864,7 +642,7 @@ mod tests {
             alpha: f64,
             beta: f64,
         ) -> Result<(), OperationError> {
-            HostTensorOperations.tree_transform_structure_into_raw(
+            DenseTreeTransformOperations::default_executor().tree_transform_structure_into_raw(
                 workspace,
                 structure,
                 dst_structure,
@@ -875,41 +653,6 @@ mod tests {
                 beta,
             )
         }
-    }
-
-    fn assert_tensor_operations_backend<B: TensorOperationsBackend>() {}
-    fn assert_host_tensor_operations_backend<B: HostTensorOperationsBackend>() {}
-    fn assert_host_tree_transform_backend<B, D, C>()
-    where
-        B: HostTreeTransformBackend<D, C>,
-        D: TreeTransformScalar,
-        C: Copy,
-    {
-    }
-
-    #[test]
-    fn host_tensor_operations_keeps_compatibility_backend_names() {
-        let backend = HostTensorOperations;
-        let tree_backend = DenseTreeTransformOperations::default();
-
-        assert_eq!(backend.placement(), Placement::Host);
-        assert_eq!(tree_backend.placement(), Placement::Host);
-        assert_tensor_operations_backend::<HostTensorOperations>();
-        assert_host_tensor_operations_backend::<HostTensorOperations>();
-        assert_host_tree_transform_backend::<HostTensorOperations, f64, f64>();
-        assert_host_tree_transform_backend::<DenseTreeTransformOperations, f64, f64>();
-    }
-
-    #[test]
-    fn host_allocator_alias_keeps_workspace_shape() {
-        let workspace = HostTensorOperationsWorkspace::default();
-        let alias = HostAllocator::default();
-
-        assert_eq!(workspace.placement(), Placement::Host);
-        assert!(workspace.is_host_workspace());
-        assert_eq!(alias.placement(), Placement::Host);
-        assert_eq!(workspace.zero_strides.len(), 0);
-        assert_eq!(alias.zero_strides.len(), workspace.zero_strides.len());
     }
 
     #[test]
@@ -1061,21 +804,6 @@ mod tests {
     fn builtin_overwrite_backends_execute_raw_and_profiled_one_pass_routes() {
         let (dst_structure, src_structure, structure) = overwrite_fixture();
         let mut workspace = TreeTransformWorkspace::default();
-
-        let mut host_dst = [f64::NAN; 2];
-        HostTensorOperations
-            .tree_transform_structure_overwrite_into_raw(
-                &mut workspace,
-                &structure,
-                &dst_structure,
-                &src_structure,
-                &mut host_dst,
-                &[3.0],
-                1.0,
-                &[],
-            )
-            .unwrap();
-        assert_eq!(host_dst, [6.0, 0.0]);
 
         let mut dense = DenseTreeTransformOperations::default();
         let mut dense_dst = [f64::NAN; 2];

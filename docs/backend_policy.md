@@ -29,7 +29,6 @@ Existing execution seams include:
 - `TreeTransformBackend` — tree transforms / transposes (permute, braid, twist).
 - `TensorContractBackend` / `HostTensorContractBackend` — contraction (the
   per-coupled-sector GEMMs).
-- `TensorTraceOperationsBackend` — traces.
 - Device placement — CPU vs CUDA, selected on the runtime.
 
 State today:

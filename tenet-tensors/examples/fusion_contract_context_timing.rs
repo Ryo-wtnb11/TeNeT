@@ -1,17 +1,18 @@
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use num_complex::Complex64;
 use tenet_core::{
     BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
-    FusionTreeHomSpace, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    SectorId, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    prepare_tensorcontract_fusion_plan, tree_transform_into_with_context, FusionContractPlan,
-    HostTensorOperations, HostTreeFusionExecutionContext, OutputAxisOrder, RuleIdentity,
+    prepare_tensorcontract_fusion_plan, DenseRecouplingScalar, FusionContractPlan, OperationError,
+    OutputAxisOrder, RecouplingCoefficientAction, RuleIdentity,
     TensorContractFusionExecutionContext, TensorContractFusionProfile, TensorContractSpec,
-    TreeTransformExecutionContext, TreeTransformRuleCacheKey,
+    TreeTransformExecutionContext, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 static LHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
@@ -48,12 +49,6 @@ fn bench_su2_non_core_form_source() {
     let (warm, warm_data) = fixture.time_context_warm(&mut context, WARM_CONTEXT_ITERS);
     assert_close(&warm_data, &expected);
     let (source_transform, source_checksum) = fixture.time_source_transforms(WARM_CONTEXT_ITERS);
-    let (source_transform_host, source_host_checksum) =
-        fixture.time_source_transforms_host_tree(WARM_CONTEXT_ITERS);
-    assert!((source_host_checksum - source_checksum).abs() < 1.0e-12);
-    let (warm_host_tree, warm_host_tree_data) =
-        fixture.time_context_warm_host_tree(WARM_CONTEXT_ITERS);
-    assert_close(&warm_host_tree_data, &expected);
     let (core_contract, contract_data) = fixture.time_core_contract(WARM_CONTEXT_ITERS);
     assert_close(&contract_data, &expected);
     let (profile, profiled_data) = fixture.time_context_warm_profiled(PROFILE_ITERS);
@@ -79,14 +74,6 @@ fn bench_su2_non_core_form_source() {
     println!(
         "source_transform_warm_ns,{:.3}",
         nanos_per(source_transform, WARM_CONTEXT_ITERS)
-    );
-    println!(
-        "source_transform_host_tree_warm_ns,{:.3}",
-        nanos_per(source_transform_host, WARM_CONTEXT_ITERS)
-    );
-    println!(
-        "context_warm_host_tree_ns,{:.3}",
-        nanos_per(warm_host_tree, WARM_CONTEXT_ITERS)
     );
     println!(
         "core_contract_warm_ns,{:.3}",
@@ -390,45 +377,12 @@ impl Su2NoncoreFixture {
         (total_profile, dst.data().to_vec())
     }
 
-    fn time_context_warm_host_tree(&self, iterations: usize) -> (Duration, Vec<f64>) {
-        let rule = SU2FusionRule;
-        let mut dst = self.dst();
-        let mut context = HostTreeFusionExecutionContext::<f64, RuleIdentity>::default();
-        context
-            .tensorcontract_fusion_into(
-                &rule,
-                &mut dst,
-                &self.lhs,
-                &self.rhs,
-                axes(),
-                self.alpha,
-                self.beta,
-            )
-            .unwrap();
-        let elapsed = time_loop(iterations, || {
-            dst.data_mut().copy_from_slice(&self.initial_dst);
-            context
-                .tensorcontract_fusion_into(
-                    &rule,
-                    &mut dst,
-                    &self.lhs,
-                    &self.rhs,
-                    axes(),
-                    self.alpha,
-                    self.beta,
-                )
-                .unwrap();
-            black_box(checksum(dst.data()));
-        });
-        (elapsed, dst.data().to_vec())
-    }
-
     fn time_source_transforms(&self, iterations: usize) -> (Duration, f64) {
         let rule = SU2FusionRule;
         let mut lhs_core = self.lhs_core();
         let mut rhs_core = self.rhs_core();
         let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-        tree_transform_into_with_context(
+        transform_into(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
@@ -438,7 +392,7 @@ impl Su2NoncoreFixture {
             0.0,
         )
         .unwrap();
-        tree_transform_into_with_context(
+        transform_into(
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
@@ -449,7 +403,7 @@ impl Su2NoncoreFixture {
         )
         .unwrap();
         let elapsed = time_loop(iterations, || {
-            tree_transform_into_with_context(
+            transform_into(
                 &mut context,
                 &rule,
                 self.plan.lhs_transform().clone(),
@@ -459,63 +413,7 @@ impl Su2NoncoreFixture {
                 0.0,
             )
             .unwrap();
-            tree_transform_into_with_context(
-                &mut context,
-                &rule,
-                self.plan.rhs_transform().clone(),
-                &mut rhs_core,
-                &self.rhs,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-            black_box(checksum(lhs_core.data()) + checksum(rhs_core.data()));
-        });
-        (
-            elapsed,
-            checksum(lhs_core.data()) + checksum(rhs_core.data()),
-        )
-    }
-
-    fn time_source_transforms_host_tree(&self, iterations: usize) -> (Duration, f64) {
-        let rule = SU2FusionRule;
-        let mut lhs_core = self.lhs_core();
-        let mut rhs_core = self.rhs_core();
-        let mut context =
-            TreeTransformExecutionContext::<f64, RuleIdentity, f64, HostTensorOperations>::default(
-            );
-        tree_transform_into_with_context(
-            &mut context,
-            &rule,
-            self.plan.lhs_transform().clone(),
-            &mut lhs_core,
-            &self.lhs,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-        tree_transform_into_with_context(
-            &mut context,
-            &rule,
-            self.plan.rhs_transform().clone(),
-            &mut rhs_core,
-            &self.rhs,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-        let elapsed = time_loop(iterations, || {
-            tree_transform_into_with_context(
-                &mut context,
-                &rule,
-                self.plan.lhs_transform().clone(),
-                &mut lhs_core,
-                &self.lhs,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-            tree_transform_into_with_context(
+            transform_into(
                 &mut context,
                 &rule,
                 self.plan.rhs_transform().clone(),
@@ -591,7 +489,7 @@ impl Su2NoncoreFixture {
     ) {
         let rule = SU2FusionRule;
         let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-        tree_transform_into_with_context(
+        transform_into(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
@@ -601,7 +499,7 @@ impl Su2NoncoreFixture {
             0.0,
         )
         .unwrap();
-        tree_transform_into_with_context(
+        transform_into(
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
@@ -859,7 +757,7 @@ impl Su2OutputScratchFixture {
         self.materialize_core_dst(&mut core_dst, &mut lhs_core, &mut rhs_core);
         let rule = SU2FusionRule;
         let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-        tree_transform_into_with_context(
+        transform_into(
             &mut context,
             &rule,
             self.plan.output_transform().clone(),
@@ -871,7 +769,7 @@ impl Su2OutputScratchFixture {
         .unwrap();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            tree_transform_into_with_context(
+            transform_into(
                 &mut context,
                 &rule,
                 self.plan.output_transform().clone(),
@@ -1599,4 +1497,40 @@ fn print_completed_transformer_cache() {
         info.misses(),
         info.entries()
     );
+}
+
+/// `dst = beta * dst + alpha * operation(src)` through the context's
+/// dynamic-rank transform entry.
+#[allow(clippy::too_many_arguments)]
+fn transform_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, f64>,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    context.tree_transform_dyn_into(
+        rule,
+        operation,
+        &dst_structure,
+        src.structure(),
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
 }

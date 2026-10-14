@@ -161,25 +161,61 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     )
     .unwrap();
 
-    tensoradd_fusion_into(
-        &rule,
-        &mut lhs_core,
-        &lhs,
-        TreeTransformOperation::permute([3], [0, 1, 2]),
-        lhs_conjugate,
-        Complex64::one(),
-        Complex64::zero(),
-    )
+    // The reference adjoint is materialized, so the core permutation acts on
+    // its logical axes.
+    if lhs_conjugate {
+        eager_tree_transform_into(
+            &rule,
+            TreeTransformOperation::permute(
+                lowered_lhs_open_axes.to_vec(),
+                lowered_lhs_axes.to_vec(),
+            ),
+            &mut lhs_core,
+            &crate::adjoint(&rule, &lhs).unwrap(),
+            Complex64::one(),
+            Complex64::zero(),
+        )
+    } else {
+        eager_tree_transform_into(
+            &rule,
+            TreeTransformOperation::permute(
+                lowered_lhs_open_axes.to_vec(),
+                lowered_lhs_axes.to_vec(),
+            ),
+            &mut lhs_core,
+            &lhs,
+            Complex64::one(),
+            Complex64::zero(),
+        )
+    }
     .unwrap();
-    tensoradd_fusion_into(
-        &rule,
-        &mut rhs_core,
-        &rhs,
-        TreeTransformOperation::permute([1, 2, 3], [0]),
-        rhs_conjugate,
-        Complex64::one(),
-        Complex64::zero(),
-    )
+    // The reference adjoint is materialized, so the core permutation acts on
+    // its logical axes.
+    if rhs_conjugate {
+        eager_tree_transform_into(
+            &rule,
+            TreeTransformOperation::permute(
+                lowered_rhs_axes.to_vec(),
+                lowered_rhs_open_axes.to_vec(),
+            ),
+            &mut rhs_core,
+            &crate::adjoint(&rule, &rhs).unwrap(),
+            Complex64::one(),
+            Complex64::zero(),
+        )
+    } else {
+        eager_tree_transform_into(
+            &rule,
+            TreeTransformOperation::permute(
+                lowered_rhs_axes.to_vec(),
+                lowered_rhs_open_axes.to_vec(),
+            ),
+            &mut rhs_core,
+            &rhs,
+            Complex64::one(),
+            Complex64::zero(),
+        )
+    }
     .unwrap();
     fusion_contract_into(
         &rule,
@@ -415,7 +451,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     .unwrap();
     let alpha = Complex64::new(2.0, 0.0);
     let beta = Complex64::new(3.0, 0.0);
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
         &mut lhs_core,
@@ -424,7 +460,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
         &mut rhs_core,
@@ -443,7 +479,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,

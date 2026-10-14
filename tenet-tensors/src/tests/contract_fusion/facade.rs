@@ -584,7 +584,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     let permuted_space = space(&homspace);
     let mut rhs_permuted =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
-    tree_transform_into(
+    eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 0], [2, 3]),
         &mut rhs_permuted,
