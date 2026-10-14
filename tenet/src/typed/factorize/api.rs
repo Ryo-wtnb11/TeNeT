@@ -76,7 +76,7 @@ where
         rhs: impl Into<TensorRef<'a, R, D>>,
         rhs_rows: &[usize],
         rhs_cols: &[usize],
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let rhs = rhs.into().operand()?;
         let rhs = &*rhs;
         // Runtime and rule first, ahead of the leg roles: the permute cannot
@@ -160,12 +160,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn pinv(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-        rcond: f64,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    pub fn pinv(&self, rows: &[usize], cols: &[usize], rcond: f64) -> Result<Self, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| t.factor_pinv(rcond))
     }
 }
@@ -253,11 +248,7 @@ where
     /// structural admission and before any output upload or solver call: it
     /// costs one device scan of the payload and one scalar download, which
     /// synchronizes the host with the device.
-    pub fn qr_compact(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-    ) -> Result<Qr<Self>, TypedFacadeError<R>> {
+    pub fn qr_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| S::qr_compact(EXEC, t))
     }
 
@@ -355,11 +346,7 @@ where
     /// multiplies by anyway (1 op) or a scaling of the aligned factor before
     /// its copy (2 ops), plus one `conj` for a complex left side. They are
     /// counted in `CudaTransferStats::gauge_ops`.
-    pub fn svd_compact(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-    ) -> Result<Svd<Self>, TypedFacadeError<R>> {
+    pub fn svd_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Svd<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| S::svd_compact(EXEC, t))
     }
 
@@ -468,7 +455,7 @@ where
         rows: &[usize],
         cols: &[usize],
         hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
+    ) -> Result<Eigh<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| S::eigh_full(EXEC, t, hermitian_tol))
     }
 }
@@ -500,11 +487,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn svd_full(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-    ) -> Result<Svd<Self>, TypedFacadeError<R>> {
+    pub fn svd_full(&self, rows: &[usize], cols: &[usize]) -> Result<Svd<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_svd_full)
     }
 }
@@ -547,11 +530,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn lq_compact(
-        &self,
-        rows: &[usize],
-        cols: &[usize],
-    ) -> Result<Lq<Self>, TypedFacadeError<R>> {
+    pub fn lq_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_lq(
                 FactorOp::LqCompact,
@@ -659,7 +638,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn qr_full(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, TypedFacadeError<R>> {
+    pub fn qr_full(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_qr(FactorOp::QrFull, |lease, source| {
                 tenet_matrixalgebra::seam::qr_full_from_source::<R::Mode, _, _, _, _>(lease, source)
@@ -690,7 +669,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
+    pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_lq(
                 FactorOp::LqFull,
@@ -742,8 +721,7 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
-    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
-    {
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_values(FactorOp::SvdVals, |lease, source| {
                 tenet_matrixalgebra::seam::svd_vals_from_source::<R::Mode, _, _, _, _>(
@@ -785,8 +763,7 @@ where
         rows: &[usize],
         cols: &[usize],
         hermitian_tol: HermitianTol,
-    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
-    {
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_values(FactorOp::EighVals, |lease, source| {
                 tenet_matrixalgebra::seam::eigh_vals_from_source::<R::Mode, _, _, _, _>(
@@ -831,7 +808,7 @@ where
         cols: &[usize],
     ) -> Result<
         Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, num_complex::Complex64>>,
-        TypedFacadeError<R>,
+        FacadeError<R>,
     > {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_values(FactorOp::EigVals, |lease, source| {
@@ -906,7 +883,7 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
-    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>> {
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_eig_full)
     }
 }
@@ -1002,7 +979,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn left_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+    pub fn left_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_null(
                 FactorOp::LeftNull,
@@ -1078,7 +1055,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn right_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+    pub fn right_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, FacadeError<R>> {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_null(
                 FactorOp::RightNull,
@@ -1154,7 +1131,7 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
-    ) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
+    ) -> Result<LeftPolar<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_left_polar)
     }
 
@@ -1176,7 +1153,7 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
-    ) -> Result<RightPolar<Self>, TypedFacadeError<R>> {
+    ) -> Result<RightPolar<Self>, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_right_polar)
     }
 }
@@ -1233,7 +1210,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn inv(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+    pub fn inv(&self, rows: &[usize], cols: &[usize]) -> Result<Self, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_inv)
     }
 }
@@ -1309,7 +1286,7 @@ where
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
-    pub fn exp(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+    pub fn exp(&self, rows: &[usize], cols: &[usize]) -> Result<Self, FacadeError<R>> {
         self.with_leg_roles(rows, cols, Self::factor_exp)
     }
 }

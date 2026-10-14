@@ -231,7 +231,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     assert!(endo
         .compose(&narrow)
         .unwrap_err()
-        .to_string()
+        .report()
         .contains("leg degeneracy mismatch"));
 
     // Matching ranks and matching degeneracies, opposite dual flags.
@@ -248,7 +248,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
         TensorMap::from_subblock_fn(&runtime, [&wide_leg], [&wide_leg], typed_fill_value).unwrap();
     // The error names both operands' axes and external-axis flags: `endo`'s
     // domain axis 1 is `V'` and `dual_endo`'s codomain axis 0 is `V'` too.
-    assert!(endo.compose(&dual_endo).unwrap_err().to_string().ends_with(
+    assert!(endo.compose(&dual_endo).unwrap_err().report().ends_with(
         "contracted fusion leg duality flags do not match: lhs axis 1 (is_dual = true) \
          and rhs axis 0 (is_dual = true) must have opposite duality flags"
     ));
@@ -257,7 +257,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     assert!(tall
         .contract(&dual_endo, &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2] })
         .unwrap_err()
-        .to_string()
+        .report()
         .ends_with("lhs axis 2 (is_dual = true) and rhs axis 0 (is_dual = true) must have opposite duality flags"));
 
     // Matching ranks and flags, different sector content.
@@ -269,7 +269,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     assert!(endo
         .compose(&even_endo)
         .unwrap_err()
-        .to_string()
+        .report()
         .contains("dimension mismatch"));
 }
 

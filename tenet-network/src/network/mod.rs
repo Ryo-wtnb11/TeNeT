@@ -169,8 +169,7 @@ fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
 }
 
-pub(crate) type HostNetworkError<R> =
-    <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
+pub(crate) use tenet::typed::FacadeError;
 
 /// Network-owned payload accounting for one symmetric sliced execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

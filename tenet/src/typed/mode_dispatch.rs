@@ -15,7 +15,7 @@ where
         provider: &R,
         left: SectorId,
         right: SectorId,
-    ) -> Result<Vec<SectorId>, TypedFacadeError<R>> {
+    ) -> Result<Vec<SectorId>, FacadeError<R>> {
         provider
             .try_fusion_channels(left, right)
             .map(|channels| channels.into_iter().collect())
@@ -27,13 +27,13 @@ where
         left: SectorId,
         right: SectorId,
         coupled: SectorId,
-    ) -> Result<usize, TypedFacadeError<R>> {
+    ) -> Result<usize, FacadeError<R>> {
         provider
             .try_nsymbol(left, right, coupled)
             .map_err(Into::into)
     }
 
-    fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
+    fn dim(provider: &R, sector: SectorId) -> Result<f64, FacadeError<R>> {
         <Self as tenet_tensors::RigidCoefficientAlgebra<R>>::dim(provider, sector)
             .map_err(Into::into)
     }
@@ -54,7 +54,7 @@ where
         provider: &R,
         left: SectorId,
         right: SectorId,
-    ) -> Result<Vec<SectorId>, TypedFacadeError<R>> {
+    ) -> Result<Vec<SectorId>, FacadeError<R>> {
         provider
             .try_fusion_channels(left, right)
             .map(|channels| channels.into_iter().collect())
@@ -66,13 +66,13 @@ where
         left: SectorId,
         right: SectorId,
         coupled: SectorId,
-    ) -> Result<usize, TypedFacadeError<R>> {
+    ) -> Result<usize, FacadeError<R>> {
         provider
             .try_nsymbol(left, right, coupled)
             .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
     }
 
-    fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
+    fn dim(provider: &R, sector: SectorId) -> Result<f64, FacadeError<R>> {
         <Self as tenet_tensors::RigidCoefficientAlgebra<R>>::dim(provider, sector).map_err(
             |error| match error {
                 tenet_tensors::CheckedGenericPlanError::Provider(error) => {
@@ -828,7 +828,7 @@ fn checked_generic_contract_owned<'a, R, D, S>(
     lhs: &'a TensorMap<R, D, S>,
     rhs: &'a TensorMap<R, D, S>,
     request: tenet_tensors::ContractRequest<'a>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, S), TypedFacadeError<R>>
+) -> Result<(BoundDynamicFusionMapSpace<R>, S), FacadeError<R>>
 where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,

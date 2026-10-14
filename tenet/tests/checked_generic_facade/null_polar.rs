@@ -483,9 +483,7 @@ fn checked_only_compact_diagonal_polar_is_direct_and_refuses_nonfinite_values() 
         if bad_value.re.is_nan() {
             let error = bad.left_polar(&[0], &[1]).map(drop).unwrap_err();
             assert!(
-                error
-                    .to_string()
-                    .contains("polar input components must be finite"),
+                report(&error).contains("polar input components must be finite"),
                 "{error}"
             );
             assert_eq!(svd_calls.total(), 0);

@@ -92,7 +92,7 @@ where
     pub fn otimes<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D>>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         other.refuse_borrowed_view("otimes")?;
@@ -356,7 +356,7 @@ where
         &self,
         other: impl Into<TensorRef<'a, R, D, S>>,
         spec: &ContractSpec<'_>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         // The one check the expert layer cannot make: it never sees the two
@@ -469,7 +469,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         if !self.runtime.same_runtime(&other.runtime)
@@ -678,7 +678,7 @@ where
     pub fn compose<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D, S>>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         // Runtime first, exactly as `contract`: crossing runtimes is a

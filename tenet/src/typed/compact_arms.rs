@@ -115,7 +115,7 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
         codomain_rank: usize,
-    ) -> Result<Option<Self>, TypedFacadeError<R>> {
+    ) -> Result<Option<Self>, FacadeError<R>> {
         let Some(DiagonalContract { pattern, layout }) =
             self.diagonal_contract_pattern(other, lhs_axes, rhs_axes, output_axes, codomain_rank)
         else {
@@ -201,7 +201,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<bool, TypedFacadeError<R>> {
+    ) -> Result<bool, FacadeError<R>> {
         let Some(DiagonalContract { pattern, layout }) = self.diagonal_contract_pattern(
             other,
             spec.lhs,
@@ -548,7 +548,7 @@ where
 pub(super) fn transform_rank_one_diagonal<R, D>(
     tensor: &TensorMap<R, D>,
     operation: &TreeTransformOperation,
-) -> Result<Option<TensorMap<R, D>>, TypedFacadeError<R>>
+) -> Result<Option<TensorMap<R, D>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D>,

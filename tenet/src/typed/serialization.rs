@@ -8,10 +8,10 @@ use num_complex::{Complex32, Complex64};
 use tenet_core::{FusionTreeKey, MultiplicityIndex, SectorLeg, TypedSectorAdmission};
 
 use super::{
-    decode_block_fusion_trees, is_diagonal_bond_space, owned_repr, BlockFusionTrees,
+    decode_block_fusion_trees, is_diagonal_bond_space, owned_repr, BlockFusionTrees, FacadeError,
     FusionProductSpace, FusionTreeHomSpace, GradedSpace, Runtime, TensorMap, TensorScalar,
-    TypedAdjointSpace, TypedData, TypedFacadeError, TypedTensorBody, TypedTensorModeDispatch,
-    TypedTensorRepr, TypedTensorRootDispatch,
+    TypedAdjointSpace, TypedData, TypedTensorBody, TypedTensorModeDispatch, TypedTensorRepr,
+    TypedTensorRootDispatch,
 };
 
 const MAGIC: &[u8; 8] = b"TENETTS\0";
@@ -131,8 +131,8 @@ pub enum EncodeError<C, P> {
 impl<C: fmt::Display, P: fmt::Display> fmt::Display for EncodeError<C, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Codec(error) => write!(formatter, "persistence codec error: {error}"),
-            Self::Provider(error) => write!(formatter, "provider label error: {error}"),
+            Self::Codec(_) => formatter.write_str("persistence codec error"),
+            Self::Provider(_) => formatter.write_str("provider label error"),
             Self::InvalidState(message) => write!(formatter, "invalid tensor state: {message}"),
             Self::LengthOverflow => formatter.write_str("length does not fit the v1 wire format"),
         }
@@ -207,13 +207,13 @@ impl<C: fmt::Display, F: fmt::Display> fmt::Display for DecodeError<C, F> {
                 formatter,
                 "typed snapshot {resource} {actual} exceeds decode limit {limit}"
             ),
-            Self::Codec(error) => write!(formatter, "persistence codec error: {error}"),
+            Self::Codec(_) => formatter.write_str("persistence codec error"),
             Self::ScalarMismatch { actual, expected } => write!(
                 formatter,
                 "typed snapshot stores {actual} values, but {expected} was requested"
             ),
             Self::ProviderMismatch => formatter.write_str("resolved provider key does not match"),
-            Self::Facade(error) => write!(formatter, "typed admission error: {error}"),
+            Self::Facade(_) => formatter.write_str("typed admission error"),
         }
     }
 }
@@ -1412,7 +1412,7 @@ where
 fn build_leg<R>(
     provider: Arc<R>,
     record: LegRecord<R::Sector>,
-) -> Result<GradedSpace<R>, TypedFacadeError<R>>
+) -> Result<GradedSpace<R>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -1431,7 +1431,7 @@ where
         .into());
     }
     let leg = SectorLeg::try_new(encoded, record.dual).map_err(|error| {
-        TypedFacadeError::<R>::from(super::Error::InvalidArgument(error.to_string()))
+        FacadeError::<R>::from(super::Error::InvalidArgument(error.to_string()))
     })?;
     Ok(GradedSpace { provider, leg })
 }
@@ -1439,7 +1439,7 @@ where
 fn build_legs<R>(
     provider: &Arc<R>,
     records: Vec<LegRecord<R::Sector>>,
-) -> Result<Vec<GradedSpace<R>>, TypedFacadeError<R>>
+) -> Result<Vec<GradedSpace<R>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
@@ -1453,7 +1453,7 @@ where
 fn build_space<R>(
     provider: &Arc<R>,
     record: SpaceRecord<R::Sector>,
-) -> Result<super::BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+) -> Result<super::BoundDynamicFusionMapSpace<R>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -1500,7 +1500,7 @@ fn build_dense<R, D, C>(
     record: SpaceRecord<R::Sector>,
     blocks: Vec<BlockRecord<R::Sector, D>>,
     limits: DecodeLimits,
-) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
+) -> Result<TensorMap<R, D>, DecodeError<C, FacadeError<R>>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -1560,7 +1560,7 @@ fn build_diagonal<R, D, C>(
     record: SpaceRecord<R::Sector>,
     entries: Vec<(R::Sector, Vec<D>)>,
     limits: DecodeLimits,
-) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
+) -> Result<TensorMap<R, D>, DecodeError<C, FacadeError<R>>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -1653,7 +1653,7 @@ where
 
 fn build_adjoint<R, D, C>(
     parent: TensorMap<R, D>,
-) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
+) -> Result<TensorMap<R, D>, DecodeError<C, FacadeError<R>>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedAdjointSpace<R>,
@@ -1673,14 +1673,14 @@ fn decode_tensor<R, D, C>(
     bytes: &[u8],
     limits: DecodeLimits,
     codec: &C,
-) -> Result<TensorMap<R, D>, DecodeError<C::Error, TypedFacadeError<R>>>
+) -> Result<TensorMap<R, D>, DecodeError<C::Error, FacadeError<R>>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R> + TypedAdjointSpace<R>,
     D: WireScalar,
     C: TypedPersistenceCodec<R>,
 {
-    preflight_tensor::<D, C::Error, TypedFacadeError<R>>(bytes, limits)?;
+    preflight_tensor::<D, C::Error, FacadeError<R>>(bytes, limits)?;
     let (mut reader, key) = read_header(bytes, limits, KIND_TENSOR, D::TAG)?;
     let provider = resolve_provider(codec, key)?;
     let record = read_tensor_record(&mut reader, limits, codec, provider.as_ref())?;
@@ -1834,11 +1834,11 @@ where
         bytes: &[u8],
         limits: DecodeLimits,
         codec: &C,
-    ) -> Result<Self, DecodeError<C::Error, TypedFacadeError<R>>>
+    ) -> Result<Self, DecodeError<C::Error, FacadeError<R>>>
     where
         C: TypedPersistenceCodec<R>,
     {
-        preflight_graded_space::<C::Error, TypedFacadeError<R>>(bytes, limits)?;
+        preflight_graded_space::<C::Error, FacadeError<R>>(bytes, limits)?;
         let (mut reader, key) = read_header(bytes, limits, KIND_SPACE, SCALAR_NONE)?;
         let provider = resolve_provider(codec, key)?;
         let record = read_leg(&mut reader, limits, codec, provider.as_ref())?;
@@ -1889,7 +1889,7 @@ macro_rules! tensor_persistence_impl {
                 bytes: &[u8],
                 limits: DecodeLimits,
                 codec: &C,
-            ) -> Result<Self, DecodeError<C::Error, TypedFacadeError<R>>>
+            ) -> Result<Self, DecodeError<C::Error, FacadeError<R>>>
             where
                 C: TypedPersistenceCodec<R>,
             {

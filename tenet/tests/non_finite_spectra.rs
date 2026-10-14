@@ -18,6 +18,9 @@ use tenet::typed::{GradedSpace, SectorSpectrum};
 
 #[path = "../../tests/support/fixtures.rs"]
 mod fixtures;
+#[path = "support/report.rs"]
+mod report;
+use report::report;
 
 use fixtures::host_runtime;
 
@@ -161,9 +164,7 @@ fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
     let before = input.diagview().unwrap();
     let error = input.svd_compact(&[0], &[1]).err().unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("svd input components must be finite"),
+        report(&error).contains("svd input components must be finite"),
         "{error}"
     );
     assert_eq!(input.diagview().unwrap(), before);

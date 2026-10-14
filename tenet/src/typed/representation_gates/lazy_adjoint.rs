@@ -681,7 +681,7 @@ fn absorb_uses_operation_local_logical_payloads_without_warming_lazy_inputs() {
 fn assert_parent_native_transform<R, D>(
     source: &TensorMap<R, D>,
     eager: &TensorMap<R, D>,
-    operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, TypedFacadeError<R>>,
+    operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, FacadeError<R>>,
 ) where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,

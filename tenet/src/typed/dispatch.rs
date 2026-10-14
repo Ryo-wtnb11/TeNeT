@@ -1,5 +1,15 @@
 use super::*;
 
+/// The error every fallible [`TensorMap`] / [`GradedSpace`] operation returns
+/// for fusion rule `R`: [`Error`] for a multiplicity-free rule, and
+/// [`GenericTensorError`]`<R::Error>` for a checked Generic rule.
+///
+/// The error type depends on the rule's admission mode, so generic code over
+/// `R` names it through this alias rather than through the mode-dispatch
+/// traits. Both types convert from [`Error`].
+pub type FacadeError<R> =
+    <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
+
 /// Tensor-side layout admission selected by a provider-owned mode.
 #[doc(hidden)]
 pub trait TypedTensorModeDispatch<R>: typed_admission_private::Sealed

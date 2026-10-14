@@ -398,7 +398,7 @@ where
     /// assert_eq!(id.trace_pairs(&[(0, 1)])?.scalar()?, 2.0);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, TypedFacadeError<R>> {
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, FacadeError<R>> {
         let braiding = <R::Mode as TypedTensorModeDispatch<R>>::braiding_style(self.provider());
         let Some(source) = trace_source(self, braiding, pairs)? else {
             return Ok(self.clone());
@@ -464,7 +464,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         if !self.runtime.same_runtime(&destination.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -716,9 +716,6 @@ where
         contract_owned_multiplicity_free(lhs, rhs, |_, _| tenet_tensors::ContractRequest::Compose)
     }
 }
-
-pub(crate) type TypedFacadeError<R> =
-    <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
 
 pub(super) fn write_identity_blocks_generic<R, D>(tensor: &mut TensorMap<R, D>) -> Result<(), Error>
 where

@@ -24,8 +24,8 @@ pub enum PhysicalConversionError<E> {
 impl<E: fmt::Display> fmt::Display for PhysicalConversionError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Operation(error) => error.fmt(formatter),
-            Self::Provider(error) => error.fmt(formatter),
+            Self::Operation(_) => formatter.write_str("tensor operation failed"),
+            Self::Provider(_) => formatter.write_str("fusion provider failed"),
         }
     }
 }

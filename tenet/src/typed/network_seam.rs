@@ -15,7 +15,7 @@ where
         &self,
         adjoint: bool,
         restrictions: &[NetworkDegeneracyRestriction],
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
@@ -92,7 +92,7 @@ where
                 &homspace.domain().legs()[logical_axis - codomain_rank]
             };
             let degeneracy = logical_leg.degeneracy(logical_sector).ok_or_else(|| {
-                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                FacadeError::<R>::from(Error::InvalidArgument(format!(
                     "sector {effective_sector:?} is absent from effective axis {effective_axis}"
                 )))
             })?;
@@ -123,13 +123,13 @@ where
                         .find(|(candidate, ..)| *candidate == logical_axis)
                     {
                         SectorLeg::try_new([(*sector, *extent)], leg.is_dual()).map_err(|error| {
-                            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
+                            FacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
                         })
                     } else {
                         Ok(leg.clone())
                     }
                 })
-                .collect::<Result<Vec<_>, TypedFacadeError<R>>>()
+                .collect::<Result<Vec<_>, FacadeError<R>>>()
                 .map(FusionProductSpace::new)
         };
         let restricted_homspace = FusionTreeHomSpace::new(
@@ -178,7 +178,7 @@ where
         &self,
         codomain: &[GradedSpace<R>],
         domain: &[GradedSpace<R>],
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
@@ -214,7 +214,7 @@ where
             .space()
             .required_len()
             .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, vec![D::from_real(0.0); len])),

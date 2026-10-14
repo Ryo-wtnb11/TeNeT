@@ -31,6 +31,9 @@ mod support {
     use num_complex::{Complex32, Complex64};
     pub mod numerics;
 }
+#[path = "support/report.rs"]
+mod report;
+use report::Report;
 use support::numerics;
 #[allow(unused_macros)] // the fermionic contraction fixture macro
 mod contract_cases;
@@ -322,8 +325,8 @@ fn rejections_match_the_host_in_order_and_do_no_device_work() {
         malformed
             .iter()
             .map(|pairs| {
-                let expected = case.tensor.trace_pairs(pairs).unwrap_err().to_string();
-                let actual = source.trace_pairs(pairs).unwrap_err().to_string();
+                let expected = case.tensor.trace_pairs(pairs).unwrap_err().report();
+                let actual = source.trace_pairs(pairs).unwrap_err().report();
                 assert_eq!(actual, expected, "device error text must be the Host's");
                 actual
             })

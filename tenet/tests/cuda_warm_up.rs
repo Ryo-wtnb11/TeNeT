@@ -9,6 +9,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "support/report.rs"]
+mod report;
+use report::Report;
 use std::sync::Arc;
 
 use tenet::expert::cuda_transfer_stats;
@@ -75,7 +78,7 @@ fn building_on_an_absent_device_fails_with_the_typed_context_error() {
     // The warm-up runs only after the context exists, so an unusable ordinal
     // still surfaces as the context construction error and no Runtime is built.
     let error = Runtime::builder().cuda(usize::MAX).build().unwrap_err();
-    let text = error.to_string();
+    let text = error.report();
     assert!(text.contains("Cuda"), "names the CUDA backend: {text}");
     assert!(
         text.contains("cuda_context"),

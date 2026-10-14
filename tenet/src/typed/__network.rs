@@ -76,7 +76,7 @@ pub fn network_restrict_degeneracies<R, D>(
     tensor: &TensorMap<R, D>,
     adjoint: bool,
     restrictions: &[NetworkDegeneracyRestriction],
-) -> Result<TensorMap<R, D>, TypedFacadeError<R>>
+) -> Result<TensorMap<R, D>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,
@@ -98,7 +98,7 @@ pub fn network_zeros_from_effective_legs<R, D>(
     tensor: &TensorMap<R, D>,
     codomain: &[GradedSpace<R>],
     domain: &[GradedSpace<R>],
-) -> Result<TensorMap<R, D>, TypedFacadeError<R>>
+) -> Result<TensorMap<R, D>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorRootDispatch<R>,

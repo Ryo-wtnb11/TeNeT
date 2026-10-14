@@ -100,7 +100,7 @@ impl Network {
         &self,
         tensors: &[&TensorMap<R, D, S>],
         optimizer: &(impl DenseContractionOptimizer + ?Sized),
-    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -124,7 +124,7 @@ impl Network {
         tensors: &[&TensorMap<R, D, S>],
         optimizer: &dyn DenseContractionOptimizer,
         fallbacks: &[&dyn DenseContractionOptimizer],
-    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -163,7 +163,7 @@ impl Network {
         &self,
         tensors: &[&TensorMap<R, D, S>],
         plan: ContractionPlan,
-    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -186,7 +186,7 @@ impl Network {
         &self,
         tensors: &[&TensorMap<R, D, S>],
         sliced: SlicedPlan,
-    ) -> std::result::Result<SymmetricSlicedPlan, SymmetricSliceLowerError<HostNetworkError<R>>>
+    ) -> std::result::Result<SymmetricSlicedPlan, SymmetricSliceLowerError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -213,10 +213,7 @@ impl Network {
         &self,
         tensors: &[&TensorMap<R, D, S>],
         plan: SymmetricSlicedPlan,
-    ) -> std::result::Result<
-        BoundSymmetricSlicedPlan<R>,
-        SymmetricSliceLowerError<HostNetworkError<R>>,
-    >
+    ) -> std::result::Result<BoundSymmetricSlicedPlan<R>, SymmetricSliceLowerError<FacadeError<R>>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -345,7 +342,7 @@ impl Network {
         measured_payload_ceiling: usize,
     ) -> std::result::Result<
         (TensorMap<R, D>, SymmetricSliceStats),
-        SymmetricSliceExecutionError<HostNetworkError<R>>,
+        SymmetricSliceExecutionError<FacadeError<R>>,
     >
     where
         R: TypedSectorAdmission,
@@ -468,7 +465,7 @@ impl Network {
 
             __network::network_scatter_add_assign(&mut accumulator, &partial, &scatter_ranges)
                 .map_err(|error| {
-                    SymmetricSliceExecutionError::Tensor(HostNetworkError::<R>::from(error))
+                    SymmetricSliceExecutionError::Tensor(FacadeError::<R>::from(error))
                 })?;
         }
         Ok((accumulator, meter.stats()))
@@ -479,7 +476,7 @@ impl Network {
         tensors: &[&TensorMap<R, D, S>],
         ir: NetworkIR,
         plan: ContractionPlan,
-    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    ) -> Result<PlannedNetwork, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -530,7 +527,7 @@ impl Network {
     fn lower_typed<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
-    ) -> Result<LoweredTypedNetwork<R>, HostNetworkError<R>>
+    ) -> Result<LoweredTypedNetwork<R>, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -572,7 +569,7 @@ impl Network {
             lowered_spaces.push(typed_effective_spaces(tensor, conj)?);
         }
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone())
-            .map_err(|error| HostNetworkError::<R>::from(invalid(error)))?;
+            .map_err(|error| FacadeError::<R>::from(invalid(error)))?;
         Ok(LoweredTypedNetwork {
             ir,
             infos,

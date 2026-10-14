@@ -15,6 +15,11 @@ use crate::typed::{BatchMemberRepresentation, SignatureField};
 /// Lower-layer errors ([`CoreError`], [`OperationError`]) are passed through
 /// unchanged; the remaining variants report user-level misuse (mixing rules
 /// or mixing runtimes).
+///
+/// A wrapping variant's `Display` names only its own layer; the wrapped error
+/// is reached through [`std::error::Error::source`], so a chain printer shows
+/// each message once.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// Structural error bubbled up from `tenet-core` (boxed: the expert
@@ -96,9 +101,11 @@ pub enum Alternative {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Core(err) => write!(f, "core error: {err}"),
-            Self::Operation(err) => write!(f, "operation error: {err}"),
-            Self::FusionAlgebra(err) => write!(f, "fusion algebra error: {err}"),
+            Self::Core(_) => f.write_str("invalid tensor structure"),
+            Self::Operation(_) => f.write_str("tensor operation failed"),
+            Self::FusionAlgebra(_) => {
+                f.write_str("the fusion algebra cannot represent the requested dual or fusion output")
+            }
             Self::RuleMismatch => write!(f, "operands use different fusion rules"),
             Self::RuntimeMismatch => write!(f, "operands belong to different runtimes"),
             Self::PlacementMismatch => write!(
@@ -113,7 +120,7 @@ impl fmt::Display for Error {
                 f,
                 "the destination shares its storage with another tensor handle"
             ),
-            Self::RuntimeConfig(err) => write!(f, "invalid runtime configuration: {err}"),
+            Self::RuntimeConfig(_) => f.write_str("invalid runtime configuration"),
             Self::BatchSignatureMismatch {
                 member: Some(member),
                 field,

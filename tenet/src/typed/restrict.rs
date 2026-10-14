@@ -10,7 +10,7 @@ where
         axis: usize,
         expected: &GradedSpace<R>,
         operation: &str,
-    ) -> Result<(), TypedFacadeError<R>>
+    ) -> Result<(), FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorModeDispatch<R>,
@@ -30,7 +30,7 @@ where
         &self,
         axis: usize,
         replacement: &SectorLeg,
-    ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+    ) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
@@ -93,10 +93,7 @@ where
     /// payload with any set other than both legs and one selection (call
     /// [`Self::materialize`] first for a dense result). Nothing is allocated
     /// before every check has passed.
-    pub fn restrict_leg(
-        &self,
-        legs: &[(usize, &LegSelection<R>)],
-    ) -> Result<Self, TypedFacadeError<R>>
+    pub fn restrict_leg(&self, legs: &[(usize, &LegSelection<R>)]) -> Result<Self, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
@@ -111,7 +108,7 @@ where
                 {
                     Ok((spectrum, *first))
                 }
-                _ => Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
+                _ => Err(FacadeError::<R>::from(Error::InvalidArgument(
                     "restrict_leg: a compact diagonal stays compact only with one selection \
                      on both legs, &[(0, sel), (1, sel)]; call materialize() first for any \
                      other restriction"
@@ -133,7 +130,7 @@ where
                     .map(|index| &spectrum[index].values)
                     .filter(|values| runs.last().is_some_and(|run| run.end <= values.len()))
                     .ok_or_else(|| {
-                        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                        FacadeError::<R>::from(Error::InvalidArgument(format!(
                             "restrict_leg: the compact payload has no positions {runs:?} for \
                              sector {sector:?}"
                         )))
@@ -193,7 +190,7 @@ where
         &self,
         axis: usize,
         selection: &LegSelection<R>,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
@@ -205,7 +202,7 @@ where
             .space()
             .required_len()
             .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
         let mut data = tenet_tensors::zeroed_payload::<D>(len);
         let mut runs: Vec<tenet_tensors::SectorRunTable<'_>> = vec![None; self.rank()];
         runs[axis] = Some(selection.entries.as_slice());

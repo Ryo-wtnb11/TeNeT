@@ -303,6 +303,7 @@ const TYPED: &[&str] = &[
     "EighStackOutput",
     "EncodeError",
     "Error",
+    "FacadeError",
     "FactorExec",
     "FactorScalar",
     "FactorizationScalar",

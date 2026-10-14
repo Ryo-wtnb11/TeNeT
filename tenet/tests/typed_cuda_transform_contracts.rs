@@ -48,6 +48,9 @@ macro_rules! full_transpose {
     }};
 }
 
+#[path = "support/report.rs"]
+mod report;
+use report::Report;
 use std::sync::Arc;
 use tenet::typed::Direction;
 
@@ -305,13 +308,13 @@ fn device_transform_rejections_happen_before_any_device_work() {
                 $call
             }
             .unwrap_err()
-            .to_string();
+            .report();
             let actual = {
                 let $t = &device;
                 $call
             }
             .unwrap_err()
-            .to_string();
+            .report();
             assert_eq!(actual, expected, "device error text must be the Host's");
             actual
         }};
@@ -639,12 +642,12 @@ fn device_into_rejections_happen_before_any_device_work() {
     // destination is (itself, or, for a lazy destination, its parent).
     macro_rules! rejects_like_host {
         ($what:expr, $host_call:expr, $witness:ident, $device_call:expr) => {{
-            let expected_message = as_device_message(&$host_call.unwrap_err().to_string());
+            let expected_message = as_device_message(&$host_call.unwrap_err().report());
             // Bitwise: the poisoned destinations are NaN, which is not equal
             // to itself.
             let before = payload_bits(&$witness);
             let (error, counters) = delta(|| $device_call.unwrap_err());
-            assert_eq!(error.to_string(), expected_message, "{}", $what);
+            assert_eq!(error.report(), expected_message, "{}", $what);
             assert_eq!(
                 counters,
                 CudaTransferStats::default(),
@@ -720,7 +723,7 @@ fn device_into_rejections_happen_before_any_device_work() {
         lazy_source.permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
     );
     assert!(
-        error.to_string().contains("ordinary dense CUDA storage"),
+        error.report().contains("ordinary dense CUDA storage"),
         "{error}"
     );
 
@@ -733,7 +736,7 @@ fn device_into_rejections_happen_before_any_device_work() {
         source.permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
     );
     assert!(
-        error.to_string().contains("ordinary dense CUDA storage"),
+        error.report().contains("ordinary dense CUDA storage"),
         "{error}"
     );
 
@@ -750,7 +753,7 @@ fn device_into_rejections_happen_before_any_device_work() {
             witness,
             source.permute_into(&[0, 0], &[1, 3], &mut alias, 1.0, 0.0)
         );
-        assert!(error.to_string().contains("must not alias"), "{error}");
+        assert!(error.report().contains("must not alias"), "{error}");
     }
 
     // 5b. A lazy-adjoint source aliasing its parent's payload: the alias
@@ -765,7 +768,7 @@ fn device_into_rejections_happen_before_any_device_work() {
             witness,
             lazy_source.permute_into(&[2, 0], &[1, 3], &mut parent_alias, 1.0, 0.0)
         );
-        assert!(error.to_string().contains("must not alias"), "{error}");
+        assert!(error.report().contains("must not alias"), "{error}");
     }
 
     // 6. A destination on the wrong space, held shared: the space check
@@ -804,7 +807,7 @@ fn device_into_rejections_happen_before_any_device_work() {
             witness,
             source.permute_into(&[2, 0], &[1, 3], &mut shared, 1.0, 0.0)
         );
-        assert!(error.to_string().contains("shares its storage"), "{error}");
+        assert!(error.report().contains("shares its storage"), "{error}");
     }
     drop(shared_handle);
     drop(host_shared_handle);
@@ -841,7 +844,7 @@ fn device_into_rejections_happen_before_any_device_work() {
             source.repartition_into(&mut rank_three, 1.0, 0.0)
         );
         assert!(
-            error.to_string().contains("does not match source rank"),
+            error.report().contains("does not match source rank"),
             "{error}"
         );
     }
@@ -989,22 +992,17 @@ fn device_twist_rejections_happen_before_any_device_work() {
             // The range check precedes the empty-list short circuit and every
             // categorical step, exactly as on Host.
             (
-                device
-                    .twist(&[4], Direction::Forward)
-                    .unwrap_err()
-                    .to_string(),
-                host.twist(&[4], Direction::Forward)
-                    .unwrap_err()
-                    .to_string(),
+                device.twist(&[4], Direction::Forward).unwrap_err().report(),
+                host.twist(&[4], Direction::Forward).unwrap_err().report(),
             ),
             (
                 device
                     .twist(&[1, 9], Direction::Inverse)
                     .unwrap_err()
-                    .to_string(),
+                    .report(),
                 host.twist(&[1, 9], Direction::Inverse)
                     .unwrap_err()
-                    .to_string(),
+                    .report(),
             ),
         ]
     });

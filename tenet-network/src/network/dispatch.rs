@@ -36,19 +36,17 @@ where
 
     fn leg_dims<B: TensorStorage<D>>(
         tensor: &TensorMap<R, D, B>,
-    ) -> Result<Vec<usize>, HostNetworkError<R>>;
+    ) -> Result<Vec<usize>, FacadeError<R>>;
 
     /// Lowers a `conj`-marked operand to its adjoint on this storage.
-    fn adjoint_operand(
-        tensor: &TensorMap<R, D, S>,
-    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
+    fn adjoint_operand(tensor: &TensorMap<R, D, S>) -> Result<TensorMap<R, D, S>, FacadeError<R>>;
 
     fn contract_step(
         lhs: &TensorMap<R, D, S>,
         rhs: &TensorMap<R, D, S>,
         destination: &mut Option<TensorMap<R, D, S>>,
         spec: &ContractSpec<'_>,
-    ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
+    ) -> Result<StepOutput<TensorMap<R, D, S>>, FacadeError<R>>;
 
     /// Reorients the operand of a zero-step schedule (a relabel), the one
     /// result no contraction step writes in its output orientation.
@@ -56,7 +54,7 @@ where
         tensor: &TensorMap<R, D, S>,
         codomain: &[usize],
         domain: &[usize],
-    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
+    ) -> Result<TensorMap<R, D, S>, FacadeError<R>>;
 
     /// Re-attaches the parked destinations to `runtime` and the step
     /// authorities, or discards them all on drift.
@@ -65,7 +63,7 @@ where
         runtime: &Runtime,
         tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
-    ) -> Result<(), HostNetworkError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         Ok(workspace.activate_parked(runtime, tensors, steps)?)
     }
 
@@ -109,7 +107,7 @@ fn host_contract_step<R, D, S>(
     rhs: &TensorMap<R, D, S>,
     destination: &mut Option<TensorMap<R, D, S>>,
     spec: &ContractSpec<'_>,
-) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>
+) -> Result<StepOutput<TensorMap<R, D, S>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorContractDispatch<R, D>,
@@ -197,7 +195,7 @@ where
 
     fn leg_dims<B: TensorStorage<D>>(
         tensor: &TensorMap<R, D, B>,
-    ) -> Result<Vec<usize>, HostNetworkError<R>> {
+    ) -> Result<Vec<usize>, FacadeError<R>> {
         tensor
             .codomain()
             .into_iter()
@@ -206,7 +204,7 @@ where
             .collect()
     }
 
-    fn adjoint_operand(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+    fn adjoint_operand(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, FacadeError<R>> {
         tensor.adjoint()
     }
 
@@ -215,7 +213,7 @@ where
         rhs: &TensorMap<R, D>,
         destination: &mut Option<TensorMap<R, D>>,
         spec: &ContractSpec<'_>,
-    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
+    ) -> Result<StepOutput<TensorMap<R, D>>, FacadeError<R>> {
         host_contract_step(lhs, rhs, destination, spec)
     }
 
@@ -223,7 +221,7 @@ where
         tensor: &TensorMap<R, D>,
         codomain: &[usize],
         domain: &[usize],
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+    ) -> Result<TensorMap<R, D>, FacadeError<R>> {
         tensor.permute(codomain, domain)
     }
 }

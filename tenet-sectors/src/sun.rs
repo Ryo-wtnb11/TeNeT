@@ -173,8 +173,8 @@ impl fmt::Display for SUNFusionRuleError {
                 "exact dimension for SectorId {} is not a finite positive f64",
                 sector.id()
             ),
-            Self::MalformedSymbolData(error) => write!(f, "malformed Racah symbol data: {error}"),
-            Self::Racah(error) => write!(f, "Racah SU(N) error: {error}"),
+            Self::MalformedSymbolData(_) => f.write_str("malformed Racah symbol data"),
+            Self::Racah(_) => f.write_str("Racah SU(N) error"),
         }
     }
 }
@@ -199,7 +199,7 @@ pub struct SUNSymbolError(racah::sun::SunError);
 
 impl fmt::Display for SUNSymbolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        f.write_str("SU(N) symbol authority failed")
     }
 }
 

@@ -10,7 +10,7 @@ where
     /// The one body of the inverse. A lazy adjoint is redirected,
     /// `(A^H)^-1 = (A^-1)^H`; a compact diagonal inverts its entries
     /// (TensorKit `inv(::DiagonalTensorMap)`).
-    pub(super) fn factor_inv(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub(super) fn factor_inv(&self) -> Result<Self, FacadeError<R>> {
         self.require_isomorphic("inv requires isomorphic codomain and domain")?;
         self.factor_inv_admitted()
     }
@@ -18,7 +18,7 @@ where
     /// The representation stage of [`Self::factor_inv`]. The redirect
     /// re-enters here rather than at the preflight: `A^H` and `A` are
     /// isomorphic together, so the parent needs no second check.
-    fn factor_inv_admitted(&self) -> Result<Self, TypedFacadeError<R>> {
+    fn factor_inv_admitted(&self) -> Result<Self, FacadeError<R>> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             const { assert!(redirects(FactorOp::Inv)) };
             return self.adjoint_of_parent(Self::factor_inv_admitted);
@@ -40,7 +40,7 @@ where
     /// The one body of the pseudo-inverse: a lazy adjoint `A^H` is read
     /// through its parent's SVD, `(A^H)^+ = U S^+ Vh`; a compact diagonal
     /// inverts its retained entries.
-    pub(super) fn factor_pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
+    pub(super) fn factor_pinv(&self, rcond: f64) -> Result<Self, FacadeError<R>> {
         // Ahead of every arm, so all of them answer alike: the dense seams
         // repeat this check for their own expert callers, but the compact arm
         // never reaches a seam. TensorKit's `pinv` has no space check.
@@ -99,10 +99,7 @@ where
 {
     /// TensorKit `cod ≅ dom` (`inv`, `\`), refused with `message`. Equal
     /// sides are isomorphic without a provider query.
-    pub(super) fn require_isomorphic(
-        &self,
-        message: &'static str,
-    ) -> Result<(), TypedFacadeError<R>> {
+    pub(super) fn require_isomorphic(&self, message: &'static str) -> Result<(), FacadeError<R>> {
         let space = self.logical_space();
         let homspace = space.space().homspace();
         if homspace.codomain() == homspace.domain()
@@ -120,14 +117,14 @@ where
     pub(super) fn factor_output_space(
         &self,
         homspace: FusionTreeHomSpace,
-    ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>> {
+    ) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>> {
         <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::authority(self.logical_space())
             .output_space(homspace)
             .map_err(R::Mode::map_root_error)
     }
 
     /// `domain <- codomain`: the output of the inverse and pseudo-inverse.
-    fn swapped_output_space(&self) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>> {
+    fn swapped_output_space(&self) -> Result<BoundDynamicFusionMapSpace<R>, FacadeError<R>> {
         let homspace = self.logical_space().space().homspace();
         self.factor_output_space(FusionTreeHomSpace::new(
             homspace.domain().clone(),
@@ -142,7 +139,7 @@ where
     pub(super) fn admit_compact(
         &self,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         tenet_matrixalgebra::seam::admit_compact_diagonal::<R::Mode, _, _>(
             self.logical_space(),
             spectrum,

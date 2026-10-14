@@ -1,6 +1,7 @@
 use super::*;
 
 include!("../../tests/common/predicate_chains.rs");
+include!("../../tests/support/report.rs");
 
 #[cfg(feature = "racah-generated")]
 mod compact_admission;
@@ -23,6 +24,14 @@ mod lazy_adjoint_spectral;
 mod network_restriction;
 mod overwrite;
 mod preflight_order;
+
+/// The innermost message of an error chain: the cause both fusion modes must
+/// agree on, below each mode's own wrapper context (#1862 D4).
+fn root_cause(error: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(error), |&error| error.source())
+        .last()
+        .map_or_else(String::new, ToString::to_string)
+}
 
 impl<T: ScalarOps> ChainCoefficient for T {
     fn real(value: f64) -> Self {

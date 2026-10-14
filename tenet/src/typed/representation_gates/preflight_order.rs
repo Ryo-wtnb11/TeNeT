@@ -29,15 +29,12 @@ fn unsupported_solve() -> String {
     .to_string()
 }
 
-/// The row text of a result: `ok`, or the error's message without the
+/// The row text of a result: `ok`, or the error's root cause without the
 /// per-mode wrapper (the facade error type is per mode by design, #1862 D4).
-fn text<T, E: std::fmt::Display>(result: &Result<T, E>) -> String {
+fn text<T, E: std::error::Error + 'static>(result: &Result<T, E>) -> String {
     match result {
         Ok(_) => "ok".to_string(),
-        Err(error) => error
-            .to_string()
-            .trim_start_matches("operation error: ")
-            .to_string(),
+        Err(error) => super::root_cause(error),
     }
 }
 

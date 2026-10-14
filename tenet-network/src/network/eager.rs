@@ -60,7 +60,7 @@ impl Network {
     fn contract_preflight<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
-    ) -> Result<(), HostNetworkError<R>>
+    ) -> Result<(), FacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -104,13 +104,13 @@ where
     fn admit_operands(
         tensors: &[&TensorMap<R, D, Self>],
         contracts: bool,
-    ) -> Result<(), HostNetworkError<R>>;
+    ) -> Result<(), FacadeError<R>>;
 
     fn execute_planned(
         planned: &PlannedNetwork,
         tensors: &[&TensorMap<R, D, Self>],
         workspace: &mut NetworkExecutionWorkspace<R, D, Self>,
-    ) -> Result<TensorMap<R, D, Self>, HostNetworkError<R>>;
+    ) -> Result<TensorMap<R, D, Self>, FacadeError<R>>;
 }
 
 impl<R, D> NetworkOperandStorage<R, D> for Vec<D>
@@ -119,10 +119,7 @@ where
     R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar + Send + Sync + 'static,
 {
-    fn admit_operands(
-        tensors: &[&TensorMap<R, D>],
-        contracts: bool,
-    ) -> Result<(), HostNetworkError<R>> {
+    fn admit_operands(tensors: &[&TensorMap<R, D>], contracts: bool) -> Result<(), FacadeError<R>> {
         reject_non_symmetric_network(tensors, contracts)
     }
 
@@ -130,7 +127,7 @@ where
         planned: &PlannedNetwork,
         tensors: &[&TensorMap<R, D>],
         workspace: &mut NetworkExecutionWorkspace<R, D>,
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+    ) -> Result<TensorMap<R, D>, FacadeError<R>> {
         planned.execute(tensors, workspace)
     }
 }
@@ -177,7 +174,7 @@ where
     D: TensorScalar + Send + Sync + 'static,
     S: NetworkOperandStorage<R, D>,
 {
-    type Error = HostNetworkError<R>;
+    type Error = FacadeError<R>;
 
     fn contract_network(network: &Network, tensors: &[&Self]) -> Result<Self, Self::Error> {
         network.validate_operand_count(tensors.len())?;

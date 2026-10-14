@@ -94,7 +94,7 @@ where
         &'a self,
         op: FactorOp,
         local: &'a mut Option<Self>,
-    ) -> Result<tenet_matrixalgebra::seam::FactorSource<'a, R, D>, TypedFacadeError<R>> {
+    ) -> Result<tenet_matrixalgebra::seam::FactorSource<'a, R, D>, FacadeError<R>> {
         let view = match &self.repr {
             TypedTensorRepr::Owned(body) => return Ok(owned_factor_source(body)?),
             TypedTensorRepr::Adjoint(view) => view,
@@ -124,8 +124,8 @@ where
     /// never redirects again.
     fn adjoint_of_parent(
         &self,
-        f: impl FnOnce(&Self) -> Result<Self, TypedFacadeError<R>>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+        f: impl FnOnce(&Self) -> Result<Self, FacadeError<R>>,
+    ) -> Result<Self, FacadeError<R>> {
         Ok(f(&self.adjoint()?)?
             .adjoint()?
             .materialized_tensor_uncached()?)
@@ -144,7 +144,7 @@ where
             Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, TypedFacadeError<R>> {
+    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, FacadeError<R>> {
         let mut local = None;
         let source = self.factor_input(op, &mut local)?;
         let raw = stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
@@ -157,7 +157,7 @@ where
                     values: entry.values,
                 })
             })
-            .collect::<Result<Vec<_>, TypedFacadeError<R>>>()?;
+            .collect::<Result<Vec<_>, FacadeError<R>>>()?;
         // Public label order, not the engine's opaque sector-id order.
         decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
         Ok(decoded)
@@ -175,7 +175,7 @@ where
             Qr<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<Qr<Self>, TypedFacadeError<R>> {
+    ) -> Result<Qr<Self>, FacadeError<R>> {
         let mut local = None;
         let source = self.factor_input(op, &mut local)?;
         let Qr { q, r } =
@@ -207,7 +207,7 @@ where
             Lq<tenet_matrixalgebra::BoundDynFactor<R, D>>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<Lq<Self>, TypedFacadeError<R>> {
+    ) -> Result<Lq<Self>, FacadeError<R>> {
         let Lq { l, q } = self.seam_factors(op, stage, |lease, parent, adjoint_space| {
             adjoint_stage(lease, parent, adjoint_space).map(|Lq { l, q }| Lq {
                 l: tenet_matrixalgebra::seam::FactorOutput::Dense(l),
@@ -226,7 +226,7 @@ where
     fn factor_null(
         &self,
         op: FactorOp,
-        partner: impl FnOnce(&Self) -> Result<Self, TypedFacadeError<R>>,
+        partner: impl FnOnce(&Self) -> Result<Self, FacadeError<R>>,
         stage: impl FnOnce(
             RuntimeDense<'_>,
             tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
@@ -234,7 +234,7 @@ where
             tenet_matrixalgebra::BoundDynFactor<R, D>,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         R::Mode: TypedAdjointSpace<R>,
     {
@@ -254,7 +254,7 @@ where
     /// [`AdjointRule::Redirect`] a lazy adjoint `A^H` is the adjoint-swapped
     /// right polar of its parent `A = p wh`: `A^H = wh^H p`, with `wh^H`
     /// detached. A compact diagonal factors directly on its bond.
-    fn factor_left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>>
+    fn factor_left_polar(&self) -> Result<LeftPolar<Self>, FacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -291,7 +291,7 @@ where
 
     /// The one body of the right polar decomposition; see
     /// [`Self::factor_left_polar`].
-    fn factor_right_polar(&self) -> Result<RightPolar<Self>, TypedFacadeError<R>>
+    fn factor_right_polar(&self) -> Result<RightPolar<Self>, FacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -328,10 +328,7 @@ where
 
     /// The one body of the Hermitian eigendecomposition: `d` is a compact
     /// diagonal on the spectrum bond `fuse(V)` (`seam::spectrum_bond`).
-    fn factor_eigh_full(
-        &self,
-        hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<Self>, TypedFacadeError<R>>
+    fn factor_eigh_full(&self, hermitian_tol: HermitianTol) -> Result<Eigh<Self>, FacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -359,9 +356,7 @@ where
     /// payload's precision, `d` on the spectrum bond as for
     /// [`Self::factor_eigh_full`].
     #[allow(clippy::type_complexity)]
-    fn factor_eig_full(
-        &self,
-    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>>
+    fn factor_eig_full(&self) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, FacadeError<R>>
     where
         D: AdvancedLinalgScalar,
         <D as FactorScalar>::Eig: TensorScalar,
@@ -409,7 +404,7 @@ where
             T,
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
-    ) -> Result<T, TypedFacadeError<R>> {
+    ) -> Result<T, FacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             if op.adjoint_rule() == AdjointRule::AdjointSeam {
                 let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
@@ -425,7 +420,7 @@ where
 
     /// The one body of compact SVD: `s` is a compact diagonal on the fresh
     /// spectrum bond `fuse(V)` (`seam::spectrum_bond`).
-    fn factor_svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
+    fn factor_svd_compact(&self) -> Result<Svd<Self>, FacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -459,7 +454,7 @@ where
     /// `svd_compact!(::DiagonalAlgorithm)` is `svd_full!`). Otherwise `s` is
     /// compact on the spectrum bond when every sector is square, and
     /// dense (possibly rectangular) when not.
-    fn factor_svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
+    fn factor_svd_full(&self) -> Result<Svd<Self>, FacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -524,20 +519,20 @@ where
     fn qr_compact(
         _: ExecToken,
         t: &TensorMap<R, D, Self>,
-    ) -> Result<Qr<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+    ) -> Result<Qr<TensorMap<R, D, Self>>, FacadeError<R>>;
 
     /// Compact SVD of `t`'s current split.
     fn svd_compact(
         _: ExecToken,
         t: &TensorMap<R, D, Self>,
-    ) -> Result<Svd<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+    ) -> Result<Svd<TensorMap<R, D, Self>>, FacadeError<R>>;
 
     /// Hermitian eigendecomposition of `t`'s current split.
     fn eigh_full(
         _: ExecToken,
         t: &TensorMap<R, D, Self>,
         hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<TensorMap<R, D, Self>>, TypedFacadeError<R>>;
+    ) -> Result<Eigh<TensorMap<R, D, Self>>, FacadeError<R>>;
 
     /// [`EighFullPlan::execute`]'s solve of every member of `source` into
     /// `buffers` (allocated when `None`) and `workspace`'s sorted spectra,
@@ -562,7 +557,7 @@ where
     fn qr_compact(
         _: ExecToken,
         t: &TensorMap<R, D>,
-    ) -> Result<Qr<TensorMap<R, D>>, TypedFacadeError<R>> {
+    ) -> Result<Qr<TensorMap<R, D>>, FacadeError<R>> {
         t.factor_qr(FactorOp::QrCompact, |lease, source| {
             tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(lease, source)
         })
@@ -571,7 +566,7 @@ where
     fn svd_compact(
         _: ExecToken,
         t: &TensorMap<R, D>,
-    ) -> Result<Svd<TensorMap<R, D>>, TypedFacadeError<R>> {
+    ) -> Result<Svd<TensorMap<R, D>>, FacadeError<R>> {
         t.factor_svd_compact()
     }
 
@@ -579,7 +574,7 @@ where
         _: ExecToken,
         t: &TensorMap<R, D>,
         hermitian_tol: HermitianTol,
-    ) -> Result<Eigh<TensorMap<R, D>>, TypedFacadeError<R>> {
+    ) -> Result<Eigh<TensorMap<R, D>>, FacadeError<R>> {
         t.factor_eigh_full(hermitian_tol)
     }
 

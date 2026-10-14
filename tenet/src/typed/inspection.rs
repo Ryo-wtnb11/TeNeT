@@ -322,7 +322,7 @@ where
         runtime: &Runtime,
         bond: &GradedSpace<R>,
         spectra: I,
-    ) -> Result<Self, TypedFacadeError<R>>
+    ) -> Result<Self, FacadeError<R>>
     where
         I: IntoIterator<Item = SectorSpectrum<R::Sector, D>>,
     {
@@ -411,7 +411,7 @@ where
 {
     /// The leg of a `bond <- bond` endomorphism, after proving that is what
     /// the receiver is.
-    fn require_bond_map(&self, operation: &str) -> Result<(), TypedFacadeError<R>> {
+    fn require_bond_map(&self, operation: &str) -> Result<(), FacadeError<R>> {
         let homspace = self.logical_space().space().homspace();
         if homspace.codomain().len() != 1 || homspace.domain().len() != 1 {
             return Err(Error::InvalidArgument(format!(
@@ -462,9 +462,9 @@ where
     /// and for a multiplicity-free provider [`Error::FusionAlgebra`]. No
     /// partial spectrum is returned. In a truncated factorization this is the
     /// step where a decode failure surfaces, before `find_truncated`.
-    pub fn diagview(&self) -> Result<Vec<SectorSpectrum<R::Sector, D>>, TypedFacadeError<R>> {
+    pub fn diagview(&self) -> Result<Vec<SectorSpectrum<R::Sector, D>>, FacadeError<R>> {
         let body = self.owned_body().ok_or_else(|| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(
+            FacadeError::<R>::from(Error::InvalidArgument(
                 "diagview requires an owned tensor, not a lazy adjoint".to_string(),
             ))
         })?;
@@ -480,7 +480,7 @@ where
                     let block = structure
                         .block(index)
                         .map_err(Error::from)
-                        .map_err(TypedFacadeError::<R>::from)?;
+                        .map_err(FacadeError::<R>::from)?;
                     let BlockKey::FusionTree(key) = block.key() else {
                         return Err(Error::InvalidArgument(
                             "diagview requires a fusion-tree block layout".to_string(),
@@ -539,7 +539,7 @@ where
     )]
     pub(crate) fn diagonal_spectrum(
         &self,
-    ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>> {
+    ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, FacadeError<R>> {
         self.spectrum()
             .map(|spectrum| {
                 spectrum
@@ -646,19 +646,19 @@ where
         &'a self,
     ) -> Result<
         impl ExactSizeIterator<Item = (BlockFusionTrees<R::Sector>, BlockView<'a, D>)> + 'a,
-        TypedFacadeError<R>,
+        FacadeError<R>,
     > {
         let data = self
             .dense_data()
             .map_err(|_| borrowed_view_unsupported("subblocks"))
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
         let structure = self.logical_space().space().structure();
         let mut labelled = Vec::with_capacity(structure.block_count());
         for index in 0..structure.block_count() {
             let block = structure
                 .block(index)
                 .map_err(Error::from)
-                .map_err(TypedFacadeError::<R>::from)?;
+                .map_err(FacadeError::<R>::from)?;
             let trees = decode_block_fusion_trees(self.logical_space().provider(), block.key())?;
             labelled.push((trees, block));
         }
@@ -669,7 +669,7 @@ where
                 BlockView::new(data, block.shape(), block.strides(), block.offset())
                     .map(|values| (trees, values))
                     .map_err(Error::from)
-                    .map_err(TypedFacadeError::<R>::from)
+                    .map_err(FacadeError::<R>::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(blocks.into_iter())
@@ -680,14 +680,14 @@ where
     pub fn subblock_fusion_trees(
         &self,
         index: usize,
-    ) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>> {
+    ) -> Result<BlockFusionTrees<R::Sector>, FacadeError<R>> {
         let block = self
             .logical_space()
             .space()
             .structure()
             .block(index)
             .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
+            .map_err(FacadeError::<R>::from)?;
         decode_block_fusion_trees(self.logical_space().provider(), block.key())
     }
 }
@@ -720,10 +720,7 @@ where
     /// # Errors
     ///
     /// Returns the provider's error when it cannot encode `coupled`.
-    pub fn block(
-        &self,
-        coupled: &R::Sector,
-    ) -> Result<CoupledBlock<'_, R, D, S>, TypedFacadeError<R>> {
+    pub fn block(&self, coupled: &R::Sector) -> Result<CoupledBlock<'_, R, D, S>, FacadeError<R>> {
         let provider = self.logical_space().provider();
         let id = TypedSectorAdmission::try_encode_label(provider, coupled)
             .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
@@ -731,7 +728,7 @@ where
         match regions.binary_search_by_key(&id, CoupledSectorRegion::coupled) {
             Ok(index) => self
                 .coupled_block(regions, index)
-                .map_err(TypedFacadeError::<R>::from),
+                .map_err(FacadeError::<R>::from),
             Err(_) => {
                 let homspace = self.logical_space().space().homspace();
                 let rows = <R::Mode as TypedTensorModeDispatch<R>>::coupled_block_dimension(
@@ -747,7 +744,7 @@ where
                 // A coupled sector nonempty on both sides always has a stored
                 // region, so a miss with two nonzero dimensions is a broken layout.
                 if rows != 0 && cols != 0 {
-                    return Err(TypedFacadeError::<R>::from(internal_layout_error(
+                    return Err(FacadeError::<R>::from(internal_layout_error(
                         "a sector fused on both sides has no stored block",
                     )));
                 }
@@ -789,7 +786,7 @@ where
         &'a self,
     ) -> Result<
         impl ExactSizeIterator<Item = (R::Sector, CoupledBlock<'a, R, D, S>)> + 'a,
-        TypedFacadeError<R>,
+        FacadeError<R>,
     > {
         let regions = self.stored_sector_regions()?;
         let provider = self.logical_space().provider();
@@ -800,19 +797,19 @@ where
                         .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
                 let block = self
                     .coupled_block(Arc::clone(&regions), index)
-                    .map_err(TypedFacadeError::<R>::from)?;
+                    .map_err(FacadeError::<R>::from)?;
                 Ok((sector, block))
             })
-            .collect::<Result<Vec<_>, TypedFacadeError<R>>>()?;
+            .collect::<Result<Vec<_>, FacadeError<R>>>()?;
         Ok(blocks.into_iter())
     }
 
     /// Coupled regions of the stored payload's own layout. For a lazy adjoint
     /// that is the parent's layout, whose sector `c` holds `block(t', c)'`.
-    fn stored_sector_regions(&self) -> Result<Arc<[CoupledSectorRegion]>, TypedFacadeError<R>> {
+    fn stored_sector_regions(&self) -> Result<Arc<[CoupledSectorRegion]>, FacadeError<R>> {
         let space = self.storage_body().space.space();
         let regions =
-            sector_regions(space.structure(), space.nout()).map_err(TypedFacadeError::<R>::from)?;
+            sector_regions(space.structure(), space.nout()).map_err(FacadeError::<R>::from)?;
         debug_assert!(
             regions
                 .windows(2)

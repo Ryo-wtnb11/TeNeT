@@ -236,7 +236,7 @@ pub struct SU2CoefficientError(racah::Su2Error);
 
 impl fmt::Display for SU2CoefficientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        f.write_str("SU(2) coupling-coefficient authority failed")
     }
 }
 

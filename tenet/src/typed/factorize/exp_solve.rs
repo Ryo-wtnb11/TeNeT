@@ -9,7 +9,7 @@ where
 {
     /// The one body of the exponential: a compact diagonal exponentiates its
     /// entries, everything else takes the dense route.
-    pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub(super) fn factor_exp(&self) -> Result<Self, FacadeError<R>> {
         // TensorKit `exp!`: `domain == codomain` before anything else.
         let homspace = self.logical_space().space().homspace();
         if homspace.codomain() != homspace.domain() {
@@ -60,7 +60,7 @@ where
     /// `domain(self) <- domain(rhs)`. A nonsingular compact divisor scales
     /// `rhs` by its reciprocal spectrum; every other divisor is solved
     /// densely into the final output.
-    pub(super) fn factor_solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+    pub(super) fn factor_solve(&self, rhs: &Self) -> Result<Self, FacadeError<R>> {
         if self.logical_space().space().homspace().codomain()
             != rhs.logical_space().space().homspace().codomain()
         {
@@ -84,7 +84,7 @@ where
 
     /// The operand checks of a solve, ahead of its operand shapes: runtime
     /// first (a trust boundary, not an algebra error), then the rule.
-    pub(super) fn require_solve_operands(&self, rhs: &Self) -> Result<(), TypedFacadeError<R>> {
+    pub(super) fn require_solve_operands(&self, rhs: &Self) -> Result<(), FacadeError<R>> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -103,7 +103,7 @@ where
         &self,
         rhs: &Self,
         output: BoundDynamicFusionMapSpace<R>,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let _host_pool = self.runtime.enter_host_pool();
         let materialize = |tensor: &Self| {
             matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
@@ -144,7 +144,7 @@ where
         &self,
         rhs: &Self,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let inverse = inv_spectrum(spectrum)?;
         if let Some(values) = rhs.spectrum() {
             if values.len() == inverse.len()

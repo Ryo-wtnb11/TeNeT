@@ -64,13 +64,8 @@ macro_rules! row {
         match $result {
             Ok(value) => $map(value),
             // The facade error type is per mode by design (#1862 D4); the
-            // operation's own message is what both must agree on.
-            Err(error) => Route::Failed(
-                error
-                    .to_string()
-                    .trim_start_matches("operation error: ")
-                    .to_string(),
-            ),
+            // root cause is what both must agree on.
+            Err(error) => Route::Failed(super::root_cause(&error)),
         }
     };
 }

@@ -126,7 +126,7 @@ where
 /// a canonical structure lists each coupled sector as one contiguous run of
 /// blocks, so this asks once per coupled sector with no allocation and no
 /// hashing.
-fn run_cached_dim<R>(provider: &R) -> impl FnMut(SectorId) -> Result<f64, TypedFacadeError<R>> + '_
+fn run_cached_dim<R>(provider: &R) -> impl FnMut(SectorId) -> Result<f64, FacadeError<R>> + '_
 where
     R: TypedSectorAdmission,
     R::Mode: TypedSpaceModeDispatch<R>,
@@ -216,7 +216,7 @@ where
     /// assert_eq!(id.tr()?, 2.0);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn norm(&self, p: f64) -> Result<f64, TypedFacadeError<R>> {
+    pub fn norm(&self, p: f64) -> Result<f64, FacadeError<R>> {
         // Checked before any dispatch so an invalid `p` is rejected the same
         // way on every representation and storage.
         validate_norm_p(p)?;
@@ -259,10 +259,7 @@ where
     /// device first (#1383). A lazy adjoint CUDA operand returns
     /// [`Error::UnsupportedOnDevice`].
     #[doc(alias = "dot")]
-    pub fn inner<'a>(
-        &self,
-        other: impl Into<TensorRef<'a, R, D, S>>,
-    ) -> Result<D, TypedFacadeError<R>> {
+    pub fn inner<'a>(&self, other: impl Into<TensorRef<'a, R, D, S>>) -> Result<D, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
@@ -289,7 +286,7 @@ fn compact_norm<R, D>(
     spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
     provider: &R,
     p: f64,
-) -> Result<f64, TypedFacadeError<R>>
+) -> Result<f64, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedSpaceModeDispatch<R>,
@@ -336,11 +333,7 @@ where
     R::Mode: TypedSpaceModeDispatch<R>,
 {
     /// `norm(t, p)` of an owned dense tensor, `p` already validated.
-    fn dense_norm(
-        _: ExecToken,
-        t: &TensorMap<R, D, Self>,
-        p: f64,
-    ) -> Result<f64, TypedFacadeError<R>>;
+    fn dense_norm(_: ExecToken, t: &TensorMap<R, D, Self>, p: f64) -> Result<f64, FacadeError<R>>;
 
     /// `inner(x, y)` of two dense operands, owned or lazy adjoint, on one
     /// runtime and one space.
@@ -348,7 +341,7 @@ where
         _: ExecToken,
         x: &TensorMap<R, D, Self>,
         y: &TensorMap<R, D, Self>,
-    ) -> Result<D, TypedFacadeError<R>>;
+    ) -> Result<D, FacadeError<R>>;
 }
 
 impl<R, D> ReduceExec<R, D> for Vec<D>
@@ -357,7 +350,7 @@ where
     R::Mode: TypedSpaceModeDispatch<R>,
     D: TensorScalar,
 {
-    fn dense_norm(_: ExecToken, t: &TensorMap<R, D>, p: f64) -> Result<f64, TypedFacadeError<R>> {
+    fn dense_norm(_: ExecToken, t: &TensorMap<R, D>, p: f64) -> Result<f64, FacadeError<R>> {
         let provider = t.logical_space().provider();
         let payload = t
             .owned_body()
@@ -409,7 +402,7 @@ where
         _: ExecToken,
         x: &TensorMap<R, D>,
         y: &TensorMap<R, D>,
-    ) -> Result<D, TypedFacadeError<R>> {
+    ) -> Result<D, FacadeError<R>> {
         let _host_pool = x.runtime.enter_host_pool();
         let provider = x.logical_space().provider();
         if matches!(&x.repr, TypedTensorRepr::Adjoint(_))
@@ -468,7 +461,7 @@ where
     /// The compact arms of [`Self::inner`]: `None` when neither operand is
     /// compact. Compact operands reduce without materializing their
     /// structural zeros.
-    fn compact_inner_arms(&self, other: &Self) -> Result<Option<D>, TypedFacadeError<R>> {
+    fn compact_inner_arms(&self, other: &Self) -> Result<Option<D>, FacadeError<R>> {
         let value = match (self.spectrum(), other.spectrum()) {
             (Some(lhs), Some(rhs)) => {
                 compact_inner(lhs, rhs, run_cached_dim(self.logical_space().provider()))?
@@ -487,7 +480,7 @@ where
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
         dense: &Self,
         compact_is_lhs: bool,
-    ) -> Result<num_complex::Complex64, TypedFacadeError<R>> {
+    ) -> Result<num_complex::Complex64, FacadeError<R>> {
         let logical_structure = dense.logical_space().space().structure();
         let (data_structure, data, dense_is_adjoint) = match &dense.repr {
             TypedTensorRepr::Owned(body) => {
@@ -585,7 +578,7 @@ where
     /// Compact diagonal input is summed directly in `O(sum_c k_c)`. A
     /// lazy adjoint returns the conjugate of its parent's trace without
     /// materializing. See [`Self::norm`] for a runnable example.
-    pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
+    pub fn tr(&self) -> Result<D, FacadeError<R>> {
         let hom = self.logical_space().space().homspace();
         // The weighted trace below indexes codomain axis `i` together with
         // domain axis `nout + i` and would be meaningless without this check.

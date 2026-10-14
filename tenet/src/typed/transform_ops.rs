@@ -146,7 +146,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         self.tree_transform_into(
             destination,
             alpha,
@@ -188,7 +188,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         let operation = braid_operation(
             self.rank(),
             self.codomain_rank(),
@@ -228,7 +228,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         self.tree_transform_into(
             destination,
             alpha,
@@ -276,7 +276,7 @@ where
         destination: &mut Self,
         alpha: D,
         beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
         let destination_codomain_rank = destination.codomain_rank();
@@ -328,7 +328,7 @@ where
         beta: D,
         operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
         exact_layout_probe: impl FnOnce(&mut dyn FnMut(tenet_tensors::TreeTransformOperationView<'_>)),
-    ) -> Result<(), TypedFacadeError<R>> {
+    ) -> Result<(), FacadeError<R>> {
         if !self.runtime.same_runtime(&destination.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -452,7 +452,7 @@ where
         &self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         if self.axes_are_identity(codomain_axes, domain_axes) {
             return Ok(self.clone());
         }
@@ -472,8 +472,8 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
-        op: impl FnOnce(&Self) -> Result<T, TypedFacadeError<R>>,
-    ) -> Result<T, TypedFacadeError<R>> {
+        op: impl FnOnce(&Self) -> Result<T, FacadeError<R>>,
+    ) -> Result<T, FacadeError<R>> {
         if self.axes_are_identity(rows, cols) {
             return op(self);
         }
@@ -516,7 +516,7 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
         levels: &[usize],
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         // Keep the established axis/level pre-check and diagnostic.
         let rank = self.rank();
         if levels.len() != rank {
@@ -559,7 +559,7 @@ where
     /// [`crate::typed::OperationError::InvalidPermutation`]. Checked Generic
     /// reports an axis misuse in [`GenericTensorError::Facade`] and other
     /// failures in [`GenericTensorError::Plan`].
-    pub fn repartition(&self, num_codomain: usize) -> Result<Self, TypedFacadeError<R>> {
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, FacadeError<R>> {
         if num_codomain == self.codomain_rank() {
             return Ok(self.clone());
         }
@@ -599,7 +599,7 @@ where
         &self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         if self.axes_are_identity(codomain_axes, domain_axes) {
             return Ok(self.clone());
         }
@@ -614,7 +614,7 @@ where
     ///
     /// The shared axis derivation defines what "planar" means for each request
     /// kind; duplicating it here would allow the definitions to drift.
-    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, TypedFacadeError<R>> {
+    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, FacadeError<R>> {
         let operation = with_planar_axes(
             self.codomain_rank(),
             self.rank(),
@@ -630,7 +630,7 @@ where
                 ))
             },
         )
-        .map_err(TypedFacadeError::<R>::from)?;
+        .map_err(FacadeError::<R>::from)?;
         self.tree_transform(operation)
     }
 
@@ -640,7 +640,7 @@ where
     pub(super) fn tree_transform(
         &self,
         operation: TreeTransformOperation,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         if let Some(host) = S::as_host(EXEC, self) {
             if let Some(compact) = compact_arms::transform_rank_one_diagonal(host, &operation)? {
                 return Ok(S::from_host(EXEC, compact)?);
@@ -1349,7 +1349,7 @@ impl<R, D> BondTransform<R, D> {
 pub(super) fn lazy_adjoint_of_transformed_parent<R, D, S>(
     tensor: &TensorMap<R, D, S>,
     operation: &TreeTransformOperation,
-) -> Result<Option<TensorMap<R, D, S>>, TypedFacadeError<R>>
+) -> Result<Option<TensorMap<R, D, S>>, FacadeError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D> + TypedAdjointSpace<R>,
@@ -1680,7 +1680,7 @@ where
         position: usize,
         seam: Side,
         dual: Duality,
-    ) -> Result<Self, TypedFacadeError<R>> {
+    ) -> Result<Self, FacadeError<R>> {
         let dual = dual.is_dual();
         let insertion = match seam {
             Side::Domain => UnitLegInsertion::Left { position, dual },
@@ -1702,7 +1702,7 @@ where
     /// not a canonical unit leg. Otherwise the layout derivation's and
     /// validator's own classes; checked-Generic failures retain their typed
     /// [`GenericTensorError`] variants.
-    pub fn remove_unit(&self, axis: usize) -> Result<Self, TypedFacadeError<R>> {
+    pub fn remove_unit(&self, axis: usize) -> Result<Self, FacadeError<R>> {
         <R::Mode as TypedTensorUnitDispatch<R, D>>::remove_unit(self, axis)
     }
 }
@@ -1891,7 +1891,7 @@ where
     /// assert_eq!(t.adjoint()?.adjoint()?.dense_data()?, t.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn adjoint(&self) -> Result<Self, FacadeError<R>> {
         // Why not a lazy view of a compact diagonal: densifying its unstored
         // zeros through conjugation would publish them as `0-0i`.
         if let Some(adjoint) = self.compact_adjoint() {

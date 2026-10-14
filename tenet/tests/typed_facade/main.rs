@@ -49,8 +49,11 @@ use tenet::typed::{
 
 #[path = "../../../tests/support/numerics.rs"]
 mod numerics;
+#[path = "../support/report.rs"]
+mod report;
 #[path = "../ulp/mod.rs"]
 mod ulp;
+use report::Report;
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
