@@ -799,8 +799,8 @@ factorization_suite!(f32_payload, f32, f64);
 factorization_suite!(complex32_payload, Complex32, Complex64);
 
 /// Checked-Generic provider: SU(3), whose factorizations run through the
-/// checked dispatch (`decide_bond_truncation_generic_checked` and the checked
-/// factor plans) rather than the multiplicity-free one.
+/// checked dispatch (`decide_bond_truncation` with the checked mode and the
+/// checked factor plans) rather than the multiplicity-free one.
 ///
 /// A separate, smaller body rather than an instantiation of `factor_checks!`:
 /// the isometry laws are expressed here as "the Gram factor is the identity"

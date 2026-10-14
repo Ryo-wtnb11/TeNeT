@@ -184,13 +184,6 @@ pub trait FactorMode<R>: sealed::Sealed {
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
 
-    fn rectangular_spectrum_factor<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum],
-        row_dimensions: &BTreeMap<SectorId, usize>,
-        col_dimensions: &BTreeMap<SectorId, usize>,
-    ) -> Result<BoundDynFactor<R, D>, Self::Error>;
-
     // Eigendecomposition stages, publishing through each mode's own
     // builders.
     fn eigh_full_diagonal<D: FactorScalar>(
@@ -287,15 +280,6 @@ where
         D: FactorScalar,
     {
         svd_full_adjoint_factors_dyn(dense, parent)
-    }
-
-    fn rectangular_spectrum_factor<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum],
-        row_dimensions: &BTreeMap<SectorId, usize>,
-        col_dimensions: &BTreeMap<SectorId, usize>,
-    ) -> Result<BoundDynFactor<R, D>, Self::Error> {
-        rectangular_diagonal_bond_tensor(space, spectrum, row_dimensions, col_dimensions)
     }
 
     fn qr_compact_dense<E, D>(
@@ -467,21 +451,6 @@ where
         D: FactorScalar,
     {
         svd_full_adjoint_factors_dyn_checked_generic(dense, parent)
-    }
-
-    fn rectangular_spectrum_factor<D: FactorScalar>(
-        space: &BoundDynamicFusionMapSpace<R>,
-        spectrum: &[SectorSpectrum],
-        row_dimensions: &BTreeMap<SectorId, usize>,
-        col_dimensions: &BTreeMap<SectorId, usize>,
-    ) -> Result<BoundDynFactor<R, D>, Self::Error> {
-        rectangular_diagonal_bond_tensor_generic_checked(
-            Arc::clone(space.provider_arc()),
-            spectrum,
-            row_dimensions,
-            col_dimensions,
-            &D::from_real,
-        )
     }
 
     fn qr_compact_dense<E, D>(

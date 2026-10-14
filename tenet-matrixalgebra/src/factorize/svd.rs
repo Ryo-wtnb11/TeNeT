@@ -1242,17 +1242,24 @@ where
 /// factorization's stored order (any order), and the kept set is a per-sector
 /// mask over those stored positions (TensorKit's `findtruncated`).
 ///
+/// The mode `M` supplies the `dim(c)` weight (exact `try_dim_scalar` on the
+/// checked tier, #1871). The rule identity and sector order are arguments
+/// because the multiplicity-free and checked providers expose them through
+/// different traits (`FusionRule` and `CheckedGenericFusion`).
+///
 /// Public and `doc(hidden)` only because the typed facade's
 /// `GradedSpace::find_truncated`, in the `tenet` crate, is its caller; it is
 /// not an API of its own.
 #[doc(hidden)]
-pub fn decide_bond_truncation<R, V>(
+pub fn decide_bond_truncation<M, R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
-) -> Result<crate::truncation::TruncationDecision, OperationError>
+    rule_identity: &RuleIdentity,
+    sector_order_key: impl Fn(SectorId) -> SectorOrderKey,
+) -> Result<crate::truncation::TruncationDecision, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    M: RigidCoefficientAlgebra<R>,
     V: SpectrumMagnitude,
 {
     let magnitudes: Vec<Vec<f64>> = spectra
@@ -1263,17 +1270,12 @@ where
     for (entry, values) in spectra.iter().zip(&magnitudes) {
         weighted.push(WeightedSpectrum {
             sector: entry.sector,
-            weight: <MultiplicityFreeAdmissionMode as RigidCoefficientAlgebra<R>>::dim(
-                rule,
-                entry.sector,
-            )?,
+            weight: M::dim(rule, entry.sector)?,
             values,
         });
     }
-    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
-        rule.sector_order_key(sector)
-    })
-    .map_err(OperationError::from)
+    select_truncation(&weighted, truncation, rule_identity, sector_order_key)
+        .map_err(|error| M::Error::from(OperationError::from(error)))
 }
 
 #[cfg(test)]
@@ -1593,7 +1595,7 @@ where
     let parts = svd_full_oriented_factors_dyn(dense, input, placement)?;
     let authority = parts.adjoint_space.as_ref().unwrap_or(input.space());
     let s = rectangular_diagonal_bond_tensor(
-        authority,
+        &MfAuthority(authority),
         &parts.singular_values,
         &parts.row_dimensions,
         &parts.col_dimensions,
@@ -1793,15 +1795,18 @@ where
 
 /// Rectangular diagonal `W_row <- W_col` bond factor (the `S` of the full
 /// SVD): per sector shape `[rows, cols]` with the spectrum on the diagonal.
+/// One body for both modes; `authority` owns the output space, so the mode
+/// shows only in that space's derivation and in the error type.
 #[doc(hidden)]
-pub fn rectangular_diagonal_bond_tensor<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+pub fn rectangular_diagonal_bond_tensor<A, R, D>(
+    authority: &A,
     spectra: &[SectorSpectrum],
     row_dimensions: &BTreeMap<SectorId, usize>,
     col_dimensions: &BTreeMap<SectorId, usize>,
-) -> Result<BoundDynFactor<R, D>, OperationError>
+) -> Result<BoundDynFactor<R, D>, A::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<A::RootError>,
     D: FactorScalar,
 {
     let row_leg = SectorLeg::new(
@@ -1820,7 +1825,7 @@ where
         FusionProductSpace::new([row_leg]),
         FusionProductSpace::new([col_leg]),
     );
-    let space = MfAuthority(authority).output_space(homspace)?;
+    let space = authority.output_space(homspace)?;
     let len = space
         .space()
         .required_len()
@@ -1850,72 +1855,7 @@ where
             data[offset + position * (strides[0] + strides[1])] = D::from_real(value);
         }
     }
-    BoundDynFactor::from_bound(space, data, 1, 1)
-}
-
-#[doc(hidden)]
-pub fn rectangular_diagonal_bond_tensor_generic_checked<R, D>(
-    provider: Arc<R>,
-    spectra: &[SectorSpectrum],
-    row_dimensions: &BTreeMap<SectorId, usize>,
-    col_dimensions: &BTreeMap<SectorId, usize>,
-    to_scalar: &dyn Fn(f64) -> D,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let row_leg = SectorLeg::new(
-        row_dimensions
-            .iter()
-            .map(|(&sector, &dimension)| (sector, dimension)),
-        false,
-    );
-    let col_leg = SectorLeg::new(
-        col_dimensions
-            .iter()
-            .map(|(&sector, &dimension)| (sector, dimension)),
-        false,
-    );
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([row_leg]),
-        FusionProductSpace::new([col_leg]),
-    );
-    let space = CheckedAuthority(&provider)
-        .output_space(homspace)
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let len = space.space().required_len().map_err(|error| {
-        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-            error,
-        ))
-    })?;
-    let mut data = vec![D::zero(); len];
-    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum> =
-        spectra.iter().map(|entry| (entry.sector, entry)).collect();
-    let structure = Arc::clone(space.space().structure());
-    for index in 0..structure.block_count() {
-        let block = structure.block(index).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                error,
-            ))
-        })?;
-        let BlockKey::FusionTree(tree) = block.key() else {
-            continue;
-        };
-        let Some(entry) = spectrum_by_sector.get(&tree.codomain_tree().coupled()) else {
-            continue;
-        };
-        let strides = block.strides();
-        let offset = block.offset();
-        let count = block.shape()[0].min(block.shape()[1]);
-        for position in 0..count {
-            let Some(&value) = entry.values.get(position) else {
-                break;
-            };
-            data[offset + position * (strides[0] + strides[1])] = to_scalar(value);
-        }
-    }
-    BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
+    Ok(BoundDynFactor::from_bound(space, data, 1, 1)?)
 }
 
 /// Positive-diagonal gauge (MatrixAlgebraKit `positive = true`, the default
@@ -2184,39 +2124,6 @@ where
     BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
 }
 
-/// Checked-Generic sibling of [`decide_bond_truncation`], public and hidden for
-/// the same reason.
-#[doc(hidden)]
-pub fn decide_bond_truncation_generic_checked<R, V>(
-    rule: &R,
-    spectra: &[SectorSpectrum<V>],
-    truncation: &Truncation,
-) -> Result<crate::truncation::TruncationDecision, CheckedGenericPlanError<R::Error>>
-where
-    R: CheckedGenericRigidSymbols<Scalar = f64>,
-    V: SpectrumMagnitude,
-{
-    let magnitudes: Vec<Vec<f64>> = spectra
-        .iter()
-        .map(|entry| entry.values.iter().map(|value| value.magnitude()).collect())
-        .collect();
-    let mut weighted = Vec::with_capacity(spectra.len());
-    for (entry, values) in spectra.iter().zip(&magnitudes) {
-        weighted.push(WeightedSpectrum {
-            sector: entry.sector,
-            weight: <CheckedGenericAdmissionMode as RigidCoefficientAlgebra<R>>::dim(
-                rule,
-                entry.sector,
-            )?,
-            values,
-        });
-    }
-    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
-        rule.sector_order_key(sector)
-    })
-    .map_err(|error| CheckedGenericPlanError::Operation(error.into()))
-}
-
 /// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound
 /// output spaces are admitted through the checked staging boundary.
 #[doc(hidden)]
@@ -2407,15 +2314,13 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
     let parts = svd_full_factors_dyn_checked_generic(dense, input)?;
     let (u, vh, singular_values, row_dimensions, col_dimensions) = parts.into_parts();
-    let s = rectangular_diagonal_bond_tensor_generic_checked(
-        Arc::clone(provider),
+    let s = rectangular_diagonal_bond_tensor(
+        &CheckedAuthority(input.space().provider_arc()),
         &singular_values,
         &row_dimensions,
         &col_dimensions,
-        &D::from_real,
     )?;
     Ok(SvdFullDyn {
         u,
