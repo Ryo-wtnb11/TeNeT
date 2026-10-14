@@ -1,11 +1,20 @@
 use super::*;
 
-/// Inline up to rank 8 so a fresh adapter per eager call allocates nothing.
+/// Inline capacity of [`FusedLayoutScratch`] and the traversal index.
+///
+/// Normalization stores every non-unit raw axis before fusing, so the inline
+/// capacity bounds the raw rank, not the fused rank. Twice Strided's fused
+/// limit keeps raw layouts that fuse back under that limit (unit legs, split
+/// degeneracies) allocation-free, as well as fused ranks just above it.
+pub(crate) const FUSED_LAYOUT_INLINE_RANK: usize = 2 * strided_kernel::RAW_FUSED_RANK_LIMIT;
+
+/// Inline up to [`FUSED_LAYOUT_INLINE_RANK`] so a fresh adapter per eager
+/// call allocates nothing.
 #[derive(Debug, Default)]
 pub(crate) struct FusedLayoutScratch {
-    dims: SmallVec<[usize; 8]>,
-    dst_strides: SmallVec<[isize; 8]>,
-    src_strides: SmallVec<[isize; 8]>,
+    dims: SmallVec<[usize; FUSED_LAYOUT_INLINE_RANK]>,
+    dst_strides: SmallVec<[isize; FUSED_LAYOUT_INLINE_RANK]>,
+    src_strides: SmallVec<[isize; FUSED_LAYOUT_INLINE_RANK]>,
 }
 
 impl FusedLayoutScratch {
@@ -25,7 +34,7 @@ impl FusedLayoutScratch {
 #[derive(Debug, Default)]
 pub(super) struct StridedKernelScratch {
     pub(super) layout: FusedLayoutScratch,
-    index: SmallVec<[usize; 8]>,
+    pub(super) index: SmallVec<[usize; FUSED_LAYOUT_INLINE_RANK]>,
 }
 
 /// Borrowed view of a prebaked fused loop layout (issue #232).

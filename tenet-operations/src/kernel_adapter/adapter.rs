@@ -25,6 +25,18 @@ pub(crate) mod sealed {
 /// Every primitive is elementwise without reduction, so an adapter that
 /// iterates the views it receives produces the same values.
 ///
+/// Bounds contract: the `*_baked` methods validate only ranks. The caller
+/// guarantees that every offset reachable through the views (or through
+/// `baked`) lies inside `dst_data` and `src_data`; replay drivers derive them
+/// from validated block descriptors. Callers holding unproven layouts use
+/// [`StridedHostKernelAdapter::tensoradd_strided_checked`].
+///
+/// # Panics
+///
+/// The `*_baked` methods panic on bounds-checked slice indexing, possibly
+/// after partial writes, when the bounds contract is violated; a violation
+/// is never undefined behavior.
+///
 /// Sealed: the `testing` feature adds a method, so an implementor outside this
 /// crate could not compile in both feature configurations.
 pub trait HostKernelAdapter<T>: sealed::Sealed {
@@ -38,6 +50,10 @@ pub trait HostKernelAdapter<T>: sealed::Sealed {
     /// fuse may ignore it. `index` is caller-owned traversal scratch (compiled
     /// replay keeps it in its execution workspace); `None` lets the adapter
     /// use its own.
+    ///
+    /// # Panics
+    ///
+    /// On a bounds-contract violation (see the trait docs).
     #[allow(clippy::too_many_arguments)]
     fn add_strided_baked(
         &mut self,
@@ -59,6 +75,10 @@ pub trait HostKernelAdapter<T>: sealed::Sealed {
     /// `dst = alpha * src + beta * dst` over strided views without
     /// conjugation (scatter primitive). `baked` and `index` as in
     /// [`add_strided_baked`](Self::add_strided_baked).
+    ///
+    /// # Panics
+    ///
+    /// On a bounds-contract violation (see the trait docs).
     #[allow(clippy::too_many_arguments)]
     fn axpby_strided_baked(
         &mut self,
@@ -77,6 +97,10 @@ pub trait HostKernelAdapter<T>: sealed::Sealed {
 
     /// `dst = alpha * op(src)` over strided views (pack primitive). `baked`
     /// and `index` as in [`add_strided_baked`](Self::add_strided_baked).
+    ///
+    /// # Panics
+    ///
+    /// On a bounds-contract violation (see the trait docs).
     #[allow(clippy::too_many_arguments)]
     fn copy_scale_strided_baked(
         &mut self,
@@ -102,6 +126,10 @@ pub trait HostKernelAdapter<T>: sealed::Sealed {
     /// an overwrite (the destination is never read) and `Some` for an
     /// accumulate. The default promotes and forwards, so adapters that cannot
     /// exploit a real coefficient keep their current behavior.
+    ///
+    /// # Panics
+    ///
+    /// On a bounds-contract violation (see the trait docs).
     #[allow(clippy::too_many_arguments)]
     fn transform_strided_baked<C>(
         &mut self,
@@ -248,7 +276,8 @@ impl StridedHostKernelAdapter {
         validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
         validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
         crate::checked_block_layout::record_checked_block_passes(1, 1);
-        if strided_raw_action(
+        let action = raw_strided_action(alpha, beta);
+        if raw_rank_within_strided_limit_routed(
             dst_data,
             src_data,
             shape,
@@ -257,40 +286,24 @@ impl StridedHostKernelAdapter {
             dst_offset,
             src_offset,
             source_conjugate,
-            raw_strided_action(alpha, beta),
+            action,
         )? {
             return Ok(());
         }
-        let op = move |value: T| value.maybe_conj(source_conjugate);
-        let scratch = &mut self.scratch;
-        macro_rules! run {
-            ($apply:expr) => {
-                fused_pair(
-                    scratch,
-                    dst_data,
-                    src_data,
-                    shape,
-                    dst_strides,
-                    src_strides,
-                    dst_offset,
-                    src_offset,
-                    $apply,
-                    op,
-                )
-            };
-        }
-        match raw_strided_action(alpha, beta) {
-            RawStridedAction::Copy => run!(|dst: &mut T, value| *dst = value),
-            RawStridedAction::CopyScale { alpha } => run!(move |dst: &mut T, value| {
-                *dst = scale_value(value, alpha);
-            }),
-            RawStridedAction::Axpy { alpha } => run!(move |dst: &mut T, value| {
-                *dst = *dst + scale_value(value, alpha);
-            }),
-            RawStridedAction::Axpby { alpha, beta } => run!(move |dst: &mut T, value| {
-                *dst = beta * *dst + scale_value(value, alpha);
-            }),
-        }
+        let StridedKernelScratch { layout, index } = &mut self.scratch;
+        combine_fused_layout(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            action,
+            layout,
+            index,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

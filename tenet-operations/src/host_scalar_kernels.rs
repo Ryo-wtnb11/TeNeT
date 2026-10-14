@@ -7,6 +7,11 @@ use strided_kernel::{
     RawStridedMut, RawStridedRef, RAW_FUSED_RANK_LIMIT,
 };
 
+use smallvec::SmallVec;
+
+use crate::kernel_adapter::{
+    apply_fused_pair_slices, normalize_fused_layout, FusedLayoutScratch, FUSED_LAYOUT_INLINE_RANK,
+};
 use crate::scalar::scale_value;
 use crate::strided::error as strided_error;
 use crate::{ConjugateValue, OperationError};
@@ -443,6 +448,14 @@ where
     )
 }
 
+/// `dst = alpha * src + beta * dst` over raw strided views the caller has
+/// already proved in bounds; only debug builds re-check them.
+///
+/// # Panics
+///
+/// If a reachable offset lies outside `dst_data` or `src_data`, a release
+/// build panics on bounds-checked slice indexing (possibly after partial
+/// writes); it is never undefined behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn axpby_raw_strided_kernel_trusted<T>(
     dst_data: &mut [T],
@@ -488,6 +501,16 @@ where
     )
 }
 
+/// `dst = beta * dst` over a raw strided view the caller has already proved
+/// in bounds; only debug builds re-check it (returning an error before any
+/// write).
+///
+/// # Panics
+///
+/// If a reachable offset lies outside `dst_data`, a release build either
+/// returns [`OperationError::OffsetOverflow`] or panics on bounds-checked
+/// slice indexing, in both cases possibly after partial writes; it is never
+/// undefined behavior.
 pub fn scale_raw_strided_kernel_trusted<T>(
     dst_data: &mut [T],
     shape: &[usize],
@@ -1052,11 +1075,10 @@ fn raw_strided_combine_loop<T>(
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue + MaybeSendSync,
 {
-    let len = crate::strided::element_count(shape)?;
-    if len == 0 {
+    if crate::strided::element_count(shape)? == 0 {
         return Ok(());
     }
-    if strided_raw_action(
+    if raw_rank_within_strided_limit_routed(
         dst_data,
         src_data,
         shape,
@@ -1069,51 +1091,152 @@ where
     )? {
         return Ok(());
     }
-    if shape.is_empty() {
-        let dst_index = checked_offset_to_index(dst_offset)?;
-        let src_index = checked_offset_to_index(src_offset)?;
-        apply_raw_strided_action(
-            &mut dst_data[dst_index],
-            src_data[src_index].maybe_conj(source_conjugate),
+    // Why not normalize every layout: normalization orders axes by
+    // destination stride, and on a destination whose axes are not separated
+    // (possibly aliasing) that reorder would change the overwrite winner and
+    // the accumulation order of TeNeT's column-major loop.
+    if !destination_axes_separated(shape, dst_strides) {
+        return raw_strided_combine_recurse_mapped(
+            shape.len() - 1,
+            dst_data,
+            src_data,
+            shape,
+            |axis| Ok(dst_strides[axis]),
+            |axis| Ok(src_strides[axis]),
+            dst_offset,
+            src_offset,
+            source_conjugate,
             action,
         );
-        return Ok(());
     }
-    if is_column_major_contiguous(shape, dst_strides)?
-        && is_column_major_contiguous(shape, src_strides)?
-    {
-        let dst_start = checked_offset_to_index(dst_offset)?;
-        let src_start = checked_offset_to_index(src_offset)?;
-        let dst_end = dst_start
-            .checked_add(len)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        let src_end = src_start
-            .checked_add(len)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        let dst = dst_data
-            .get_mut(dst_start..dst_end)
-            .ok_or_else(|| OperationError::OffsetOverflow { value: dst_end })?;
-        let src = src_data
-            .get(src_start..src_end)
-            .ok_or_else(|| OperationError::OffsetOverflow { value: src_end })?;
-        for (dst_value, src_value) in dst.iter_mut().zip(src.iter().copied()) {
-            apply_raw_strided_action(dst_value, src_value.maybe_conj(source_conjugate), action);
-        }
-        return Ok(());
-    }
-
-    raw_strided_combine_recurse_mapped(
-        shape.len() - 1,
+    combine_fused_layout(
         dst_data,
         src_data,
         shape,
-        |axis| Ok(dst_strides[axis]),
-        |axis| Ok(src_strides[axis]),
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        action,
+        &mut FusedLayoutScratch::default(),
+        &mut SmallVec::new(),
+    )
+}
+
+/// Strided's raw kernels on the raw layout when its rank is within
+/// [`RAW_FUSED_RANK_LIMIT`]: Strided then fuses the layout itself, so
+/// TeNeT's normalization would only repeat that work. Callers follow a
+/// `false` with [`combine_fused_layout`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn raw_rank_within_strided_limit_routed<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    action: RawStridedAction<T>,
+) -> Result<bool, OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue + MaybeSendSync,
+{
+    if shape.len() > RAW_FUSED_RANK_LIMIT {
+        return Ok(false);
+    }
+    strided_raw_action(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
         dst_offset,
         src_offset,
         source_conjugate,
         action,
     )
+}
+
+/// Normalizes the layout with [`normalize_fused_layout`] (unit axes
+/// dropped, axes ordered by destination stride, axes contiguous in both
+/// operands merged) and chooses the kernel by the fused rank: up to
+/// [`RAW_FUSED_RANK_LIMIT`] Strided's raw kernels, otherwise one span walk
+/// over the fused axes.
+///
+/// Strided gates on the rank it is given, before dropping unit axes, so a
+/// raw rank above its limit must be fused here first. A raw rank within the
+/// limit was already offered to Strided by
+/// [`raw_rank_within_strided_limit_routed`], and fusion changes neither the
+/// action nor destination separation, so it is not offered again.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn combine_fused_layout<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    raw_dst_strides: &[isize],
+    raw_src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    action: RawStridedAction<T>,
+    layout: &mut FusedLayoutScratch,
+    index: &mut SmallVec<[usize; FUSED_LAYOUT_INLINE_RANK]>,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue + MaybeSendSync,
+{
+    normalize_fused_layout(shape, raw_dst_strides, raw_src_strides, layout)?;
+    let (dims, dst_strides, src_strides) =
+        (layout.dims(), layout.dst_strides(), layout.src_strides());
+    if shape.len() > RAW_FUSED_RANK_LIMIT
+        && strided_raw_action(
+            dst_data,
+            src_data,
+            dims,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            action,
+        )?
+    {
+        return Ok(());
+    }
+    index.clear();
+    index.resize(dims.len(), 0);
+    let op = move |value: T| value.maybe_conj(source_conjugate);
+    macro_rules! run {
+        ($apply:expr) => {
+            apply_fused_pair_slices(
+                dst_data,
+                src_data,
+                dims,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                index,
+                $apply,
+                op,
+            )
+        };
+    }
+    match action {
+        RawStridedAction::Copy => run!(|dst: &mut T, value| *dst = value),
+        RawStridedAction::CopyScale { alpha } => {
+            run!(move |dst: &mut T, value| *dst = scale_value(value, alpha))
+        }
+        RawStridedAction::Axpy { alpha } => {
+            run!(move |dst: &mut T, value| *dst = *dst + scale_value(value, alpha))
+        }
+        RawStridedAction::Axpby { alpha, beta } => {
+            run!(move |dst: &mut T, value| *dst = beta * *dst + scale_value(value, alpha))
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1178,7 +1301,9 @@ where
 /// - `Axpby` (Strided has no allocation-free axpby) and a zero `alpha`, whose
 ///   TensorKit zero rule Strided's `alpha * x` would break (`0 * inf = NaN`);
 /// - rank above [`RAW_FUSED_RANK_LIMIT`], where Strided falls back to
-///   allocating view kernels;
+///   allocating view kernels. Strided gates on the rank it is given, before
+///   dropping unit axes, so [`combine_fused_layout`] passes the fused layout
+///   of a larger raw rank;
 /// - a destination whose axes are not separated (see
 ///   [`destination_axes_separated`]). Strided replays axes in destination
 ///   stride order, so on an aliasing destination the overwrite winner and the
@@ -2215,6 +2340,18 @@ mod tests {
         }
     }
 
+    impl BitPattern for f32 {
+        fn pattern(self) -> (u64, u64) {
+            (f64::from(self).to_bits(), 0)
+        }
+    }
+
+    impl BitPattern for num_complex::Complex32 {
+        fn pattern(self) -> (u64, u64) {
+            (f64::from(self.re).to_bits(), f64::from(self.im).to_bits())
+        }
+    }
+
     fn patterns<T: BitPattern>(values: &[T]) -> Vec<(u64, u64)> {
         values.iter().map(|&value| value.pattern()).collect()
     }
@@ -2689,5 +2826,323 @@ mod tests {
             RawStridedAction::Copy,
         );
         assert_eq!(bits(&dst), bits(&want));
+    }
+
+    /// Test-only oracle independent of every traversal under test: decode
+    /// each column-major linear index into raw coordinates and apply the
+    /// element action at the raw offsets.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_combine<T>(
+        dst: &mut [T],
+        src: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        conjugate: bool,
+        action: RawStridedAction<T>,
+    ) where
+        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    {
+        for linear in 0..shape.iter().product::<usize>() {
+            let (mut rest, mut d, mut s) = (linear, dst_offset, src_offset);
+            for axis in 0..shape.len() {
+                let coord = (rest % shape[axis]) as isize;
+                rest /= shape[axis];
+                d += coord * dst_strides[axis];
+                s += coord * src_strides[axis];
+            }
+            let value = src[s as usize].maybe_conj(conjugate);
+            apply_raw_strided_action(&mut dst[d as usize], value, action);
+        }
+    }
+
+    /// xorshift64: deterministic layouts without a test-only dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+    }
+
+    /// Strides of a column-major layout over `order` with extent
+    /// `dim + pad` per axis, negating some axes; returns the strides, the
+    /// offset making every index nonnegative, and the buffer length.
+    fn random_strides(
+        rng: &mut Rng,
+        shape: &[usize],
+        order: &[usize],
+        pad_odds: usize,
+    ) -> (Vec<isize>, isize, usize) {
+        let mut strides = vec![0isize; shape.len()];
+        let mut stride = 1isize;
+        for &axis in order {
+            strides[axis] = stride;
+            let pad = usize::from(rng.below(pad_odds) == 0);
+            stride *= (shape[axis] + pad) as isize;
+        }
+        let mut offset = 0isize;
+        for (axis, slot) in strides.iter_mut().enumerate() {
+            if shape[axis] == 1 {
+                // A unit axis contributes no offset: any stride is valid.
+                *slot = rng.below(9) as isize;
+            } else if rng.below(4) == 0 {
+                offset += *slot * (shape[axis] as isize - 1);
+                *slot = -*slot;
+            }
+        }
+        (strides, offset, stride as usize)
+    }
+
+    fn assert_fused_rank_matches_naive<T>(make: impl Fn(f64, f64) -> T, alpha: T, beta: T)
+    where
+        T: BitPattern
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + MaybeSendSync
+            + core::fmt::Debug,
+    {
+        let mut rng = Rng(0x2230_9e37_79b9_7f4a);
+        let mut fused_ranks = [0usize; 17];
+        for case in 0..96 {
+            let rank = 6 + case % 11;
+            let mut shape = Vec::with_capacity(rank);
+            let mut len = 1usize;
+            for _ in 0..rank {
+                let dim = [1, 1, 2, 2, 2, 3][rng.below(6)];
+                let dim = if len * dim > 4096 { 1 } else { dim };
+                len *= dim;
+                shape.push(dim);
+            }
+            let mut dst_order: Vec<usize> = (0..rank).collect();
+            for axis in (1..rank).rev() {
+                dst_order.swap(axis, rng.below(axis + 1));
+            }
+            // Same order (fusable runs), reversed, or an independent shuffle.
+            let src_order: Vec<usize> = match case % 3 {
+                0 => dst_order.clone(),
+                1 => dst_order.iter().rev().copied().collect(),
+                _ => {
+                    let mut order = dst_order.clone();
+                    for axis in (1..rank).rev() {
+                        order.swap(axis, rng.below(axis + 1));
+                    }
+                    order
+                }
+            };
+            let (dst_strides, dst_offset, dst_len) =
+                random_strides(&mut rng, &shape, &dst_order, 3);
+            let (src_strides, src_offset, src_len) =
+                random_strides(&mut rng, &shape, &src_order, 4);
+            assert!(destination_axes_separated(&shape, &dst_strides));
+            let mut layout = FusedLayoutScratch::default();
+            normalize_fused_layout(&shape, &dst_strides, &src_strides, &mut layout).unwrap();
+            fused_ranks[layout.dims().len()] += 1;
+
+            let src = special_values(src_len, case, &make);
+            let initial = special_values(dst_len, case + 2, &make);
+            for (a, b) in [
+                (T::one(), T::zero()),
+                (alpha, T::zero()),
+                (alpha, T::one()),
+                (alpha, beta),
+                (T::zero(), beta),
+            ] {
+                let action = raw_strided_action(a, b);
+                let compare = if matches!(action, RawStridedAction::Copy) {
+                    patterns::<T>
+                } else {
+                    arithmetic_patterns::<T>
+                };
+                for conjugate in [false, true] {
+                    let mut expected = initial.clone();
+                    naive_combine(
+                        &mut expected,
+                        &src,
+                        &shape,
+                        &dst_strides,
+                        &src_strides,
+                        dst_offset,
+                        src_offset,
+                        conjugate,
+                        action,
+                    );
+                    let mut validated = initial.clone();
+                    tensoradd_raw_strided_kernel(
+                        &mut Vec::new(),
+                        &mut validated,
+                        &src,
+                        &shape,
+                        &dst_strides,
+                        &src_strides,
+                        dst_offset,
+                        src_offset,
+                        conjugate,
+                        a,
+                        b,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        compare(&validated),
+                        compare(&expected),
+                        "case {case} shape {shape:?} dst {dst_strides:?} src {src_strides:?} \
+                         {action:?} conj {conjugate}"
+                    );
+                    if !conjugate {
+                        let mut trusted = initial.clone();
+                        axpby_raw_strided_kernel_trusted(
+                            &mut trusted,
+                            &src,
+                            &shape,
+                            &dst_strides,
+                            &src_strides,
+                            dst_offset,
+                            src_offset,
+                            a,
+                            b,
+                        )
+                        .unwrap();
+                        assert_eq!(compare(&trusted), compare(&expected), "case {case}");
+                    }
+                }
+            }
+        }
+        // The sample reaches both kernels: fused rank at most Strided's limit
+        // from raw rank above it, and fused rank above the limit.
+        assert!(fused_ranks[..=RAW_FUSED_RANK_LIMIT].iter().sum::<usize>() > 0);
+        assert!(
+            fused_ranks[RAW_FUSED_RANK_LIMIT + 1..]
+                .iter()
+                .sum::<usize>()
+                > 0
+        );
+    }
+
+    /// What: at raw rank 6 through 16, with unit axes of arbitrary stride,
+    /// padded, permuted, reversed and negative strides on separated
+    /// destinations, every action (copy, scale, axpy, axpby, zero alpha), with
+    /// and without conjugation, gives exactly the naive column-major result
+    /// for f32, f64, Complex32 and Complex64, whether the fused rank routes
+    /// the call to Strided or to the fused span walk.
+    #[test]
+    fn fused_rank_gate_matches_naive_oracle_bitwise() {
+        assert_fused_rank_matches_naive(|re, _| re, -0.5, 0.25);
+        assert_fused_rank_matches_naive(|re, _| re as f32, -0.5f32, 0.25);
+        assert_fused_rank_matches_naive(
+            Complex64::new,
+            Complex64::new(-0.5, 0.25),
+            Complex64::new(0.0, -1.0),
+        );
+        assert_fused_rank_matches_naive(
+            |re, im| num_complex::Complex32::new(re as f32, im as f32),
+            num_complex::Complex32::new(-0.5, 0.25),
+            num_complex::Complex32::new(0.0, -1.0),
+        );
+    }
+
+    /// Raw rank-12 layout `(shape, dst_strides, src_strides)` over logical
+    /// axes `[4, 3, 2, 2, 3, 2, 2, 4]` (padded destination, reversed source,
+    /// so no logical axes fuse): both extent-4 axes are split into
+    /// contiguous `(2, 2)` pairs and two unit axes are inserted. It fuses
+    /// back to rank 8.
+    fn raw_rank_twelve_fusing_to_eight() -> (Vec<usize>, Vec<isize>, Vec<isize>) {
+        let logical = [4usize, 3, 2, 2, 3, 2, 2, 4];
+        let mut dst = Vec::new();
+        let mut stride = 1isize;
+        for &dim in &logical {
+            dst.push(stride);
+            stride *= dim as isize + 1;
+        }
+        let mut src = vec![0isize; logical.len()];
+        let mut stride = 1isize;
+        for axis in (0..logical.len()).rev() {
+            src[axis] = stride;
+            stride *= logical[axis] as isize;
+        }
+        let mut layout = (Vec::new(), Vec::new(), Vec::new());
+        for axis in 0..logical.len() {
+            if logical[axis] == 4 {
+                layout.0.extend([2, 2]);
+                layout.1.extend([dst[axis], 2 * dst[axis]]);
+                layout.2.extend([src[axis], 2 * src[axis]]);
+            } else {
+                layout.0.push(logical[axis]);
+                layout.1.push(dst[axis]);
+                layout.2.push(src[axis]);
+            }
+            if axis == 2 || axis == 5 {
+                layout.0.push(1);
+                layout.1.push(11);
+                layout.2.push(3);
+            }
+        }
+        layout
+    }
+
+    /// What: a raw rank-12 layout whose unit axes and contiguous axis pairs
+    /// fuse away normalizes to rank 8, Strided's limit, and every action
+    /// over it (through Strided, or TeNeT's walk for axpby) gives exactly the
+    /// naive column-major result.
+    #[test]
+    fn raw_rank_twelve_normalizes_to_strided_limit() {
+        let (shape, dst_strides, src_strides) = raw_rank_twelve_fusing_to_eight();
+        assert_eq!(shape.len(), 12);
+        let mut layout = FusedLayoutScratch::default();
+        normalize_fused_layout(&shape, &dst_strides, &src_strides, &mut layout).unwrap();
+        assert_eq!(layout.dims().len(), RAW_FUSED_RANK_LIMIT);
+
+        let len: usize = shape.iter().product();
+        let dst_len = 5 * 4 * 3 * 3 * 4 * 3 * 3 * 5;
+        let src = special_values(len, 3, Complex64::new);
+        let initial = special_values(dst_len, 5, Complex64::new);
+        let alpha = Complex64::new(-0.5, 0.25);
+        for (a, b) in [
+            (Complex64::one(), Complex64::zero()),
+            (alpha, Complex64::one()),
+            (alpha, alpha),
+        ] {
+            let action = raw_strided_action(a, b);
+            let mut expected = initial.clone();
+            naive_combine(
+                &mut expected,
+                &src,
+                &shape,
+                &dst_strides,
+                &src_strides,
+                0,
+                0,
+                true,
+                action,
+            );
+            let mut actual = initial.clone();
+            tensoradd_raw_strided_kernel(
+                &mut Vec::new(),
+                &mut actual,
+                &src,
+                &shape,
+                &dst_strides,
+                &src_strides,
+                0,
+                0,
+                true,
+                a,
+                b,
+            )
+            .unwrap();
+            assert_eq!(
+                arithmetic_patterns(&actual),
+                arithmetic_patterns(&expected),
+                "{action:?}"
+            );
+        }
     }
 }
