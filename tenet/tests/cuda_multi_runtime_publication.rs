@@ -154,8 +154,6 @@ fn graded(runtime: &Runtime, seed: usize) -> Host {
 /// One thread's work: upload through one Runtime, compose, read the output
 /// back through the same Runtime after touching the other one, and run the
 /// other Runtime's maintenance paths in between.
-// Exercises the deprecated per-Runtime wrapper's device-state clear.
-#[allow(deprecated)]
 fn round(own: &Runtime, other: &Runtime, seed: usize) {
     let host = graded(own, seed);
     let expected = host.compose(&host).unwrap();
@@ -164,7 +162,7 @@ fn round(own: &Runtime, other: &Runtime, seed: usize) {
     graded(other, seed).to_cuda().unwrap().to_host().unwrap();
     other.cuda_tree_transform_stats().unwrap();
     if seed.is_multiple_of(5) {
-        other.clear_tree_transform_cache();
+        other.clear_cuda_caches();
     }
     assert_eq!(
         out.to_host().unwrap().dense_data().unwrap(),

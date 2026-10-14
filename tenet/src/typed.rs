@@ -229,12 +229,8 @@ pub type PhysicalDenseError<E> = tenet_tensors::PhysicalConversionError<E>;
 pub use crate::error::{Alternative, Error};
 #[cfg(feature = "cuda")]
 pub use crate::runtime::CudaTreeTransformStats;
-/// The runtime every constructor here takes, its builder and configuration,
-/// and its cache observability.
-pub use crate::runtime::{
-    LinalgBackend, Runtime, RuntimeBuilder, RuntimeConfigError, RuntimeTreeTransformCacheInfo,
-    TreeTransformCacheInfo,
-};
+/// The runtime every constructor here takes, its builder and configuration.
+pub use crate::runtime::{LinalgBackend, Runtime, RuntimeBuilder, RuntimeConfigError};
 /// The complex payload scalars.
 pub use num_complex::{Complex32, Complex64};
 /// Block and fusion-tree keys and vertex labels read from a [`TensorMap`],

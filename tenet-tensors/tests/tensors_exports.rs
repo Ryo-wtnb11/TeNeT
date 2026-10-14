@@ -306,7 +306,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "build_all_codomain_tree_transform_group_plan",
         "build_tree_pair_transform_group_plan",
         "CheckedGenericPlanError",
-        "RuntimeTreeTransformCacheInfo",
         "TreeTransformBlockSpec",
         "TreeTransformGroupBlockSpec",
         "TreeTransformGroupPlan",

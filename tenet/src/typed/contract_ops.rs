@@ -284,7 +284,7 @@ where
     /// core-destination scratch costs one zero upload of the new size per
     /// buffer; both then stay resident on the Runtime (see
     /// `Runtime::cuda_contract_scratch_bytes`) until the
-    /// deprecated [`crate::typed::Runtime::clear_tree_transform_cache`]. Per
+    /// `Runtime::clear_cuda_caches`. Per
     /// call the device submits one region move per Single block / pack /
     /// scatter column, one GEMM per recoupling job and per coupled-sector
     /// job, one zero fill per inactive layout of each transform in overwrite

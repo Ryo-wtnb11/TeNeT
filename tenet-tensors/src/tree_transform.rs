@@ -3,8 +3,7 @@ mod operation;
 mod plan;
 
 pub use cache::{
-    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, RuntimeTreeTransformCacheInfo,
-    TreeTransformOperationView,
+    admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, TreeTransformOperationView,
 };
 #[cfg(test)]
 pub(crate) use cache::{
