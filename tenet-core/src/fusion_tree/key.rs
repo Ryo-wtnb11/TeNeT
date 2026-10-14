@@ -131,28 +131,21 @@ impl Hash for FusionTreeKey {
     }
 }
 
+// Why the impls go through the view: one comparison authority for owned
+// keys and borrowed lookups, so `Equivalent` agrees with `Eq` by construction.
 impl PartialEq for FusionTreeKey {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.hash == other.hash
-            && self.coupled == other.coupled
-            && self.uncoupled == other.uncoupled
-            && self.is_dual == other.is_dual
-            && self.innerlines == other.innerlines
-            && self.vertices == other.vertices
+        self.as_view() == other.as_view()
     }
 }
 
 impl Eq for FusionTreeKey {}
 
 impl Ord for FusionTreeKey {
+    #[inline]
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.uncoupled
-            .cmp(&other.uncoupled)
-            .then_with(|| self.coupled.cmp(&other.coupled))
-            .then_with(|| self.is_dual.cmp(&other.is_dual))
-            .then_with(|| self.innerlines.cmp(&other.innerlines))
-            .then_with(|| self.vertices.cmp(&other.vertices))
+        self.as_view().cmp(&other.as_view())
     }
 }
 
@@ -165,13 +158,7 @@ impl PartialOrd for FusionTreeKey {
 
 impl fmt::Debug for FusionTreeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FusionTreeKey")
-            .field("uncoupled", &self.uncoupled)
-            .field("coupled", &self.coupled)
-            .field("is_dual", &self.is_dual)
-            .field("innerlines", &self.innerlines)
-            .field("vertices", &self.vertices)
-            .finish()
+        self.as_view().fmt_named("FusionTreeKey", f)
     }
 }
 
