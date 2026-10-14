@@ -9,18 +9,40 @@
 //! hand-written `2j + 1`.
 
 use super::*;
-use crate::seam::{decide_bond_truncation, decide_bond_truncation_generic_checked};
+use crate::seam::decide_bond_truncation;
+use crate::TruncationDecision;
+use std::collections::BTreeMap;
+use tenet_core::MultiplicityFreeAdmissionMode;
+
+/// The checked-tier truncation decision, with the provider's own identity and
+/// sector order.
+fn checked_decision(
+    provider: &InfallibleGeneric<'_, Su2Generic>,
+    spectra: &[SectorSpectrum],
+    truncation: &Truncation,
+) -> TruncationDecision {
+    decide_bond_truncation::<CheckedGenericAdmissionMode, _, _>(
+        provider,
+        spectra,
+        truncation,
+        &CheckedGenericFusion::rule_identity(provider),
+        |sector| CheckedGenericFusion::sector_order_key(provider, sector),
+    )
+    .unwrap()
+}
 
 /// SU(2) as an infallible Generic provider: 1x1 symbol blocks lifted from
-/// [`SU2FusionRule`], under its own identity.
+/// [`SU2FusionRule`], under its own identity and the Generic style.
 struct Su2Generic;
 
 impl FusionRule for Su2Generic {
     fn rule_identity(&self) -> RuleIdentity {
         RuleIdentity::of_type::<Self>()
     }
+    // Generic, as the checked tier's root constructor admits only Generic
+    // providers; SU(2) has no multiplicity, so the geometry is unchanged.
     fn fusion_style(&self) -> FusionStyleKind {
-        SU2FusionRule.fusion_style()
+        FusionStyleKind::Generic
     }
     fn braiding_style(&self) -> BraidingStyleKind {
         SU2FusionRule.braiding_style()
@@ -143,9 +165,7 @@ fn infallible_generic_keeps_a_state_that_meets_the_rank_budget_exactly() {
         values: vec![1.0],
     }];
     for (budget, kept) in [(4, false), (5, true)] {
-        let decision =
-            decide_bond_truncation_generic_checked(&provider, &spectra, &Truncation::rank(budget))
-                .unwrap();
+        let decision = checked_decision(&provider, &spectra, &Truncation::rank(budget));
         assert_eq!(decision.kept, vec![vec![kept]], "budget {budget}");
     }
 }
@@ -162,9 +182,15 @@ fn multiplicity_free_and_infallible_generic_take_one_rank_decision() {
         .sum();
     for budget in 0..=total + 1 {
         let truncation = Truncation::rank(budget);
-        let mf = decide_bond_truncation(&SU2FusionRule, &spectra, &truncation).unwrap();
-        let generic =
-            decide_bond_truncation_generic_checked(&provider, &spectra, &truncation).unwrap();
+        let mf = decide_bond_truncation::<MultiplicityFreeAdmissionMode, _, _>(
+            &SU2FusionRule,
+            &spectra,
+            &truncation,
+            &FusionRule::rule_identity(&SU2FusionRule),
+            |sector| FusionRule::sector_order_key(&SU2FusionRule, sector),
+        )
+        .unwrap();
+        let generic = checked_decision(&provider, &spectra, &truncation);
         assert_eq!(mf.kept, generic.kept, "budget {budget}");
         assert_eq!(
             mf.error.to_bits(),
@@ -172,4 +198,97 @@ fn multiplicity_free_and_infallible_generic_take_one_rank_decision() {
             "budget {budget}"
         );
     }
+}
+
+/// One block of a published bond factor: its coupled sector, shape and
+/// column-major values, each as its round-trip `Debug` text (bit-exact,
+/// sign of zero included).
+type BlockBits = (SectorId, Vec<usize>, Vec<String>);
+
+/// The rectangular `S` of a full SVD on one SU(2) bond `W_row <- W_col`,
+/// published through mode `M`'s factor-space authority, in block order.
+fn rectangular_bond_blocks<M, R, D>(space: &BoundDynamicFusionMapSpace<R>) -> Vec<BlockBits>
+where
+    M: crate::seam::FactorMode<R>,
+    M::Error: fmt::Debug,
+    D: crate::factorize::FactorScalar + fmt::Debug,
+{
+    let sector = SectorId::new;
+    let rows = BTreeMap::from([(sector(0), 2), (sector(2), 3), (sector(4), 1)]);
+    let cols = BTreeMap::from([(sector(0), 3), (sector(2), 2), (sector(6), 2)]);
+    // Sector 0 carries one value fewer than its `min(rows, cols)` diagonal;
+    // sectors 4 and 6 have no partner and so no block.
+    let spectra = [
+        SectorSpectrum {
+            sector: sector(2),
+            values: vec![0.7, 1.0 / 3.0],
+        },
+        SectorSpectrum {
+            sector: sector(0),
+            values: vec![2.5],
+        },
+    ];
+    let s = crate::seam::rectangular_diagonal_bond_tensor::<_, R, D>(
+        &M::authority(space),
+        &spectra,
+        &rows,
+        &cols,
+    )
+    .unwrap();
+    let structure = s.space().space().structure();
+    (0..structure.block_count())
+        .map(|index| {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(tree) = block.key() else {
+                unreachable!("a bond factor has fusion-tree blocks");
+            };
+            let (shape, strides) = (block.shape(), block.strides());
+            let values = (0..shape[1])
+                .flat_map(|col| (0..shape[0]).map(move |row| (row, col)))
+                .map(|(row, col)| {
+                    format!(
+                        "{:?}",
+                        s.data()[block.offset() + row * strides[0] + col * strides[1]]
+                    )
+                })
+                .collect();
+            (tree.codomain_tree().coupled(), shape.to_vec(), values)
+        })
+        .collect()
+}
+
+#[test]
+fn multiplicity_free_and_checked_publish_one_rectangular_bond() {
+    // What: the full-SVD `S` on SU(2) through either tier has the same
+    // blocks, shapes and values bit for bit, for a real and a complex
+    // payload.
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(SectorId::new(2), 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(SectorId::new(2), 1)], false)]),
+    );
+    let mf = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(SU2FusionRule),
+        homspace.clone(),
+    )
+    .unwrap();
+    let checked = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(InfallibleGeneric::new(&Su2Generic)),
+        homspace,
+    )
+    .unwrap();
+    let real = rectangular_bond_blocks::<MultiplicityFreeAdmissionMode, _, f64>(&mf);
+    assert_eq!(
+        real.iter()
+            .map(|(sector, shape, _)| (sector.id(), shape.clone()))
+            .collect::<Vec<_>>(),
+        [(0, vec![2, 3]), (2, vec![3, 2])],
+    );
+    assert_eq!(
+        real,
+        rectangular_bond_blocks::<CheckedGenericAdmissionMode, _, f64>(&checked)
+    );
+    assert_eq!(
+        rectangular_bond_blocks::<MultiplicityFreeAdmissionMode, _, Complex64>(&mf),
+        rectangular_bond_blocks::<CheckedGenericAdmissionMode, _, Complex64>(&checked),
+    );
 }

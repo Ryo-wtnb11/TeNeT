@@ -492,8 +492,8 @@ where
                 vh: wrap_factor_on(&self.runtime, vh),
             });
         }
-        let s = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::rectangular_spectrum_factor(
-            self.logical_space(),
+        let s = tenet_matrixalgebra::seam::rectangular_diagonal_bond_tensor(
+            &<R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::authority(self.logical_space()),
             &spectrum,
             &row_dimensions,
             &col_dimensions,

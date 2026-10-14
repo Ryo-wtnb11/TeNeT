@@ -99,8 +99,14 @@ where
         V: SpectrumMagnitude,
     {
         // Magnitude-based, as MatrixAlgebraKit `findtruncated` is.
-        tenet_matrixalgebra::seam::decide_bond_truncation(provider, spectra, truncation)
-            .map_err(Error::from)
+        tenet_matrixalgebra::seam::decide_bond_truncation::<Self, _, _>(
+            provider,
+            spectra,
+            truncation,
+            &tenet_core::FusionRule::rule_identity(provider),
+            |sector| tenet_core::FusionRule::sector_order_key(provider, sector),
+        )
+        .map_err(Error::from)
     }
 }
 
@@ -119,8 +125,12 @@ where
     where
         V: SpectrumMagnitude,
     {
-        tenet_matrixalgebra::seam::decide_bond_truncation_generic_checked(
-            provider, spectra, truncation,
+        tenet_matrixalgebra::seam::decide_bond_truncation::<Self, _, _>(
+            provider,
+            spectra,
+            truncation,
+            &CheckedGenericFusion::rule_identity(provider),
+            |sector| CheckedGenericFusion::sector_order_key(provider, sector),
         )
         .map_err(Into::into)
     }
