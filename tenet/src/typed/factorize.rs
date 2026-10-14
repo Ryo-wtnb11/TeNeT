@@ -503,8 +503,16 @@ where
 }
 
 /// The storage kernels of the factorizations with a device route
-/// (`qr_compact`, `svd_compact`, `eigh_full`): one typed body per operation,
-/// with each storage supplying only its execution (#1756).
+/// (`qr_compact`, `svd_compact`, `eigh_full`): one typed body per operation
+/// (#1756), with each storage supplying its admission *sequence* and its
+/// execution.
+///
+/// The admission rules and their refusals are not the storage's: the Host
+/// kernel admits inside the matrix-algebra stage, and the device kernel asks
+/// the same matrix-algebra seam (endomorphism and stacking admission, the
+/// finite-input and Hermitian refusals) at the points its own placement
+/// preflight and device scans dictate. Only measuring a rule on the device
+/// (finiteness, hermiticity) is storage code.
 ///
 /// Each kernel factors the matrix view the body's leg roles selected, in
 /// whatever representation it holds; a representation the storage cannot

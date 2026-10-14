@@ -879,12 +879,8 @@ where
         }
         let _host_pool = source.runtime.enter_host_pool();
         let space = source.space.space();
-        if space.homspace().codomain() != space.homspace().domain() {
-            return Err(OperationError::SpaceMismatch {
-                message: "eigh requires an endomorphism (codomain == domain)",
-            }
-            .into());
-        }
+        tenet_matrixalgebra::seam::EndomorphismFamily::EighFull
+            .require_endomorphism(space.homspace())?;
         let regions = space
             .structure()
             .coupled_sector_regions(space.nout())?
@@ -893,13 +889,13 @@ where
             })?;
         if regions.iter().any(|region| region.rows() != region.cols()) {
             return Err(OperationError::SpaceMismatch {
-                message: "eigh requires square coupled-sector matrices",
+                message: tenet_matrixalgebra::seam::EIGH_NOT_SQUARE,
             }
             .into());
         }
         tenet_matrixalgebra::seam::validate_endomorphism_region_stacking(
             &regions,
-            tenet_matrixalgebra::seam::EIGH_FULL_STACKING,
+            tenet_matrixalgebra::seam::EndomorphismFamily::EighFull,
         )?;
         let provider = source.space.provider();
         let mut labels = regions

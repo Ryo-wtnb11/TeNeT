@@ -11,13 +11,9 @@ where
     /// entries, everything else takes the dense route.
     pub(super) fn factor_exp(&self) -> Result<Self, FacadeError<R>> {
         // TensorKit `exp!`: `domain == codomain` before anything else.
-        let homspace = self.logical_space().space().homspace();
-        if homspace.codomain() != homspace.domain() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "exp requires an endomorphism (codomain == domain)",
-            })
-            .into());
-        }
+        tenet_matrixalgebra::seam::EndomorphismFamily::Exp
+            .require_endomorphism(self.logical_space().space().homspace())
+            .map_err(Error::from)?;
         // A lazy adjoint is never compact; the dense route materializes it.
         const {
             assert!(matches!(

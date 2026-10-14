@@ -58,9 +58,9 @@ pub mod seam {
         svd_compact_from_source, svd_full_adjoint_from_parent, svd_full_from_source, svd_vals_dyn,
         svd_vals_from_source, validate_endomorphism_region_stacking, validate_hermitian_regions,
         BoundDynamicTensorRef, CheckedGenericFactorPlanError, CompactFactorPlan,
-        CompactFactorRoute, EigFullDyn, EighFullDyn, EighScratch, ExecutorLease, FactorFamily,
-        FactorMode, FactorOutput, FactorSource, FactorSpaceAuthority, SvdFactorsDyn,
-        EIGH_EIGENVALUE_CHECK, EIGH_FULL_STACKING,
+        CompactFactorRoute, EigFullDyn, EighFullDyn, EighScratch, EndomorphismFamily,
+        ExecutorLease, FactorFamily, FactorMode, FactorOutput, FactorSource, FactorSpaceAuthority,
+        SvdFactorsDyn, EIGH_EIGENVALUE_CHECK, EIGH_NOT_HERMITIAN, EIGH_NOT_SQUARE,
     };
     pub use crate::matrix_functions::{
         exp_direct_into_dyn, inv_direct_into_dyn, pinv_adjoint_parent_direct_into_dyn,

@@ -222,7 +222,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
              BoundDynamicTensorRef CheckedGenericFactorPlanError CompactFactorPlan CompactFactorRoute EigFullDyn EighFullDyn EighScratch \
-             EIGH_EIGENVALUE_CHECK EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
+             EIGH_EIGENVALUE_CHECK EIGH_NOT_HERMITIAN EIGH_NOT_SQUARE EndomorphismFamily ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
              SvdFactorsDyn \
              sector_matricization_diagnostic \
              exp_direct_into_dyn inv_direct_into_dyn \

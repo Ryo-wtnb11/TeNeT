@@ -149,7 +149,7 @@ pub(crate) use eig::{eig_vals_dyn, eigh_vals_dyn};
 pub use matricize::sector_matricization_diagnostic;
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
-    EIGH_FULL_STACKING,
+    EndomorphismFamily, EIGH_NOT_HERMITIAN, EIGH_NOT_SQUARE,
 };
 #[cfg(test)]
 pub(crate) use null_space::{

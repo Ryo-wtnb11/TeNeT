@@ -19,7 +19,7 @@ use crate::factorize::{
     compact_eigh_owned, inverse_by_sector_dyn_into, is_hermitian_endomorphism_dyn,
     map_square_sectors_dyn_into, pinv_adjoint_by_sector_dyn_into, pinv_by_sector_dyn_into,
     solve_left_by_sector_dyn_into, validate_real_eigenvalues, BoundDynFactor,
-    BoundDynamicTensorRef, FactorScalar,
+    BoundDynamicTensorRef, EndomorphismFamily, FactorScalar,
 };
 #[cfg(test)]
 use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
@@ -72,7 +72,9 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    require_endomorphism(input)?;
+    // Asked here, at the one point both routes pass through, so the refusal
+    // names `exp` rather than whichever helper would notice first.
+    EndomorphismFamily::Exp.require_endomorphism(input.space().space().homspace())?;
     // Asked directly rather than inferred from a failed EIGH, so a backend
     // failure is never mistaken for non-hermiticity.
     let spectral = is_hermitian_endomorphism_dyn(input)?;
@@ -90,20 +92,6 @@ where
             }
         },
     )
-}
-
-fn require_endomorphism<R, D>(
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<(), OperationError> {
-    // Asked here, at the one point both routes pass through, so the refusal
-    // names `exp` rather than whichever helper would notice first.
-    let homspace = input.space().space().homspace();
-    if homspace.codomain() != homspace.domain() {
-        return Err(OperationError::SpaceMismatch {
-            message: "exp requires an endomorphism (codomain == domain)",
-        });
-    }
-    Ok(())
 }
 
 /// Scratch of the route [`exp_direct_into_dyn`] chose, sized once to the

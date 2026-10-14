@@ -191,13 +191,13 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     /// identically (outer-multiplicity vertices included).
     pub(super) fn validate_endomorphism_stacking(
         &self,
-        message: &'static str,
+        family: EndomorphismFamily,
     ) -> Result<(), OperationError> {
         match self {
             Self::Regions { regions, .. } => {
-                validate_endomorphism_tree_stacking(regions.as_ref(), message)
+                validate_endomorphism_tree_stacking(regions.as_ref(), family)
             }
-            Self::Packed(matrices) => validate_endomorphism_tree_stacking(matrices, message),
+            Self::Packed(matrices) => validate_endomorphism_tree_stacking(matrices, family),
         }
     }
 
@@ -543,32 +543,124 @@ pub(super) fn endomorphism_tree_stacking_is_identical<M: SectorGeometry>(matrice
     })
 }
 
+/// `eigh` refusal of a block that is not Hermitian at the admitted tolerance.
 #[doc(hidden)]
-pub const EIGH_FULL_STACKING: &str =
-    "eigh_full requires identical endomorphism row/column fusion-tree stacking";
+pub const EIGH_NOT_HERMITIAN: &str = "eigh requires Hermitian coupled-sector blocks";
 
-pub(super) const EXP_STACKING: &str =
-    "exp requires identical endomorphism row/column fusion-tree stacking";
+/// `eigh` refusal of a non-square coupled-sector block.
+#[doc(hidden)]
+pub const EIGH_NOT_SQUARE: &str = "eigh requires square coupled-sector matrices";
+
+/// An operation defined only on endomorphisms. The one owner of its
+/// endomorphism and row/column stacking refusal texts, for every storage.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndomorphismFamily {
+    EighFull,
+    EighVals,
+    EigFull,
+    EigVals,
+    Exp,
+}
+
+impl EndomorphismFamily {
+    const fn not_endomorphism(self) -> &'static str {
+        match self {
+            Self::EighFull | Self::EighVals => "eigh requires an endomorphism (codomain == domain)",
+            Self::EigFull | Self::EigVals => "eig requires an endomorphism (codomain == domain)",
+            Self::Exp => "exp requires an endomorphism (codomain == domain)",
+        }
+    }
+
+    const fn stacking(self) -> &'static str {
+        match self {
+            Self::EighFull => {
+                "eigh_full requires identical endomorphism row/column fusion-tree stacking"
+            }
+            Self::EighVals => {
+                "eigh_vals requires identical endomorphism row/column fusion-tree stacking"
+            }
+            Self::EigFull => {
+                "eig_full requires identical endomorphism row/column fusion-tree stacking"
+            }
+            Self::EigVals => {
+                "eig_vals requires identical endomorphism row/column fusion-tree stacking"
+            }
+            Self::Exp => "exp requires identical endomorphism row/column fusion-tree stacking",
+        }
+    }
+
+    /// TensorKit's `domain(t) == codomain(t)` precondition, asked first.
+    pub fn require_endomorphism(self, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
+        if homspace.codomain() == homspace.domain() {
+            Ok(())
+        } else {
+            Err(OperationError::SpaceMismatch {
+                message: self.not_endomorphism(),
+            })
+        }
+    }
+}
+
+/// The endomorphism admission of every Host eigenvalue-type operation:
+/// endomorphism, then `matricize`, then identical row/column stacking.
+pub(super) fn admit_endomorphism<'a, D>(
+    space: &DynamicFusionMapSpace,
+    data: &'a [D],
+    family: EndomorphismFamily,
+    matricize: impl FnOnce(
+        &BlockStructure,
+        &'a [D],
+        usize,
+    ) -> Result<InputMatricizations<'a, D>, OperationError>,
+) -> Result<InputMatricizations<'a, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    family.require_endomorphism(space.homspace())?;
+    admit_endomorphism_stacking(space, data, family, matricize)
+}
+
+/// [`admit_endomorphism`] after the caller has already asked
+/// [`EndomorphismFamily::require_endomorphism`] (for a route taken between
+/// the two).
+pub(super) fn admit_endomorphism_stacking<'a, D>(
+    space: &DynamicFusionMapSpace,
+    data: &'a [D],
+    family: EndomorphismFamily,
+    matricize: impl FnOnce(
+        &BlockStructure,
+        &'a [D],
+        usize,
+    ) -> Result<InputMatricizations<'a, D>, OperationError>,
+) -> Result<InputMatricizations<'a, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    let matricizations = matricize(space.structure(), data, space.nout())?;
+    matricizations.validate_endomorphism_stacking(family)?;
+    Ok(matricizations)
+}
 
 /// [`validate_endomorphism_tree_stacking`] over canonical coupled-sector
-/// regions, for device paths outside this crate. `message` names the
-/// refusing operation.
+/// regions, for device paths outside this crate.
 #[doc(hidden)]
 pub fn validate_endomorphism_region_stacking(
     regions: &[CoupledSectorRegion],
-    message: &'static str,
+    family: EndomorphismFamily,
 ) -> Result<(), OperationError> {
-    validate_endomorphism_tree_stacking(regions, message)
+    validate_endomorphism_tree_stacking(regions, family)
 }
 
-/// `message` names the refusing operation.
 pub(super) fn validate_endomorphism_tree_stacking<M: SectorGeometry>(
     matrices: &[M],
-    message: &'static str,
+    family: EndomorphismFamily,
 ) -> Result<(), OperationError> {
     if endomorphism_tree_stacking_is_identical(matrices) {
         Ok(())
     } else {
-        Err(OperationError::UnsupportedTensorContractScope { message })
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: family.stacking(),
+        })
     }
 }

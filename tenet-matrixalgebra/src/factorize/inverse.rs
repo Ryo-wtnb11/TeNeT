@@ -704,7 +704,7 @@ where
     // Why stacking and not only tree identity, as `inv` needs: `f(P_R A
     // P_C^T)` is not `P_R f(A) P_C^T` unless the row and column stackings
     // coincide.
-    matrices.validate_endomorphism_stacking(EXP_STACKING)?;
+    matrices.validate_endomorphism_stacking(EndomorphismFamily::Exp)?;
     let landings = with_input_geometry!(&matrices, |geometry| compile_sector_landings(
         geometry,
         &output_regions,
