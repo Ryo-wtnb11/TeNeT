@@ -173,6 +173,42 @@ Cost: GPU work of different threads no longer overlaps on the device (it
 serializes on the stream, not only at enqueue), and Tenferro's cross-thread
 host `synchronize()` no longer happens because every thread shares one slot.
 
+## Device test runner
+
+CI has no GPU, so the CUDA device suite (the `#[ignore]` tests that need a real
+device, plus the non-ignored tests and doctests built with `cuda`) runs only
+through one command, on a host with a free GPU:
+
+```sh
+CUDA_VISIBLE_DEVICES=<free ordinal> scripts/run-device-tests.sh
+```
+
+- It runs `cargo test --workspace --no-default-features --features cuda,cpu-faer`
+  with `--include-ignored --test-threads=1`, then the doctests separately.
+  Cargo discovers the targets, so a new device test is picked up without
+  editing the script. Ignored tests that are not device tests (benchmarks,
+  measurements, exhaustive CPU sweeps) are skipped by name in `non_device`
+  inside the script; a new ignored non-device test must be added there.
+- The script never picks a GPU: `CUDA_VISIBLE_DEVICES` is required, and the
+  caller must name a device nobody else occupies. It prints the git SHA and the
+  `nvidia-smi` name and driver version of the selected device.
+- Logs go to `--out DIR` (default: a fresh temporary directory).
+  `test-lines.log` keeps every `^test ` result line, so each test is evidenced
+  by name; the script ends with ok/FAILED/ignored counts and `RESULT: PASS` or
+  `RESULT: FAIL`.
+- Exit status is nonzero on any failure. Exceptions are explicit, never silent:
+
+| Test | Handling | Reason |
+|---|---|---|
+| `typed_cuda_into_rejects_a_foreign_device_destination_untouched`, `a_spectrum_from_another_device_is_rejected_by_every_consumer` | Skipped unless `--two-gpu` (then `CUDA_VISIBLE_DEVICES` must list two free devices); the summary prints `NOT RUN` | Needs device 1 as well as device 0 |
+| `cuda_view_matches_owned_lazy_adjoint` (`tenet/src/typed/view_tests.rs`) | Runs and fails on `main` by default; `--skip-known-failing` skips it and prints `NOT RUN` | Fails on `main`; no issue tracks it (checked 2026-10-14), file one before relying on the flag |
+
+**Evidence rule.** At each milestone that touches CUDA paths, run the script on
+the milestone commit and record the SHA, the device line, the counts and the
+`RESULT` line as a comment on the milestone's tracking issue (for CUDA
+execution: #1139). A milestone with a failing or `NOT RUN` entry beyond the
+table above is not recorded as passing.
+
 ## Historical context
 
 Issues #155 and #176 record earlier implementation work; they are not current
