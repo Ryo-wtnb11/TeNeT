@@ -200,7 +200,6 @@ CUDA_VISIBLE_DEVICES=<free ordinal> scripts/run-device-tests.sh
 | Test | Handling | Reason |
 |---|---|---|
 | `typed_cuda_into_rejects_a_foreign_device_destination_untouched`, `a_spectrum_from_another_device_is_rejected_by_every_consumer` | Skipped unless `--two-gpu` (then `CUDA_VISIBLE_DEVICES` must list two free devices); the summary prints `NOT RUN` | Needs device 1 as well as device 0 |
-| `cuda_view_matches_owned_lazy_adjoint` (`tenet/src/typed/view_tests.rs`) | Runs and fails on `main` by default; `--skip-known-failing` skips it and prints `NOT RUN` | Fails on `main`; no issue tracks it (checked 2026-10-14), file one before relying on the flag |
 
 **Evidence rule.** At each milestone that touches CUDA paths, run the script on
 the milestone commit and record the SHA, the device line, the counts and the

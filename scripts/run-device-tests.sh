@@ -48,11 +48,11 @@ two_gpu_tests=(
   a_spectrum_from_another_device_is_rejected_by_every_consumer
 )
 # Fail on main; run unless --skip-known-failing, so the failure stays visible.
-known_failing=(cuda_view_matches_owned_lazy_adjoint)
+known_failing=()
 
 skips=("${non_device[@]}")
 [ "$two_gpu" = 1 ] || skips+=("${two_gpu_tests[@]}")
-[ "$skip_known" = 1 ] && skips+=("${known_failing[@]}")
+[ "$skip_known" = 1 ] && skips+=(${known_failing[@]+"${known_failing[@]}"})
 skip_args=()
 for s in "${skips[@]}"; do skip_args+=(--skip "$s"); done
 
@@ -79,6 +79,6 @@ done
 grep '\.\.\. FAILED$' "$out/test-lines.log"
 grep -hE '^error(\[|:)' "$out/tests.log" "$out/doc.log" | head
 [ "$two_gpu" = 1 ] || echo "NOT RUN: two-GPU tests (${two_gpu_tests[*]})"
-[ "$skip_known" = 1 ] && echo "NOT RUN: known failing (${known_failing[*]})"
+[ "$skip_known" = 1 ] && echo "NOT RUN: known failing (${known_failing[*]-})"
 if [ "$rc" = 0 ]; then echo "RESULT: PASS"; else echo "RESULT: FAIL (see $out)"; fi
 exit $rc
