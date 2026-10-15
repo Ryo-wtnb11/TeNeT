@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use tenet_core::{
@@ -962,18 +963,31 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
 /// retains nothing once the last one is dropped. One slot per group: two sets
 /// that start with one group and alternate rebuild their payload per
 /// binding, as before this slot existed (#1753).
+///
+/// A payload names the groups it was built from by their `id`s, which are
+/// never reused in a process, so it retains no group after eviction (#2251).
 #[doc(hidden)]
 pub struct TreeTransformSpecGroup<T> {
+    id: u64,
     specs: Box<[TreeTransformGroupBlockSpec<T>]>,
     payload: Mutex<Weak<TreeTransformCoefficients<T>>>,
 }
 
 impl<T> TreeTransformSpecGroup<T> {
     pub fn new(specs: Vec<TreeTransformGroupBlockSpec<T>>) -> Self {
+        // One counter for every `T`; 2^64 ids cannot wrap in a process.
+        static NEXT_GROUP_ID: AtomicU64 = AtomicU64::new(0);
         Self {
+            id: NEXT_GROUP_ID.fetch_add(1, Ordering::Relaxed),
             specs: specs.into_boxed_slice(),
             payload: Mutex::new(Weak::new()),
         }
+    }
+
+    /// This group's process-unique identity.
+    #[inline]
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     #[inline]

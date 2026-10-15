@@ -1,5 +1,3 @@
-use std::sync::Weak;
-
 use super::*;
 use crate::transform_plan::TreeTransformSpecGroup;
 
@@ -21,10 +19,12 @@ pub(crate) struct TreeTransformCoefficients<T> {
     /// device keys on it, so a host-only build allocates none.
     #[cfg(feature = "cuda")]
     identity: Arc<()>,
-    /// The cached groups a shared group plan built this payload from, in
-    /// order; empty for any other producer. Weak, so the payload never keeps
-    /// an evicted group's specs alive, yet each pins its group's address.
-    sources: Vec<Weak<TreeTransformSpecGroup<T>>>,
+    /// The ids of the cached groups a shared group plan built this payload
+    /// from, in order; empty for any other producer. Ids, not `Weak`s: a
+    /// `Weak` would keep an evicted group's allocation alive (#2251), while
+    /// an id is never reused, so it identifies the group as exactly as a
+    /// pinned address did (#1753) and retains nothing.
+    sources: Vec<u64>,
 }
 
 // The identity and provenance are bookkeeping, never part of the value.
@@ -83,20 +83,19 @@ impl<T: Copy> TreeTransformCoefficients<T> {
 impl<T> TreeTransformCoefficients<T> {
     /// Records the cached groups this payload was built from, in order.
     pub(crate) fn built_from(mut self, groups: &[Arc<TreeTransformSpecGroup<T>>]) -> Self {
-        self.sources = groups.iter().map(Arc::downgrade).collect();
+        self.sources = groups.iter().map(|group| group.id()).collect();
         self
     }
 
     /// Whether this payload was built from exactly `groups`, in order. Exact:
-    /// each recorded `Weak` pins its group's allocation, and every `groups`
-    /// entry is alive, so equal addresses are the same group.
+    /// group ids are never reused, so equal ids are the same group.
     pub(crate) fn is_built_from(&self, groups: &[Arc<TreeTransformSpecGroup<T>>]) -> bool {
         self.sources.len() == groups.len()
             && self
                 .sources
                 .iter()
                 .zip(groups)
-                .all(|(source, group)| core::ptr::eq(source.as_ptr(), Arc::as_ptr(group)))
+                .all(|(&source, group)| source == group.id())
     }
 
     #[inline]
@@ -115,12 +114,6 @@ impl<T> TreeTransformCoefficients<T> {
     pub(super) fn charged_bytes(&self) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
         let element = core::mem::size_of::<T>();
-        // Why the recorded groups are charged as their `Weak` handles only:
-        // once a group leaves cache 4, its handle pins the group's header
-        // (`Arc` control plus a box pointer and a slot, no spec), a fixed
-        // multiple of the handle itself. Charging headers that cache 4 already
-        // charges while the group is resident would double the charge and
-        // evict a near-budget core (#1998's rank-6 transform).
         self.matrices.iter().fold(
             ARC_CONTROL_BYTES
                 .saturating_add(core::mem::size_of::<Self>())
@@ -133,7 +126,7 @@ impl<T> TreeTransformCoefficients<T> {
                 .saturating_add(
                     self.sources
                         .capacity()
-                        .saturating_mul(core::mem::size_of::<Weak<TreeTransformSpecGroup<T>>>()),
+                        .saturating_mul(core::mem::size_of::<u64>()),
                 )
                 .saturating_add(self.singles.capacity().saturating_mul(element))
                 .saturating_add(
@@ -166,6 +159,23 @@ pub(super) fn shared_payload_mismatch() -> OperationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_payload_never_matches_a_group_created_after_its_source_dropped() {
+        type Specs<'a> = std::iter::Empty<(usize, usize, &'a [f64], Option<&'a Arc<[f64]>>)>;
+        let source = Arc::new(TreeTransformSpecGroup::<f64>::new(Vec::new()));
+        let payload = TreeTransformCoefficients::from_specs(Specs::default())
+            .unwrap()
+            .built_from(std::slice::from_ref(&source));
+        assert!(payload.is_built_from(std::slice::from_ref(&source)));
+        drop(source);
+
+        // What: the payload pins nothing, yet a group allocated afterwards,
+        // possibly at the freed address, is not taken for its source.
+        let later = Arc::new(TreeTransformSpecGroup::<f64>::new(Vec::new()));
+        assert!(!payload.is_built_from(std::slice::from_ref(&later)));
+        assert!(!payload.is_built_from(&[]));
+    }
 
     #[test]
     fn multi_matrices_are_addressed_by_ordinal_with_no_per_layout_table() {
