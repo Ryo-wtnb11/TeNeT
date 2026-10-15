@@ -185,13 +185,14 @@ where
     K: Eq + Hash + Clone,
     V: ?Sized,
 {
-    /// `shards` (a power of two) bounds the largest entry to
-    /// `byte_budget / shards`. Why few: entries are heavy-tailed, and the
-    /// largest must still fit one shard.
-    pub fn new(kind: StructureCacheKind, byte_budget: u64, shards: usize) -> Self {
+    /// One shard: entries are heavy-tailed, and the largest must fit it
+    /// (the U(1) `V^6 <- V^6` structures charge 30-46 MB, so more shards would
+    /// force a larger budget). A hit takes only the shard's read lock, so one
+    /// shard adds no contention.
+    pub fn new(kind: StructureCacheKind, byte_budget: u64) -> Self {
         let evictions = Arc::new(AtomicU64::new(0));
         let options = OptionsBuilder::new()
-            .shards(shards)
+            .shards(1)
             .hot_allocation(HOT_ALLOCATION)
             .weight_capacity(byte_budget)
             .estimated_items_capacity(1024)
@@ -612,7 +613,7 @@ mod tests {
     use crate::block_structure::core_reset_epoch;
 
     fn cache(byte_budget: u64) -> StructureCache<u32, u32> {
-        StructureCache::new(StructureCacheKind::SectorStructure, byte_budget, 2)
+        StructureCache::new(StructureCacheKind::SectorStructure, byte_budget)
     }
 
     #[test]
@@ -650,8 +651,8 @@ mod tests {
     fn an_entry_over_one_shard_is_rejected_and_counted() {
         let cache = cache(1 << 20);
         let max_entry = cache.info().max_entry_bytes();
-        // The hot-queue share of one of the two shards, as quick_cache admits.
-        assert_eq!(max_entry, ((1u64 << 19) as f64 * HOT_ALLOCATION) as u64);
+        // The hot-queue share of the single shard, as quick_cache admits.
+        assert_eq!(max_entry, ((1u64 << 20) as f64 * HOT_ALLOCATION) as u64);
         let (value, resident) = cache.publish(&5, Arc::new(9), max_entry + 1, core_reset_epoch());
         // What: the caller still gets its value; the cache keeps nothing and
         // says so (quick_cache alone would drop it silently).
@@ -730,7 +731,7 @@ mod tests {
             let budget =
                 register_structure_cache(StructureCacheKind::CompletedTreeTransformer, &FakeOwner)
                     .unwrap();
-            StructureCache::new(StructureCacheKind::CompletedTreeTransformer, budget, 1)
+            StructureCache::new(StructureCacheKind::CompletedTreeTransformer, budget)
         })
     }
 

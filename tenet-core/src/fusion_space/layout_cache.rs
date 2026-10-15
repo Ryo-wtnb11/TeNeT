@@ -141,12 +141,6 @@ pub(crate) const SECTOR_STRUCTURE_CACHE_BYTE_BUDGET: u64 =
     crate::cache::DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET;
 pub(crate) const DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET: u64 =
     crate::cache::DEFAULT_STRUCTURE_CACHE_BYTE_BUDGET;
-/// One shard: entries are heavy-tailed, and the largest must fit one shard.
-/// The U(1) `V^6 <- V^6` sector and degeneracy structures charge about
-/// 44 and 46 MB (`warm_contract_compile_allocations`, rank 6), so two shards
-/// would need a 128 MiB budget. Why one shard costs no contention: a hit
-/// takes only the shard's read lock.
-const STRUCTURE_CACHE_SHARDS: usize = 1;
 
 /// Fusion-tree keys and the shared sector structure per HomSpace sector
 /// signature (TensorKit `sectorstructure`, `structure.jl:41` @cfaa073):
@@ -159,7 +153,6 @@ pub(crate) fn sector_structure_cache(
         StructureCache::new(
             StructureCacheKind::SectorStructure,
             SECTOR_STRUCTURE_CACHE_BYTE_BUDGET,
-            STRUCTURE_CACHE_SHARDS,
         )
     })
 }
@@ -339,7 +332,6 @@ pub(crate) fn degeneracy_structure_cache(
         StructureCache::new(
             StructureCacheKind::DegeneracyStructure,
             DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET,
-            STRUCTURE_CACHE_SHARDS,
         )
     })
 }
