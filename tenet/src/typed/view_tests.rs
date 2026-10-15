@@ -501,14 +501,18 @@ mod cuda {
                 format!("{what}: axpby")
             );
 
-            // Pre-existing device rejections of a lazy operand are unchanged.
-            let (view, entries) = adjoint_entries(|| a.axpby($alpha, b.adjoint_view(), $beta));
-            assert_eq!(entries, 0);
-            assert_eq!(
-                view.err().unwrap(),
-                a.axpby($alpha, &lazy, $beta).err().unwrap(),
-                "{what}: mixed axpby"
+            let (view, owned) = direct!(
+                "cuda axpby (mixed)",
+                a.axpby($alpha, b.adjoint_view(), $beta),
+                a.axpby($alpha, &lazy, $beta)
             );
+            assert_same_tensor!(
+                view.to_host().unwrap(),
+                owned.to_host().unwrap(),
+                format!("{what}: mixed axpby")
+            );
+
+            // `inner` still rejects a lazy operand on the device.
             let (view, entries) = adjoint_entries(|| a.inner(b.adjoint_view()));
             assert_eq!(entries, 0);
             assert_eq!(
