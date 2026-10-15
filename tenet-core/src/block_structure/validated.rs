@@ -98,6 +98,31 @@ where
         )
     }
 
+    /// [`Self::execute_unique_rigid_for_block_index`] with the destination
+    /// left in `scratch` ([`UniqueTreePairScratch::pair_view`]): a caller
+    /// reusing one scratch for every block allocates nothing per block.
+    pub fn execute_unique_rigid_for_block_index_into(
+        &self,
+        index: usize,
+        operation: &PreparedTreePairOperation<'_>,
+        scratch: &mut UniqueTreePairScratch,
+    ) -> Result<R::Scalar, CoreError> {
+        if self.rule.fusion_style() != FusionStyleKind::Unique {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: self.rule.fusion_style(),
+            });
+        }
+        let key = self.required_fusion_tree_pair_key(index)?;
+        operation.execute_unique_rigid_proven_into(
+            ValidatedFusionTreePair {
+                rule: self.rule,
+                key,
+            },
+            scratch,
+        )
+    }
+
     /// Why this seam keeps a release check although the `tenet-tensors`
     /// gate already admitted the style: for an identity plan it is the only
     /// guard, since the identity rows never consult the rule (#1950).

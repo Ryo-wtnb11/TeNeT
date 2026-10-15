@@ -671,12 +671,9 @@ where
 }
 
 /// As [`build_tree_pair_transform_group_plan_validated_with_threads`], reusing
-/// cached source groups. Unique fusion is cached too, deliberately unlike
-/// TensorKit's `NoCache` for `fsbraid`/`fstranspose` (and QSpace's abelian
-/// skip): a Unique group is one tree with one phase, but a rebuild allocates
-/// its destination tree keys, so without the cache a degeneracy-only change
-/// (the common U(1)/Z2 truncation churn) would cost O(B) allocations where a
-/// hit costs O(1).
+/// cached source groups. Unique fusion never reuses one: it is `NoCache`, as
+/// TensorKit's `fsbraid`/`fstranspose` (and QSpace's abelian skip), since its
+/// per-block rebuild allocates nothing ([`compile_unique_tree_pair_structure`]).
 fn build_tree_pair_transform_group_plan_validated_reusing<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
@@ -689,26 +686,8 @@ where
         'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        let Some(reuse) = reuse else {
-            return build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
-                .map(ComposedPlan::Owned);
-        };
-        let source_axes = operation_source_axes(&operation);
-        let mut primary_prepared = None;
-        let mut additional_prepared =
-            None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
-        let mut scratch = UniqueTreePairScratch::default();
-        build_unique_groups_reusing(source_proof.structure(), reuse, |index| {
-            unique_tree_pair_spec(
-                source_proof,
-                &operation,
-                &source_axes,
-                &mut primary_prepared,
-                &mut additional_prepared,
-                &mut scratch,
-                index,
-            )
-        })
+        build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
+            .map(ComposedPlan::Owned)
     } else {
         build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads(
             source_proof,
@@ -717,6 +696,192 @@ where
             reuse,
         )
     }
+}
+
+/// The Unique tree-pair transformer of a cache-3 miss, uncached as TensorKit's
+/// `NoCache` `fsbraid`/`fstranspose` (`braiding_manipulations.jl:338-339`,
+/// `duality_manipulations.jl:566-569`) under its `AbelianTreeTransformer`
+/// (`treetransformers.jl:10-12`): each source block moves on one reused
+/// scratch, its destination is found by view, and the spec stores block
+/// indices, so the compile allocates nothing per block at any rank.
+///
+/// Specs follow the source groups, as the cached builder emitted them.
+pub(crate) fn compile_unique_tree_pair_structure<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    storage_conjugate: bool,
+) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
+        rule,
+        operation,
+        src_structure,
+    )?;
+    LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let source_axes = operation_source_axes(operation);
+    let mut primary_prepared = None;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
+    let mut scratch = UniqueTreePairScratch::with_rank(src_structure.rank());
+    let mut specs = Vec::with_capacity(src_structure.block_count());
+    for group in src_structure.fusion_tree_group_slice() {
+        for &index in group.block_indices() {
+            let Some(src_key) = source_proof.fusion_tree_pair_key(index)? else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index,
+                });
+            };
+            let prepared = prepared_tree_pair_operation_for_split(
+                &mut primary_prepared,
+                &mut additional_prepared,
+                rule,
+                operation,
+                tree_pair_split(src_key),
+            )?;
+            let coefficient = source_proof
+                .execute_unique_rigid_for_block_index_into(index, prepared, &mut scratch)
+                .map_err(OperationError::from_core_preserving_context)?;
+            specs.push(
+                TreeTransformBlockSpec::single(
+                    unique_destination_block(dst_structure, &scratch)?,
+                    index,
+                    coefficient,
+                )
+                .with_shared_source_axes(Arc::clone(&source_axes)),
+            );
+        }
+    }
+    tenet_operations::TreeTransformStructure::compile_indexed_shared_structures(
+        Arc::clone(dst_structure),
+        Arc::clone(src_structure),
+        &specs,
+        storage_conjugate,
+    )
+}
+
+/// [`compile_unique_tree_pair_structure`] for a source read through its
+/// parent's storage blocks in `orientation` (a lazy adjoint). Each block moves
+/// as the logical pair its storage block reads in `orientation`; the spec
+/// sources are storage blocks and its axes the storage axes, shared.
+///
+/// Specs follow the order the cached oriented builder emitted: the parent's
+/// groups for [`OrientedBasisOrder::Storage`], the logical keys otherwise
+/// (a Unique group holds one tree pair, so first group appearance is key
+/// order).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_unique_oriented_tree_pair_structure<R, FAxis>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: &Arc<BlockStructure>,
+    logical_keys: &[FusionTreePairKey],
+    storage_structure: &Arc<BlockStructure>,
+    orientation: FusionTreePairOrientation,
+    basis_order: OrientedBasisOrder,
+    logical_rank: usize,
+    storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
+    logical_to_storage_axis: FAxis,
+) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    FAxis: Fn(usize) -> Result<usize, OperationError>,
+{
+    validate_tree_transform_rank_syntax(operation, logical_rank)?;
+    let storage_axes = operation
+        .codomain_permutation()
+        .iter()
+        .chain(operation.domain_permutation())
+        .map(|&axis| logical_to_storage_axis(axis))
+        .collect::<Result<Arc<[usize]>, _>>()?;
+    let mut primary_prepared = None;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
+    let mut scratch = UniqueTreePairScratch::with_rank(logical_rank);
+    let mut specs = Vec::with_capacity(logical_keys.len());
+    let mut push = |storage_index: usize| -> Result<(), OperationError> {
+        let BlockKey::FusionTree(storage_key) = storage_structure.block(storage_index)?.key()
+        else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: storage_index,
+            });
+        };
+        // Two handle clones, no allocation: the pair the oriented block reads.
+        let source = match orientation {
+            FusionTreePairOrientation::Direct => storage_key.clone(),
+            FusionTreePairOrientation::Adjoint => FusionTreePairKey::pair(
+                storage_key.domain_tree().clone(),
+                storage_key.codomain_tree().clone(),
+            ),
+        };
+        let prepared = prepared_tree_pair_operation_for_split(
+            &mut primary_prepared,
+            &mut additional_prepared,
+            rule,
+            operation,
+            tree_pair_split(&source),
+        )?;
+        let coefficient = prepared
+            .execute_unique_rigid_into(rule, &source, &mut scratch)
+            .map_err(OperationError::from_core_preserving_context)?;
+        specs.push(
+            TreeTransformBlockSpec::single(
+                unique_destination_block(dst_structure, &scratch)?,
+                storage_index,
+                coefficient,
+            )
+            .with_shared_source_axes(Arc::clone(&storage_axes)),
+        );
+        Ok(())
+    };
+    if basis_order == OrientedBasisOrder::Storage {
+        for group in storage_structure.fusion_tree_group_slice() {
+            for &index in group.block_indices() {
+                push(index)?;
+            }
+        }
+    } else {
+        for key in logical_keys {
+            push(
+                *storage_projection
+                    .get(key)
+                    .ok_or(OperationError::StructureMismatch {
+                        tensor: "oriented source projection",
+                    })?,
+            )?;
+        }
+    }
+    tenet_operations::TreeTransformStructure::compile_indexed_shared_structures(
+        Arc::clone(dst_structure),
+        Arc::clone(storage_structure),
+        &specs,
+        orientation == FusionTreePairOrientation::Adjoint,
+    )
+}
+
+fn tree_pair_split(key: &FusionTreePairKey) -> (usize, usize) {
+    (
+        key.codomain_tree().uncoupled().len(),
+        key.domain_tree().uncoupled().len(),
+    )
+}
+
+/// The destination block of the pair a Unique move left in `scratch`.
+fn unique_destination_block(
+    dst_structure: &BlockStructure,
+    scratch: &UniqueTreePairScratch,
+) -> Result<usize, OperationError> {
+    let pair = scratch.pair_view();
+    dst_structure
+        .find_block_index_by_fusion_tree_pair_view(pair)
+        .ok_or_else(|| OperationError::MissingBlockKey {
+            key: Box::new(BlockKey::FusionTree(pair.to_key())),
+        })
 }
 
 /// Source fusion-tree pair keys of `structure`, flattened in group order.
@@ -2636,40 +2801,6 @@ where
         TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)
             .with_shared_source_axes(Arc::clone(source_axes)),
     ))
-}
-
-/// Unique fusion through the composed-coefficient cache: each source group
-/// (one tree for a Unique rule) is looked up, and the missing ones are built
-/// block by block with `spec_for`.
-fn build_unique_groups_reusing<T, E>(
-    structure: &BlockStructure,
-    reuse: &CoefficientGroupReuse<T>,
-    mut spec_for: impl FnMut(usize) -> Result<Option<TreeTransformGroupBlockSpec<T>>, E>,
-) -> Result<ComposedPlan<T>, E>
-where
-    T: 'static + Clone + Send + Sync,
-    E: From<OperationError>,
-{
-    let all_groups = structure.fusion_tree_group_slice();
-    let flat_keys = source_group_key_refs(structure)?;
-    let groups = split_source_groups(
-        all_groups
-            .iter()
-            .map(|group| (group.group_key(), group.block_indices().len())),
-        &flat_keys,
-    );
-    build_groups_reusing(Some((reuse, &groups)), all_groups.len(), |missing| {
-        missing
-            .into_iter()
-            .map(|group| {
-                let mut specs = Vec::with_capacity(all_groups[group].block_indices().len());
-                for &index in all_groups[group].block_indices() {
-                    specs.extend(spec_for(index)?);
-                }
-                Ok(specs)
-            })
-            .collect()
-    })
 }
 
 fn prepared_tree_pair_operation_for_split<'prepared, 'operation, R>(

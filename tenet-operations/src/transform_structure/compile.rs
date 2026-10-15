@@ -103,6 +103,18 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
+    /// Compiles block-index specs against shared structures; the result
+    /// keeps these `Arc`s, so no structure is copied.
+    #[doc(hidden)]
+    pub fn compile_indexed_shared_structures(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[TreeTransformBlockSpec<T>],
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(dst_structure, src_structure, specs, storage_conjugate)
+    }
+
     pub(crate) fn compile_resolved_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,

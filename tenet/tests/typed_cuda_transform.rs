@@ -369,6 +369,46 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
     );
 }
 
+/// #2192 L4: Unique fusion is `NoCache`, so a degeneracy-only change misses
+/// the completed transformer and every block's phase is recomputed. The
+/// device permute right after that change, and the warm one after it, must
+/// match the Host. The timings are an observation, not a gate.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_u1_permute_after_a_degeneracy_change_matches_the_host() {
+    let runtime = runtime();
+    let fixture = |outer: usize, inner: usize| {
+        let u1 = u1_leg(&[(-1, outer), (0, inner), (1, outer)], false);
+        let u1_dual = u1_leg(&[(-1, inner), (0, outer), (1, inner)], true);
+        TensorMap::<_, f64>::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill)
+            .unwrap()
+    };
+    let first = fixture(2, 1);
+    device_matches_host!("U1 permute, first degeneracies", first, |t| t
+        .permute(&[2, 0], &[1, 3]));
+    let changed = fixture(1, 3);
+    let device = changed.to_cuda().unwrap();
+    for what in ["after a degeneracy change", "warm"] {
+        let start = std::time::Instant::now();
+        let permuted = device.permute(&[2, 0], &[1, 3]).unwrap();
+        let elapsed = start.elapsed();
+        let permuted = permuted.to_host().unwrap();
+        eprintln!("U1 device permute {what}: {elapsed:?}");
+        let expected = changed.permute(&[2, 0], &[1, 3]).unwrap();
+        assert_payload_close(
+            permuted.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            what,
+        );
+        assert_eq!(layout(&permuted), layout(&expected), "{what}: layout");
+        assert_moved(
+            changed.dense_data().unwrap(),
+            permuted.dense_data().unwrap(),
+            what,
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_permutes_match_the_dense_physical_oracle_within_one_side() {

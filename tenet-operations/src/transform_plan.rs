@@ -296,6 +296,14 @@ impl<T> TreeTransformBlockSpec<T> {
         self
     }
 
+    /// As [`Self::with_source_axes`], sharing `axes` instead of copying them,
+    /// so specs that read their sources in one axis order share one buffer.
+    #[doc(hidden)]
+    pub fn with_shared_source_axes(mut self, axes: Arc<[usize]>) -> Self {
+        self.source_axes = Some(axes);
+        self
+    }
+
     #[inline]
     pub fn dst_blocks(&self) -> &[usize] {
         self.entries.dst()

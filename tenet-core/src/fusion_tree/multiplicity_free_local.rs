@@ -150,6 +150,53 @@ impl UnhashedFusionTree {
     where
         R: FusionRule,
     {
+        self.fill_externals(uncoupled, is_dual)?;
+        if self.len_uncoupled < 2 {
+            return Err(CoreError::MalformedFusionTree {
+                message: "direct unique braid rebuild requires at least two sectors",
+            });
+        }
+        self.fold_unique_lines(rule, coupled)
+    }
+
+    /// [`Self::rebuild_unique_standard`] at every rank, admitting rank zero
+    /// and one as the tree enumeration does: rank zero couples to the
+    /// vacuum, rank one to its only leg.
+    pub(crate) fn rebuild_unique_tree<R>(
+        &mut self,
+        rule: &R,
+        uncoupled: impl IntoIterator<Item = SectorId>,
+        coupled: SectorId,
+        is_dual: impl IntoIterator<Item = bool>,
+    ) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
+        self.fill_externals(uncoupled, is_dual)?;
+        if self.len_uncoupled >= 2 {
+            return self.fold_unique_lines(rule, coupled);
+        }
+        let admitted = match self.sectors.first() {
+            None => coupled == rule.vacuum(),
+            Some(&only) => only == coupled,
+        };
+        if !admitted {
+            return Err(CoreError::FusionChannelCount {
+                left: coupled,
+                right: coupled,
+                count: 0,
+            });
+        }
+        self.sectors.push(coupled);
+        self.reset_multiplicity_free_vertices();
+        Ok(())
+    }
+
+    fn fill_externals(
+        &mut self,
+        uncoupled: impl IntoIterator<Item = SectorId>,
+        is_dual: impl IntoIterator<Item = bool>,
+    ) -> Result<(), CoreError> {
         self.sectors.clear();
         self.sectors.extend(uncoupled);
         self.len_uncoupled = self.sectors.len();
@@ -160,11 +207,15 @@ impl UnhashedFusionTree {
                 message: "fusion tree sectors and duality flags must have matching length",
             });
         }
-        if self.len_uncoupled < 2 {
-            return Err(CoreError::MalformedFusionTree {
-                message: "direct unique braid rebuild requires at least two sectors",
-            });
-        }
+        Ok(())
+    }
+
+    /// Append `coupled` and the inner lines of the left fusion of at least
+    /// two uncoupled legs, which must end at `coupled`.
+    fn fold_unique_lines<R>(&mut self, rule: &R, coupled: SectorId) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
         self.sectors.push(coupled);
         let rank = self.len_uncoupled;
         let mut running = self.sectors[0];
