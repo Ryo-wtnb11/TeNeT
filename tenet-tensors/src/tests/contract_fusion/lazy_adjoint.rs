@@ -981,23 +981,16 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         reverse_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut profiled_artifact_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); oracle.len()],
-        reverse_dst.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
+    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
         provider.as_ref(),
         &reverse_plan,
         &mut artifact_dst,
-        &mut profiled_artifact_dst,
         &lhs_typed,
         &rhs_typed,
         Complex64::one(),
         Complex64::zero(),
     )
     .unwrap();
-    assert_eq!(profiled_artifact_dst.data(), artifact_dst.data());
     for (&actual, &expected) in artifact_dst.data().iter().zip(&oracle) {
         assert!((actual - expected).norm() < 1.0e-10);
     }

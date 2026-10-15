@@ -118,66 +118,6 @@ where
     )
 }
 
-/// [`context_contract_into`] with its planning and stages timed into
-/// `profile`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn context_contract_into_profiled<
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
-    rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractSpec<'_>,
-    alpha: D,
-    beta: D,
-    profile: &mut TensorContractFusionProfile,
-) -> Result<(), OperationError>
-where
-    BT: TreeTransformBackend<D, R::Scalar>,
-    BC: TensorContractBackend<D, R::Scalar>,
-    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
-    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    R::Scalar: DenseBlockScalar,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let dst_space = fixture_space(dst)?;
-    let lhs_space = fixture_space(lhs)?;
-    let rhs_space = fixture_space(rhs)?;
-    context.tensorcontract_fusion_dyn_into_raw_profiled(
-        rule,
-        &dst_space,
-        dst.data_mut(),
-        &lhs_space,
-        lhs.data(),
-        &rhs_space,
-        rhs.data(),
-        axes,
-        alpha,
-        beta,
-        profile,
-    )
-}
-
 /// Plans the eager fusion contraction of static-rank fixtures once, for
 /// replay by [`fixture_execute_prepared`] without any cache lookup.
 pub(crate) fn fixture_prepare_contract<

@@ -449,9 +449,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     .unwrap();
     let mut automatic_context =
         TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    crate::contract::reset_profiled_artifact_compile_phases();
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
+    context_contract_into(
         &mut automatic_context,
         &rule,
         &mut automatic_context_dst,
@@ -460,21 +458,11 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         axes,
         alpha,
         beta,
-        &mut profile,
     )
     .unwrap();
-    // What: a cold profiled dynamic artifact attributes each owning compile phase.
-    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
-    assert_ne!(profile.resolution_preflight, std::time::Duration::ZERO);
-    assert_ne!(profile.dynamic_tree_plan_build, std::time::Duration::ZERO);
-    assert_ne!(profile.source_space_lookup, std::time::Duration::ZERO);
-    assert_ne!(profile.core_dst_space_lookup, std::time::Duration::ZERO);
-    assert_ne!(profile.core_block_plan_build, std::time::Duration::ZERO);
-    assert_eq!(profile.prepared_plan, std::time::Duration::ZERO);
-    assert_eq!(
-        crate::contract::profiled_artifact_compile_phases(),
-        (true, true, true)
-    );
+    // What: the cold eager call takes the dynamic-tree route.
+    assert!(!automatic_context.last_resolution_is_core());
+    assert!(automatic_context.last_resolution_orientation().is_some());
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1057,8 +1045,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
+    context_contract_into(
         &mut automatic_context,
         &rule,
         &mut automatic_context_dst,
@@ -1067,7 +1054,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         axes,
         alpha,
         beta,
-        &mut profile,
     )
     .unwrap();
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
@@ -1076,24 +1062,8 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    // What: the profiled entry reports the eager route, TensorKit's copyC:
-    // a core into the temporary, then one output permute.
-    assert_eq!(profile.route, TensorContractFusionRoute::CopyC);
-    assert_eq!(profile.lhs_transform_calls, 0);
-    assert_eq!(profile.rhs_transform_calls, 0);
-    assert_eq!(profile.output_transform_calls, 1);
-    assert!(profile.core_contract_groups > 0);
-    assert_eq!(profile.tree_replay.cache_lookup.as_nanos(), 0);
-    assert_eq!(profile.tree_replay.strided_view_setup.as_nanos(), 0);
-    assert_eq!(profile.tree_replay.multi_dense_view_setup.as_nanos(), 0);
-    assert_eq!(profile.tree_replay.multi_dense_matmul_call.as_nanos(), 0);
-    assert_eq!(
-        profile.tree_replay.multi_matmul_total,
-        profile.tree_replay.multi_dense_view_setup
-            + profile.tree_replay.multi_dense_matmul_call
-            + profile.tree_replay.multi_scalar_recoupling
-    );
-    assert_eq!(profile.tree_replay.multi_blocks, 0);
-    assert_eq!(profile.tree_replay.packed_columns, 0);
-    assert_eq!(profile.tree_replay.scattered_columns, 0);
+    // What: the eager route is TensorKit's copyC: a core into the
+    // temporary, then one output permute.
+    assert!(!automatic_context.last_resolution_is_core());
+    assert!(automatic_context.last_resolution_orientation().is_none());
 }

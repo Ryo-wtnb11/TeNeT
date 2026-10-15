@@ -29,8 +29,7 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
 use tenet_operations::{
     admit_tree_transform_members_overwrite_raw, tree_transform_members_overwrite_raw,
-    ContractDestinationInit, DenseTreeTransformOperations, Rank2Gemm, TensorContractFusionProfile,
-    TreeTransformReplayProfile, TreeTransformWorkspace,
+    ContractDestinationInit, DenseTreeTransformOperations, Rank2Gemm, TreeTransformWorkspace,
 };
 
 use crate::host_scratch::HostScratchBuffer;
@@ -456,22 +455,6 @@ fn exact_len(actual: usize, expected: usize) -> Result<(), OperationError> {
     }
 }
 
-fn timed<T>(
-    profile: &mut Option<&mut TensorContractFusionProfile>,
-    field: fn(&mut TensorContractFusionProfile) -> &mut std::time::Duration,
-    run: impl FnOnce(Option<&mut TreeTransformReplayProfile>) -> T,
-) -> T {
-    match profile.as_deref_mut() {
-        Some(profile) => {
-            let start = std::time::Instant::now();
-            let result = run(Some(&mut profile.tree_replay));
-            *field(profile) += start.elapsed();
-            result
-        }
-        None => run(None),
-    }
-}
-
 /// `overwrite` one stage: `dst = T(src)`, the move writing destination block
 /// `b` scaled by `θ_b` from `destination_scales`.
 #[allow(clippy::too_many_arguments)]
@@ -485,7 +468,6 @@ fn overwrite_stage<S, D, C>(
     src: &[D],
     members: usize,
     destination_scales: &[(usize, C)],
-    profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
 where
     S: HostTreeStage<D, C>,
@@ -505,29 +487,16 @@ where
         );
     }
     let (backend, workspace) = stage.ordinary(slot);
-    match profile {
-        Some(profile) => backend.tree_transform_structure_overwrite_into_raw_profiled(
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst,
-            src,
-            D::one(),
-            destination_scales,
-            profile,
-        ),
-        None => backend.tree_transform_structure_overwrite_into_raw(
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst,
-            src,
-            D::one(),
-            destination_scales,
-        ),
-    }
+    backend.tree_transform_structure_overwrite_into_raw(
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst,
+        src,
+        D::one(),
+        destination_scales,
+    )
 }
 
 /// An owned source copy: the transform writing a core operand from the
@@ -557,9 +526,6 @@ pub(super) struct RouteView<'r, C> {
     /// Alpha rides the output transform (CopyC: `mul!` into the temporary,
     /// then `tensoradd!(C, Cnew, α, β)`), else the core GEMMs.
     output_alpha: bool,
-    /// Profiler attribution: a DynamicTree core destination's preparation
-    /// is `dst_scratch_prepare`; the CopyC temporary has no field.
-    times_core_dst_prepare: bool,
 }
 
 impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
@@ -592,7 +558,6 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
                 .as_ref()
                 .map(|entry| (&entry.output_transform_structure, entry.space.structure())),
             output_alpha: false,
-            times_core_dst_prepare: true,
         }
     }
 
@@ -611,7 +576,6 @@ impl<'r, C: DenseBlockScalar> RouteView<'r, C> {
             output,
             // CopyC (an output transform) carries alpha in its `tensoradd!`.
             output_alpha: output.is_some(),
-            times_core_dst_prepare: false,
         };
         match route {
             ContractRoute::Core { plan, swapped } => direct(plan, *swapped, None),
@@ -662,7 +626,6 @@ fn execute_route_view<S, G, D, C>(
     members: usize,
     alpha: D,
     init: ContractDestinationInit<D>,
-    mut profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<(), OperationError>
 where
     S: HostTreeStage<D, C>,
@@ -670,7 +633,6 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
-    debug_assert!(members == 1 || profile.is_none());
     let HostRouteScratch {
         lhs: lhs_scratch,
         rhs: rhs_scratch,
@@ -788,18 +750,10 @@ where
     }
 
     if route.lhs_source.is_some() {
-        timed(
-            &mut profile,
-            |p| &mut p.lhs_scratch_prepare,
-            |_| prepare(lhs_scratch, lhs_core_len),
-        );
+        prepare(lhs_scratch, lhs_core_len);
     }
     if route.rhs_source.is_some() {
-        timed(
-            &mut profile,
-            |p| &mut p.rhs_scratch_prepare,
-            |_| prepare(rhs_scratch, rhs_core_len),
-        );
+        prepare(rhs_scratch, rhs_core_len);
     }
     // Workspace core destination: refill its inactive blocks unless the slot
     // proves them zero for this replay and length.
@@ -809,15 +763,7 @@ where
         let proved = core
             .as_deref()
             .is_some_and(|slot| slot.inactive_zero && core_dst.len() == core_dst_len);
-        if route.times_core_dst_prepare {
-            timed(
-                &mut profile,
-                |p| &mut p.dst_scratch_prepare,
-                |_| prepare(core_dst, core_dst_len),
-            );
-        } else {
-            prepare(core_dst, core_dst_len);
-        }
+        prepare(core_dst, core_dst_len);
         if proved {
             ContractDestinationInit::Zeroed
         } else {
@@ -835,50 +781,30 @@ where
     }
 
     if let Some(source) = &route.lhs_source {
-        timed(
-            &mut profile,
-            |p| &mut p.lhs_transform,
-            |replay_profile| {
-                overwrite_stage(
-                    stage,
-                    Stage::Lhs,
-                    source.transform,
-                    lhs_core,
-                    source.payload_structure,
-                    lhs_scratch.as_mut_slice(),
-                    lhs_data,
-                    members,
-                    source.scales,
-                    replay_profile,
-                )
-            },
+        overwrite_stage(
+            stage,
+            Stage::Lhs,
+            source.transform,
+            lhs_core,
+            source.payload_structure,
+            lhs_scratch.as_mut_slice(),
+            lhs_data,
+            members,
+            source.scales,
         )?;
-        if let Some(profile) = profile.as_deref_mut() {
-            profile.lhs_transform_calls += 1;
-        }
     }
     if let Some(source) = &route.rhs_source {
-        timed(
-            &mut profile,
-            |p| &mut p.rhs_transform,
-            |replay_profile| {
-                overwrite_stage(
-                    stage,
-                    Stage::Rhs,
-                    source.transform,
-                    rhs_core,
-                    source.payload_structure,
-                    rhs_scratch.as_mut_slice(),
-                    rhs_data,
-                    members,
-                    source.scales,
-                    replay_profile,
-                )
-            },
+        overwrite_stage(
+            stage,
+            Stage::Rhs,
+            source.transform,
+            rhs_core,
+            source.payload_structure,
+            rhs_scratch.as_mut_slice(),
+            rhs_data,
+            members,
+            source.scales,
         )?;
-        if let Some(profile) = profile.as_deref_mut() {
-            profile.rhs_transform_calls += 1;
-        }
     }
 
     let physical_lhs = if route.lhs_source.is_some() {
@@ -904,25 +830,8 @@ where
     }
     if members == 1 {
         let mut kernels = crate::StridedHostKernelAdapter::default();
-        match (profile.as_deref_mut(), core_init) {
-            (Some(profile), init) => {
-                debug_assert!(matches!(init, ContractDestinationInit::Axpby(_)));
-                plan.execute_raw_profiled(
-                    &mut kernels,
-                    gemm,
-                    fusion_block_workspace,
-                    core_dst_structure,
-                    core_out,
-                    left_structure,
-                    left,
-                    right_structure,
-                    right,
-                    core_alpha,
-                    init.active_beta(),
-                    profile,
-                )
-            }
-            (None, ContractDestinationInit::Zeroed) => plan.execute_raw_zeroed(
+        match core_init {
+            ContractDestinationInit::Zeroed => plan.execute_raw_zeroed(
                 &mut kernels,
                 gemm,
                 fusion_block_workspace,
@@ -934,7 +843,7 @@ where
                 right,
                 core_alpha,
             ),
-            (None, ContractDestinationInit::Axpby(beta)) => plan.execute_raw(
+            ContractDestinationInit::Axpby(beta) => plan.execute_raw(
                 &mut kernels,
                 gemm,
                 fusion_block_workspace,
@@ -973,65 +882,42 @@ where
                 usize::from(members == 1 && matches!(init, ContractDestinationInit::Zeroed));
         }
     }
-    let result = timed(
-        &mut profile,
-        |p| &mut p.output_transform,
-        |replay_profile| {
-            if members != 1 {
-                return stage.overwrite_members(
-                    Stage::Output,
-                    transform,
-                    dst_structure,
-                    core_dst_structure,
-                    dst_data,
-                    core_dst.as_slice(),
-                    members,
-                    &[],
-                );
-            }
-            let (backend, workspace) = stage.ordinary(Stage::Output);
-            let source = core_dst.as_slice();
-            match (replay_profile, init) {
-                (None, ContractDestinationInit::Zeroed) => backend
-                    .tree_transform_structure_overwrite_into_raw(
-                        workspace,
-                        transform,
-                        dst_structure,
-                        core_dst_structure,
-                        dst_data,
-                        source,
-                        output_alpha,
-                        &[],
-                    ),
-                (None, ContractDestinationInit::Axpby(beta)) => backend
-                    .tree_transform_structure_into_raw(
-                        workspace,
-                        transform,
-                        dst_structure,
-                        core_dst_structure,
-                        dst_data,
-                        source,
-                        output_alpha,
-                        beta,
-                    ),
-                (Some(replay_profile), init) => backend.tree_transform_structure_into_raw_profiled(
-                    workspace,
-                    transform,
-                    dst_structure,
-                    core_dst_structure,
-                    dst_data,
-                    source,
-                    output_alpha,
-                    init.active_beta(),
-                    replay_profile,
-                ),
-            }
-        },
-    );
-    if let Some(profile) = profile {
-        profile.output_transform_calls += 1;
+    if members != 1 {
+        return stage.overwrite_members(
+            Stage::Output,
+            transform,
+            dst_structure,
+            core_dst_structure,
+            dst_data,
+            core_dst.as_slice(),
+            members,
+            &[],
+        );
     }
-    result
+    let (backend, workspace) = stage.ordinary(Stage::Output);
+    let source = core_dst.as_slice();
+    match init {
+        ContractDestinationInit::Zeroed => backend.tree_transform_structure_overwrite_into_raw(
+            workspace,
+            transform,
+            dst_structure,
+            core_dst_structure,
+            dst_data,
+            source,
+            output_alpha,
+            &[],
+        ),
+        ContractDestinationInit::Axpby(beta) => backend.tree_transform_structure_into_raw(
+            workspace,
+            transform,
+            dst_structure,
+            core_dst_structure,
+            dst_data,
+            source,
+            output_alpha,
+            beta,
+        ),
+    }
 }
 
 /// Replays `resolution` through the one stage sequence of every route; the
@@ -1050,7 +936,6 @@ pub(super) fn execute_route_host<S, G, D, C>(
     members: usize,
     alpha: D,
     init: ContractDestinationInit<D>,
-    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<(), OperationError>
 where
     S: HostTreeStage<D, C>,
@@ -1070,7 +955,6 @@ where
         members,
         alpha,
         init,
-        profile,
     )
 }
 
@@ -1090,7 +974,6 @@ pub(super) fn execute_dynamic_tree_route_host<S, G, D, C>(
     members: usize,
     alpha: D,
     init: ContractDestinationInit<D>,
-    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<(), OperationError>
 where
     S: HostTreeStage<D, C>,
@@ -1110,7 +993,6 @@ where
         members,
         alpha,
         init,
-        profile,
     )
 }
 
@@ -1254,7 +1136,6 @@ where
         members,
         D::one(),
         init,
-        None,
     )
 }
 

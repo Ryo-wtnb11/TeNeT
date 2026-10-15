@@ -270,23 +270,10 @@ fn forced_orientations_match_asymmetric_u1_reduced_block_oracle() {
                 dst_space.clone(),
             )
             .unwrap();
-            let mut profiled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-                initial.clone(),
-                dst_space.clone(),
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+                &rule, &plan, &mut dst, &lhs, &rhs, alpha, beta,
             )
             .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
-                &rule,
-                &plan,
-                &mut dst,
-                &mut profiled,
-                &lhs,
-                &rhs,
-                alpha,
-                beta,
-            )
-            .unwrap();
-            assert_eq!(profiled.data(), dst.data());
             for (&actual, &expected) in dst.data().iter().zip(&expected) {
                 assert!((actual - expected).abs() < 1.0e-10);
             }
@@ -622,8 +609,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         let profiled_call =
             |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
              dst: &mut TensorMap<f64, 2, 2>| {
-                let mut profile = TensorContractFusionProfile::default();
-                context_contract_into_profiled(
+                context_contract_into(
                     context,
                     provider.as_ref(),
                     dst,
@@ -632,9 +618,9 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
                     axes(),
                     alpha,
                     beta,
-                    &mut profile,
                 )?;
-                assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+                assert!(!context.last_resolution_is_core());
+                assert!(context.last_resolution_orientation().is_some());
                 Ok::<_, OperationError>(())
             };
         if profiled_first {
@@ -958,16 +944,10 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
                 dst_space.clone(),
             )
             .unwrap();
-            let mut profiled = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-                vec![Complex64::zero(); dst_len],
-                dst_space.clone(),
-            )
-            .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
                 &rule,
                 &plan,
                 &mut artifact,
-                &mut profiled,
                 &lhs,
                 &rhs,
                 Complex64::one(),
@@ -980,7 +960,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
             assert_eq!(artifact.structure(), dst.structure());
             // Path-to-path agreement of two executors of one plan with SU2
             // recoupling, under the tolerance rule (terms bounded by
-            // len(lhs) * len(rhs), recoupled trees included); the profiled replay of the same artifact stays
+            // len(lhs) * len(rhs), recoupled trees included); the replay of the same artifact stays
             // exact.
             numerics::assert_slices_close(
                 "compiled artifact vs direct plan replay",
@@ -988,7 +968,6 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
                 dst.data(),
                 lhs.data().len() * rhs.data().len(),
             );
-            assert_eq!(profiled.data(), artifact.data());
             outputs.push(dst);
         }
     }

@@ -24,7 +24,7 @@ where
         G: Rank2Gemm<D>,
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
-        self.execute_host::<_, _, _, false>(
+        self.execute_host(
             kernels,
             gemm,
             fusion_workspace,
@@ -36,7 +36,6 @@ where
             rhs_data,
             alpha,
             ContractDestinationInit::Axpby(beta),
-            None,
         )
     }
 
@@ -63,7 +62,7 @@ where
         G: Rank2Gemm<D>,
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
-        self.execute_host::<_, _, _, false>(
+        self.execute_host(
             kernels,
             gemm,
             fusion_workspace,
@@ -75,49 +74,11 @@ where
             rhs_data,
             alpha,
             ContractDestinationInit::Zeroed,
-            None,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_raw_profiled<A, G, D>(
-        &self,
-        kernels: &mut A,
-        gemm: &mut G,
-        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_data: &[D],
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_data: &[D],
-        alpha: D,
-        beta: D,
-        profile: &mut TensorContractFusionProfile,
-    ) -> Result<(), OperationError>
-    where
-        A: HostKernelAdapter<D>,
-        G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-    {
-        self.execute_host::<_, _, _, true>(
-            kernels,
-            gemm,
-            fusion_workspace,
-            dst_structure,
-            dst_data,
-            lhs_structure,
-            lhs_data,
-            rhs_structure,
-            rhs_data,
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-            Some(profile),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn execute_host<A, G, D, const PROFILED: bool>(
+    fn execute_host<A, G, D>(
         &self,
         kernels: &mut A,
         gemm: &mut G,
@@ -130,7 +91,6 @@ where
         rhs_data: &[D],
         alpha: D,
         init: ContractDestinationInit<D>,
-        mut profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<(), OperationError>
     where
         A: HostKernelAdapter<D>,
@@ -138,8 +98,6 @@ where
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         let beta = init.active_beta();
-        let total_start = PROFILED.then(std::time::Instant::now);
-        let start = PROFILED.then(std::time::Instant::now);
         self.validate_replay_inputs(
             dst_structure,
             dst_data.len(),
@@ -148,53 +106,23 @@ where
             rhs_structure,
             rhs_data.len(),
         )?;
-        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-            profile.core_validate += start.elapsed();
-        }
 
         if self.max_irregular_scratch_len != 0 {
-            let start = PROFILED.then(std::time::Instant::now);
             fusion_workspace
                 .scratch
                 .resize_filled(self.max_irregular_scratch_len, D::zero());
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_workspace_prepare += start.elapsed();
-            }
         } else {
             fusion_workspace.scratch.resize_filled(0, D::zero());
         }
 
-        let start = PROFILED.then(std::time::Instant::now);
         self.init_inactive_blocks(kernels, &mut fusion_workspace.zero_strides, dst_data, init)?;
-        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-            profile.core_scale += start.elapsed();
-        }
 
-        if PROFILED {
-            if let Some(profile) = profile.as_deref_mut() {
-                profile.core_contract_groups += self.direct_batch.len() + self.irregular.len();
-            }
-        }
         if !self.direct_batch.is_empty() {
-            let start = PROFILED.then(std::time::Instant::now);
             self.execute_direct_batches(gemm, dst_data, lhs_data, rhs_data, alpha, beta)?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_matmul += start.elapsed();
-            }
-            if PROFILED {
-                if let Some(profile) = profile.as_deref_mut() {
-                    profile.core_direct_gemm_groups += self.direct_batch.len();
-                }
-            }
         }
 
         for execution in &self.irregular {
-            let group_profile = if PROFILED {
-                profile.as_deref_mut()
-            } else {
-                None
-            };
-            self.execute_irregular_group::<_, _, _, PROFILED>(
+            self.execute_irregular_group(
                 kernels,
                 gemm,
                 fusion_workspace,
@@ -204,12 +132,7 @@ where
                 rhs_data,
                 alpha,
                 beta,
-                group_profile,
             )?;
-        }
-
-        if let (Some(start), Some(profile)) = (total_start, profile) {
-            profile.core_contract_total += start.elapsed();
         }
         Ok(())
     }
@@ -281,7 +204,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn execute_irregular_group<A, G, D, const PROFILED: bool>(
+    fn execute_irregular_group<A, G, D>(
         &self,
         kernels: &mut A,
         gemm: &mut G,
@@ -292,7 +215,6 @@ where
         rhs_data: &[D],
         alpha: D,
         beta: D,
-        mut profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<(), OperationError>
     where
         A: HostKernelAdapter<D>,
@@ -308,15 +230,7 @@ where
             if group.lhs.needs_clear {
                 lhs.fill(D::zero());
             }
-            let start = PROFILED.then(std::time::Instant::now);
             pack_group(kernels, &group.lhs, lhs_data, lhs)?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_pack_lhs += start.elapsed();
-            }
-        } else if PROFILED && !execution.class.packs_lhs() {
-            if let Some(profile) = profile.as_deref_mut() {
-                profile.core_direct_pack_skips += 1;
-            }
         }
         if forms_product && execution.class.packs_rhs() {
             let start_index = execution.scratch.rhs_offset;
@@ -325,18 +239,9 @@ where
             if group.rhs.needs_clear {
                 rhs.fill(D::zero());
             }
-            let start = PROFILED.then(std::time::Instant::now);
             pack_group(kernels, &group.rhs, rhs_data, rhs)?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_pack_rhs += start.elapsed();
-            }
-        } else if PROFILED && !execution.class.packs_rhs() {
-            if let Some(profile) = profile.as_deref_mut() {
-                profile.core_direct_pack_skips += 1;
-            }
         }
 
-        let start = PROFILED.then(std::time::Instant::now);
         if execution.class.scatters_dst() {
             let (inputs, destination) = scratch.split_at_mut(execution.scratch.dst_offset);
             let destination = &mut destination[..execution.scratch.dst_len];
@@ -361,14 +266,7 @@ where
                 alpha,
                 D::zero(),
             )?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_matmul += start.elapsed();
-            }
-            let start = PROFILED.then(std::time::Instant::now);
             scatter_group(kernels, &group.dst, dst_data, destination, beta)?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_scatter += start.elapsed();
-            }
         } else {
             let lhs = if execution.class.packs_lhs() {
                 &scratch[..execution.scratch.lhs_len]
@@ -391,14 +289,6 @@ where
                 alpha,
                 beta,
             )?;
-            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
-                profile.core_matmul += start.elapsed();
-            }
-            if PROFILED {
-                if let Some(profile) = profile {
-                    profile.core_direct_gemm_groups += 1;
-                }
-            }
         }
         Ok(())
     }

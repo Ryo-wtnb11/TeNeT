@@ -716,7 +716,6 @@ fn member_replays_outside_the_overwrite_contract_are_unsupported_before_writes()
             2,
             alpha,
             init,
-            None,
         )
         .unwrap_err();
         assert!(

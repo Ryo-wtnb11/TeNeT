@@ -91,23 +91,19 @@ fn run_nan_poisoned_destination_case(
 
     let mut tree_context =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let artifact = compile_dynamic_tree_execution_artifact::<
-        tenet_core::MultiplicityFreeAdmissionMode,
-        _,
-        false,
-    >(
-        tree_context.planning(),
-        provider.as_ref(),
-        encoded_layout_primer::<U1FusionRule>,
-        &plan,
-        dst.space(),
-        lhs.space(),
-        lhs.space().structure(),
-        rhs.space(),
-        rhs.space().structure(),
-        None,
-    )
-    .unwrap();
+    let artifact =
+        compile_dynamic_tree_execution_artifact::<tenet_core::MultiplicityFreeAdmissionMode, _>(
+            tree_context.planning(),
+            provider.as_ref(),
+            encoded_layout_primer::<U1FusionRule>,
+            &plan,
+            dst.space(),
+            lhs.space(),
+            lhs.space().structure(),
+            rhs.space(),
+            rhs.space().structure(),
+        )
+        .unwrap();
     let core_dst = artifact.core_dst.as_ref().unwrap();
     let core_len = core_dst.space.required_len().unwrap();
     let inactive = artifact.block_plan.inactive_destination_regions().len();

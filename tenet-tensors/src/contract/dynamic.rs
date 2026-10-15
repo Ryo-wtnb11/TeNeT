@@ -31,35 +31,6 @@ use super::fusion::{
 #[cfg(test)]
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::{contract_axes_require_twist, rhs_contract_requires_twist};
-use tenet_operations::TensorContractFusionProfile;
-
-#[cfg(test)]
-const PROFILED_ARTIFACT_SOURCE_PHASE: u8 = 1 << 0;
-#[cfg(test)]
-const PROFILED_ARTIFACT_CORE_DST_PHASE: u8 = 1 << 1;
-#[cfg(test)]
-const PROFILED_ARTIFACT_BLOCK_PLAN_PHASE: u8 = 1 << 2;
-
-#[cfg(test)]
-std::thread_local! {
-    static PROFILED_ARTIFACT_COMPILE_PHASES: std::cell::Cell<u8> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_profiled_artifact_compile_phases() {
-    PROFILED_ARTIFACT_COMPILE_PHASES.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
-    let phases = PROFILED_ARTIFACT_COMPILE_PHASES.get();
-    (
-        phases & PROFILED_ARTIFACT_SOURCE_PHASE != 0,
-        phases & PROFILED_ARTIFACT_CORE_DST_PHASE != 0,
-        phases & PROFILED_ARTIFACT_BLOCK_PLAN_PHASE != 0,
-    )
-}
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;

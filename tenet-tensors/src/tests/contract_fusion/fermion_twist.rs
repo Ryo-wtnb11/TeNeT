@@ -219,23 +219,16 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut profiled_artifact_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        initial.to_vec(),
-        dst.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
+    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
         &rule,
         &reverse_plan,
         &mut artifact_dst,
-        &mut profiled_artifact_dst,
         &lhs,
         &rhs,
         alpha,
         beta,
     )
     .unwrap();
-    assert_eq!(profiled_artifact_dst.data(), artifact_dst.data());
     for (index, (&actual, &want)) in artifact_dst.data().iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1.0e-12,
@@ -245,8 +238,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
 
     dst.data_mut().copy_from_slice(&initial);
     let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
+    context_contract_into(
         &mut context,
         &rule,
         &mut dst,
@@ -255,19 +247,16 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         TensorContractSpec::with_default_output_order(&[1], &[0]),
         alpha,
         beta,
-        &mut profile,
     )
     .unwrap();
 
     // What: the eager route folds the uniform twist into the core's per-job
     // alpha, so neither source is materialized.
-    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
-    assert_eq!(profile.lhs_transform_calls, 0);
-    assert_eq!(profile.rhs_transform_calls, 0);
+    assert!(context.last_resolution_is_core());
     for (index, (&actual, &want)) in dst.data().iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1.0e-12,
-            "profiled element {index}: got {actual}, TensorKit reference {want}"
+            "eager element {index}: got {actual}, TensorKit reference {want}"
         );
     }
 }
@@ -369,11 +358,12 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     // The eager entry.
     let mut plain = new_dst();
     fusion_contract_into(&rule, &mut plain, &lhs, &rhs, axes, alpha, beta).unwrap();
-    // The same entry profiled: it reports the route the eager call takes.
+    // The same entry through an explicit context: it records the route the
+    // eager call takes.
     let mut artifact = new_dst();
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
-        &mut TensorContractFusionExecutionContext::<f64, _>::default(),
+    let mut artifact_context = TensorContractFusionExecutionContext::<f64, _>::default();
+    context_contract_into(
+        &mut artifact_context,
         &rule,
         &mut artifact,
         &lhs,
@@ -381,15 +371,12 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
         axes,
         alpha,
         beta,
-        &mut profile,
     )
     .unwrap();
     // What: the twist is uniform within each coupled sector, so the eager
     // route is the canonical core with the twist as per-job alpha: no source
     // is transformed.
-    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
-    assert_eq!(profile.lhs_transform_calls, 0);
-    assert_eq!(profile.rhs_transform_calls, 0);
+    assert!(artifact_context.last_resolution_is_core());
     // What: exact (dyadic) agreement with the hand calculation on both paths.
     assert_eq!(plain.data(), &expected);
     assert_eq!(artifact.data(), &expected);

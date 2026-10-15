@@ -300,8 +300,6 @@ fn tenet_operations_root_exports_exactly_the_pinned_names() {
         "StridedHostKernelAdapter",
         // placement / profile
         "ReportsPlacement",
-        "TensorContractFusionProfile",
-        "TensorContractFusionRoute",
         // scalar
         "scale_value",
         "ConjugateValue",

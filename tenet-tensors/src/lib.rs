@@ -40,8 +40,6 @@ pub use bound_tensor::BoundDynamicTensorRef;
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use contract::tensorcontract_structure;
 #[cfg(test)]
-pub(crate) use contract::TensorContractFusionRoute;
-#[cfg(test)]
 pub(crate) use contract::{contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
@@ -57,7 +55,7 @@ pub use contract::{
 pub use contract::{
     prepare_tensorcontract_fusion_plan_dyn, tensorcontract_fusion_block_specs, FusionContractPlan,
     HostTensorContractBackend, TensorContractBackend, TensorContractBlockSpec,
-    TensorContractFusionExecutionContext, TensorContractFusionProfile,
+    TensorContractFusionExecutionContext,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,

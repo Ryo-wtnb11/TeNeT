@@ -975,23 +975,19 @@ where
         .unwrap();
     let mut tree_context: TreeTransformExecutionContext<D, RuleIdentity, f64, _> =
         TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let artifact = compile_dynamic_tree_execution_artifact::<
-        tenet_core::MultiplicityFreeAdmissionMode,
-        _,
-        false,
-    >(
-        tree_context.planning(),
-        rule,
-        crate::contract::encoded_layout_primer::<R>,
-        &plan,
-        dst.space(),
-        case.lhs.space(),
-        case.lhs.space().structure(),
-        case.rhs.space(),
-        case.rhs.space().structure(),
-        None,
-    )
-    .unwrap();
+    let artifact =
+        compile_dynamic_tree_execution_artifact::<tenet_core::MultiplicityFreeAdmissionMode, _>(
+            tree_context.planning(),
+            rule,
+            crate::contract::encoded_layout_primer::<R>,
+            &plan,
+            dst.space(),
+            case.lhs.space(),
+            case.lhs.space().structure(),
+            case.rhs.space(),
+            case.rhs.space().structure(),
+        )
+        .unwrap();
     let mut host = vec![D::zero(); dst.space().required_len().unwrap()];
     execute_dynamic_tree_execution_artifact(
         &mut tree_context,
@@ -1516,9 +1512,8 @@ where
     let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
         DenseTreeTransformOperations::default_executor(),
     );
-    let mut profile = tenet_operations::TensorContractFusionProfile::default();
-    let mut profiled = vec![0.0; dst.space().required_len().unwrap()];
-    super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
+    let mut replayed = vec![0.0; dst.space().required_len().unwrap()];
+    super::dynamic::execute_dynamic_tree_execution_artifact(
         &mut tree_context,
         &mut DenseTreeTransformOperations::default(),
         &mut crate::contract::backend::TensorContractWorkspace::default(),
@@ -1526,31 +1521,20 @@ where
         &mut DynamicFusionScratchWorkspace::default(),
         &artifact,
         dst.space().structure(),
-        &mut profiled,
+        &mut replayed,
         &lhs,
         &rhs,
         1.0,
         0.0,
-        &mut profile,
     )
     .unwrap();
-    assert_eq!(
-        profile.lhs_transform_calls,
-        usize::from(lhs_len != 0),
-        "{what}"
-    );
-    assert_eq!(
-        profile.rhs_transform_calls,
-        usize::from(rhs_len != 0),
-        "{what}"
-    );
 
     let eager = eager_host(case, &lhs, &rhs);
     let scale = eager
         .iter()
         .fold(0.0_f64, |max, value| max.max(value.abs()));
     for (index, ((&forced, &replayed), &production)) in
-        host.iter().zip(&profiled).zip(&eager).enumerate()
+        host.iter().zip(&replayed).zip(&eager).enumerate()
     {
         assert!(
             (forced - production).abs() <= 1e-12 * (1.0 + scale)

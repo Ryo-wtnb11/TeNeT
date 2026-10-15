@@ -732,9 +732,7 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
     let lhs_before = lhs.data().to_vec();
     let rhs_before = rhs.data().to_vec();
     let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
-    let mut profile = TensorContractFusionProfile::default();
-
-    context_contract_into_profiled(
+    context_contract_into(
         &mut context,
         &rule,
         &mut dst,
@@ -743,16 +741,14 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
         TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
-        &mut profile,
     )
     .unwrap();
 
     // What: only the output repartitions (TensorKit's copyC); the canonical
     // nondual product RHS is read directly while alpha and beta remain on
     // their original writes.
-    assert_eq!(profile.route, TensorContractFusionRoute::CopyC);
-    assert_eq!(profile.rhs_transform_calls, 0);
-    assert_eq!(profile.output_transform_calls, 1);
+    assert!(!context.last_resolution_is_core());
+    assert!(context.last_resolution_orientation().is_none());
     assert_eq!(dst.data(), &[27.0]);
     assert_eq!(lhs.data(), lhs_before);
     assert_eq!(rhs.data(), rhs_before);
