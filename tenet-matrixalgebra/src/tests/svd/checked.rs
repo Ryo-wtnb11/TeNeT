@@ -262,10 +262,10 @@ fn assert_checked_compact_svd_live_stage_owners<D: crate::factorize::FactorScala
     let (_, space, data) = checked_svd_truncation_input::<D>(true);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
-    crate::factorize::reset_checked_compact_svd_stage_pointers();
+    let svd_stage_rec = crate::probe::record();
 
     svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    let stage = crate::factorize::checked_compact_svd_stage_pointers();
+    let stage = svd_stage_rec.checked_svd_stages();
 
     assert_eq!(dense.counts().svd_into, 0);
     assert_eq!(dense.counts().svd, 2);
@@ -285,7 +285,7 @@ fn checked_generic_compact_svd_keeps_live_stage_owners_for_every_dtype() {
 #[test]
 fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
     let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
-    crate::factorize::reset_checked_compact_svd_stage_pointers();
+    let svd_stage_rec = crate::probe::record();
 
     for (rows, cols) in [(0, 3), (3, 0)] {
         assert_eq!(
@@ -301,7 +301,7 @@ fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
     }
     assert_eq!(dense.counts().svd, 0);
     assert_eq!(dense.counts().svd_into, 0);
-    assert!(crate::factorize::checked_compact_svd_stage_pointers().is_empty());
+    assert!(svd_stage_rec.checked_svd_stages().is_empty());
 }
 
 #[test]

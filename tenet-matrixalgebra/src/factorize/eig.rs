@@ -113,7 +113,7 @@ fn stable_ascending_order<T>(
     }
     order.sort_by(|&left, &right| cmp(&values[left], &values[right]));
     #[cfg(test)]
-    EIG_ORDER_PERMUTATIONS.with(|count| count.set(count.get() + 1));
+    crate::probe::hit(crate::probe::Event::EigOrderPermutation);
     true
 }
 
@@ -123,15 +123,8 @@ fn sort_spectrum<T>(values: &mut [T], cmp: impl Fn(&T, &T) -> std::cmp::Ordering
     if !values.is_sorted_by(|left, right| cmp(left, right).is_le()) {
         values.sort_by(cmp);
         #[cfg(test)]
-        EIG_ORDER_PERMUTATIONS.with(|count| count.set(count.get() + 1));
+        crate::probe::hit(crate::probe::Event::EigOrderPermutation);
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Sectors whose eigenvalues the order authority had to permute.
-    pub(crate) static EIG_ORDER_PERMUTATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -226,7 +219,12 @@ where
             let matricizations = multiplicity_free_input_matricizations(structure, data, nout)?;
             #[cfg(test)]
             if let InputMatricizations::Packed(matrices) = &matricizations {
-                record_eigh_input_pack(matrices);
+                crate::probe::input_pack(
+                    crate::probe::CopyOp::Eigh,
+                    matrices
+                        .iter()
+                        .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+                );
             }
             Ok(matricizations)
         },
@@ -290,7 +288,7 @@ where
                 values: sorted_values,
             });
             #[cfg(test)]
-            record_eigh_owned_vector_before_scatter(&vectors);
+            crate::probe::eigh_owned_vector(&vectors);
             scatter_left_sector_blocks(
                 v_target,
                 &mut v_data,
@@ -301,7 +299,7 @@ where
                 n,
             )?;
             #[cfg(test)]
-            record_eigh_output_scatter::<D>(n * n);
+            crate::probe::output_scatter::<D>(crate::probe::CopyOp::Eigh, 1, n * n);
         }
         Ok(())
     })?;
@@ -1699,7 +1697,12 @@ where
         .map(|matrix| (matrix.sector(), matrix.rows()))
         .collect::<BTreeMap<_, _>>());
     #[cfg(test)]
-    record_checked_eigh_pair_pointers(&pairs);
+    crate::probe::checked_eigh_pairs(
+        pairs
+            .iter()
+            .map(|pair| pair.left.as_ptr() as usize)
+            .collect(),
+    );
     let v = with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
         provider,
         space.homspace(),

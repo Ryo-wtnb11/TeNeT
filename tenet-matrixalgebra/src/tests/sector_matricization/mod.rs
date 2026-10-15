@@ -1,4 +1,6 @@
 use super::*;
+use crate::probe::{GenericPairPublicationProbe, PlacementIndexProbe, ScatterVisitProbe};
+use std::cell::RefCell;
 use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
 
 #[derive(Clone, Copy)]

@@ -23,6 +23,8 @@
 mod compose;
 mod factorize;
 mod matrix_functions;
+#[cfg(test)]
+mod probe;
 mod results;
 pub mod truncation;
 

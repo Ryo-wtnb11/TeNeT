@@ -57,7 +57,13 @@ where
     V: Copy,
 {
     #[cfg(test)]
-    record_diagonal_bond_build(spectrum);
+    {
+        crate::probe::hit(crate::probe::Event::DiagonalBondBuilds);
+        crate::probe::add(
+            crate::probe::Event::DiagonalBondValues,
+            spectrum.iter().map(|entry| entry.values.len()).sum(),
+        );
+    }
     let space = spectrum_bond::<MultiplicityFreeAdmissionMode, _, _>(authority, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
     BoundDynFactor::from_bound(space, data, 1, 1)
@@ -691,7 +697,7 @@ where
         CompactSvdGauge::Left,
         |_u, _vt| {
             #[cfg(test)]
-            record_checked_compact_svd_stage_gauge(_u, _vt);
+            crate::probe::checked_svd_stage(_u, _vt);
         },
     )
 }
@@ -796,7 +802,12 @@ where
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
-    record_compact_svd_input_pack(&matricizations);
+    crate::probe::input_pack(
+        crate::probe::CopyOp::Svd,
+        matricizations
+            .iter()
+            .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+    );
 
     let ranks = matricizations
         .iter()
@@ -867,7 +878,7 @@ where
                 gauge,
                 |_u, _vt| {
                     #[cfg(test)]
-                    record_mf_compact_svd_fallback_gauge(_u, _vt);
+                    crate::probe::mf_svd_fallback(_u, _vt);
                 },
             )?;
             singular_values.push(SectorSpectrum {
@@ -896,7 +907,7 @@ where
                 )?,
             }
             #[cfg(test)]
-            record_compact_svd_output_scatter::<D>(matrix.rows * rank);
+            crate::probe::output_scatter::<D>(crate::probe::CopyOp::Svd, 1, matrix.rows * rank);
             match gauge {
                 CompactSvdGauge::Left => scatter_right_sector_blocks(
                     vt_target,
@@ -919,7 +930,7 @@ where
                 )?,
             }
             #[cfg(test)]
-            record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+            crate::probe::output_scatter::<D>(crate::probe::CopyOp::Svd, 1, rank * matrix.cols);
         }
         Ok(())
     })?;
@@ -2097,13 +2108,10 @@ pub(super) fn concat_compact_svd_factor_regions<D>(
         .find_map(|region| region.as_ref().map(Vec::as_ptr));
     let output = concat_owned_factor_regions(regions, required_len);
     #[cfg(test)]
-    COMPACT_SVD_COPY_PROBE.with(|probe| {
-        let mut current = probe.get();
-        current.owned_output_publications += 1;
-        current.owned_output_owner_reused +=
-            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())));
-        probe.set(current);
-    });
+    crate::probe::owned_output(
+        crate::probe::CopyOp::Svd,
+        first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())),
+    );
     output
 }
 
@@ -2196,7 +2204,12 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     #[cfg(test)]
     if let InputMatricizations::Packed(matrices) = &matrices {
-        record_compact_svd_input_pack(matrices);
+        crate::probe::input_pack(
+            crate::probe::CopyOp::Svd,
+            matrices
+                .iter()
+                .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+        );
     }
     let gauge = match placement {
         FactorPlacement::Direct => CompactSvdGauge::Left,
@@ -2211,7 +2224,12 @@ where
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
             #[cfg(test)]
-            record_checked_compact_input(CheckedCompactOperation::Svd, data, matrix.data, None);
+            crate::probe::checked_compact_input(
+                crate::probe::CheckedCompactOperation::Svd,
+                data,
+                matrix.data,
+                None,
+            );
             let CompactSvdNumericalStage {
                 rows,
                 cols,
@@ -2228,7 +2246,7 @@ where
                 |_u, _vt| {
                     #[cfg(test)]
                     if matches!(gauge, CompactSvdGauge::Left) {
-                        record_checked_compact_svd_stage_gauge(_u, _vt);
+                        crate::probe::checked_svd_stage(_u, _vt);
                     }
                 },
             )?;

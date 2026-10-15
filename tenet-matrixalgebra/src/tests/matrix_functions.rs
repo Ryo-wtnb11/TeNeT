@@ -123,8 +123,8 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     let tensor = padded_copy(&rule, &canonical);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_input_pack_bytes();
+    let compact_svd_copy_rec = crate::probe::record();
+    let input_pack_bytes_rec = crate::probe::record();
 
     let plus = pinv(
         &mut dense_executor,
@@ -143,11 +143,8 @@ fn pinv_satisfies_the_moore_penrose_identity() {
         );
     }
     // The padded input is packed once; no SVD factor is laid out.
-    assert!(crate::factorize::input_pack_bytes() > 0);
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        Default::default()
-    );
+    assert!(input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes) > 0);
+    assert_eq!(compact_svd_copy_rec.compact_svd_copy(), Default::default());
 }
 
 #[test]
@@ -1059,8 +1056,8 @@ fn pinv_keeps_its_global_rcond_cutoff() {
     let canonical = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![1e-14])]);
     let tensor = padded_copy(&U1FusionRule, &canonical);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_input_pack_bytes();
+    let compact_svd_copy_rec = crate::probe::record();
+    let input_pack_bytes_rec = crate::probe::record();
 
     let inverse = pinv(
         &mut dense,
@@ -1072,11 +1069,8 @@ fn pinv_keeps_its_global_rcond_cutoff() {
     assert!((scalar_u1_block(inverse.tensor(), 0) - 1.0).abs() < 1e-12);
     assert_eq!(scalar_u1_block(inverse.tensor(), 1), 0.0);
     // The padded input is packed once; no SVD factor is laid out.
-    assert!(crate::factorize::input_pack_bytes() > 0);
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        Default::default()
-    );
+    assert!(input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes) > 0);
+    assert_eq!(compact_svd_copy_rec.compact_svd_copy(), Default::default());
 }
 
 #[test]
@@ -1102,8 +1096,8 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     );
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_input_pack_bytes();
+    let compact_svd_copy_rec = crate::probe::record();
+    let input_pack_bytes_rec = crate::probe::record();
     let output = pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.0).unwrap();
     let output: BoundTensorMap<_, _> = typed_from_bound_factor(output).unwrap();
     let adjoint = adjoint(provider.as_ref(), &canonical).unwrap();
@@ -1117,11 +1111,8 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
         assert!((actual - expected).norm() < 1.0e-10);
     }
     // The padded input is packed once; no SVD factor is laid out.
-    assert!(crate::factorize::input_pack_bytes() > 0);
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        Default::default()
-    );
+    assert!(input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes) > 0);
+    assert_eq!(compact_svd_copy_rec.compact_svd_copy(), Default::default());
 }
 
 #[test]
@@ -2636,8 +2627,9 @@ fn mf_pinv_exp_and_polar_publish_no_factor_layout() {
             let (general, hermitian) = (general.as_ref(), hermitian.as_ref());
             let (general, hermitian) = (general.dynamic(), hermitian.dynamic());
             let mut dense = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
-            let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
-            crate::factorize::reset_compact_svd_copy_probe();
+            let stage_rec = crate::probe::record();
+            let stages = || stage_rec.get(crate::probe::Event::MfFactorSpaceStage);
+            let compact_svd_copy_rec = crate::probe::record();
             let before = stages();
 
             pinv_into_mf(&mut dense, &general, 1e-12).unwrap();
@@ -2650,7 +2642,7 @@ fn mf_pinv_exp_and_polar_publish_no_factor_layout() {
 
             assert_eq!(stages(), before, "padded={padded}: factor spaces staged");
             assert_eq!(
-                crate::factorize::compact_svd_copy_probe(),
+                compact_svd_copy_rec.compact_svd_copy(),
                 Default::default(),
                 "padded={padded}: SVD factor layout"
             );

@@ -4,9 +4,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::sync::Arc;
 
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
-
 use num_complex::Complex64;
 use num_traits::{Float, Zero};
 #[cfg(test)]
@@ -62,7 +59,6 @@ mod landing;
 mod matricize;
 mod null_space;
 mod polar;
-mod probes;
 mod publish_checked;
 mod publish_mf;
 mod qr_lq;
@@ -90,8 +86,6 @@ mod sector_matricization_tests;
 // name below.
 #[cfg(test)]
 pub(crate) use authority::multiplicity_free_output_space;
-#[cfg(test)]
-pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
 pub use authority::{spectrum_bond, FactorMode, FactorSpaceAuthority};
 pub(crate) use bound::*;
@@ -112,12 +106,6 @@ use publish_checked::*;
 pub(crate) use publish_mf::*;
 #[cfg(not(test))]
 use publish_mf::*;
-// `probes` holds the thread-local test probes; outside tests it keeps only
-// the no-op recorders the publication paths call unconditionally.
-#[cfg(test)]
-pub(crate) use probes::*;
-#[cfg(not(test))]
-use probes::*;
 pub(crate) use qr_lq::*;
 use source::factor_from_source;
 pub use source::{ExecutorLease, FactorOutput, FactorSource};

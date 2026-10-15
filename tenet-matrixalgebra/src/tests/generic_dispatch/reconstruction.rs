@@ -464,10 +464,10 @@ fn full_factorizations_agree_with_compact_on_matching_square_support() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let compact = svd_compact(&mut dense, &input.as_ref()).unwrap();
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let full = svd_full(&mut dense, &input.as_ref()).unwrap();
     assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
+        buffer_builds_rec.factor_buffer_builds(),
         (1, 1),
         "full SVD must build exactly its returned U and Vh buffers"
     );
@@ -571,7 +571,7 @@ fn assert_value_region_paths_match<R, D>(
     let hermitian_fallback_before = hermitian_fallback.data().to_vec();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
     let direct_svd = svd_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
     let direct_eigh = eigh_vals_dyn(
         &mut dense,
@@ -580,9 +580,12 @@ fn assert_value_region_paths_match<R, D>(
     )
     .unwrap();
     let direct_eig = eig_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        0
+    );
 
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
     let packed_svd = svd_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
     let packed_eigh = eigh_vals_dyn(
         &mut dense,
@@ -591,7 +594,10 @@ fn assert_value_region_paths_match<R, D>(
     )
     .unwrap();
     let packed_eig = eig_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 3);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        3
+    );
 
     assert_real_spectra_close(&direct_svd, &packed_svd);
     assert_real_spectra_close(&direct_eigh, &packed_eigh);

@@ -41,7 +41,8 @@ impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
     }
 
     pub(super) fn matches(&mut self, side: FactorSide, key: &FusionTreeKey) -> bool {
-        record_generic_pair_ordered_key_validation();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::PairOrderedKeyValidations);
         if !self.valid {
             return false;
         }
@@ -93,7 +94,11 @@ pub(super) fn validate_generic_factor_keys<'a, 'k, M: SectorGeometry>(
             .as_deref_mut()
             .map(|cursor| cursor.matches(side, tree));
         if aligned != Some(true) {
-            record_generic_pair_fallback_lookup(side);
+            #[cfg(test)]
+            crate::probe::hit(match side {
+                FactorSide::Left => crate::probe::Event::PairFallbackRowLookups,
+                FactorSide::Right => crate::probe::Event::PairFallbackColLookups,
+            });
             let matrix_by_sector =
                 matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
             let sector = coupled_of_generic(tree);
@@ -427,11 +432,10 @@ pub(super) fn one_sided_factor_output_plan<D, M: SectorGeometry>(
         return None;
     }
     #[cfg(test)]
-    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.plan_bytes += identities.capacity() * std::mem::size_of::<IdentitySegment>();
-        probe.set(value);
-    });
+    crate::probe::add(
+        crate::probe::Event::OneSidedPlanBytes,
+        identities.capacity() * std::mem::size_of::<IdentitySegment>(),
+    );
     Some(identities)
 }
 
@@ -479,14 +483,15 @@ pub(super) fn take_one_sided_factors<D: FactorScalar>(
     }
     let data = output.unwrap_or_default();
     #[cfg(test)]
-    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.canonical_publications += 1;
-        value.owner_reused +=
-            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, data.as_ptr())));
-        value.appended_elements += _written;
-        probe.set(value);
-    });
+    {
+        use crate::probe::Event;
+        crate::probe::hit(Event::OneSidedCanonicalPublications);
+        crate::probe::add(
+            Event::OneSidedOwnerReused,
+            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, data.as_ptr()))),
+        );
+        crate::probe::add(Event::OneSidedAppendedElements, _written);
+    }
     data
 }
 
@@ -596,12 +601,17 @@ impl<D> PairedFactors<D> for PackedFactorPairs<D> {
     fn into_concatenated(self, left_len: usize, right_len: usize) -> (Vec<D>, Vec<D>) {
         debug_assert_eq!((self.left.len(), self.right.len()), (left_len, right_len));
         #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.left_owner_reused += usize::from(!self.left.is_empty());
-            value.right_owner_reused += usize::from(!self.right.is_empty());
-            probe.set(value);
-        });
+        {
+            use crate::probe::Event;
+            crate::probe::add(
+                Event::PairLeftOwnerReused,
+                usize::from(!self.left.is_empty()),
+            );
+            crate::probe::add(
+                Event::PairRightOwnerReused,
+                usize::from(!self.right.is_empty()),
+            );
+        }
         (self.left, self.right)
     }
 }
@@ -624,23 +634,32 @@ pub(super) fn publish_generic_factor_pairs<D>(
     let mut left_data: Option<Vec<D>> = None;
     let mut right_data: Option<Vec<D>> = None;
     for pair in pairs {
-        let left_appended = append_owned_factor(&mut left_data, pair.left, left_len);
-        let right_appended = append_owned_factor(&mut right_data, pair.right, right_len);
-        record_generic_pair_appended(left_appended, right_appended);
+        let _left_appended = append_owned_factor(&mut left_data, pair.left, left_len);
+        let _right_appended = append_owned_factor(&mut right_data, pair.right, right_len);
+        #[cfg(test)]
+        {
+            crate::probe::add(crate::probe::Event::PairLeftAppended, _left_appended);
+            crate::probe::add(crate::probe::Event::PairRightAppended, _right_appended);
+        }
     }
     let left_data = left_data.unwrap_or_default();
     let right_data = right_data.unwrap_or_default();
     #[cfg(test)]
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.left_owner_reused += usize::from(
-            first_left.is_some_and(|pointer| std::ptr::eq(pointer, left_data.as_ptr())),
+    {
+        use crate::probe::Event;
+        crate::probe::add(
+            Event::PairLeftOwnerReused,
+            usize::from(
+                first_left.is_some_and(|pointer| std::ptr::eq(pointer, left_data.as_ptr())),
+            ),
         );
-        value.right_owner_reused += usize::from(
-            first_right.is_some_and(|pointer| std::ptr::eq(pointer, right_data.as_ptr())),
+        crate::probe::add(
+            Event::PairRightOwnerReused,
+            usize::from(
+                first_right.is_some_and(|pointer| std::ptr::eq(pointer, right_data.as_ptr())),
+            ),
         );
-        probe.set(value);
-    });
+    }
     (left_data, right_data)
 }
 
@@ -728,19 +747,11 @@ where
         );
     let (left_data, right_data) = if canonical {
         #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.canonical_publications += 1;
-            probe.set(value);
-        });
+        crate::probe::hit(crate::probe::Event::PairCanonicalPublications);
         pairs.into_concatenated(left_len, right_len)
     } else {
         #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.fallback_publications += 1;
-            probe.set(value);
-        });
+        crate::probe::hit(crate::probe::Event::PairFallbackPublications);
         let mut left_data = vec![D::zero(); left_len];
         let mut right_data = vec![D::zero(); right_len];
         let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
@@ -846,7 +857,7 @@ where
     let left_structure = Arc::clone(left_space.structure());
     for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
-        record_scatter_visit(FactorSide::Left);
+        crate::probe::hit(crate::probe::Event::LeftVisits);
         let block = left_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -857,13 +868,13 @@ where
         let (row_offset, _) =
             index.placement(matrix.sector(), FactorSide::Left, key.codomain_tree())?;
         #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.left_scatter_calls += 1;
-            value.left_scattered_elements +=
-                checked_extent(block.shape()).expect("admitted block extent is finite");
-            probe.set(value);
-        });
+        {
+            crate::probe::hit(crate::probe::Event::PairLeftScatterCalls);
+            crate::probe::add(
+                crate::probe::Event::PairLeftScatteredElements,
+                checked_extent(block.shape()).expect("admitted block extent is finite"),
+            );
+        }
         scatter_matrix_block(
             left_data,
             block.shape(),
@@ -896,7 +907,7 @@ where
     let right_structure = Arc::clone(right_space.structure());
     for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
-        record_scatter_visit(FactorSide::Right);
+        crate::probe::hit(crate::probe::Event::RightVisits);
         let block = right_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -907,13 +918,13 @@ where
         let (col_offset, _) =
             index.placement(matrix.sector(), FactorSide::Right, key.domain_tree())?;
         #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.right_scatter_calls += 1;
-            value.right_scattered_elements +=
-                checked_extent(block.shape()).expect("admitted block extent is finite");
-            probe.set(value);
-        });
+        {
+            crate::probe::hit(crate::probe::Event::PairRightScatterCalls);
+            crate::probe::add(
+                crate::probe::Event::PairRightScatteredElements,
+                checked_extent(block.shape()).expect("admitted block extent is finite"),
+            );
+        }
         scatter_matrix_block(
             right_data,
             block.shape(),

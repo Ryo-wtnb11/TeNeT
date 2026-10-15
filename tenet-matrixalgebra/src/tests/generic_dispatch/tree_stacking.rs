@@ -83,35 +83,26 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
         let input = BoundDynamicTensorRef::try_new(&space, &general).unwrap();
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-        crate::factorize::reset_generic_pair_publication_probe();
-        crate::factorize::reset_compact_qr_copy_probe();
+        let generic_pair_rec = crate::probe::record();
+        let compact_qr_copy_rec = crate::probe::record();
         let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
         assert_compact_factors_reconstruct_input(&input, &qr.q, None, &qr.r);
-        assert_eq!(
-            crate::factorize::compact_qr_copy_probe().input_pack_bytes,
-            0
-        );
+        assert_eq!(compact_qr_copy_rec.compact_qr_copy().input_pack_bytes, 0);
 
-        crate::factorize::reset_compact_svd_copy_probe();
+        let compact_svd_copy_rec = crate::probe::record();
         let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
         assert_compact_factors_reconstruct_input(&input, &svd.u, Some(&svd.s), &svd.vh);
-        assert_eq!(
-            crate::factorize::compact_svd_copy_probe().input_pack_bytes,
-            0
-        );
+        assert_eq!(compact_svd_copy_rec.compact_svd_copy().input_pack_bytes, 0);
 
-        crate::factorize::reset_compact_lq_copy_probe();
+        let compact_lq_copy_rec = crate::probe::record();
         let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
         assert_compact_factors_reconstruct_input(&input, &lq.l, None, &lq.q);
-        assert_eq!(
-            crate::factorize::compact_lq_copy_probe().input_pack_bytes,
-            0
-        );
+        assert_eq!(compact_lq_copy_rec.compact_lq_copy().input_pack_bytes, 0);
 
         // The fresh bond-space builder enumerates the preserved side's trees
         // in the facade input's order, so the per-call route proof publishes
         // every factor in place: no pack in, no scatter out.
-        let publication = crate::factorize::generic_pair_publication_probe();
+        let publication = generic_pair_rec.generic_pair_publication();
         assert_eq!(
             (
                 publication.canonical_publications,
@@ -120,14 +111,17 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
             (3, 0),
             "{publication:?}"
         );
-        crate::factorize::reset_values_matricization_fallbacks();
+        let values_fallbacks_rec = crate::probe::record();
         svd_vals_dyn_checked_generic(&mut dense, &input).unwrap();
         if endomorphism {
             let hermitian_input = BoundDynamicTensorRef::try_new(&space, &hermitian).unwrap();
             eigh_vals_dyn_checked_generic(&mut dense, &hermitian_input).unwrap();
             eig_vals_dyn_checked_generic(&mut dense, &input).unwrap();
         }
-        assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+        assert_eq!(
+            values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+            0
+        );
     }
     assert!(
         unordered_fixtures > 0,
@@ -235,16 +229,15 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
     let input = BoundDynamicTensorRef::try_new(&space, &general_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_compact_qr_copy_probe();
-    crate::factorize::reset_generic_pair_publication_probe();
+    let compact_qr_copy_rec = crate::probe::record();
+    let generic_pair_rec = crate::probe::record();
     let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &qr.q, None, &qr.r);
+    assert_eq!(compact_qr_copy_rec.compact_qr_copy().input_pack_bytes, 0);
     assert_eq!(
-        crate::factorize::compact_qr_copy_probe().input_pack_bytes,
-        0
-    );
-    assert_eq!(
-        crate::factorize::generic_pair_publication_probe().canonical_publications,
+        generic_pair_rec
+            .generic_pair_publication()
+            .canonical_publications,
         0
     );
     let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();

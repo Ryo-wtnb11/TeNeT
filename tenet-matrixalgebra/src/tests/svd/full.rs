@@ -10,16 +10,13 @@ fn full_svd_late_error_preserves_input_and_publishes_no_factors() {
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
 
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let result = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
     assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (0, 0)
-    );
+    assert_eq!(buffer_builds_rec.factor_buffer_builds(), (0, 0));
 }
 
 #[test]
@@ -32,18 +29,18 @@ fn full_svd_publishes_owned_factors_without_scatter_in_both_orientations() {
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
     let direct = svd_full_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
-    let probe = crate::factorize::one_sided_publication_probe();
+    let probe = one_sided_rec.one_sided_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (2, 0)
     );
     assert!(probe.appended_elements > 0);
 
-    crate::factorize::reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
     let adjoint = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
-    let probe = crate::factorize::one_sided_publication_probe();
+    let probe = one_sided_rec.one_sided_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (2, 0)
@@ -60,13 +57,10 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let output = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
 
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (1, 1)
-    );
+    assert_eq!(buffer_builds_rec.factor_buffer_builds(), (1, 1));
     assert_eq!(output.u().space().space().required_len().unwrap(), 9);
     assert_eq!(output.s().space().space().required_len().unwrap(), 6);
     assert_eq!(output.vh().space().space().required_len().unwrap(), 4);
@@ -566,16 +560,13 @@ fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
         return;
     };
 
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let result = svd_full_dyn(&mut dense, &input.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(dense.counts().svd_full, 2);
     assert_eq!(input.data(), before);
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (0, 0)
-    );
+    assert_eq!(buffer_builds_rec.factor_buffer_builds(), (0, 0));
 }
 
 #[test]

@@ -27,8 +27,8 @@ where
 fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
     let (homspace, matrix) = z2_single_sector_matrix(2, 1);
     let provider = Arc::new(TestGenericRule);
-    reset_generic_pair_publication_probe();
-    reset_scatter_visit_probe();
+    let generic_pair_rec = crate::probe::record();
+    let scatter_visit_rec = crate::probe::record();
 
     let (left, right) = publish_pair(
         &provider,
@@ -50,7 +50,7 @@ fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
     // G_s = 1 still pays the grouping pass (B = 1 per side) on top of the
     // F = 1 scattered block; disclosed, not dispatched on.
     assert_eq!(
-        scatter_visit_probe(),
+        scatter_visit_rec.scatter_visit(),
         ScatterVisitProbe {
             left_grouped: 1,
             right_grouped: 1,
@@ -60,7 +60,7 @@ fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
             right_visits: 1,
         }
     );
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (0, 1)
@@ -115,20 +115,20 @@ fn generic_pair_fallback_validation_indexes_each_sector_once() {
         (FactorSide::Left, &left_keys),
         (FactorSide::Right, &right_keys),
     ] {
-        reset_generic_pair_publication_probe();
-        reset_placement_index_probe();
+        let generic_pair_rec = crate::probe::record();
+        let placement_index_rec = crate::probe::record();
         let mut matrix_by_sector = None;
         assert!(
             validate_generic_factor_keys(keys, side, None, &matrices, &mut matrix_by_sector)
                 .unwrap()
         );
-        let probe = generic_pair_publication_probe();
+        let probe = generic_pair_rec.generic_pair_publication();
         let lookups = match side {
             FactorSide::Left => probe.fallback_row_lookups,
             FactorSide::Right => probe.fallback_col_lookups,
         };
         assert_eq!(lookups, total);
-        let index = placement_index_probe();
+        let index = placement_index_rec.placement_index();
         assert_eq!(
             index,
             PlacementIndexProbe {
@@ -150,11 +150,11 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
     let (homspace, matrix, pair) = vertex_tree_factor_fixture(false);
     let expected_left = pair.left.clone();
     let expected_right = pair.right.clone();
-    reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let (left, right) = publish_pair(&provider, &homspace, &[matrix], vec![pair]).unwrap();
     assert_eq!(left.data(), expected_left);
     assert_eq!(right.data(), expected_right);
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (1, 0)
@@ -177,8 +177,8 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
     let (homspace, matrix, pair) = vertex_tree_factor_fixture(true);
     let left_source = pair.left.clone();
     let right_source = pair.right.clone();
-    reset_generic_pair_publication_probe();
-    reset_placement_index_probe();
+    let generic_pair_rec = crate::probe::record();
+    let placement_index_rec = crate::probe::record();
     let (left, right) = publish_pair(&provider, &homspace, &[matrix], vec![pair]).unwrap();
     assert_eq!(
         left.data(),
@@ -210,7 +210,7 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
             right_source[5],
         ]
     );
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (0, 1)
@@ -226,7 +226,7 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
     // Row and column key validation each build a one-sided table; the
     // scatter loop shares one two-sided table (formerly four tables).
     assert_eq!(
-        placement_index_probe(),
+        placement_index_rec.placement_index(),
         PlacementIndexProbe {
             index_builds: 3,
             indexed_sides: 4,
@@ -333,7 +333,7 @@ fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
             .flat_map(|pair| pair.right.iter().copied())
             .collect::<Vec<_>>();
 
-        reset_generic_pair_publication_probe();
+        let generic_pair_rec = crate::probe::record();
         let mut matrix_by_sector = None;
         let mut left_cursor = FactorTreeCursor::new(&matrices, &ranks);
         assert!(validate_generic_factor_keys(
@@ -368,7 +368,7 @@ fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
             FactorSide::Right,
         ));
         let output_blocks = left_keys.len() + right_keys.len();
-        let probe = generic_pair_publication_probe();
+        let probe = generic_pair_rec.generic_pair_publication();
         assert_eq!(probe.ordered_key_validation_events, output_blocks);
         assert_eq!(
             (probe.fallback_row_lookups, probe.fallback_col_lookups),
@@ -439,7 +439,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
 fn generic_pair_publication_handles_zero_kept_sector() {
     let provider = Arc::new(TestGenericRule);
     let (homspace, matrix) = z2_single_sector_matrix(2, 1);
-    reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let (left, right) = publish_pair(
         &provider,
         &homspace,
@@ -457,7 +457,7 @@ fn generic_pair_publication_handles_zero_kept_sector() {
     assert!(left.data().is_empty());
     assert!(right.data().is_empty());
     assert_eq!(
-        generic_pair_publication_probe(),
+        generic_pair_rec.generic_pair_publication(),
         GenericPairPublicationProbe {
             canonical_publications: 1,
             ..GenericPairPublicationProbe::default()
@@ -479,7 +479,7 @@ fn generic_pair_publication_handles_scalar_matrix() {
     let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
     let homspace = FusionTreeHomSpace::new(empty.clone(), empty);
     let key = homspace.fusion_tree_keys_generic(&TestGenericRule).unwrap()[0].clone();
-    reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let (left, right) = publish_pair(
         &provider,
         &homspace,
@@ -503,7 +503,7 @@ fn generic_pair_publication_handles_scalar_matrix() {
     .unwrap();
     assert_eq!(left.data(), [2.0]);
     assert_eq!(right.data(), [3.5]);
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(probe.canonical_publications, 1);
     assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
 }
@@ -518,7 +518,7 @@ fn generic_pair_fallback_scatters_rank1_right_block_with_right_layout() {
     let right = (0..b * (1 + padding))
         .map(|k| 20.0 + k as f64)
         .collect::<Vec<_>>();
-    reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
 
     let (left_factor, right_factor) = publish_pair(
         &provider,
@@ -535,7 +535,7 @@ fn generic_pair_fallback_scatters_rank1_right_block_with_right_layout() {
     )
     .unwrap();
 
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (0, 1)
@@ -659,8 +659,8 @@ fn generic_pair_fallback_scatters_each_output_block_once() {
         let checked_provider = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
 
         let build = |matrices: &[SectorMatricization<D>]| {
-            reset_generic_pair_publication_probe();
-            reset_scatter_visit_probe();
+            let generic_pair_rec = crate::probe::record();
+            let scatter_visit_rec = crate::probe::record();
             let (left, right) = build_left_right_bound_pair_generic_checked(
                 &checked_provider,
                 &homspace,
@@ -678,8 +678,8 @@ fn generic_pair_fallback_scatters_each_output_block_once() {
             (
                 left.data().to_vec(),
                 right.data().to_vec(),
-                generic_pair_publication_probe(),
-                scatter_visit_probe(),
+                generic_pair_rec.generic_pair_publication(),
+                scatter_visit_rec.scatter_visit(),
             )
         };
 
@@ -851,10 +851,10 @@ fn assert_checked_pair_matches_two_enumeration_construction<
     let (left_keys, left_expected) = two_enumeration_space(checked, left_hom);
     let (right_keys, right_expected) = two_enumeration_space(checked, right_hom);
     let (plain_left, plain_right) = publish_pair(plain, homspace, matrices, pairs()).unwrap();
-    reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let (left, right) =
         build_left_right_bound_pair_generic_checked(checked, homspace, matrices, pairs()).unwrap();
-    let probe = generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         expected_publications
@@ -967,7 +967,7 @@ fn checked_paired_placement_error_precedes_bound_space() {
             FactorSide::Right => matrix.col_trees.truncate(1),
         }
         let recorder = Arc::new(RecordingGeneric::new());
-        reset_generic_pair_publication_probe();
+        let generic_pair_rec = crate::probe::record();
         let error = build_left_right_bound_pair_generic_checked(
             &recorder,
             &homspace,
@@ -989,7 +989,7 @@ fn checked_paired_placement_error_precedes_bound_space() {
             ) if message == expected_message
         ));
         assert_eq!(recorder.log().len(), expected_calls);
-        let probe = generic_pair_publication_probe();
+        let probe = generic_pair_rec.generic_pair_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 0)
