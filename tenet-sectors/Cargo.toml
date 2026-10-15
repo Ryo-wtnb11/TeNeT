@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-racah-generated = ["racah/cgc-gen"]
+racah-generated = ["racah/cgc-gen", "dep:num-traits"]
 # The infallible Generic symbol tier (`GenericFusionSymbols`,
 # `GenericRigidSymbols`): test oracles for this and sibling crates only;
 # production Generic is checked only (#1854).
@@ -22,7 +22,7 @@ testing = []
 [dependencies]
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
-num-traits = "0.2"
+num-traits = { version = "0.2", optional = true }
 racah = { version = "0.2.4" }
 
 [dev-dependencies]
