@@ -612,12 +612,21 @@ mod tests {
     use super::*;
     use crate::block_structure::core_reset_epoch;
 
+    /// Tests that publish at the live reset epoch must exclude every
+    /// clear-all (it opens an odd epoch that refuses their publications).
+    fn epoch_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn cache(byte_budget: u64) -> StructureCache<u32, u32> {
         StructureCache::new(StructureCacheKind::SectorStructure, byte_budget)
     }
 
     #[test]
     fn a_miss_builds_once_and_a_failed_build_is_not_cached() {
+        let _guard = epoch_lock();
         let cache = cache(1 << 20);
         let epoch = core_reset_epoch();
         let failed = cache.get_or_try_build(&1, epoch, || Err::<(Arc<u32>, u64), _>("no"));
@@ -637,6 +646,7 @@ mod tests {
 
     #[test]
     fn publish_keeps_the_first_value_of_a_key() {
+        let _guard = epoch_lock();
         let cache = cache(1 << 20);
         let epoch = core_reset_epoch();
         let (first, admitted) = cache.publish(&3, Arc::new(1), 64, epoch);
@@ -649,6 +659,7 @@ mod tests {
 
     #[test]
     fn an_entry_over_one_shard_is_rejected_and_counted() {
+        let _guard = epoch_lock();
         let cache = cache(1 << 20);
         let max_entry = cache.info().max_entry_bytes();
         // The hot-queue share of the single shard, as quick_cache admits.
@@ -665,6 +676,7 @@ mod tests {
 
     #[test]
     fn a_build_from_a_stale_epoch_is_not_published() {
+        let _guard = epoch_lock();
         let cache = cache(1 << 20);
         let stale = core_reset_epoch().wrapping_add(2);
         let (value, resident) = cache.publish(&6, Arc::new(4), 64, stale);
@@ -675,6 +687,7 @@ mod tests {
 
     #[test]
     fn the_byte_budget_bounds_the_resident_entries() {
+        let _guard = epoch_lock();
         let cache = cache(64 * 1024);
         let epoch = core_reset_epoch();
         for key in 0..1024 {
