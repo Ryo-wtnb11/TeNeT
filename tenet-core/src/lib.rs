@@ -69,6 +69,8 @@ pub use error::*;
 #[doc(hidden)]
 pub mod testing;
 
+#[cfg(any(test, feature = "testing"))]
+mod probe;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

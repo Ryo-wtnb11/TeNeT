@@ -1,20 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-thread_local! {
-    static EXACT_STORAGE_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_exact_storage_fallback_count() {
-    EXACT_STORAGE_FALLBACKS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn exact_storage_fallback_count() -> usize {
-    EXACT_STORAGE_FALLBACKS.with(std::cell::Cell::get)
-}
-
 /// Checks that every logical block element owns a distinct storage offset.
 ///
 /// General [`BlockStructure`] values may describe aliased read views. Owning
@@ -51,7 +36,7 @@ pub fn validate_block_storage_injective(structure: &BlockStructure) -> Result<()
         let proven_injective = block_layout_is_proven_injective(layout.shape(), layout.strides());
         if !proven_injective {
             #[cfg(test)]
-            EXACT_STORAGE_FALLBACKS.with(|count| count.set(count.get() + 1));
+            crate::probe::hit(crate::probe::Event::ExactStorageFallback);
             let mut offsets = FxHashMap::<usize, ()>::default();
             if let Some(offset) = visit_block_layout_offsets(
                 layout.shape(),
@@ -85,7 +70,7 @@ pub fn validate_block_storage_injective(structure: &BlockStructure) -> Result<()
         }
 
         #[cfg(test)]
-        EXACT_STORAGE_FALLBACKS.with(|count| count.set(count.get() + 1));
+        crate::probe::hit(crate::probe::Event::ExactStorageFallback);
         component.sort_by_key(|entry| entry.block);
         let mut owners = FxHashMap::<usize, usize>::default();
         for entry in component {

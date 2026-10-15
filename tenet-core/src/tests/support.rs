@@ -864,7 +864,7 @@ pub(super) fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
     // What: the destination check proves equality from the legs alone,
     // for both algebra contracts, and a different destination is
     // rejected with the materializing comparison's answer.
-    let materializations = DESCRIPTOR_MATERIALIZATIONS.get();
+    let recording = crate::probe::record();
     let matches = |expected: &FusionTreeHomSpace| {
         let unchecked = FusionTreeHomSpace::tensorcontract_homspace_matches(
             rule,
@@ -892,7 +892,10 @@ pub(super) fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
         unchecked
     };
     assert!(matches(&actual));
-    assert_eq!(DESCRIPTOR_MATERIALIZATIONS.get(), materializations);
+    assert_eq!(
+        recording.get(crate::probe::Event::DescriptorMaterialization),
+        0
+    );
     let flipped_leg = |leg: &SectorLeg| SectorLeg::new(leg.iter(), !leg.is_dual());
     let mut codomain = actual.codomain().legs().to_vec();
     let mut domain = actual.domain().legs().to_vec();
@@ -1007,7 +1010,7 @@ pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
         + std::fmt::Debug
         + TransposeOracleScalar,
 {
-    reset_compact_block_dimensions();
+    let recording = crate::probe::record();
     let compact = multiplicity_free_transpose_tree_pair_block(
         rule,
         sources,
@@ -1015,7 +1018,13 @@ pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
         domain_permutation,
     )
     .unwrap();
-    let dimensions = compact_block_dimensions();
+    let scatters = recording.get(crate::probe::Event::CompactBlockScatter);
+    let dimensions = (
+        recording.get(crate::probe::Event::CompactDestinationRows),
+        recording.get(crate::probe::Event::CompactSourceColumns),
+        recording.get(crate::probe::Event::CompactCoefficientSlots),
+        recording.get(crate::probe::Event::CompactCoefficientBytes),
+    );
     let group = validate_tree_pair_block_group_for_rule(rule, sources)
         .unwrap()
         .expect("oracle cohort is nonempty");
@@ -1115,7 +1124,9 @@ pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
     }
 
     if expect_compact_boundary {
-        let dimensions = dimensions.expect("nonidentity compact transform records dimensions");
+        // What: a nonidentity compact transform scatters exactly one block.
+        assert_eq!(scatters, 1);
+        let (destination_rows, source_columns, coefficient_slots, coefficient_bytes) = dimensions;
         let destinations = full_key
             .iter()
             .flatten()
@@ -1123,18 +1134,15 @@ pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
             .collect::<std::collections::BTreeSet<_>>();
         // What: the dense coefficient matrix is exactly the canonical
         // reachable block basis by the caller's source columns.
-        assert_eq!(dimensions.destination_rows, destinations.len());
-        assert_eq!(dimensions.source_columns, sources.len());
+        assert_eq!(destination_rows, destinations.len());
+        assert_eq!(source_columns, sources.len());
+        assert_eq!(coefficient_slots, destination_rows * source_columns);
         assert_eq!(
-            dimensions.coefficient_slots,
-            dimensions.destination_rows * dimensions.source_columns
-        );
-        assert_eq!(
-            dimensions.coefficient_bytes,
-            dimensions.coefficient_slots * std::mem::size_of::<Option<R::Scalar>>()
+            coefficient_bytes,
+            coefficient_slots * std::mem::size_of::<Option<R::Scalar>>()
         );
     } else {
-        assert_eq!(dimensions, None);
+        assert_eq!(scatters, 0);
     }
 }
 
@@ -2745,9 +2753,9 @@ pub(super) fn assert_canonical_storage_admitted_without_enumeration(canonical: &
         hits.iter().all(|&hit| hit == 1),
         "offset histogram {hits:?}"
     );
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     validate_block_storage_injective(canonical).unwrap();
-    assert_eq!(exact_storage_fallback_count(), 0);
+    assert_eq!(recording.get(crate::probe::Event::ExactStorageFallback), 0);
 
     let unwitnessed = PreparedBlockStructure::from_parts(
         canonical.sector_structure().clone(),
@@ -2755,7 +2763,7 @@ pub(super) fn assert_canonical_storage_admitted_without_enumeration(canonical: &
     )
     .unwrap();
     assert!(!unwitnessed.structure().storage_tiling_proven());
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     validate_block_storage_injective(unwitnessed.structure()).unwrap();
-    assert!(exact_storage_fallback_count() > 0);
+    assert!(recording.get(crate::probe::Event::ExactStorageFallback) > 0);
 }

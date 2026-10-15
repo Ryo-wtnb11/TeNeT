@@ -74,21 +74,21 @@ fn canonical_and_factor_bridge_storage_skip_exact_enumeration() {
     // shared bridge are admitted by structural proof, not element scans.
     let rule = SU2FusionRule;
     let homspace = FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     let canonical = homspace
         .clone()
         .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
         .unwrap();
-    assert_eq!(exact_storage_fallback_count(), 0);
+    assert_eq!(recording.get(crate::probe::Event::ExactStorageFallback), 0);
 
     // The expert layout constructor skips the exact check exactly when the
     // structure compiles to coupled-sector regions.
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     assert!(canonical.coupled_sector_regions(1).unwrap().is_some());
     homspace
         .validate_subblock_structure_subset(&rule, &canonical)
         .unwrap();
-    assert_eq!(exact_storage_fallback_count(), 0);
+    assert_eq!(recording.get(crate::probe::Event::ExactStorageFallback), 0);
 }
 
 #[test]
@@ -480,11 +480,17 @@ fn checked_prepare_surfaces_each_stage_failure_without_publishing() {
         ),
     ] {
         clear_structure_caches();
-        reset_fusion_tree_layout_probe_side_effect_calls();
+        let recording = crate::probe::record();
         let error = homspace
             .prepare_fusion_tree_layout_checked(&CheckedFailRule { fail: stage })
             .unwrap_err();
         assert_eq!(error, expected);
-        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+        assert_eq!(
+            (
+                recording.get(crate::probe::Event::LayoutBuild),
+                recording.get(crate::probe::Event::LayoutAdmission)
+            ),
+            (0, 0)
+        );
     }
 }

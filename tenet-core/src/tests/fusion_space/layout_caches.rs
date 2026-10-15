@@ -315,23 +315,32 @@ fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
         })
         .collect::<Vec<_>>();
 
-    reset_coupled_grid_build_observations();
-    let misses = complete_hom_space_miss_observations();
+    let misses = crate::probe::record();
+    let recording = crate::probe::record();
     let first = hom
         .coupled_subblock_structure(&U1FusionRule, 2, shapes.clone())
         .unwrap();
-    assert_eq!(coupled_grid_build_observations().1, grid_sides);
-    assert_eq!(complete_hom_space_miss_observations(), misses + 1);
+    assert_eq!(
+        recording.get(crate::probe::Event::CoupledGridSideDerivation),
+        grid_sides
+    );
+    assert_eq!(misses.get(crate::probe::Event::CompleteHomSpaceMiss), 1);
 
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let second = hom
         .coupled_subblock_structure(&U1FusionRule, 2, shapes)
         .unwrap();
     let from_legs = hom
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
-    assert_eq!(coupled_grid_build_observations(), (0, 0));
-    assert_eq!(complete_hom_space_miss_observations(), misses + 1);
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::CoupledGridReconstructionInsert),
+            recording.get(crate::probe::Event::CoupledGridSideDerivation)
+        ),
+        (0, 0)
+    );
+    assert_eq!(misses.get(crate::probe::Event::CompleteHomSpaceMiss), 1);
     assert!(Arc::ptr_eq(&first, &second));
     assert!(Arc::ptr_eq(&first, &from_legs));
     assert!(first.storage_tiling_proven());
@@ -548,12 +557,10 @@ fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
     let during = std::rc::Rc::new(std::cell::RefCell::new(None));
     let slot = std::rc::Rc::clone(&during);
     let hom = homspace.clone();
-    crate::block_structure::MID_RESET_HOOK.with(|hook| {
-        hook.set(Some(Box::new(move || {
-            let epoch = core_reset_epoch();
-            *slot.borrow_mut() = Some((epoch, complete_build(&hom)));
-        })));
-    });
+    crate::probe::set_mid_reset_hook(Box::new(move || {
+        let epoch = core_reset_epoch();
+        *slot.borrow_mut() = Some((epoch, complete_build(&hom)));
+    }));
     clear_structure_caches();
     let (epoch, (key, stale)) = during.borrow_mut().take().unwrap();
     assert_eq!(stale.as_ref(), source.as_ref());
@@ -588,26 +595,24 @@ fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
         Arc::clone(&second_done),
         homspace.clone(),
     );
-    crate::block_structure::MID_RESET_HOOK.with(|hook| {
-        hook.set(Some(Box::new(move || {
-            // Reset B starts on another thread while reset A is mid-way.
-            let finished = Arc::clone(&done);
-            *slot.borrow_mut() = Some(std::thread::spawn(move || {
-                clear_structure_caches();
-                finished.store(true, std::sync::atomic::Ordering::SeqCst);
-            }));
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            // What: B cannot run inside A, so the epoch stays odd and a build
-            // here is not published.
-            assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
-            assert_eq!(core_reset_epoch(), start + 1);
-            let inside = hom
-                .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
-                .unwrap();
-            assert_eq!(inside.as_ref(), source.as_ref());
-            assert_ne!(inside.content_id(), source_id);
-        })));
-    });
+    crate::probe::set_mid_reset_hook(Box::new(move || {
+        // Reset B starts on another thread while reset A is mid-way.
+        let finished = Arc::clone(&done);
+        *slot.borrow_mut() = Some(std::thread::spawn(move || {
+            clear_structure_caches();
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // What: B cannot run inside A, so the epoch stays odd and a build
+        // here is not published.
+        assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(core_reset_epoch(), start + 1);
+        let inside = hom
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        assert_eq!(inside.as_ref(), source.as_ref());
+        assert_ne!(inside.content_id(), source_id);
+    }));
     clear_structure_caches();
     second.borrow_mut().take().unwrap().join().unwrap();
 
@@ -636,14 +641,20 @@ fn a_degeneracy_only_change_reuses_the_sector_structure() {
             FusionProductSpace::new([leg]),
         )
     };
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let first = hom(1, 2)
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
     let second = hom(3, 5)
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (1, 1)
+    );
     assert!(Arc::ptr_eq(
         &first.content_key().sector,
         &second.content_key().sector
@@ -949,11 +960,14 @@ fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
     let (destination, structure) = commit(prepared);
     drop(commit(raced));
     let before = degeneracy_cache_info();
-    let publications = PERMUTED_MEMO_PUBLICATIONS.get();
+    let recording = crate::probe::record();
     first.publish(&destination, &structure);
     let charged = degeneracy_cache_info().charged_bytes() - before.charged_bytes();
     assert_eq!(degeneracy_cache_info().entries(), before.entries());
-    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    assert_eq!(
+        recording.get(crate::probe::Event::PermutedMemoPublication),
+        1
+    );
     // At least the key words, one table slot and the destination content.
     let floor = 3 * std::mem::size_of::<usize>()
         + std::mem::size_of::<(Box<[usize]>, HomSpaceId)>()
@@ -965,14 +979,17 @@ fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
         degeneracy_cache_info().charged_bytes() - before.charged_bytes(),
         charged
     );
-    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    assert_eq!(
+        recording.get(crate::probe::Event::PermutedMemoPublication),
+        1
+    );
 
     // The memo answers the same axes with the canonical destination.
-    let hits = PERMUTED_MEMO_HITS.get();
+    let hits = crate::probe::record();
     let (prepared, memoized, Permuted::Memo, false) = swap(&source) else {
         panic!("a published memo answers without deriving");
     };
-    assert_eq!(PERMUTED_MEMO_HITS.get(), hits + 1);
+    assert_eq!(hits.get(crate::probe::Event::PermutedMemoHit), 1);
     assert_eq!(memoized, destination);
     assert!(Arc::ptr_eq(&prepared.shared_structure(), &structure));
     // Another split of the same concatenation is another key.
@@ -988,7 +1005,10 @@ fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
     let (destination, structure) = commit(prepared);
     clear_structure_caches();
     stale.publish(&destination, &structure);
-    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    assert_eq!(
+        recording.get(crate::probe::Event::PermutedMemoPublication),
+        1
+    );
     assert_eq!(degeneracy_cache_info().charged_bytes(), 0);
     let (_, _, Permuted::Derived(_), true) = swap(&source) else {
         panic!("a reset drops every memo");
@@ -1005,7 +1025,10 @@ fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
         let (destination, structure) = commit(prepared);
         ticket.publish(&destination, &structure);
     }
-    assert_eq!(PERMUTED_MEMO_PUBLICATIONS.get(), publications + 1);
+    assert_eq!(
+        recording.get(crate::probe::Event::PermutedMemoPublication),
+        1
+    );
     set_structure_cache_byte_budget(
         StructureCacheKind::DegeneracyStructure,
         DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET,

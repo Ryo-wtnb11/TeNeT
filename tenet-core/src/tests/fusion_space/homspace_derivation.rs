@@ -151,14 +151,20 @@ fn uncached_coupled_layout_probe_does_not_publish_identity_or_cache_state() {
         .coupled_subblock_structure_from_leg_degeneracies(&rule)
         .unwrap();
 
-    crate::reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let (required_len, source_matches) = homspace
         .coupled_subblock_layout_probe_uncached(&rule, source.as_ref())
         .unwrap();
 
     assert_eq!(required_len, source.required_len().unwrap());
     assert!(source_matches);
-    assert_eq!(crate::fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
     let cached_again = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&rule)
         .unwrap();
@@ -576,11 +582,11 @@ fn match_against_build<R: CheckedFusionAlgebra>(
         rule, lhs, rhs, args.0, args.1, args.2, args.3,
     )
     .map(|built| built == *expected);
-    let before = DESCRIPTOR_MATERIALIZATIONS.get();
+    let recording = crate::probe::record();
     let matched = FusionTreeHomSpace::try_tensorcontract_homspace_matches_checked(
         rule, lhs, rhs, args.0, args.1, args.2, args.3, expected,
     );
-    let materialized = DESCRIPTOR_MATERIALIZATIONS.get() - before;
+    let materialized = recording.get(crate::probe::Event::DescriptorMaterialization);
     (matched, built, materialized)
 }
 

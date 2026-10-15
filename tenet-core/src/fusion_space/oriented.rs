@@ -1,10 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-thread_local! {
-    pub(crate) static DESCRIPTOR_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct OrientedLegView<'a> {
     pub(super) source: &'a SectorLeg,
@@ -188,7 +183,7 @@ impl<'a> HomSpaceDescriptor<'a> {
         R: FusionRule,
     {
         #[cfg(test)]
-        DESCRIPTOR_MATERIALIZATIONS.set(DESCRIPTOR_MATERIALIZATIONS.get() + 1);
+        crate::probe::hit(crate::probe::Event::DescriptorMaterialization);
         FusionTreeHomSpace::new(
             FusionProductSpace::new(
                 self.codomain()
@@ -213,7 +208,7 @@ impl<'a> HomSpaceDescriptor<'a> {
         R: CheckedFusionAlgebra,
     {
         #[cfg(test)]
-        DESCRIPTOR_MATERIALIZATIONS.set(DESCRIPTOR_MATERIALIZATIONS.get() + 1);
+        crate::probe::hit(crate::probe::Event::DescriptorMaterialization);
         let codomain = self
             .codomain()
             .iter()

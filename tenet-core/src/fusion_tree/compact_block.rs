@@ -461,17 +461,20 @@ fn record_compact_block_dimensions<S>(
     _columns: &DenseColumns<S>,
 ) {
     #[cfg(test)]
-    COMPACT_BLOCK_DIMENSIONS.with(|dimensions| {
-        dimensions.set(Some(CompactBlockDimensions {
-            destination_rows: _basis.locals.len(),
-            source_columns: _columns.num_src,
-            coefficient_slots: _columns.data.len(),
-            coefficient_bytes: _columns
+    {
+        use crate::probe::{add, hit, Event};
+        hit(Event::CompactBlockScatter);
+        add(Event::CompactDestinationRows, _basis.locals.len());
+        add(Event::CompactSourceColumns, _columns.num_src);
+        add(Event::CompactCoefficientSlots, _columns.data.len());
+        add(
+            Event::CompactCoefficientBytes,
+            _columns
                 .data
                 .len()
                 .saturating_mul(std::mem::size_of::<Option<S>>()),
-        }));
-    });
+        );
+    }
 }
 
 pub(crate) fn scatter_compact_block<S: Clone>(
@@ -662,31 +665,6 @@ pub(super) fn order_compact_tree_pair_block<S: Clone>(
     block: CompactMultiplicityFreeTreePairBlock<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
     order_compact_block(block.basis, block.columns)
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CompactBlockDimensions {
-    pub(crate) destination_rows: usize,
-    pub(crate) source_columns: usize,
-    pub(crate) coefficient_slots: usize,
-    pub(crate) coefficient_bytes: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static COMPACT_BLOCK_DIMENSIONS: std::cell::Cell<Option<CompactBlockDimensions>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_compact_block_dimensions() {
-    COMPACT_BLOCK_DIMENSIONS.with(|dimensions| dimensions.set(None));
-}
-
-#[cfg(test)]
-pub(crate) fn compact_block_dimensions() -> Option<CompactBlockDimensions> {
-    COMPACT_BLOCK_DIMENSIONS.with(std::cell::Cell::get)
 }
 
 /// Test-only invariant of a compact transpose output basis: its keys are

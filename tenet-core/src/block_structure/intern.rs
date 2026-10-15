@@ -46,11 +46,9 @@ pub fn clear_structure_caches() {
     crate::fusion_space::reset_structure_caches();
     crate::cache::clear_registered_structure_caches();
     #[cfg(test)]
-    MID_RESET_HOOK.with(|hook| {
-        if let Some(hook) = hook.take() {
-            hook();
-        }
-    });
+    if let Some(hook) = crate::probe::take_mid_reset_hook() {
+        hook();
+    }
     CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
@@ -70,10 +68,4 @@ pub fn core_reset_epoch() -> usize {
 /// Whether a structure built since `epoch` may be published.
 pub(crate) fn may_publish_since(epoch: usize) -> bool {
     epoch.is_multiple_of(2) && CORE_RESET_EPOCH.load(Ordering::SeqCst) == epoch
-}
-
-#[cfg(test)]
-std::thread_local! {
-    pub(crate) static MID_RESET_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::Cell::new(None) };
 }

@@ -37,22 +37,6 @@ pub(crate) struct UniqueBorrowedTreePairBraid<'operation> {
     levels: UniqueBorrowedBraidLevels<'operation>,
 }
 
-#[cfg(test)]
-thread_local! {
-    static UNIQUE_BORROWED_POSITION_QUERIES: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_unique_borrowed_position_queries() {
-    UNIQUE_BORROWED_POSITION_QUERIES.with(|queries| queries.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn unique_borrowed_position_queries() -> usize {
-    UNIQUE_BORROWED_POSITION_QUERIES.with(std::cell::Cell::get)
-}
-
 impl<'operation> UniqueBorrowedTreePairBraid<'operation> {
     pub(super) fn permutation_at(&self, position: usize) -> usize {
         linearized_tree_pair_axis_at(
@@ -67,7 +51,7 @@ impl<'operation> UniqueBorrowedTreePairBraid<'operation> {
     fn linear_position_of_axis(&self, axis: usize) -> usize {
         #[cfg(test)]
         if self.raw_axis_positions.is_some() {
-            UNIQUE_BORROWED_POSITION_QUERIES.with(|queries| queries.set(queries.get() + 1));
+            crate::probe::hit(crate::probe::Event::UniqueBorrowedPositionQuery);
         }
         let logical_axis = if axis < self.source_codomain_rank {
             axis

@@ -295,7 +295,7 @@ impl DegeneracyStructureEntry {
         };
         if degeneracy_structure_cache().add_charge(&self.key, self, bytes as u64) {
             #[cfg(test)]
-            PERMUTED_MEMO_PUBLICATIONS.set(PERMUTED_MEMO_PUBLICATIONS.get() + 1);
+            crate::probe::hit(crate::probe::Event::PermutedMemoPublication);
         } else {
             self.permuted
                 .write()
@@ -388,28 +388,6 @@ impl PermutedMemoTicket {
     }
 }
 
-#[cfg(test)]
-std::thread_local! {
-    /// This thread's destination-memo hits and charged publications.
-    pub(crate) static PERMUTED_MEMO_HITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-    pub(crate) static PERMUTED_MEMO_PUBLICATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-std::thread_local! {
-    /// This thread's complete-HomSpace admissions offered. Why not the global
-    /// counter: concurrent tests advance it between a test's two readings.
-    static COMPLETE_HOM_SPACE_MISS_OBSERVATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn complete_hom_space_miss_observations() -> usize {
-    COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get()
-}
-
 /// Admits a structure whose build began at reset epoch `epoch`. A build that
 /// straddles a reset returns its result unpublished (the reset contract at
 /// [`crate::clear_structure_caches`]). Resident content is marked canonical.
@@ -419,7 +397,7 @@ pub(crate) fn admit_complete_hom_space_structure(
     epoch: usize,
 ) -> (Arc<DegeneracyStructureEntry>, Arc<BlockStructure>) {
     #[cfg(test)]
-    COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.set(COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CompleteHomSpaceMiss);
     let entry = Arc::new(DegeneracyStructureEntry::new(&key, Arc::clone(&structure)));
     // Link before measuring: a memo that materializes after the snapshot
     // charges itself through the link instead.
