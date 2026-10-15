@@ -388,9 +388,9 @@ fn degeneracy_only_bindings_of_one_group_set_share_one_coefficient_payload() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let operation = TreeTransformOperation::braid([1, 0], [2, 3], [1, 0], [2, 3]);
-    let planning = TreeTransformPlanning::default();
+    let mut planning = TreeTransformPlanning::default();
     // Degeneracies no other test uses, so each binding is a cache-3 miss.
-    let bind = |degeneracy: usize, operation: &TreeTransformOperation| {
+    let mut bind = |degeneracy: usize, operation: &TreeTransformOperation| {
         let source = su2_structure(degeneracy);
         planning
             .resolve_tree_pair(&SU2FusionRule, operation, &source, &source, false)

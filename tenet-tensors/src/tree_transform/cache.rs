@@ -42,7 +42,7 @@ use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockStructure, ErasedStructureCacheControl, FusionTreePairKey, FusionTreePairOrientation,
     HomSpaceId, MultiplicityFreeRigidSymbols, RuleIdentity, StructureCache, StructureCacheInfo,
-    StructureCacheKind, WeakHomSpaceId,
+    StructureCacheKind, UniqueTreePairScratch, WeakHomSpaceId,
 };
 
 #[cfg(test)]
@@ -113,6 +113,7 @@ fn compile_oriented_tree_pair_structure<R, FAxis>(
     logical_to_storage_axis: FAxis,
     threads: usize,
     epoch: usize,
+    unique_scratch: &mut UniqueTreePairScratch,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -140,6 +141,7 @@ where
             logical_rank,
             projection,
             logical_to_storage_axis,
+            unique_scratch,
         );
     }
     // Why the logical keys key a group: the orientation maps each logical
@@ -748,17 +750,30 @@ where
 }
 
 /// What a context's multiplicity-free resolution needs besides the global
-/// owners (caches 3 and 4): the recoupling worker count.
-#[derive(Clone, Debug)]
+/// owners (caches 3 and 4): the recoupling worker count, and the Unique
+/// compile's tree-pair scratch, reused across cache-3 misses.
+///
+/// Why a plain field rather than a `RefCell` behind `&self`: the context
+/// already plans through `&mut`, and a cell would make the planning `!Sync`.
 pub(crate) struct TreeTransformPlanning {
     recoupling_threads: NonZeroUsize,
+    unique_scratch: UniqueTreePairScratch,
 }
 
 impl Default for TreeTransformPlanning {
     fn default() -> Self {
         Self {
             recoupling_threads: NonZeroUsize::MIN,
+            unique_scratch: UniqueTreePairScratch::default(),
         }
+    }
+}
+
+impl std::fmt::Debug for TreeTransformPlanning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TreeTransformPlanning")
+            .field("recoupling_threads", &self.recoupling_threads)
+            .finish_non_exhaustive()
     }
 }
 
@@ -775,7 +790,7 @@ impl TreeTransformPlanning {
     /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
     /// precondition.
     pub(crate) fn resolve_tree_pair<R, T>(
-        &self,
+        &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
@@ -812,6 +827,7 @@ impl TreeTransformPlanning {
                         dst_structure,
                         src_structure,
                         storage_conjugate,
+                        &mut self.unique_scratch,
                     );
                 }
                 let reuse = multiplicity_free_reuse(
@@ -846,7 +862,7 @@ impl TreeTransformPlanning {
     /// parent is canonical.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_tree_pair_oriented<'p, R, T, FIndices, FAxis>(
-        &self,
+        &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
@@ -887,7 +903,7 @@ impl TreeTransformPlanning {
     /// miss, so a warm call reads neither.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(crate) fn resolve_tree_pair_oriented_with<'k, 'p, R, T, FProjection, FAxis>(
-        &self,
+        &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
@@ -939,6 +955,7 @@ impl TreeTransformPlanning {
                 logical_to_storage_axis,
                 threads,
                 epoch,
+                &mut self.unique_scratch,
             )
         };
         // Why only the adjoint orientation: a direct oriented key would equal

@@ -267,7 +267,7 @@ fn only_canonical_keys_publish_and_hits_rebind_the_callers_structures() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (dst, src, operation) = fixture(2);
     assert!(dst.is_canonical() && src.is_canonical());
-    let planning = TreeTransformPlanning::default();
+    let mut planning = TreeTransformPlanning::default();
     take_completed_transformer_activity();
     let cold = planning
         .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)
@@ -413,7 +413,7 @@ fn a_build_straddling_a_clear_or_failing_is_not_published() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (dst, src, operation) = fixture(4);
-    let planning = TreeTransformPlanning::default();
+    let mut planning = TreeTransformPlanning::default();
     take_completed_transformer_activity();
     super::before_next_completed_publication(Box::new(tenet_core::clear_structure_caches));
     let straddling = planning
@@ -472,7 +472,7 @@ fn a_zero_degeneracy_budget_admits_no_completed_transformer() {
     // content is canonical, so every transformer key is lookup-only.
     let (dst, src, operation) = fixture(6);
     assert!(!dst.is_canonical() && !src.is_canonical());
-    let planning = TreeTransformPlanning::default();
+    let mut planning = TreeTransformPlanning::default();
     for _ in 0..2 {
         planning
             .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)

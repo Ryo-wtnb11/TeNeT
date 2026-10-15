@@ -34,6 +34,16 @@ impl UnhashedFusionTree {
         }
     }
 
+    /// Grow each buffer to at least [`Self::with_widths`]' capacity.
+    pub(crate) fn reserve_widths(&mut self, (sectors, vertices, duals): (usize, usize, usize)) {
+        self.sectors
+            .reserve(sectors.saturating_sub(self.sectors.len()));
+        self.is_dual
+            .reserve(duals.saturating_sub(self.is_dual.len()));
+        self.vertices
+            .reserve(vertices.saturating_sub(self.vertices.len()));
+    }
+
     /// Overwrite this tree with `tree`, keeping the buffers.
     pub(crate) fn load(&mut self, tree: FusionTreeRef<'_>) {
         self.sectors.clear();

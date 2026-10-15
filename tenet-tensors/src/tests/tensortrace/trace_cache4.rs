@@ -491,8 +491,8 @@ fn trace_and_transform_of_one_permutation_do_not_share_entries() {
             .structure(),
         )
     };
-    let planning = crate::tree_transform::TreeTransformPlanning::default();
-    let transform = |degeneracy| {
+    let mut planning = crate::tree_transform::TreeTransformPlanning::default();
+    let mut transform = |degeneracy| {
         let layout = structure(degeneracy);
         planning
             .resolve_tree_pair(&SU2FusionRule, &operation, &layout, &layout, false)
