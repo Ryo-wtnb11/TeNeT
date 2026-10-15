@@ -1061,7 +1061,7 @@ where
     let logical = &body.space;
     // As the owned arm: a swap keeps whatever coefficient it carries, and any
     // other read keeps the dense replay's off-diagonal `0 · c` products.
-    let require_representable = !crate::tensor_core::is_rank_one_diagonal_swap(
+    let require_representable = !crate::tensor_product::is_rank_one_diagonal_swap(
         source.codomain_rank(),
         source.domain_rank(),
         operation,
@@ -1070,7 +1070,7 @@ where
                     destination: &tenet_core::BlockStructure,
                     data: &mut [D]|
      -> Result<bool, Error> {
-        let Some(diagonal) = crate::tensor_core::bond_spectrum(
+        let Some(diagonal) = crate::tensor_product::bond_spectrum(
             logical.space().structure(),
             destination,
             structure,
@@ -1104,7 +1104,7 @@ pub(super) fn scale_by_beta<D: TensorScalar>(data: &mut [D], beta: D) {
 
 /// `data = alpha · diag(diagonal) + beta · data` on the bond blocks of
 /// `structure`, where `diagonal[i]` is block `i`'s diagonal
-/// ([`crate::tensor_core::bond_spectrum`] proved the bijection and the
+/// ([`crate::tensor_product::bond_spectrum`] proved the bijection and the
 /// shapes). `beta == 0` never reads `data` and `alpha == 0` never reads the
 /// diagonal, as for the dense replay.
 fn axpby_bond_diagonal<D: TensorScalar>(
@@ -1313,7 +1313,7 @@ where
             source,
             operation,
             |structure, preview| {
-                crate::tensor_core::bond_spectrum(
+                crate::tensor_product::bond_spectrum(
                     source.space().structure(),
                     preview,
                     structure,

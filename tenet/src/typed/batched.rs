@@ -42,7 +42,7 @@ use super::{
 };
 use crate::error::Error;
 use crate::runtime::RuntimeIdentity;
-use crate::tensor_core::internal_layout_error;
+use crate::tensor_product::internal_layout_error;
 
 #[path = "contract_batch.rs"]
 mod contract_batch;

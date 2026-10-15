@@ -267,8 +267,8 @@ use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
-pub use crate::tensor_core::CheckedGenericTensorProductError;
-use crate::tensor_core::{
+pub use crate::tensor_product::CheckedGenericTensorProductError;
+use crate::tensor_product::{
     internal_layout_error, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free,
 };

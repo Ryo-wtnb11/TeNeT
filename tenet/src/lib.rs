@@ -90,7 +90,7 @@ mod error;
 pub mod expert;
 mod runtime;
 pub mod sector;
-mod tensor_core;
+mod tensor_product;
 #[cfg(test)]
 mod test_cache;
 pub mod typed;

@@ -421,7 +421,7 @@ where
                 source,
                 operation,
                 |structure, preview| {
-                    crate::tensor_core::bond_spectrum(
+                    crate::tensor_product::bond_spectrum(
                         source.space().structure(),
                         preview,
                         structure,

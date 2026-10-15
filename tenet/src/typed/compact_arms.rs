@@ -559,9 +559,9 @@ where
     };
     let (codomain_rank, domain_rank) = (tensor.codomain_rank(), tensor.domain_rank());
     let braid =
-        crate::tensor_core::is_rank_one_diagonal_braid(codomain_rank, domain_rank, operation);
+        crate::tensor_product::is_rank_one_diagonal_braid(codomain_rank, domain_rank, operation);
     if !braid
-        && !crate::tensor_core::is_rank_one_diagonal_swap(codomain_rank, domain_rank, operation)
+        && !crate::tensor_product::is_rank_one_diagonal_swap(codomain_rank, domain_rank, operation)
     {
         return Ok(None);
     }
