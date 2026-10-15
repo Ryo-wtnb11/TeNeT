@@ -172,11 +172,7 @@ pub(super) fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage
     intermediates: &[TypedIntermediateBuffers<R, D, S>],
 ) -> Vec<Option<(usize, usize)>> {
     #[cfg(test)]
-    INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
-        if let Some(count) = calls.get() {
-            calls.set(Some(count + 1));
-        }
-    });
+    crate::probe::hit(crate::probe::Event::IntermediatePayloadSnapshot);
     intermediates
         .iter()
         .filter_map(|buffers| buffers.output.as_ref())

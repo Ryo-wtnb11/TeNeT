@@ -114,8 +114,8 @@ where
     D: TensorScalar,
     S: ContractExec<R, D>,
 {
-    #[cfg(all(test, feature = "cuda"))]
-    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(calls.get() + 1));
+    #[cfg(test)]
+    crate::probe::hit(crate::probe::Event::ContractStep);
     if let Some(destination) = destination {
         lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
         Ok(StepOutput::Overwritten)

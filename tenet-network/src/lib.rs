@@ -58,6 +58,8 @@ pub(crate) mod parse;
 mod pathopt;
 mod plan;
 mod plancache;
+#[cfg(test)]
+mod probe;
 mod slice;
 mod stepflow;
 mod tree;
