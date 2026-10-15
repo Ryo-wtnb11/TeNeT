@@ -271,15 +271,18 @@ pub(super) trait TraceTermMode<R> {
         terms: &mut Vec<TensorTraceFusionStructureTerm<Self::Scalar>>,
     ) -> Result<PendingCoefficientGroups, Self::Error>;
 
+    /// Split `tree` at `rank` into `rows`; returns the rows of both halves.
     fn split(
         rule: &R,
-        tree: &FusionTreeKey,
+        tree: FusionTreeRef<'_>,
         rank: usize,
-    ) -> Result<(FusionTreeKey, FusionTreeKey), Self::Error>;
+        rows: &mut TreeScratch,
+    ) -> Result<(usize, usize), Self::Error>;
 
     /// `dim(coupled)/dim(first) · Π twist(non-dual)`: one division of the
     /// provider's dimensions, as TensorKit's `_trace_permute!` forms it.
-    fn channel_factor(rule: &R, trace_tree: &FusionTreeKey) -> Result<Self::Scalar, Self::Error>;
+    fn channel_factor(rule: &R, trace_tree: FusionTreeRef<'_>)
+        -> Result<Self::Scalar, Self::Error>;
 }
 
 /// The trace geometry every source row is lowered against.
@@ -293,35 +296,44 @@ pub(super) struct TraceLowering<'a> {
 impl TraceLowering<'_> {
     /// Lowers permuted rows: split at the open ranks, keep the rows whose
     /// traced trees match, scale by the channel factor, and hand each
-    /// `(open tree pair, coefficient)` to `keep`, in row order.
+    /// `(open tree pair, coefficient)` to `keep`, in row order. The split
+    /// halves live in `split` until the next row.
     #[inline]
     fn lower_rows<'r, M, R, I>(
         &self,
         rule: &R,
         rows: I,
-        mut keep: impl FnMut(FusionTreePairKey, M::Scalar),
+        split: &mut TreeScratch,
+        mut keep: impl FnMut(FusionTreePairRef<'_>, M::Scalar) -> Result<(), M::Error>,
     ) -> Result<(), M::Error>
     where
         M: TraceTermMode<R>,
         M::Scalar: 'r,
-        I: IntoIterator<Item = (&'r FusionTreePairKey, &'r M::Scalar)>,
+        I: IntoIterator<Item = (FusionTreePairRef<'r>, &'r M::Scalar)>,
     {
-        for (permuted_key, permutation_coefficient) in rows {
-            let (dst_codomain_tree, trace_codomain_tree) =
-                M::split(rule, permuted_key.codomain_tree(), self.dst_codomain_rank)?;
+        for (permuted, permutation_coefficient) in rows {
+            split.clear();
+            let (dst_codomain_tree, trace_codomain_tree) = M::split(
+                rule,
+                permuted.codomain_tree(),
+                self.dst_codomain_rank,
+                split,
+            )?;
             let (dst_domain_tree, trace_domain_tree) = M::split(
                 rule,
-                permuted_key.domain_tree(),
+                permuted.domain_tree(),
                 self.axis_plan.output_axes.len() - self.dst_codomain_rank,
+                split,
             )?;
-            if trace_codomain_tree != trace_domain_tree {
+            let trace_tree = split.view(trace_codomain_tree);
+            if trace_tree != split.view(trace_domain_tree) {
                 continue;
             }
-            let trace_factor = M::channel_factor(rule, &trace_codomain_tree)?;
+            let trace_factor = M::channel_factor(rule, trace_tree)?;
             keep(
-                FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree),
+                FusionTreePairRef::new(split.view(dst_codomain_tree), split.view(dst_domain_tree)),
                 permutation_coefficient.clone() * trace_factor,
-            );
+            )?;
         }
         Ok(())
     }
@@ -333,6 +345,7 @@ impl TraceLowering<'_> {
         &self,
         rule: &R,
         permuted: &BlockSourceColumns<FusionTreePairKey, M::Scalar>,
+        split: &mut TreeScratch,
     ) -> Result<BlockSourceColumns<FusionTreePairKey, M::Scalar>, M::Error>
     where
         M: TraceTermMode<R>,
@@ -349,14 +362,16 @@ impl TraceLowering<'_> {
                 permuted
                     .column(source)
                     .iter()
-                    .map(|(row, coefficient)| (&rows[*row], coefficient)),
-                |dst_key, coefficient| {
+                    .map(|(row, coefficient)| (rows[*row].as_view(), coefficient)),
+                split,
+                |dst, coefficient| {
                     let next = destinations.len();
-                    let row = *row_of.entry(dst_key).or_insert_with_key(|key| {
+                    let row = *row_of.entry(dst.to_key()).or_insert_with_key(|key| {
                         destinations.push(key.clone());
                         next
                     });
                     entries.push((row, coefficient));
+                    Ok(())
                 },
             )?;
             column_start.push(entries.len());
@@ -368,27 +383,35 @@ impl TraceLowering<'_> {
         ))
     }
 
-    /// Addresses one lowered row's destination block and records its term.
+    /// Addresses one lowered row's destination block and records its term,
+    /// holding the destination structure's own key.
     #[inline]
     fn push_term<M, R>(
         &self,
         src_block_index: usize,
         src_key: &impl Fn() -> Result<FusionTreePairKey, M::Error>,
-        dst_key: FusionTreePairKey,
+        dst: FusionTreePairRef<'_>,
         coefficient: M::Scalar,
         terms: &mut Vec<TensorTraceFusionStructureTerm<M::Scalar>>,
     ) -> Result<(), M::Error>
     where
         M: TraceTermMode<R>,
     {
+        let missing = || {
+            M::operation(OperationError::MissingBlockKey {
+                key: Box::new(BlockKey::from(dst.to_key())),
+            })
+        };
         let dst_block = self
             .dst_structure
-            .find_block_index_by_fusion_tree_pair(&dst_key)
-            .ok_or_else(|| {
-                M::operation(OperationError::MissingBlockKey {
-                    key: Box::new(BlockKey::from(dst_key.clone())),
-                })
-            })?;
+            .find_block_index_by_fusion_tree_pair_view(dst)
+            .ok_or_else(missing)?;
+        let dst_key = self
+            .dst_structure
+            .block(dst_block)
+            .ok()
+            .and_then(|block| block.key().as_fusion_tree_pair().cloned())
+            .ok_or_else(missing)?;
         terms.push(TensorTraceFusionStructureTerm {
             dst_key,
             src_key: src_key()?,
@@ -488,6 +511,7 @@ where
         lowering.dst_codomain_rank,
     );
     let mut storage_keys = Vec::new();
+    let mut split = TreeScratch::default();
     let block_count = src.structure.block_count();
     let groups = src.structure.fusion_tree_group_slice();
     // Each source's group and its position (column) in that group.
@@ -523,7 +547,7 @@ where
                                     "trace block transform returned the wrong source column count",
                             }));
                         }
-                        let lowered = lowering.lower_group::<M, R>(rule, &permuted)?;
+                        let lowered = lowering.lower_group::<M, R>(rule, &permuted, &mut split)?;
                         reuse.stage(hash, (group.group_key(), &storage_keys), lowered)
                     }
                 };
@@ -536,7 +560,7 @@ where
             lowering.push_term::<M, R>(
                 src_block_index,
                 &src_key,
-                destinations[*row].clone(),
+                destinations[*row].as_view(),
                 coefficient.clone(),
                 terms,
             )?;
@@ -589,26 +613,37 @@ where
                 domain_permutation,
             )
             .map_err(OperationError::from_core_preserving_context)?;
+            // Every intermediate and split tree lives in these two scratches,
+            // as TensorKit's isbits trees do on the stack: no allocation per
+            // tree (#2192).
+            let rank = source_codomain_rank + source_domain_rank;
+            let mut permuted = UniqueTreePairScratch::with_rank(rank);
+            let mut split = TreeScratch::with_rank(rank);
+            // At most one term per source tree.
+            terms.reserve_exact(src.structure.block_count());
             for src_block_index in 0..src.structure.block_count() {
                 record_trace_transform_invocation(src_block_index);
-                let row = prepared
-                    .execute_unique_rigid(rule, &src.source_key(src_block_index)?)
+                let coefficient = prepared
+                    .execute_unique_rigid_into(
+                        rule,
+                        &src.source_key(src_block_index)?,
+                        &mut permuted,
+                    )
                     .map_err(OperationError::from_core_preserving_context)?;
-                let mut lowered = None;
                 lowering.lower_rows::<Self, R, _>(
                     rule,
-                    core::iter::once((&row.0, &row.1)),
-                    |dst_key, coefficient| lowered = Some((dst_key, coefficient)),
+                    core::iter::once((permuted.pair_view(), &coefficient)),
+                    &mut split,
+                    |dst, coefficient| {
+                        lowering.push_term::<Self, R>(
+                            src_block_index,
+                            &|| src.source_key(src_block_index),
+                            dst,
+                            coefficient,
+                            terms,
+                        )
+                    },
                 )?;
-                if let Some((dst_key, coefficient)) = lowered {
-                    lowering.push_term::<Self, R>(
-                        src_block_index,
-                        &|| src.source_key(src_block_index),
-                        dst_key,
-                        coefficient,
-                        terms,
-                    )?;
-                }
             }
             // TensorKit `NoCache` for Unique: one uncached phase per tree.
             return Ok(PendingCoefficientGroups::default());
@@ -637,14 +672,19 @@ where
     #[inline]
     fn split(
         rule: &R,
-        tree: &FusionTreeKey,
+        tree: FusionTreeRef<'_>,
         rank: usize,
-    ) -> Result<(FusionTreeKey, FusionTreeKey), Self::Error> {
-        split_fusion_tree(rule, tree, rank).map_err(OperationError::from_core_preserving_context)
+        rows: &mut TreeScratch,
+    ) -> Result<(usize, usize), Self::Error> {
+        split_fusion_tree_into(rule, tree, rank, rows)
+            .map_err(OperationError::from_core_preserving_context)
     }
 
     #[inline]
-    fn channel_factor(rule: &R, trace_tree: &FusionTreeKey) -> Result<Self::Scalar, Self::Error> {
+    fn channel_factor(
+        rule: &R,
+        trace_tree: FusionTreeRef<'_>,
+    ) -> Result<Self::Scalar, Self::Error> {
         let coupled = trace_tree.coupled();
         let first = trace_tree.uncoupled().first().copied().ok_or(
             tenet_core::CoreError::MalformedFusionTree {
@@ -723,14 +763,18 @@ where
 
     fn split(
         rule: &R,
-        tree: &FusionTreeKey,
+        tree: FusionTreeRef<'_>,
         rank: usize,
-    ) -> Result<(FusionTreeKey, FusionTreeKey), Self::Error> {
-        split_fusion_tree_generic_checked(rule, tree, rank)
+        rows: &mut TreeScratch,
+    ) -> Result<(usize, usize), Self::Error> {
+        split_fusion_tree_generic_checked_into(rule, tree, rank, rows)
             .map_err(map_checked_generic_trace_structure_error)
     }
 
-    fn channel_factor(rule: &R, trace_tree: &FusionTreeKey) -> Result<Self::Scalar, Self::Error> {
+    fn channel_factor(
+        rule: &R,
+        trace_tree: FusionTreeRef<'_>,
+    ) -> Result<Self::Scalar, Self::Error> {
         let first = trace_tree.uncoupled().first().copied().ok_or_else(|| {
             CheckedGenericPlanError::Core(tenet_core::CoreError::MalformedFusionTree {
                 message: "trace channel requires at least one uncoupled sector",
@@ -767,7 +811,7 @@ where
 mod channel_factor_tests {
     use super::*;
     use num_complex::Complex64;
-    use tenet_core::FibonacciFusionRule;
+    use tenet_core::{FibonacciFusionRule, FusionTreeKey};
 
     /// Fibonacci `(τ) → τ` and `(τ, τ) → τ` trace trees, where TensorKit's
     /// `dim(τ)/dim(τ)` is exactly 1 and a non-dual second `τ` contributes
@@ -799,7 +843,7 @@ mod channel_factor_tests {
         for (trace_tree, want) in cases {
             let actual = <MultiplicityFreeAdmissionMode as TraceTermMode<_>>::channel_factor(
                 &rule,
-                &trace_tree,
+                trace_tree.as_view(),
             )
             .unwrap();
             assert_eq!(

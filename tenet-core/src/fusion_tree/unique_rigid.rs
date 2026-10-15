@@ -54,29 +54,73 @@ fn unique_rigid_bend_tree_pair<R>(
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let (state, coefficient) =
-        unique_rigid_bend_state(rule, UniqueRigidTreePairState { frame, local }, bend)?;
-    Ok((state.frame.materialize(state.local), coefficient))
+    let mut scratch = UniqueTreePairScratch::default();
+    scratch.load(tree_pair);
+    check_multiplicity_free_projection(rule, &scratch)?;
+    let coefficient = unique_rigid_bend_in_place(rule, &mut scratch, bend)?;
+    scratch.codomain.reset_multiplicity_free_vertices();
+    scratch.domain.reset_multiplicity_free_vertices();
+    Ok((scratch.materialize(), coefficient))
 }
 
-struct UniqueRigidTreePairState {
-    frame: MultiplicityFreeTreePairFrame,
-    local: MultiplicityFreeTreePairLocal,
-}
-
-fn unique_rigid_bend_state<R>(
+/// The gate `project_multiplicity_free_tree_pair` applies before any
+/// multiplicity-free move: the style, then every vertex label one.
+fn check_multiplicity_free_projection<R>(
     rule: &R,
-    state: UniqueRigidTreePairState,
+    scratch: &UniqueTreePairScratch,
+) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    scratch.codomain.check_multiplicity_free_vertices()?;
+    scratch.domain.check_multiplicity_free_vertices()
+}
+
+/// One Unique bend of the scratch pair, in place. `bendleft` is `bendright`
+/// through the swapped pair, conjugated (`duality_manipulations.jl:140-148`).
+fn unique_rigid_bend_in_place<R>(
+    rule: &R,
+    scratch: &mut UniqueTreePairScratch,
     bend: Bend,
-) -> Result<(UniqueRigidTreePairState, R::Scalar), CoreError>
+) -> Result<R::Scalar, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    let prepared = MultiplicityFreeBend::prepare(&state.frame, bend)?;
-    let (local, coefficient) = prepared.apply(&UniqueK(rule), &state.local)?;
-    let frame = prepared.output_frame(rule, &state.frame)?;
-    Ok((UniqueRigidTreePairState { frame, local }, coefficient))
+    let UniqueTreePairScratch {
+        codomain, domain, ..
+    } = scratch;
+    match bend {
+        Bend::Right => unique_rigid_bendright_in_place(rule, codomain, domain),
+        Bend::Left => Ok(unique_rigid_bendright_in_place(rule, domain, codomain)?.conj()),
+    }
+}
+
+/// TensorKit `_bendright_treepair` (`duality_manipulations.jl:33-54`) on a
+/// tree pair edited in place: [`MultiplicityFreeBend`]'s site, lines and
+/// `UniqueK` coefficient, then its frame and local update.
+///
+/// Why not through [`MultiplicityFreeBend`]: its output frame owns the moved
+/// externals (two allocations per side and bend), which a
+/// one-tree-at-a-time Unique path would pay for every tree and bend.
+fn unique_rigid_bendright_in_place<R>(
+    rule: &R,
+    codomain: &mut UnhashedFusionTree,
+    domain: &mut UnhashedFusionTree,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let site = BendSite::new(codomain.uncoupled(), codomain.is_dual(), domain.rank())?;
+    let (lines, coefficient) = bend_surgery(&UniqueK(rule), &site, &*codomain, &*domain)?;
+    codomain.shrink_after_bend(lines.left_coupled);
+    domain.grow_after_bend(
+        rule.dual(site.bent_sector),
+        !lines.bent_is_dual,
+        lines.left_coupled,
+        (site.domain_rank > 1).then_some(lines.coupled),
+    );
+    Ok(coefficient)
 }
 
 fn unique_rigid_foldright_tree_pair<R>(
@@ -129,26 +173,30 @@ where
     )
 }
 
-pub(super) fn unique_rigid_repartition_tree_pair_validated<R>(
-    validated: ValidatedFusionTreePair<'_, R>,
+pub(crate) fn unique_rigid_repartition_tree_pair_unchecked<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    unique_rigid_repartition_tree_pair_unchecked(
-        validated.rule,
-        validated.key,
-        target_codomain_rank,
-    )
+    let mut scratch = UniqueTreePairScratch::default();
+    scratch.load(tree_pair);
+    let coefficient = unique_rigid_repartition_in_place(rule, &mut scratch, target_codomain_rank)?;
+    Ok((scratch.materialize(), coefficient))
 }
 
-pub(crate) fn unique_rigid_repartition_tree_pair_unchecked<R>(
+/// TensorKit `repartition` (`duality_manipulations.jl:460-505`) of a Unique
+/// tree pair, in place: bend until the codomain has `target_codomain_rank`
+/// legs. The trees end with every vertex label one, as a materialized
+/// multiplicity-free frame writes them.
+pub(super) fn unique_rigid_repartition_in_place<R>(
     rule: &R,
-    tree_pair: &FusionTreePairKey,
+    scratch: &mut UniqueTreePairScratch,
     target_codomain_rank: usize,
-) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
+) -> Result<R::Scalar, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
@@ -159,27 +207,26 @@ where
             actual: rule.fusion_style(),
         });
     }
-    let total_rank =
-        tree_pair.codomain_tree().uncoupled().len() + tree_pair.domain_tree().uncoupled().len();
+    let codomain_rank = scratch.codomain.rank();
+    let total_rank = codomain_rank + scratch.domain.rank();
     if target_codomain_rank > total_rank {
         return Err(CoreError::DimensionMismatch {
             expected: total_rank,
             actual: target_codomain_rank,
         });
     }
-
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let codomain_rank = frame.codomain.uncoupled().len();
-    let (current, coefficient) = repartition_loop(
-        (UniqueRigidTreePairState { frame, local }, R::Scalar::one()),
+    check_multiplicity_free_projection(rule, scratch)?;
+    let coefficient = repartition_loop(
+        R::Scalar::one(),
         codomain_rank,
         target_codomain_rank,
-        |(state, coefficient), bend| {
-            let (next, step_coefficient) = unique_rigid_bend_state(rule, state, bend)?;
-            Ok::<_, CoreError>((next, coefficient * step_coefficient))
+        |coefficient, bend| {
+            Ok::<_, CoreError>(coefficient * unique_rigid_bend_in_place(rule, scratch, bend)?)
         },
     )?;
-    Ok((current.frame.materialize(current.local), coefficient))
+    scratch.codomain.reset_multiplicity_free_vertices();
+    scratch.domain.reset_multiplicity_free_vertices();
+    Ok(coefficient)
 }
 
 /// The forward move is TensorKit `multi_Fmove`'s `UniqueFusion` branch

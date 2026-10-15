@@ -10,20 +10,76 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
-    let rank = tree.uncoupled().len();
+    let mut braided = UnhashedFusionTree::from(tree.clone());
+    let coefficient = unique_tree_braid_in_place(
+        rule,
+        &mut braided,
+        &mut UnhashedFusionTree::default(),
+        permutation,
+        artin_steps,
+    )?;
+    Ok((braided.freeze(), coefficient))
+}
+
+/// [`execute_unique_tree_braid`] of a tree edited in place; `spare` is the
+/// direct path's rebuild buffer.
+pub(crate) fn unique_tree_braid_in_place<R>(
+    rule: &R,
+    tree: &mut UnhashedFusionTree,
+    spare: &mut UnhashedFusionTree,
+    permutation: &[usize],
+    artin_steps: &[PreparedArtinStep],
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let rank = tree.rank();
     if permutation.len() != rank {
         return Err(CoreError::InvalidPermutation {
             permutation: permutation.to_vec(),
             rank,
         });
     }
-    if let Some(direct) = unique_direct_braid(rule, tree, |position| permutation[position])? {
-        return Ok(direct);
-    }
-
-    execute_unique_tree_braid_steps(rule, tree, artin_steps.iter().copied())
+    unique_braid_in_place(
+        rule,
+        tree,
+        spare,
+        |position| permutation[position],
+        artin_steps.iter().copied(),
+    )
 }
 
+/// The borrowed-schedule form of [`unique_tree_braid_in_place`].
+pub(crate) fn unique_tree_braid_borrowed_in_place<R>(
+    rule: &R,
+    tree: &mut UnhashedFusionTree,
+    spare: &mut UnhashedFusionTree,
+    braid: &UniqueBorrowedTreePairBraid<'_>,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let rank = tree.rank();
+    if braid.source_codomain_rank + braid.source_domain_rank != rank {
+        return Err(CoreError::InvalidPermutation {
+            permutation: (0..braid.source_codomain_rank + braid.source_domain_rank)
+                .map(|position| braid.permutation_at(position))
+                .collect(),
+            rank,
+        });
+    }
+    unique_braid_in_place(
+        rule,
+        tree,
+        spare,
+        |position| braid.permutation_at(position),
+        braid.artin_steps(),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn execute_unique_tree_braid_borrowed<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -33,38 +89,52 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
-    let rank = tree.uncoupled().len();
-    if braid.source_codomain_rank + braid.source_domain_rank != rank {
-        return Err(CoreError::InvalidPermutation {
-            permutation: (0..braid.source_codomain_rank + braid.source_domain_rank)
-                .map(|position| braid.permutation_at(position))
-                .collect(),
-            rank,
-        });
-    }
-    if let Some(direct) =
-        unique_direct_braid(rule, tree, |position| braid.permutation_at(position))?
-    {
-        return Ok(direct);
-    }
+    let mut braided = UnhashedFusionTree::from(tree.clone());
+    let coefficient = unique_tree_braid_borrowed_in_place(
+        rule,
+        &mut braided,
+        &mut UnhashedFusionTree::default(),
+        braid,
+    )?;
+    Ok((braided.freeze(), coefficient))
+}
 
-    execute_unique_tree_braid_steps(rule, tree, braid.artin_steps())
+/// The direct braid when its invariants hold, otherwise the Artin steps.
+fn unique_braid_in_place<R, I>(
+    rule: &R,
+    tree: &mut UnhashedFusionTree,
+    spare: &mut UnhashedFusionTree,
+    permutation: impl Fn(usize) -> usize,
+    steps: I,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+    I: IntoIterator<Item = PreparedArtinStep>,
+{
+    if let Some(coefficient) = unique_direct_braid(rule, tree, permutation, spare)? {
+        core::mem::swap(tree, spare);
+        return Ok(coefficient);
+    }
+    unique_tree_braid_steps_in_place(rule, tree, steps)
 }
 
 /// Symmetric-braiding unique-fusion braid in one step: TensorKit
 /// `braid(f::FusionTree, p, levels)` `SymmetricBraiding` branch
 /// (`braiding_manipulations.jl:217-234`) structure: the product over every
 /// inverted pair of `R(a, b, a ⊗ b)` with `a` before `b` in the source (the
-/// Artin-composition value), then the canonical tree of the permuted legs.
-/// `None` when the source does not satisfy the direct-path invariants.
+/// Artin-composition value), then the canonical tree of the permuted legs,
+/// written to `out`. `None` when the source does not satisfy the direct-path
+/// invariants.
 ///
 /// `permutation(position)` is the source axis at output `position`, for
 /// every position below the tree rank (validated by the caller).
 fn unique_direct_braid<R>(
     rule: &R,
-    tree: &FusionTreeKey,
+    tree: &UnhashedFusionTree,
     permutation: impl Fn(usize) -> usize,
-) -> Result<Option<(FusionTreeKey, R::Scalar)>, CoreError>
+    out: &mut UnhashedFusionTree,
+) -> Result<Option<R::Scalar>, CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
@@ -74,11 +144,12 @@ where
     // Artin behavior must not be silently normalized into a different key.
     if !(rule.braiding_style().is_symmetric()
         && rule.has_trivial_associator_gauge()
-        && is_unique_direct_braid_source(rule, tree))
+        && is_unique_direct_braid_source(rule, tree.view()))
     {
         return Ok(None);
     }
-    let rank = tree.uncoupled().len();
+    let rank = tree.rank();
+    let uncoupled = tree.uncoupled();
     let mut coefficient = R::Scalar::one();
     for right_position in 0..rank {
         for left_position in 0..right_position {
@@ -91,8 +162,8 @@ where
                 // shortcut order `R(second, first)`: it differs from its
                 // own `artin_braid` whenever a trivial-gauge symmetric R is
                 // not symmetric in its arguments (alternating bicharacters).
-                let first = tree.uncoupled()[right_axis];
-                let second = tree.uncoupled()[left_axis];
+                let first = uncoupled[right_axis];
+                let second = uncoupled[left_axis];
                 // TensorKit treats a unit crossing as structural identity.
                 // Why not ask the provider for R(unit, a): providers are
                 // permitted to omit identity symbols and the Artin path
@@ -105,15 +176,14 @@ where
             }
         }
     }
-    let uncoupled = (0..rank)
-        .map(|position| tree.uncoupled()[permutation(position)])
-        .collect::<SmallVec<[SectorId; 8]>>();
-    let is_dual = (0..rank)
-        .map(|position| tree.is_dual()[permutation(position)])
-        .collect::<SmallVec<[bool; 8]>>();
-    let destination =
-        rebuild_unique_standard_fusion_tree(rule, &uncoupled, tree.coupled(), &is_dual)?;
-    Ok(Some((destination, coefficient)))
+    let is_dual = tree.is_dual();
+    out.rebuild_unique_standard(
+        rule,
+        (0..rank).map(|position| uncoupled[permutation(position)]),
+        tree.coupled(),
+        (0..rank).map(|position| is_dual[permutation(position)]),
+    )?;
+    Ok(Some(coefficient))
 }
 
 pub(crate) fn execute_unique_tree_braid_steps<R, I>(
@@ -126,25 +196,32 @@ where
     R::Scalar: Mul<Output = R::Scalar>,
     I: IntoIterator<Item = PreparedArtinStep>,
 {
-    // Why not freeze a key after every step: this state is private to one
-    // execution, while only the final categorical identity can escape.
-    let (current, coefficient) = run_artin_steps(
-        (UnhashedFusionTree::from(tree.clone()), R::Scalar::one()),
-        steps,
-        |(mut current, coefficient), step| {
-            let step_coefficient = apply_unique_artin_braid_at_with_inverse(
-                rule,
-                &mut current,
-                step.index,
-                step.inverse,
-            )?;
-            Ok::<_, CoreError>((current, coefficient * step_coefficient))
-        },
-    )?;
-    Ok((current.freeze(), coefficient))
+    let mut braided = UnhashedFusionTree::from(tree.clone());
+    let coefficient = unique_tree_braid_steps_in_place(rule, &mut braided, steps)?;
+    Ok((braided.freeze(), coefficient))
 }
 
-pub(crate) fn is_unique_direct_braid_source<R>(rule: &R, tree: &FusionTreeKey) -> bool
+/// Apply an Artin schedule to a Unique tree in place.
+fn unique_tree_braid_steps_in_place<R, I>(
+    rule: &R,
+    tree: &mut UnhashedFusionTree,
+    steps: I,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+    I: IntoIterator<Item = PreparedArtinStep>,
+{
+    // Why not freeze a key after every step: this state is private to one
+    // execution, while only the final categorical identity can escape.
+    run_artin_steps(R::Scalar::one(), steps, |coefficient, step| {
+        let step_coefficient =
+            apply_unique_artin_braid_at_with_inverse(rule, tree, step.index, step.inverse)?;
+        Ok::<_, CoreError>(coefficient * step_coefficient)
+    })
+}
+
+pub(crate) fn is_unique_direct_braid_source<R>(rule: &R, tree: FusionTreeRef<'_>) -> bool
 where
     R: MultiplicityFreeFusionRule,
 {
@@ -176,54 +253,6 @@ where
         running = next;
     }
     true
-}
-
-fn rebuild_unique_standard_fusion_tree<R>(
-    rule: &R,
-    uncoupled: &[SectorId],
-    coupled: SectorId,
-    is_dual: &[bool],
-) -> Result<FusionTreeKey, CoreError>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    if uncoupled.len() != is_dual.len() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "fusion tree sectors and duality flags must have matching length",
-        });
-    }
-    if uncoupled.len() < 2 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "direct unique braid rebuild requires at least two sectors",
-        });
-    }
-
-    let mut innerlines = SmallVec::<[SectorId; 8]>::new();
-    let mut running = uncoupled[0];
-    for (offset, &right) in uncoupled[1..].iter().enumerate() {
-        let next = only_fusion_channel(rule, running, right)?;
-        let is_last = offset + 2 == uncoupled.len();
-        if is_last {
-            if next != coupled {
-                return Err(CoreError::FusionChannelCount {
-                    left: coupled,
-                    right: coupled,
-                    count: 0,
-                });
-            }
-        } else {
-            innerlines.push(next);
-        }
-        running = next;
-    }
-
-    Ok(FusionTreeKey::new(
-        uncoupled.iter().copied(),
-        coupled,
-        is_dual.iter().copied(),
-        innerlines,
-        std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1)),
-    ))
 }
 
 #[cfg(test)]

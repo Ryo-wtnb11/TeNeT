@@ -417,7 +417,7 @@ fn unique_proof_hook_rechecks_style_and_prepared_source_rank() {
         PreparedTreePairOperation::prepare_transpose(2, 0, &[0, 1], &[]).unwrap();
     assert_eq!(
         simple_proof
-            .execute_unique_rigid_for_block_index(0, &rank_two_identity)
+            .execute_unique_rigid_for_block_index(0, &rank_two_identity, &mut Default::default())
             .unwrap_err(),
         CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Unique,
@@ -444,7 +444,7 @@ fn unique_proof_hook_rechecks_style_and_prepared_source_rank() {
     let rank_one_identity = PreparedTreePairOperation::prepare_transpose(1, 0, &[0], &[]).unwrap();
     assert_eq!(
         unique_proof
-            .execute_unique_rigid_for_block_index(0, &rank_one_identity)
+            .execute_unique_rigid_for_block_index(0, &rank_one_identity, &mut Default::default())
             .unwrap_err(),
         CoreError::DimensionMismatch {
             expected: 1,
@@ -612,7 +612,10 @@ fn unique_direct_braid_eligibility_excludes_rank_zero() {
             .unwrap();
 
     assert_eq!(empty.coupled(), Z2FusionRule.vacuum());
-    assert!(!is_unique_direct_braid_source(&Z2FusionRule, &empty));
+    assert!(!is_unique_direct_braid_source(
+        &Z2FusionRule,
+        empty.as_view()
+    ));
 }
 
 #[test]

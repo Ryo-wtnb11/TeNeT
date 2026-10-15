@@ -519,12 +519,23 @@ pub(super) fn validate_fusion_tree_for_rule<'a, R>(
 where
     R: FusionRule,
 {
+    validate_fusion_tree_view_for_rule(rule, tree.as_view())?;
+    Ok(ValidatedFusionTree { rule, key: tree })
+}
+
+/// [`validate_fusion_tree_for_rule`] of a borrowed tree, for scratch trees
+/// that have no key.
+pub(super) fn validate_fusion_tree_view_for_rule<R>(
+    rule: &R,
+    tree: FusionTreeRef<'_>,
+) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
     validate_fusion_tree_structure(rule, tree)?;
     validate_fusion_tree_vertices(tree, |left, right, coupled| {
         Ok(rule.nsymbol(left, right, coupled))
-    })?;
-
-    Ok(ValidatedFusionTree { rule, key: tree })
+    })
 }
 
 pub(crate) fn validate_fusion_tree_for_rule_checked<'a, R>(
@@ -554,7 +565,7 @@ pub(crate) struct ShapeValidatedFusionTree<'tree> {
 
 impl<'tree> ShapeValidatedFusionTree<'tree> {
     pub(crate) fn try_new(tree: &'tree FusionTreeKey) -> Result<Self, CoreError> {
-        validate_fusion_tree_key_shape(tree)?;
+        validate_fusion_tree_key_shape(tree.as_view())?;
         Ok(Self { tree })
     }
 
@@ -566,7 +577,7 @@ impl<'tree> ShapeValidatedFusionTree<'tree> {
         R: CheckedFusionAlgebra,
     {
         validate_fusion_tree_checked_after_shape(
-            self.tree,
+            self.tree.as_view(),
             rule.vacuum(),
             |left, right| {
                 rule.try_fusion_channels(left, right)
@@ -585,7 +596,7 @@ impl<'tree> ShapeValidatedFusionTree<'tree> {
     }
 }
 
-fn validate_fusion_tree_structure<R>(rule: &R, tree: &FusionTreeKey) -> Result<(), CoreError>
+fn validate_fusion_tree_structure<R>(rule: &R, tree: FusionTreeRef<'_>) -> Result<(), CoreError>
 where
     R: FusionRule,
 {
@@ -597,7 +608,7 @@ where
 /// style: unit-sector structure, the rank-1 `N(c, 1, c)` provider-domain probe,
 /// and every vertex.
 pub(super) fn validate_fusion_tree_checked_after_shape<E>(
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
     vacuum: SectorId,
     mut fusion_channels: impl FnMut(SectorId, SectorId) -> Result<(), E>,
     mut nsymbol: impl FnMut(SectorId, SectorId, SectorId) -> Result<usize, E>,
@@ -620,7 +631,7 @@ where
 
 fn validate_fusion_tree_structure_after_shape(
     vacuum: SectorId,
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
 ) -> Result<(), CoreError> {
     match tree.uncoupled().len() {
         0 if tree.coupled() != vacuum => Err(CoreError::MalformedFusionTree {
@@ -636,7 +647,7 @@ fn validate_fusion_tree_structure_after_shape(
 }
 
 fn validate_fusion_tree_vertices<E>(
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
     mut multiplicity: impl FnMut(SectorId, SectorId, SectorId) -> Result<usize, E>,
 ) -> Result<(), E>
 where
@@ -756,7 +767,7 @@ pub(crate) fn validate_fusion_tree_pair_coupled(
     }
 }
 
-pub(crate) fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError> {
+pub(crate) fn validate_fusion_tree_key_shape(tree: FusionTreeRef<'_>) -> Result<(), CoreError> {
     let rank = tree.uncoupled().len();
     if tree.is_dual().len() != rank {
         return Err(CoreError::MalformedFusionTree {

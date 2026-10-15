@@ -391,6 +391,25 @@ impl SectorStructure {
                 find_tree_row(arena, n_codomain..arena.len(), domain.as_view())?,
             )
         };
+        self.block_at_tree_rows(rows)
+    }
+
+    /// The block whose tree pair equals `pair`, searched per side by
+    /// content: a borrowed tree never shares this structure's arena.
+    #[doc(hidden)]
+    pub fn find_fusion_tree_pair_view_index(&self, pair: FusionTreePairRef<'_>) -> Option<usize> {
+        if self.key_kind != Some(BlockKeyKind::FusionTree) {
+            return None;
+        }
+        let arena = self.trees.as_ref()?;
+        let n_codomain = arena.codomain_rows()?;
+        self.block_at_tree_rows((
+            find_tree_row(arena, 0..n_codomain, pair.codomain_tree())?,
+            find_tree_row(arena, n_codomain..arena.len(), pair.domain_tree())?,
+        ))
+    }
+
+    fn block_at_tree_rows(&self, rows: (usize, usize)) -> Option<usize> {
         self.sorted_indices
             .binary_search_by_key(&rows, |&index| fusion_tree_rows(&self.blocks[index]))
             .ok()

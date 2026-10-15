@@ -36,8 +36,8 @@ impl<'homspace, 'structure> StructurallyValidatedFusionTreeSubset<'homspace, 'st
             let codomain_tree = key.codomain_tree();
             let domain_tree = key.domain_tree();
 
-            validate_fusion_tree_key_shape(codomain_tree)?;
-            validate_fusion_tree_key_shape(domain_tree)?;
+            validate_fusion_tree_key_shape(codomain_tree.as_view())?;
+            validate_fusion_tree_key_shape(domain_tree.as_view())?;
             if codomain_tree.uncoupled().len() != homspace.codomain().len()
                 || domain_tree.uncoupled().len() != homspace.domain().len()
             {

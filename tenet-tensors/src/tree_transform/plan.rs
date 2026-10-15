@@ -18,7 +18,7 @@ use tenet_core::{
     FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
     LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
-    PreparedTreePairOperation, RuleIdentity,
+    PreparedTreePairOperation, RuleIdentity, UniqueTreePairScratch,
 };
 
 use crate::OperationError;
@@ -697,6 +697,7 @@ where
         let mut primary_prepared = None;
         let mut additional_prepared =
             None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
+        let mut scratch = UniqueTreePairScratch::default();
         build_unique_groups_reusing(source_proof.structure(), reuse, |index| {
             unique_tree_pair_spec(
                 source_proof,
@@ -704,6 +705,7 @@ where
                 &source_axes,
                 &mut primary_prepared,
                 &mut additional_prepared,
+                &mut scratch,
                 index,
             )
         })
@@ -2583,6 +2585,7 @@ where
     let mut primary_prepared = None;
     let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     let mut specs = Vec::with_capacity(src_structure.block_count());
+    let mut scratch = UniqueTreePairScratch::default();
     for index in 0..src_structure.block_count() {
         specs.extend(unique_tree_pair_spec(
             source_proof,
@@ -2590,6 +2593,7 @@ where
             &source_axes,
             &mut primary_prepared,
             &mut additional_prepared,
+            &mut scratch,
             index,
         )?);
     }
@@ -2604,6 +2608,7 @@ fn unique_tree_pair_spec<'p, 'o, R>(
     source_axes: &Arc<[usize]>,
     primary_prepared: &'p mut Option<((usize, usize), PreparedTreePairOperation<'o>)>,
     additional_prepared: &'p mut Option<FxHashMap<(usize, usize), PreparedTreePairOperation<'o>>>,
+    scratch: &mut UniqueTreePairScratch,
     index: usize,
 ) -> Result<Option<TreeTransformGroupBlockSpec<R::Scalar>>, OperationError>
 where
@@ -2625,7 +2630,7 @@ where
         source_split,
     )?;
     let transformed = source_proof
-        .execute_unique_rigid_for_block_index(index, prepared)
+        .execute_unique_rigid_for_block_index(index, prepared, scratch)
         .map_err(OperationError::from_core_preserving_context)?;
     Ok(Some(
         TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)

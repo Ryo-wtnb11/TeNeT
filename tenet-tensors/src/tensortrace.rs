@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree,
-    split_fusion_tree_generic_checked, BlockKey, BlockStructure, CheckedFusionAlgebra,
+    multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree_generic_checked_into,
+    split_fusion_tree_into, BlockKey, BlockStructure, CheckedFusionAlgebra,
     CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericPivotal,
-    CheckedGenericSymbolError, FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairKey, FusionTreePairOrientation, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg,
+    CheckedGenericSymbolError, FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey,
+    FusionTreePairOrientation, FusionTreePairRef, FusionTreeRef, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg, TreeScratch,
+    UniqueTreePairScratch,
 };
 
 use crate::contract::{
@@ -618,6 +619,15 @@ impl TensorTraceDescriptor {
         descriptor
             .destination_layouts
             .reserve(dst_structure.block_count());
+        let destination_layout_len = dst_structure
+            .block_count()
+            .saturating_mul(dst_structure.rank());
+        descriptor
+            .destination_shape
+            .reserve_exact(destination_layout_len);
+        descriptor
+            .destination_strides
+            .reserve_exact(destination_layout_len);
         descriptor
             .destination_zero_strides
             .resize(dst_structure.rank(), 0);
