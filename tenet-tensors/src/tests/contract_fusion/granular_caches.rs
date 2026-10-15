@@ -107,8 +107,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
         )
         .unwrap();
         if case_index == 2 {
-            let mut profile = TensorContractFusionProfile::default();
-            context_contract_into_profiled(
+            context_contract_into(
                 &mut context,
                 &rule,
                 &mut actual,
@@ -117,11 +116,11 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
                 axes,
                 alpha,
                 beta,
-                &mut profile,
             )
             .unwrap();
-            // What: profiling replays the ordinary artifact for padded expert storage.
-            assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+            // What: padded expert storage takes the dynamic-tree route.
+            assert!(!context.last_resolution_is_core());
+            assert!(context.last_resolution_orientation().is_some());
         } else {
             context_contract_into(
                 &mut context,

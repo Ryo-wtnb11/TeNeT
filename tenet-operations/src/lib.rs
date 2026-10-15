@@ -43,7 +43,6 @@ mod host_scalar_kernels;
 pub mod host_scratch;
 pub mod kernel_adapter;
 mod placement;
-mod profile;
 pub mod replay_backend;
 mod scalar;
 #[doc(hidden)]
@@ -88,7 +87,6 @@ pub use host_scalar_kernels::{
 };
 pub use kernel_adapter::{BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
-pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 pub use replay_backend::*;
 pub use scalar::{
     scale_value, ConjugateValue, DenseBlockScalar, DenseRecouplingScalar,

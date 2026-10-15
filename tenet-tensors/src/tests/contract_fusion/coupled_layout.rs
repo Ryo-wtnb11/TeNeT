@@ -494,8 +494,7 @@ where
             assert_eq!(dst_packed.data(), ordinary);
 
             dst_packed.data_mut().fill(0.0);
-            let mut profile = TensorContractFusionProfile::default();
-            context_contract_into_profiled(
+            context_contract_into(
                 &mut packed_context,
                 rule,
                 &mut dst_packed,
@@ -504,12 +503,10 @@ where
                 axes(),
                 1.0,
                 0.0,
-                &mut profile,
             )
             .unwrap();
             assert_eq!(dst_packed.data(), ordinary);
-            assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
-            assert!(profile.core_contract_groups > 0);
+            assert!(packed_context.last_resolution_is_core());
 
             let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_packed.fusion_space().unwrap());
             let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_packed.fusion_space().unwrap());
@@ -603,34 +600,24 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     .unwrap();
     let dst_space = space(dst_hom);
     let dst_len = dst_space.required_len().unwrap();
-    let mut dst =
+    let dst =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
 
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let axes =
-        || TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
-        &mut context,
-        &rule,
-        &mut dst,
-        &lhs,
-        &rhs,
-        axes(),
-        1.0,
-        0.0,
-        &mut profile,
-    )
-    .unwrap();
+    let dst_dyn = DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap());
+    let lhs_dyn = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
+    let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let resolution = context
+        .plan_tensorcontract_fusion_dyn_raw(
+            &rule,
+            &dst_dyn,
+            &lhs_dyn,
+            &rhs_dyn,
+            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        )
+        .unwrap();
 
-    assert!(profile.core_contract_groups > 0);
-    assert_eq!(
-        profile.core_direct_gemm_groups, profile.core_contract_groups,
-        "coupled layout compose must GEMM directly into destination blocks"
-    );
-    // Pack/scatter no longer exist on the fully-direct core route, so the
-    // pack counters stay at their zero defaults.
-    assert_eq!(profile.core_direct_pack_skips, 0);
-    assert_eq!(profile.core_pack_lhs, std::time::Duration::ZERO);
-    assert_eq!(profile.core_scatter, std::time::Duration::ZERO);
+    // What: coupled-layout compose GEMMs directly into destination blocks
+    // (no pack or scatter).
+    assert!(resolution.direct_core().unwrap().0.is_fully_direct());
 }

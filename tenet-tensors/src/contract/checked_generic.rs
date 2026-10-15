@@ -1881,7 +1881,6 @@ mod tests {
             FusionOperand::direct(lhs.space()),
             FusionOperand::direct(rhs.space()),
             (&lhs_axes, &rhs_axes, &output),
-            None,
         )
         .unwrap();
         assert!(resolution.copy_c().is_some());

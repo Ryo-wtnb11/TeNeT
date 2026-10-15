@@ -206,7 +206,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "TensorContractBackend",
         "TensorContractBlockSpec",
         "TensorContractFusionExecutionContext",
-        "TensorContractFusionProfile",
         "ValidatedDynamicFusionLayout",
         // facade
         // oriented_elementwise

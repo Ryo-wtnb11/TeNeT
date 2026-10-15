@@ -2,11 +2,10 @@ use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
 use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap};
 
-// Non-profiled reference contraction path. Its only production caller
-// (`tensorcontract_fusion_dynamic_into_context`) was removed as dead code;
-// the profiled twin (`..._profiled`) is the live path via `context.rs`. Kept
-// as the allocation/output reference the `run_host_reference` tests compare
-// against, so it is test-only now.
+// Reference contraction path. Its only production caller
+// (`tensorcontract_fusion_dynamic_into_context`) was removed as dead code.
+// Kept as the allocation/output reference the `run_host_reference` tests
+// compare against, so it is test-only now.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
@@ -138,102 +137,6 @@ where
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_profile_pair_for_test<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
-    rule: &R,
-    plan: &FusionContractPlan,
-    ordinary_dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
-    profiled_dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
-    alpha: D,
-    beta: D,
-) -> Result<TensorContractFusionProfile, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-{
-    let mut tree_context: TreeTransformExecutionContext<D, R::Key, f64, _> =
-        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
-    let mut contract_backend = DenseTreeTransformOperations::default();
-    let mut contract_workspace = super::backend::TensorContractWorkspace::default();
-    let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
-    let dst_space = DynamicFusionMapSpace::from_typed(
-        ordinary_dst
-            .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let lhs_space = DynamicFusionMapSpace::from_typed(
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let rhs_space = DynamicFusionMapSpace::from_typed(
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let artifact = compile_dynamic_tree_execution_artifact::<
-        tenet_core::MultiplicityFreeAdmissionMode,
-        _,
-        false,
-    >(
-        tree_context.planning(),
-        rule,
-        encoded_layout_primer::<R>,
-        plan,
-        &dst_space,
-        &lhs_space,
-        lhs.structure(),
-        &rhs_space,
-        rhs.structure(),
-        None,
-    )?;
-    let mut ordinary_scratch = DynamicFusionScratchWorkspace::default();
-    let ordinary_dst_structure = Arc::clone(ordinary_dst.structure());
-    execute_dynamic_tree_execution_artifact(
-        &mut tree_context,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &mut fusion_block_workspace,
-        &mut ordinary_scratch,
-        &artifact,
-        &ordinary_dst_structure,
-        ordinary_dst.data_mut(),
-        lhs.data(),
-        rhs.data(),
-        alpha,
-        beta,
-    )?;
-    let mut profiled_scratch = DynamicFusionScratchWorkspace::default();
-    let mut profile = TensorContractFusionProfile::default();
-    let profiled_dst_structure = Arc::clone(profiled_dst.structure());
-    execute_dynamic_tree_execution_artifact_profiled(
-        &mut tree_context,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &mut fusion_block_workspace,
-        &mut profiled_scratch,
-        &artifact,
-        &profiled_dst_structure,
-        profiled_dst.data_mut(),
-        lhs.data(),
-        rhs.data(),
-        alpha,
-        beta,
-        &mut profile,
-    )?;
-    Ok(profile)
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_prelowered_dynamic_tree_execution_artifact_for_test<R, D>(
     rule: &R,
     plan: &FusionContractPlan,
@@ -260,7 +163,7 @@ where
     let layout_primer = encoded_layout_primer::<R>;
     let lhs_layout = lhs.prepare(rule, layout_primer)?;
     let rhs_layout = rhs.prepare(rule, layout_primer)?;
-    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, false>(
+    let artifact = compile_prelowered_dynamic_tree_execution_artifact(
         tree_context.planning(),
         rule,
         layout_primer,
@@ -268,7 +171,6 @@ where
         dst_space,
         &lhs_layout,
         &rhs_layout,
-        None,
     )?;
     execute_dynamic_tree_execution_artifact(
         &mut tree_context,
@@ -320,22 +222,18 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let artifact = compile_dynamic_tree_execution_artifact::<
-        tenet_core::MultiplicityFreeAdmissionMode,
-        _,
-        false,
-    >(
-        tree_context.planning(),
-        rule,
-        layout_primer,
-        plan,
-        dst_space,
-        lhs_space,
-        lhs_structure,
-        rhs_space,
-        rhs_structure,
-        None,
-    )?;
+    let artifact =
+        compile_dynamic_tree_execution_artifact::<tenet_core::MultiplicityFreeAdmissionMode, _>(
+            tree_context.planning(),
+            rule,
+            layout_primer,
+            plan,
+            dst_space,
+            lhs_space,
+            lhs_structure,
+            rhs_space,
+            rhs_structure,
+        )?;
     execute_dynamic_tree_execution_artifact(
         tree_context,
         contract_backend,
@@ -377,88 +275,6 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
-    execute_dynamic_tree_execution_artifact_with_profile(
-        tree_context,
-        contract_backend,
-        contract_workspace,
-        fusion_block_workspace,
-        scratch,
-        artifact,
-        dst_structure,
-        dst_data,
-        lhs_data,
-        rhs_data,
-        alpha,
-        beta,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, D, C>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact<C>,
-    dst_structure: &Arc<BlockStructure>,
-    dst_data: &mut [D],
-    lhs_data: &[D],
-    rhs_data: &[D],
-    alpha: D,
-    beta: D,
-    profile: &mut TensorContractFusionProfile,
-) -> Result<(), OperationError>
-where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    BT::Workspace: Default,
-    BC: TensorContractBackend<D, C>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
-{
-    execute_dynamic_tree_execution_artifact_with_profile(
-        tree_context,
-        contract_backend,
-        contract_workspace,
-        fusion_block_workspace,
-        scratch,
-        artifact,
-        dst_structure,
-        dst_data,
-        lhs_data,
-        rhs_data,
-        alpha,
-        beta,
-        Some(profile),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_dynamic_tree_execution_artifact_with_profile<RuleKey, BT, BC, D, C>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact<C>,
-    dst_structure: &Arc<BlockStructure>,
-    dst_data: &mut [D],
-    lhs_data: &[D],
-    rhs_data: &[D],
-    alpha: D,
-    beta: D,
-    profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<(), OperationError>
-where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, C>,
-    BT::Workspace: Default,
-    BC: TensorContractBackend<D, C>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: DenseBlockScalar,
-{
     super::super::route_host::execute_dynamic_tree_route_host(
         &mut super::super::route_host::EagerTreeStage {
             backend: tree_context.backend_mut(),
@@ -474,6 +290,5 @@ where
         1,
         alpha,
         tenet_operations::ContractDestinationInit::Axpby(beta),
-        profile,
     )
 }

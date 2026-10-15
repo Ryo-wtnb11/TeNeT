@@ -20,10 +20,9 @@ pub(crate) use dynamic::{
 #[cfg(test)]
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,
-    execute_dynamic_tree_execution_artifact_profile_pair_for_test,
-    execute_prelowered_dynamic_tree_execution_artifact_for_test, profiled_artifact_compile_phases,
-    reset_profiled_artifact_compile_phases, reset_source_layout_homspace_id_comparisons,
-    source_layout_homspace_id_comparisons, tensorcontract_fusion_dynamic_plan_into_with,
+    execute_prelowered_dynamic_tree_execution_artifact_for_test,
+    reset_source_layout_homspace_id_comparisons, source_layout_homspace_id_comparisons,
+    tensorcontract_fusion_dynamic_plan_into_with,
 };
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
@@ -108,9 +107,6 @@ pub(crate) use structure::TensorContractDenseRouteKind;
 #[cfg(test)]
 pub(crate) use structure::TensorContractStructure;
 pub use structure::{tensorcontract_structure, TensorContractBlockSpec};
-pub use tenet_operations::TensorContractFusionProfile;
-#[cfg(test)]
-pub use tenet_operations::TensorContractFusionRoute;
 
 #[cfg(test)]
 pub(crate) use dynamic_space::encoded_layout_primer;

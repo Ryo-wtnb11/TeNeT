@@ -322,8 +322,7 @@ where
 
     workspace.scratch.fill(T::from(99.0));
     dst.clone_from(&initial);
-    let mut profile = TensorContractFusionProfile::default();
-    plan.execute_raw_profiled(
+    plan.execute_raw(
         &mut kernels,
         &mut gemm,
         &mut workspace,
@@ -335,12 +334,9 @@ where
         &rhs,
         alpha,
         beta,
-        &mut profile,
     )
     .unwrap();
     assert_eq!(dst, expected);
-    assert_eq!(profile.core_contract_groups, 8);
-    assert_eq!(profile.core_direct_gemm_groups, 4);
 
     // A zero alpha (either sign) leaves exactly TensorKit's `scale(C,
     // beta)` in every class, over Inf/NaN operands, a NaN destination and
@@ -372,42 +368,23 @@ where
                     _ => T::from(beta) * value,
                 })
                 .collect();
-            for profiled in [false, true] {
-                workspace.scratch.fill(nan);
-                dst.clone_from(&dirty);
-                let run = if profiled {
-                    plan.execute_raw_profiled(
-                        &mut kernels,
-                        &mut gemm,
-                        &mut workspace,
-                        &structure,
-                        &mut dst,
-                        &structure,
-                        &bad_lhs,
-                        &structure,
-                        &bad_rhs,
-                        T::from(zero),
-                        T::from(beta),
-                        &mut TensorContractFusionProfile::default(),
-                    )
-                } else {
-                    plan.execute_raw(
-                        &mut kernels,
-                        &mut gemm,
-                        &mut workspace,
-                        &structure,
-                        &mut dst,
-                        &structure,
-                        &bad_lhs,
-                        &structure,
-                        &bad_rhs,
-                        T::from(zero),
-                        T::from(beta),
-                    )
-                };
-                run.unwrap();
-                same(&dst, &want);
-            }
+            workspace.scratch.fill(nan);
+            dst.clone_from(&dirty);
+            plan.execute_raw(
+                &mut kernels,
+                &mut gemm,
+                &mut workspace,
+                &structure,
+                &mut dst,
+                &structure,
+                &bad_lhs,
+                &structure,
+                &bad_rhs,
+                T::from(zero),
+                T::from(beta),
+            )
+            .unwrap();
+            same(&dst, &want);
         }
     }
 
@@ -1200,7 +1177,7 @@ impl Rank2Gemm<f64> for CountingBatchGemm {
 }
 
 #[test]
-fn profiled_direct_replay_uses_one_batched_gemm_call() {
+fn direct_replay_uses_one_batched_gemm_call() {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
@@ -1228,12 +1205,11 @@ fn profiled_direct_replay_uses_one_batched_gemm_call() {
     let mut kernels = crate::StridedHostKernelAdapter::default();
     let mut gemm = CountingBatchGemm::default();
     let mut workspace = FusionBlockContractWorkspace::<f64>::default();
-    let mut profile = TensorContractFusionProfile::default();
     let lhs = vec![0.0; 2];
     let rhs = vec![0.0; 2];
     let mut dst = vec![0.0; 2];
 
-    plan.execute_raw_profiled(
+    plan.execute_raw(
         &mut kernels,
         &mut gemm,
         &mut workspace,
@@ -1245,16 +1221,12 @@ fn profiled_direct_replay_uses_one_batched_gemm_call() {
         &rhs,
         1.0,
         0.0,
-        &mut profile,
     )
     .unwrap();
 
     assert_eq!(gemm.batch_calls, 1);
     assert_eq!(gemm.rank2_calls, 0);
     assert_eq!(gemm.last_batch_len, 2);
-    assert_eq!(profile.core_contract_groups, 2);
-    assert_eq!(profile.core_direct_gemm_groups, 2);
-    assert_eq!(profile.core_workspace_prepare, std::time::Duration::ZERO);
     assert_eq!(workspace.scratch.len(), 0);
 }
 

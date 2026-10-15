@@ -421,8 +421,7 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
 
     context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
-    let mut profile = TensorContractFusionProfile::default();
-    context_contract_into_profiled(
+    context_contract_into(
         &mut context,
         &rule,
         &mut context_dst,
@@ -431,24 +430,10 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
         TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
-        &mut profile,
     )
     .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
-    assert_eq!(profile.lhs_transform_calls, 0);
-    assert_eq!(profile.rhs_transform_calls, 0);
-    assert!(profile.core_contract_groups > 0);
-    // alpha = 2, beta = 3 and every group still runs the direct GEMM: the
-    // accumulate factors ride on the GEMM itself (TensorKit mul! semantics),
-    // never on a scatter pass.
-    assert_eq!(
-        profile.core_direct_gemm_groups,
-        profile.core_contract_groups
-    );
-    assert_eq!(profile.core_scatter, std::time::Duration::ZERO);
-    assert_eq!(profile.tree_replay.single_blocks, 0);
-    assert_eq!(profile.tree_replay.multi_blocks, 0);
+    assert!(context.last_resolution_is_core());
 }
 
 #[test]
@@ -662,16 +647,10 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 tensor_space.clone(),
             )
             .unwrap();
-            let mut profiled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-                vec![0.0; len],
-                tensor_space.clone(),
-            )
-            .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
                 &rule,
                 &plan,
                 &mut artifact,
-                &mut profiled,
                 &lhs,
                 &rhs,
                 1.0,
@@ -694,7 +673,6 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 actual.data(),
                 lhs.data().len() * rhs.data().len(),
             );
-            assert_eq!(profiled.data(), artifact.data());
             for (&actual, &expected) in artifact.data().iter().zip(dst_compose.data()) {
                 assert!((actual - expected).abs() < 1.0e-10);
             }

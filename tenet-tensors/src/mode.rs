@@ -66,7 +66,7 @@ use crate::{
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::fusion_replay::MatrixOp;
-use tenet_operations::{OutputAxisOrder, TensorContractFusionProfile, TensorContractSpec};
+use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 mod sealed {
     pub trait Sealed {}
@@ -479,7 +479,6 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
         axes: TensorContractSpec<'_>,
-        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<DynamicTreeExecutionArtifact<Self::Scalar>, Self::Error>
     where
         Self::Scalar: DenseBlockScalar;
@@ -936,12 +935,11 @@ where
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
         axes: TensorContractSpec<'_>,
-        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<DynamicTreeExecutionArtifact<R::Scalar>, OperationError>
     where
         R::Scalar: DenseBlockScalar,
     {
-        compile_prelowered_dynamic_tree(planning, target, lhs, rhs, axes, profile)
+        compile_prelowered_dynamic_tree(planning, target, lhs, rhs, axes)
     }
 }
 
@@ -1711,7 +1709,6 @@ where
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
         axes: TensorContractSpec<'_>,
-        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<DynamicTreeExecutionArtifact<f64>, Self::Error> {
         compile_stored_dynamic_tree::<Self, R>(
             txn,
@@ -1725,7 +1722,6 @@ where
                 rhs.storage_space().structure(),
             ),
             axes,
-            profile,
         )
     }
 }

@@ -165,7 +165,7 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
 /// The `DynamicTree` artifact of two stored operands in admission mode `M`,
 /// derived under `cache`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
+pub(crate) fn compile_dynamic_tree_execution_artifact<M, R>(
     cache: &mut M::StructureCache,
     rule: &R,
     authority: M::SpaceAuthority<'_>,
@@ -175,13 +175,11 @@ pub(crate) fn compile_dynamic_tree_execution_artifact<M, R, const PROFILED: bool
     lhs_structure: &Arc<BlockStructure>,
     rhs_space: &DynamicFusionMapSpace,
     rhs_structure: &Arc<BlockStructure>,
-    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
 where
     M: PlanningAlgebra<R>,
     M::Scalar: DenseBlockScalar,
 {
-    let source_start = PROFILED.then(std::time::Instant::now);
     let lhs_transform = M::transformed_source(
         cache,
         authority,
@@ -225,7 +223,7 @@ where
         lhs_layout_borrowable,
         rhs_layout_borrowable,
     )?;
-    finish_dynamic_tree_execution_artifact::<M, R, PROFILED>(
+    finish_dynamic_tree_execution_artifact::<M, R>(
         cache,
         rule,
         authority,
@@ -234,15 +232,13 @@ where
         lhs_transform,
         rhs_transform,
         borrowing,
-        source_start,
-        profile,
     )
 }
 
 /// The multiplicity-free `DynamicTree` artifact over prelowered operands,
 /// a lazy adjoint read through its parent's storage.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<R, const PROFILED: bool>(
+pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<R>(
     planning: &mut TreeTransformPlanning,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
@@ -250,13 +246,11 @@ pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<R, const PROFIL
     dst_space: &DynamicFusionMapSpace,
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
-    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
     R::Scalar: DenseBlockScalar + MultiplicityFreePlanningScalar,
 {
-    let source_start = PROFILED.then(std::time::Instant::now);
     debug_assert_eq!(
         plan.lhs_source_conjugate(),
         lhs.orientation() == FusionTreePairOrientation::Adjoint
@@ -307,7 +301,7 @@ where
         lhs_layout_borrowable,
         rhs_layout_borrowable,
     )?;
-    finish_dynamic_tree_execution_artifact::<MultiplicityFreeAdmissionMode, R, PROFILED>(
+    finish_dynamic_tree_execution_artifact::<MultiplicityFreeAdmissionMode, R>(
         planning,
         rule,
         layout_primer,
@@ -316,8 +310,6 @@ where
         lhs_transform,
         rhs_transform,
         borrowing,
-        source_start,
-        profile,
     )
 }
 
@@ -348,7 +340,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
+fn finish_dynamic_tree_execution_artifact<M, R>(
     cache: &mut M::StructureCache,
     rule: &R,
     authority: M::SpaceAuthority<'_>,
@@ -357,8 +349,6 @@ fn finish_dynamic_tree_execution_artifact<M, R, const PROFILED: bool>(
     lhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
     rhs_transform: DynamicFusionTransformedSourceEntry<M::Scalar>,
     mut borrowing: SourceBorrowing,
-    source_start: Option<std::time::Instant>,
-    mut profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact<M::Scalar>, M::Error>
 where
     M: PlanningAlgebra<R>,
@@ -394,17 +384,6 @@ where
         };
         validate_uniform_multi_scales(structure, &source_twist_destination_scales)?;
     }
-    if let Some(start) = source_start {
-        profile
-            .as_deref_mut()
-            .expect("profiled compilation carries a profile")
-            .source_space_lookup += start.elapsed();
-        #[cfg(test)]
-        PROFILED_ARTIFACT_COMPILE_PHASES
-            .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_SOURCE_PHASE));
-    }
-
-    let core_dst_start = PROFILED.then(std::time::Instant::now);
     let core_dst = if plan.output_transform_is_identity() {
         None
     } else {
@@ -418,21 +397,9 @@ where
             dst_space,
         )?)
     };
-    if core_dst.is_some() {
-        if let Some(start) = core_dst_start {
-            profile
-                .as_deref_mut()
-                .expect("profiled compilation carries a profile")
-                .core_dst_space_lookup += start.elapsed();
-            #[cfg(test)]
-            PROFILED_ARTIFACT_COMPILE_PHASES
-                .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_CORE_DST_PHASE));
-        }
-    }
     let block_dst_space = core_dst
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
-    let block_plan_start = PROFILED.then(std::time::Instant::now);
     let block_plan = match storage_adjoint_core_plan(
         block_dst_space,
         plan.orientation(),
@@ -464,14 +431,6 @@ where
             }
             .into());
         }
-    }
-    if let Some(start) = block_plan_start {
-        profile
-            .expect("profiled compilation carries a profile")
-            .core_block_plan_build += start.elapsed();
-        #[cfg(test)]
-        PROFILED_ARTIFACT_COMPILE_PHASES
-            .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_BLOCK_PLAN_PHASE));
     }
     // Why not check this in every executor: Host, member and device replays
     // all fold the twist into the transform writing the twisted source's
