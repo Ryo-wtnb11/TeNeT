@@ -95,10 +95,11 @@ where
     S: Clone,
 {
     let mut rows_per_source = vec![Vec::new(); columns.num_src];
-    for (destination_row, destination_local) in basis.locals.into_iter().enumerate() {
-        // Why not materialize in each source column: the full external frame is
-        // identical for the row and must be rebuilt only once at the API edge.
-        let destination_key = basis.frame.materialize(destination_local);
+    // Why not materialize in each source column: the full external frame is
+    // identical for the row and must be rebuilt only once at the API edge.
+    let destinations = basis.frame.materialize_all(basis.locals.iter());
+    for destination_row in 0..basis.locals.len() {
+        let destination_key = destinations.key(destination_row);
         for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
             if let Some(coefficient) = coefficient {
                 rows_per_source[source].push((destination_key.clone(), coefficient.clone()));
@@ -190,8 +191,8 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let site = FoldSite::new(
-        &basis.frame.codomain.uncoupled,
-        &basis.frame.codomain.is_dual,
+        basis.frame.codomain.uncoupled(),
+        basis.frame.codomain.is_dual(),
     )?;
     let kernel = SimpleK(rule);
     let (fold, dual_first) = kernel.fold_begin(&site)?;
@@ -421,7 +422,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    if basis.frame.codomain.uncoupled.is_empty() {
+    if basis.frame.codomain.uncoupled().is_empty() {
         let (basis, columns) = compact_bendleft_block(rule, basis, columns)?;
         compact_foldright_block(rule, basis, Some(&columns), false, false)
     } else {
@@ -445,7 +446,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    if basis.frame.domain.uncoupled.is_empty() {
+    if basis.frame.domain.uncoupled().is_empty() {
         let (basis, columns) = compact_bendright_block(rule, basis, columns)?;
         compact_foldleft_block(rule, basis, Some(&columns))
     } else {
@@ -479,8 +480,9 @@ pub(crate) fn scatter_compact_block<S: Clone>(
 ) -> Vec<Vec<(FusionTreePairKey, S)>> {
     record_compact_block_dimensions(&basis, &columns);
     let mut rows_per_source = vec![Vec::new(); columns.num_src];
-    for (destination_row, destination_local) in basis.locals.into_iter().enumerate() {
-        let destination = basis.frame.materialize(destination_local);
+    let destinations = basis.frame.materialize_all(basis.locals.iter());
+    for destination_row in 0..basis.locals.len() {
+        let destination = materialized_pair(&destinations, destination_row);
         for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
             if let Some(coefficient) = coefficient {
                 rows_per_source[source].push((destination.clone(), coefficient.clone()));
@@ -497,13 +499,9 @@ pub(crate) fn order_compact_block<S: Clone>(
     record_compact_block_dimensions(&basis, &columns);
 
     let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
-    let mut local_slots = locals.into_iter().map(Some).collect::<Vec<_>>();
-    order_block_columns(local_slots.len(), columns, |basis_row| {
-        frame.materialize(
-            local_slots[basis_row]
-                .take()
-                .expect("ordered compact rows contain each basis row once"),
-        )
+    let destinations = frame.materialize_all(locals.iter());
+    order_block_columns(locals.len(), columns, |basis_row| {
+        materialized_pair(&destinations, basis_row)
     })
 }
 
@@ -593,8 +591,9 @@ pub(super) fn scatter_compact_tree_pair_block<S: Clone>(
         scatter_compact_block(block.basis, block.columns)
     } else {
         let mut rows_per_source = vec![Vec::new(); block.columns.num_src];
-        for (destination_row, destination_local) in block.basis.locals.into_iter().enumerate() {
-            let destination = block.basis.frame.materialize(destination_local);
+        let destinations = block.basis.frame.materialize_all(block.basis.locals.iter());
+        for destination_row in 0..block.basis.locals.len() {
+            let destination = materialized_pair(&destinations, destination_row);
             for (source, coefficient) in block.columns.row(destination_row).iter().enumerate() {
                 if let Some(coefficient) = coefficient {
                     rows_per_source[source].push((destination.clone(), coefficient.clone()));
@@ -623,13 +622,18 @@ pub(super) fn columns_compact_tree_pair_block<S>(
     }
     let source_count = columns.num_src;
     let mut destination_of_row = vec![usize::MAX; basis.locals.len()];
-    let mut destinations = Vec::with_capacity(basis.locals.len());
-    for (row, local) in basis.locals.into_iter().enumerate() {
+    let mut present = Vec::with_capacity(basis.locals.len());
+    for (row, local) in basis.locals.iter().enumerate() {
         if columns.row(row).iter().any(Option::is_some) {
-            destination_of_row[row] = destinations.len();
-            destinations.push(basis.frame.materialize(local));
+            destination_of_row[row] = present.len();
+            present.push(local);
         }
     }
+    let count = present.len();
+    let arena = basis.frame.materialize_all(present.into_iter());
+    let destinations = (0..count)
+        .map(|index| materialized_pair(&arena, index))
+        .collect::<Vec<_>>();
     let mut column_start = Vec::with_capacity(source_count + 1);
     column_start.push(0);
     let mut entries = Vec::with_capacity(
@@ -702,10 +706,10 @@ pub(super) fn assert_compact_tree_pair_basis_in_homspace<R>(
     let product_space = |frame: &MultiplicityFreeTreeFrame| {
         FusionProductSpace::new(
             frame
-                .uncoupled
+                .uncoupled()
                 .iter()
                 .copied()
-                .zip(frame.is_dual.iter().copied())
+                .zip(frame.is_dual().iter().copied())
                 .map(|(sector, is_dual)| SectorLeg::new([(sector, 1)], is_dual)),
         )
     };

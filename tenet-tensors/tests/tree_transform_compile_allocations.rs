@@ -384,9 +384,11 @@ fn cold_ordered_tree_pair_staging_stays_within_allocation_envelopes() {
         // What: the staging's ordered whole-block resolution stays within the
         // prior cold compile envelope (41 one-block allocations, under five
         // per further block, plus one bounded all-rank normalization
-        // workspace): it grows at most linearly in the source blocks.
+        // workspace), plus the published composed-coefficient entry's own
+        // tree arena and its reusable re-homing scratch (Rule O, #2192): it
+        // grows at most linearly in the source blocks.
         assert!(
-            resolution as usize <= 44 + 5 * (blocks - 1),
+            resolution as usize <= 52 + 5 * (blocks - 1),
             "blocks={blocks}, resolution allocations={resolution}"
         );
     }

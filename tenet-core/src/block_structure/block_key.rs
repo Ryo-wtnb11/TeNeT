@@ -193,13 +193,12 @@ impl FusionTreePairKey {
         is_dual
     }
 
+    /// The pair's external-sector group: two refcount bumps, no allocation.
     pub fn group_key(&self) -> FusionTreeGroupKey {
-        FusionTreeGroupKey::from_frozen(
-            Arc::clone(&self.codomain_tree.uncoupled),
-            Arc::clone(&self.domain_tree.uncoupled),
-            Arc::clone(&self.codomain_tree.is_dual),
-            Arc::clone(&self.domain_tree.is_dual),
-        )
+        FusionTreeGroupKey {
+            codomain: self.codomain_tree.clone(),
+            domain: self.domain_tree.clone(),
+        }
     }
 }
 

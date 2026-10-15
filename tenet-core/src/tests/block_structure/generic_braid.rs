@@ -59,12 +59,12 @@ fn toy_om_rule_r_symbol_generic_has_nsymbol_shaped_matrix() {
 #[test]
 fn frozen_fusion_tree_identity_and_group_projection_are_content_based() {
     // What: independently allocated equal keys compare and hash by content,
-    // while group projection reuses the pair's external owners.
+    // while group projection reuses the pair's tree handles.
     let a = SectorId::new(ToyOmRule::A);
     let c = SectorId::new(ToyOmRule::C);
     let first = FusionTreeKey::new([a, a], c, [false, true], [], [MultiplicityIndex::ONE]);
     let second = FusionTreeKey::new([a, a], c, [false, true], [], [MultiplicityIndex::ONE]);
-    assert!(!Arc::ptr_eq(&first.uncoupled, &second.uncoupled));
+    assert!(!Arc::ptr_eq(&first.arena, &second.arena));
     assert_eq!(first, second);
     assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
 
@@ -74,22 +74,14 @@ fn frozen_fusion_tree_identity_and_group_projection_are_content_based() {
 
     let pair = FusionTreePairKey::pair(first, second);
     let group = pair.group_key();
+    // The group holds the pair's own tree handles: no copy, no allocation.
     assert!(Arc::ptr_eq(
-        &group.codomain_uncoupled,
-        &pair.codomain_tree.uncoupled
+        &group.codomain.arena,
+        &pair.codomain_tree.arena
     ));
-    assert!(Arc::ptr_eq(
-        &group.domain_uncoupled,
-        &pair.domain_tree.uncoupled
-    ));
-    assert!(Arc::ptr_eq(
-        &group.codomain_is_dual,
-        &pair.codomain_tree.is_dual
-    ));
-    assert!(Arc::ptr_eq(
-        &group.domain_is_dual,
-        &pair.domain_tree.is_dual
-    ));
+    assert_eq!(group.codomain.index, pair.codomain_tree.index);
+    assert!(Arc::ptr_eq(&group.domain.arena, &pair.domain_tree.arena));
+    assert_eq!(group.domain.index, pair.domain_tree.index);
 }
 
 #[test]

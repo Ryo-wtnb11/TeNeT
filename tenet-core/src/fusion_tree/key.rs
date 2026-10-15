@@ -1,15 +1,63 @@
 use super::*;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+/// External-sector identity of a fusion-tree pair: the uncoupled sectors and
+/// duality flags of both trees.
+///
+/// Held as the pair's two tree handles, of which only `uncoupled` and
+/// `is_dual` are ever read, so [`FusionTreePairKey::group_key`] is two
+/// refcount bumps across arenas too. Eq, Ord, Hash and Debug are written by
+/// hand to keep the derived form of the former four-slice struct: order
+/// interleaved (codomain sectors, domain sectors, codomain duals, domain
+/// duals) and the structural slice hash, not a stored one.
+#[derive(Clone)]
 pub struct FusionTreeGroupKey {
-    pub(crate) codomain_uncoupled: Arc<[SectorId]>,
-    pub(crate) domain_uncoupled: Arc<[SectorId]>,
-    pub(crate) codomain_is_dual: Arc<[bool]>,
-    pub(crate) domain_is_dual: Arc<[bool]>,
+    pub(crate) codomain: FusionTreeKey,
+    pub(crate) domain: FusionTreeKey,
+}
+
+impl PartialEq for FusionTreeGroupKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_view() == other.as_view()
+    }
+}
+
+impl Eq for FusionTreeGroupKey {}
+
+impl Ord for FusionTreeGroupKey {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.as_view().cmp(&other.as_view())
+    }
+}
+
+impl PartialOrd for FusionTreeGroupKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for FusionTreeGroupKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_view().hash(state);
+    }
+}
+
+impl fmt::Debug for FusionTreeGroupKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FusionTreeGroupKey")
+            .field("codomain_uncoupled", &self.codomain_uncoupled())
+            .field("domain_uncoupled", &self.domain_uncoupled())
+            .field("codomain_is_dual", &self.codomain_is_dual())
+            .field("domain_is_dual", &self.domain_is_dual())
+            .finish()
+    }
 }
 
 impl FusionTreeGroupKey {
-    /// Heap bytes of this group's shared backing slices, each counted once
+    /// Heap bytes of the arenas this group keeps alive, each counted once
     /// across calls that share `seen`.
     #[doc(hidden)]
     pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
@@ -28,25 +76,30 @@ impl FusionTreeGroupKey {
         CodomainDual: IntoIterator<Item = bool>,
         DomainDual: IntoIterator<Item = bool>,
     {
-        Self {
-            codomain_uncoupled: codomain_uncoupled.into_iter().collect::<Vec<_>>().into(),
-            domain_uncoupled: domain_uncoupled.into_iter().collect::<Vec<_>>().into(),
-            codomain_is_dual: codomain_is_dual.into_iter().collect::<Vec<_>>().into(),
-            domain_is_dual: domain_is_dual.into_iter().collect::<Vec<_>>().into(),
-        }
-    }
-
-    pub(crate) fn from_frozen(
-        codomain_uncoupled: Arc<[SectorId]>,
-        domain_uncoupled: Arc<[SectorId]>,
-        codomain_is_dual: Arc<[bool]>,
-        domain_is_dual: Arc<[bool]>,
-    ) -> Self {
-        Self {
+        // The coupled sector, inner lines and vertices of these two rows are
+        // never read through a group key.
+        let (codomain_uncoupled, domain_uncoupled) =
+            (codomain_uncoupled.into_iter(), domain_uncoupled.into_iter());
+        let (codomain_is_dual, domain_is_dual) =
+            (codomain_is_dual.into_iter(), domain_is_dual.into_iter());
+        let mut builder = TreeArenaBuilder::exact(
+            2,
+            codomain_uncoupled.size_hint().0 + domain_uncoupled.size_hint().0 + 2,
+            0,
+            codomain_is_dual.size_hint().0 + domain_is_dual.size_hint().0,
+        );
+        builder.push_parts(
             codomain_uncoupled,
-            domain_uncoupled,
+            SectorId::new(0),
             codomain_is_dual,
-            domain_is_dual,
+            [],
+            [],
+        );
+        builder.push_parts(domain_uncoupled, SectorId::new(0), domain_is_dual, [], []);
+        let arena = builder.freeze();
+        Self {
+            codomain: arena.key(0),
+            domain: arena.key(1),
         }
     }
 
@@ -72,38 +125,45 @@ impl FusionTreeGroupKey {
 
     #[inline]
     pub fn codomain_uncoupled(&self) -> &[SectorId] {
-        &self.codomain_uncoupled
+        self.codomain.uncoupled()
     }
 
     #[inline]
     pub fn domain_uncoupled(&self) -> &[SectorId] {
-        &self.domain_uncoupled
+        self.domain.uncoupled()
     }
 
     #[inline]
     pub fn codomain_is_dual(&self) -> &[bool] {
-        &self.codomain_is_dual
+        self.codomain.is_dual()
     }
 
     #[inline]
     pub fn domain_is_dual(&self) -> &[bool] {
-        &self.domain_is_dual
+        self.domain.is_dual()
     }
 }
 
+/// Identity of one fusion tree: a handle into an immutable tree arena
+/// shared by every tree of its holder (#2192).
+///
+/// Eq, Ord, Hash and Debug depend only on the five identity fields (and the
+/// hash stored with them), never on which arena holds them, so equal trees
+/// from different structures compare, order and hash identically. A clone
+/// is one refcount increment.
+///
+/// Retention: a key keeps its whole arena alive. A key taken from a block
+/// structure keeps that structure's tree arena (all of its distinct trees)
+/// resident for as long as the key lives.
 // Why the hash is stored: keys are built once per structure and looked up
 // many times per publication, so an `O(K)` hash per lookup (TensorKit's
-// `hash(::FusionTree)` per `Dict` access) is avoidable constant work. The
-// cache is a pure function of the five identity fields, is excluded from
-// `Ord` and `Debug`, and is never persisted.
+// `hash(::FusionTree)` per `Dict` access) is avoidable constant work. It is
+// a pure function of the five identity fields, is excluded from `Ord` and
+// `Debug`, and is never persisted.
 #[derive(Clone)]
 pub struct FusionTreeKey {
-    pub(crate) uncoupled: Arc<[SectorId]>,
-    pub(super) coupled: SectorId,
-    pub(crate) is_dual: Arc<[bool]>,
-    pub(crate) innerlines: Arc<[SectorId]>,
-    pub(crate) vertices: Arc<[MultiplicityIndex]>,
-    pub(super) hash: u64,
+    pub(crate) arena: Arc<TreeArena>,
+    pub(crate) index: usize,
 }
 
 #[inline]
@@ -127,16 +187,18 @@ pub(crate) fn fusion_tree_key_hash(
 impl Hash for FusionTreeKey {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_u64(self.hash);
+        state.write_u64(self.arena.hash(self.index));
     }
 }
 
 // Why the impls go through the view: one comparison authority for owned
 // keys and borrowed lookups, so `Equivalent` agrees with `Eq` by construction.
+// Arenas are immutable, so one row of one arena is equal to itself.
 impl PartialEq for FusionTreeKey {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.as_view() == other.as_view()
+        (self.index == other.index && Arc::ptr_eq(&self.arena, &other.arena))
+            || self.as_view() == other.as_view()
     }
 }
 
@@ -165,15 +227,24 @@ impl fmt::Debug for FusionTreeKey {
 impl FusionTreeKey {
     #[cfg(test)]
     pub(crate) fn cached_hash_for_test(&self) -> u64 {
-        self.hash
+        self.arena.hash(self.index)
     }
 
     /// Test-only hook that overrides the cached hash so collision handling can
     /// be exercised deterministically; it never changes the identity fields.
     #[cfg(test)]
-    pub(crate) fn with_cached_hash_for_test(mut self, hash: u64) -> Self {
-        self.hash = hash;
-        self
+    pub(crate) fn with_cached_hash_for_test(self, hash: u64) -> Self {
+        let view = self.as_view();
+        let mut builder = TreeArenaBuilder::for_views(std::iter::once(view));
+        builder.push_view(FusionTreeRef::with_hash(
+            view.uncoupled(),
+            view.coupled(),
+            view.is_dual(),
+            view.innerlines(),
+            view.vertices(),
+            hash,
+        ));
+        builder.freeze().key(0)
     }
 
     /// Construct and validate a categorical fusion tree for `rule`.
@@ -227,6 +298,7 @@ impl FusionTreeKey {
 
     // Why not store a fusion style here: the bound rule is the authority for
     // categorical capabilities; duplicating it in identity can become stale.
+    /// A lone key: one arena of one row, at most 5 allocations.
     pub(crate) fn new<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
         coupled: SectorId,
@@ -240,31 +312,20 @@ impl FusionTreeKey {
         Innerlines: IntoIterator<Item = SectorId>,
         Vertices: IntoIterator<Item = MultiplicityIndex>,
     {
-        Self::from_frozen(
-            uncoupled.into_iter().collect::<Vec<_>>().into(),
-            coupled,
-            is_dual.into_iter().collect::<Vec<_>>().into(),
-            innerlines.into_iter().collect::<Vec<_>>().into(),
-            vertices.into_iter().collect::<Vec<_>>().into(),
-        )
-    }
-
-    pub(crate) fn from_frozen(
-        uncoupled: Arc<[SectorId]>,
-        coupled: SectorId,
-        is_dual: Arc<[bool]>,
-        innerlines: Arc<[SectorId]>,
-        vertices: Arc<[MultiplicityIndex]>,
-    ) -> Self {
-        let hash = fusion_tree_key_hash(&uncoupled, coupled, &is_dual, &innerlines, &vertices);
-        Self {
-            uncoupled,
-            coupled,
-            is_dual,
-            innerlines,
-            vertices,
-            hash,
-        }
+        let (uncoupled, is_dual, innerlines, vertices) = (
+            uncoupled.into_iter(),
+            is_dual.into_iter(),
+            innerlines.into_iter(),
+            vertices.into_iter(),
+        );
+        let mut builder = TreeArenaBuilder::exact(
+            1,
+            uncoupled.size_hint().0 + 1 + innerlines.size_hint().0,
+            vertices.size_hint().0,
+            is_dual.size_hint().0,
+        );
+        builder.push_parts(uncoupled, coupled, is_dual, innerlines, vertices);
+        builder.freeze().key(0)
     }
 
     pub(crate) fn try_from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
@@ -367,27 +428,27 @@ impl FusionTreeKey {
 
     #[inline]
     pub fn uncoupled(&self) -> &[SectorId] {
-        &self.uncoupled
+        self.arena.uncoupled(self.index)
     }
 
     #[inline]
     pub fn coupled(&self) -> SectorId {
-        self.coupled
+        self.arena.coupled(self.index)
     }
 
     #[inline]
     pub fn is_dual(&self) -> &[bool] {
-        &self.is_dual
+        self.arena.is_dual(self.index)
     }
 
     #[inline]
     pub fn innerlines(&self) -> &[SectorId] {
-        &self.innerlines
+        self.arena.innerlines(self.index)
     }
 
     #[inline]
     pub fn vertices(&self) -> &[MultiplicityIndex] {
-        &self.vertices
+        self.arena.vertices(self.index)
     }
 
     /// Validate this raw key as a categorical fusion tree for `rule`.
@@ -422,13 +483,13 @@ impl FusionTreeKey {
     }
 }
 
-const FROZEN_SLICE_CONTROL_BYTES: usize = 2 * std::mem::size_of::<usize>();
-
-fn charge_frozen_slice<T>(seen: &mut rustc_hash::FxHashSet<usize>, slice: &Arc<[T]>) -> usize {
-    let pointer = Arc::as_ptr(slice) as *const T as usize;
-    if seen.insert(pointer) {
-        FROZEN_SLICE_CONTROL_BYTES
-            .saturating_add(slice.len().saturating_mul(std::mem::size_of::<T>()))
+/// The arena's heap bytes, counted once across calls that share `seen`.
+pub(crate) fn charge_tree_arena(
+    seen: &mut rustc_hash::FxHashSet<usize>,
+    arena: &Arc<TreeArena>,
+) -> usize {
+    if seen.insert(Arc::as_ptr(arena) as usize) {
+        arena.heap_bytes()
     } else {
         0
     }
@@ -438,20 +499,15 @@ pub(crate) fn charge_fusion_tree_key_backings(
     seen: &mut rustc_hash::FxHashSet<usize>,
     tree: &FusionTreeKey,
 ) -> usize {
-    charge_frozen_slice(seen, &tree.uncoupled)
-        .saturating_add(charge_frozen_slice(seen, &tree.is_dual))
-        .saturating_add(charge_frozen_slice(seen, &tree.innerlines))
-        .saturating_add(charge_frozen_slice(seen, &tree.vertices))
+    charge_tree_arena(seen, &tree.arena)
 }
 
 pub(crate) fn charge_fusion_tree_group_key_backings(
     seen: &mut rustc_hash::FxHashSet<usize>,
     group: &FusionTreeGroupKey,
 ) -> usize {
-    charge_frozen_slice(seen, &group.codomain_uncoupled)
-        .saturating_add(charge_frozen_slice(seen, &group.domain_uncoupled))
-        .saturating_add(charge_frozen_slice(seen, &group.codomain_is_dual))
-        .saturating_add(charge_frozen_slice(seen, &group.domain_is_dual))
+    charge_tree_arena(seen, &group.codomain.arena)
+        .saturating_add(charge_tree_arena(seen, &group.domain.arena))
 }
 
 #[derive(Clone, Copy)]
@@ -621,7 +677,7 @@ where
 }
 
 impl FusionTreePairKey {
-    /// Heap bytes of this pair's shared backing slices, each counted once
+    /// Heap bytes of the arenas this pair keeps alive, each counted once
     /// across calls that share `seen`.
     #[doc(hidden)]
     pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {

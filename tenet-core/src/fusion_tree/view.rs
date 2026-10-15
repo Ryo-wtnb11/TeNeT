@@ -55,6 +55,12 @@ impl<'a> FusionTreeRef<'a> {
         self.uncoupled
     }
 
+    /// The hash [`Hash`] writes, as stored with the key.
+    #[inline]
+    pub(crate) fn stored_hash(&self) -> u64 {
+        self.hash
+    }
+
     #[inline]
     pub fn coupled(&self) -> SectorId {
         self.coupled
@@ -245,14 +251,7 @@ impl FusionTreeKey {
     #[doc(hidden)]
     #[inline]
     pub fn as_view(&self) -> FusionTreeRef<'_> {
-        FusionTreeRef::with_hash(
-            &self.uncoupled,
-            self.coupled,
-            &self.is_dual,
-            &self.innerlines,
-            &self.vertices,
-            self.hash,
-        )
+        self.arena.view(self.index)
     }
 }
 
@@ -269,10 +268,10 @@ impl FusionTreeGroupKey {
     #[inline]
     pub fn as_view(&self) -> FusionTreeGroupRef<'_> {
         FusionTreeGroupRef::new(
-            &self.codomain_uncoupled,
-            &self.domain_uncoupled,
-            &self.codomain_is_dual,
-            &self.domain_is_dual,
+            self.codomain.uncoupled(),
+            self.domain.uncoupled(),
+            self.codomain.is_dual(),
+            self.domain.is_dual(),
         )
     }
 }

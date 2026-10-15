@@ -279,7 +279,10 @@ fn an_entry_charges_its_recoupling_matrix_and_trees() {
         FusionTreePairOrientation::Direct,
     );
     let refs = multi.1.iter().collect::<Vec<_>>();
-    let key = handle.context.key(0, (&multi.0, &refs));
+    let mut arena = tenet_core::DedupTreeArenaBuilder::default();
+    let (key, _) = handle
+        .context
+        .rehomed_key(0, (&multi.0, &refs), &mut arena, std::iter::empty());
     let mut backings = Default::default();
     let bytes = charged_key_bytes(&key, &mut backings).saturating_add(charged_entry_bytes(
         std::slice::from_ref(&spec),
@@ -400,4 +403,89 @@ fn degeneracy_only_bindings_of_one_group_set_share_one_coefficient_payload() {
 
     let other = TreeTransformOperation::permute([1, 0], [2, 3]);
     assert!(!bind(43, &other).shares_coefficients_with(&first));
+}
+
+#[test]
+fn a_staged_entry_owns_one_arena_for_its_key_and_value() {
+    let structure = su2_structure(1);
+    let multi = group_keys(&structure)
+        .into_iter()
+        .find(|(_, keys)| keys.len() > 1)
+        .unwrap();
+    let handle = reuse::<f64>(
+        RuleIdentity::of_type::<KeyMarker>(),
+        TransformerMode::MultiplicityFree,
+        TreeTransformScope::TreePair,
+        &TreeTransformOperation::permute([0, 1], [3, 2]),
+        FusionTreePairOrientation::Direct,
+    );
+    let width = multi.1.len();
+    let spec = TreeTransformGroupBlockSpec::try_multi(
+        multi.1.clone(),
+        multi.1.clone(),
+        vec![0.5_f64; width * width],
+    )
+    .unwrap();
+    let refs = multi.1.iter().collect::<Vec<_>>();
+    let entry = handle.stage(0, (&multi.0, &refs), vec![spec]);
+    let pending = handle.into_pending();
+    let (key, _, _) = &pending.groups[0];
+
+    // What: the key's group and source pairs and the value's destination and
+    // source pairs all point into one arena (charged once), never into the
+    // source structure's (charged again on top), and are equal by content
+    // (Rule O, #2192).
+    let mut seen = rustc_hash::FxHashSet::default();
+    let entry_bytes = key.group_key.charge_retained_backings(&mut seen);
+    assert!(entry_bytes > 0);
+    let spec = &entry.specs()[0];
+    for pair in key
+        .src_keys
+        .iter()
+        .chain(spec.dst_keys())
+        .chain(spec.src_keys())
+    {
+        assert_eq!(pair.charge_retained_backings(&mut seen), 0);
+    }
+    assert!(multi.1[0].charge_retained_backings(&mut seen) > 0);
+    assert_eq!(key.group_key, multi.0);
+    assert_eq!(&*key.src_keys, &multi.1[..]);
+    assert_eq!(spec.dst_keys(), &multi.1[..]);
+}
+
+#[test]
+fn a_staged_trace_entry_owns_one_arena_for_its_key_and_destinations() {
+    let structure = su2_structure(1);
+    let multi = group_keys(&structure)
+        .into_iter()
+        .find(|(_, keys)| keys.len() > 1)
+        .unwrap();
+    let mut handle = TraceTermReuse::<f64>::new(
+        RuleIdentity::of_type::<KeyMarker>(),
+        TransformerMode::MultiplicityFree,
+        TreeTransformOperation::permute([0, 1], [3, 2]),
+        FusionTreePairOrientation::Direct,
+        1,
+    );
+    let width = multi.1.len();
+    let columns = BlockSourceColumns::new(
+        multi.1.clone().into_boxed_slice(),
+        Box::new([0, width]),
+        (0..width).map(|row| (row, 1.0)).collect(),
+    );
+    let refs = multi.1.iter().collect::<Vec<_>>();
+    let entry = handle.stage(0, (&multi.0, &refs), columns);
+    let pending = handle.into_pending();
+    let (key, _, _) = &pending.groups[0];
+
+    // What: the key and every destination of a trace entry point into one
+    // arena (charged once), never into the source structure's (Rule O,
+    // #2192), and keep their content.
+    let mut seen = rustc_hash::FxHashSet::default();
+    assert!(key.group_key.charge_retained_backings(&mut seen) > 0);
+    for pair in key.src_keys.iter().chain(entry.destinations()) {
+        assert_eq!(pair.charge_retained_backings(&mut seen), 0);
+    }
+    assert!(multi.1[0].charge_retained_backings(&mut seen) > 0);
+    assert_eq!(entry.destinations(), &multi.1[..]);
 }

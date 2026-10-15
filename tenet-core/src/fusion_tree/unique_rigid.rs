@@ -169,7 +169,7 @@ where
     }
 
     let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let codomain_rank = frame.codomain.uncoupled.len();
+    let codomain_rank = frame.codomain.uncoupled().len();
     let (current, coefficient) = repartition_loop(
         (UniqueRigidTreePairState { frame, local }, R::Scalar::one()),
         codomain_rank,

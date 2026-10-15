@@ -139,8 +139,8 @@ pub(crate) trait GenericFRAccess {
     /// sector, in canonical order.
     fn try_fusion_trees(
         &self,
-        uncoupled: &Arc<[SectorId]>,
-        is_dual: &Arc<[bool]>,
+        uncoupled: &[SectorId],
+        is_dual: &[bool],
         coupled: SectorId,
     ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>>;
 }
@@ -232,8 +232,8 @@ where
     }
     fn try_fusion_trees(
         &self,
-        uncoupled: &Arc<[SectorId]>,
-        is_dual: &Arc<[bool]>,
+        uncoupled: &[SectorId],
+        is_dual: &[bool],
         coupled: SectorId,
     ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>> {
         Ok(collect_generic_fusion_trees_for_coupled_frozen(
@@ -335,8 +335,8 @@ impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
     }
     fn try_fusion_trees(
         &self,
-        uncoupled: &Arc<[SectorId]>,
-        is_dual: &Arc<[bool]>,
+        uncoupled: &[SectorId],
+        is_dual: &[bool],
         coupled: SectorId,
     ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>> {
         collect_generic_fusion_trees_for_coupled_frozen_checked(

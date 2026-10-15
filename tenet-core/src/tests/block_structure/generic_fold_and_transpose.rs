@@ -181,14 +181,14 @@ fn b2b_a4_multi_fmove_matches_tensorkit() {
     for (inner, v1, v2, outputs) in table {
         let out = generic_multi_fmove_tree(&rule, &a4f_rank3(inner, v1, v2)).unwrap();
         assert_eq!(out.len(), 5, "in({inner},{v1},{v2}): 5 tails");
-        // What: every tail-coupled candidate reuses the same frozen
-        // external runtime-rank identity.
-        assert!(out
-            .windows(2)
-            .all(|terms| Arc::ptr_eq(&terms[0].0.uncoupled, &terms[1].0.uncoupled)));
-        assert!(out
-            .windows(2)
-            .all(|terms| Arc::ptr_eq(&terms[0].0.is_dual, &terms[1].0.is_dual)));
+        // What: every tail-coupled candidate carries the same externals, and
+        // the candidates of one tail-coupled sector share one arena.
+        assert!(out.windows(2).all(|terms| {
+            terms[0].0.uncoupled() == terms[1].0.uncoupled()
+                && terms[0].0.is_dual() == terms[1].0.is_dual()
+                && (terms[0].0.coupled() != terms[1].0.coupled()
+                    || Arc::ptr_eq(&terms[0].0.arena, &terms[1].0.arena))
+        }));
         for (coupled, vtx, want) in outputs {
             let got = find_coeff(&out, coupled, vtx);
             assert_vec(

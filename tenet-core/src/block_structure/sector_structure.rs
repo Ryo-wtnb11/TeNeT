@@ -136,6 +136,11 @@ impl FusionTreeBlockGroup {
 pub struct SectorStructure {
     rank: usize,
     key_kind: Option<BlockKeyKind>,
+    /// The canonical arena of every fusion-tree key in `blocks` and
+    /// `fusion_tree_groups` (Rule O, #2192); `None` for other kinds and when
+    /// empty. Its per-side row order is the tree order, so a row index is the
+    /// tree's rank on its side.
+    trees: Option<Arc<TreeArena>>,
     pub(super) blocks: Vec<SectorBlock>,
     pub(super) fusion_tree_groups: Vec<FusionTreeBlockGroup>,
     pub(super) sorted_indices: DimVec,
@@ -148,6 +153,7 @@ impl Clone for SectorStructure {
         Self {
             rank: self.rank,
             key_kind: self.key_kind,
+            trees: self.trees.clone(),
             blocks: self.blocks.clone(),
             fusion_tree_groups: self.fusion_tree_groups.clone(),
             sorted_indices: self.sorted_indices.clone(),
@@ -181,6 +187,7 @@ impl SectorStructure {
         Self {
             rank,
             key_kind: None,
+            trees: None,
             blocks: Vec::new(),
             fusion_tree_groups: Vec::new(),
             sorted_indices: DimVec::new(),
@@ -211,22 +218,7 @@ impl SectorStructure {
             }
             blocks.push(SectorBlock::new(key));
         }
-        let sorted_indices = sorted_block_indices(&blocks);
-        for pair in sorted_indices.windows(2) {
-            let left = blocks[pair[0]].key();
-            let right = blocks[pair[1]].key();
-            if left == right {
-                return Err(CoreError::DuplicateBlockKey {
-                    key: Box::new(left.clone()),
-                });
-            }
-        }
-        Ok(Self::from_checked_blocks(
-            rank,
-            expected_kind,
-            blocks,
-            sorted_indices,
-        ))
+        Self::from_checked_blocks(rank, expected_kind, blocks)
     }
 
     /// [`Self::from_keys`] over the fusion-tree keys of an enumerated
@@ -241,30 +233,39 @@ impl SectorStructure {
             .iter()
             .map(|key| SectorBlock::new(BlockKey::from(key.clone())))
             .collect::<Vec<_>>();
-        let sorted_indices = sorted_block_indices(&blocks);
-        if let Some(pair) = sorted_indices
-            .windows(2)
-            .find(|pair| blocks[pair[0]].key() == blocks[pair[1]].key())
-        {
-            return Err(CoreError::DuplicateBlockKey {
-                key: Box::new(blocks[pair[0]].key().clone()),
-            });
-        }
         let kind = blocks.first().map(|block| block.key().kind());
-        Ok(Self::from_checked_blocks(
-            rank,
-            kind,
-            blocks,
-            sorted_indices,
-        ))
+        Self::from_checked_blocks(rank, kind, blocks)
     }
 
+    /// Re-home fusion-tree blocks into this structure's own canonical arena
+    /// (Rule O), sort, reject duplicates, and group.
     fn from_checked_blocks(
         rank: usize,
         expected_kind: Option<BlockKeyKind>,
-        blocks: Vec<SectorBlock>,
-        sorted_indices: DimVec,
-    ) -> Self {
+        mut blocks: Vec<SectorBlock>,
+    ) -> Result<Self, CoreError> {
+        let trees = if expected_kind == Some(BlockKeyKind::FusionTree) {
+            Some(rehome_fusion_tree_blocks(&mut blocks))
+        } else {
+            None
+        };
+        let sorted_indices = match &trees {
+            Some(_) => {
+                let mut sorted = (0..blocks.len()).collect::<DimVec>();
+                sorted.sort_unstable_by_key(|&index| fusion_tree_rows(&blocks[index]));
+                sorted
+            }
+            None => sorted_block_indices(&blocks),
+        };
+        for pair in sorted_indices.windows(2) {
+            let left = blocks[pair[0]].key();
+            let right = blocks[pair[1]].key();
+            if left == right {
+                return Err(CoreError::DuplicateBlockKey {
+                    key: Box::new(left.clone()),
+                });
+            }
+        }
         let mut fusion_tree_groups = Vec::<FusionTreeBlockGroup>::new();
         let mut fusion_tree_group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
         for (index, block) in blocks.iter().enumerate() {
@@ -279,15 +280,16 @@ impl SectorStructure {
             }
         }
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
-        Self {
+        Ok(Self {
             rank,
             key_kind: expected_kind,
+            trees,
             blocks,
             fusion_tree_groups,
             sorted_indices,
             compact_lookup,
             charged_heap_bytes: OnceLock::new(),
-        }
+        })
     }
 
     #[inline]
@@ -346,6 +348,9 @@ impl SectorStructure {
         if self.key_kind != Some(key.kind()) {
             return None;
         }
+        if let BlockKey::FusionTree(pair) = key {
+            return self.find_fusion_tree_pair_index(pair);
+        }
         if let (Some(lookup), Some(id)) = (&self.compact_lookup, key.compact_id()) {
             if let Some(index) = lookup.get(id) {
                 return Some(index);
@@ -358,15 +363,36 @@ impl SectorStructure {
     }
 
     pub fn find_fusion_tree_pair_index(&self, key: &FusionTreePairKey) -> Option<usize> {
+        self.find_tree_rows(key.codomain_tree(), key.domain_tree())
+    }
+
+    /// The block whose codomain tree equals `codomain` and whose domain tree
+    /// equals `domain`.
+    ///
+    /// Same-arena fast path (#2192): a handle into this structure's arena
+    /// with `codomain` on a codomain row and `domain` on a domain row already
+    /// names its side ranks. Any other handle, a swapped-side one included,
+    /// is searched per side by content; a miss on either side is a miss.
+    fn find_tree_rows(&self, codomain: &FusionTreeKey, domain: &FusionTreeKey) -> Option<usize> {
         if self.key_kind != Some(BlockKeyKind::FusionTree) {
             return None;
         }
+        let arena = self.trees.as_ref()?;
+        let n_codomain = arena.codomain_rows()?;
+        let rows = if Arc::ptr_eq(&codomain.arena, arena)
+            && Arc::ptr_eq(&domain.arena, arena)
+            && codomain.index < n_codomain
+            && n_codomain <= domain.index
+        {
+            (codomain.index, domain.index)
+        } else {
+            (
+                find_tree_row(arena, 0..n_codomain, codomain.as_view())?,
+                find_tree_row(arena, n_codomain..arena.len(), domain.as_view())?,
+            )
+        };
         self.sorted_indices
-            .binary_search_by(|&index| match self.blocks[index].key() {
-                BlockKey::Dense => std::cmp::Ordering::Less,
-                BlockKey::Opaque(_) => std::cmp::Ordering::Less,
-                BlockKey::FusionTree(tree) => tree.cmp(key),
-            })
+            .binary_search_by_key(&rows, |&index| fusion_tree_rows(&self.blocks[index]))
             .ok()
             .map(|position| self.sorted_indices[position])
     }
@@ -376,19 +402,7 @@ impl SectorStructure {
         &self,
         logical_key: &FusionTreePairKey,
     ) -> Option<usize> {
-        if self.key_kind != Some(BlockKeyKind::FusionTree) {
-            return None;
-        }
-        self.sorted_indices
-            .binary_search_by(|&index| match self.blocks[index].key() {
-                BlockKey::FusionTree(storage_key) => storage_key
-                    .codomain_tree()
-                    .cmp(logical_key.domain_tree())
-                    .then_with(|| storage_key.domain_tree().cmp(logical_key.codomain_tree())),
-                _ => std::cmp::Ordering::Less,
-            })
-            .ok()
-            .map(|position| self.sorted_indices[position])
+        self.find_tree_rows(logical_key.domain_tree(), logical_key.codomain_tree())
     }
 
     #[deprecated(
@@ -527,6 +541,99 @@ impl CompactBlockLookup {
             .copied()
             .filter(|&index| index != Self::MISSING)
     }
+}
+
+/// The `(codomain row, domain row)` of a re-homed fusion-tree block.
+#[inline]
+fn fusion_tree_rows(block: &SectorBlock) -> (usize, usize) {
+    match block.key() {
+        BlockKey::FusionTree(pair) => (pair.codomain_tree.index, pair.domain_tree.index),
+        BlockKey::Dense | BlockKey::Opaque(_) => (usize::MAX, usize::MAX),
+    }
+}
+
+/// The row in `rows` of `arena` equal to `tree` (`Ord`, then stored hash:
+/// the canonical row order), by binary search.
+fn find_tree_row(
+    arena: &TreeArena,
+    rows: core::ops::Range<usize>,
+    tree: FusionTreeRef<'_>,
+) -> Option<usize> {
+    let (mut low, mut high) = (rows.start, rows.end);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let row = arena.view(middle);
+        match row
+            .cmp(&tree)
+            .then_with(|| row.stored_hash().cmp(&tree.stored_hash()))
+        {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => return Some(middle),
+        }
+    }
+    None
+}
+
+/// The tree pair of a block of a homogeneous fusion-tree structure.
+#[inline]
+fn fusion_tree_pair_of(block: &SectorBlock) -> &FusionTreePairKey {
+    match block.key() {
+        BlockKey::FusionTree(pair) => pair,
+        BlockKey::Dense | BlockKey::Opaque(_) => {
+            unreachable!("a fusion-tree structure holds only fusion-tree keys")
+        }
+    }
+}
+
+/// Point every block at one canonical arena the structure owns: the input
+/// arena when the blocks already use all of it in canonical order (the
+/// cache-built layouts, one refcount bump), else a canonical copy (5 arena
+/// allocations and O(Σ words)).
+fn rehome_fusion_tree_blocks(blocks: &mut [SectorBlock]) -> Arc<TreeArena> {
+    if let Some(arena) = reusable_tree_arena(blocks) {
+        return arena;
+    }
+    rehome_canonical_with(blocks, fusion_tree_pair_of, |block| match &mut block.key {
+        BlockKey::FusionTree(pair) => pair,
+        BlockKey::Dense | BlockKey::Opaque(_) => {
+            unreachable!("a fusion-tree structure holds only fusion-tree keys")
+        }
+    })
+}
+
+/// The blocks' arena if it is canonical, every block's codomain tree is on
+/// a codomain row and its domain tree on a domain row, and every row is
+/// used (so a structure over a few keys of a large one never pins it).
+fn reusable_tree_arena(blocks: &[SectorBlock]) -> Option<Arc<TreeArena>> {
+    let arena = &fusion_tree_pair_of(blocks.first()?).codomain_tree.arena;
+    let n_codomain = arena.codomain_rows()?;
+    // Each block names one row per side, so fewer blocks than either side's
+    // rows cannot use them all.
+    if blocks.len() < n_codomain.max(arena.len() - n_codomain) {
+        return None;
+    }
+    // One bit per row; inline up to 256 rows.
+    let mut referenced = SmallVec::<[u64; 4]>::from_elem(0, arena.len().div_ceil(64));
+    for block in blocks {
+        let pair = fusion_tree_pair_of(block);
+        let (codomain, domain) = (&pair.codomain_tree, &pair.domain_tree);
+        if !Arc::ptr_eq(&codomain.arena, arena)
+            || !Arc::ptr_eq(&domain.arena, arena)
+            || codomain.index >= n_codomain
+            || domain.index < n_codomain
+        {
+            return None;
+        }
+        for row in [codomain.index, domain.index] {
+            referenced[row / 64] |= 1 << (row % 64);
+        }
+    }
+    let used = referenced
+        .iter()
+        .map(|word| word.count_ones() as usize)
+        .sum::<usize>();
+    (used == arena.len()).then(|| Arc::clone(arena))
 }
 
 fn sorted_block_indices(blocks: &[SectorBlock]) -> DimVec {

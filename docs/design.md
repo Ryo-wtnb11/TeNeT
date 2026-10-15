@@ -42,7 +42,9 @@ owns applicable strided traversal and movement primitives.
 `FusionTreeKey` identifies a basis state by uncoupled sectors, coupled sector,
 dual flags, inner lines, and vertex multiplicities. All five fields participate
 in equality and ordering; a cached hash only avoids recomputing the hash during
-lookups. `BlockStructure` keeps sector/tree identity alongside degeneracy
+lookups. A key is a handle into an immutable tree arena owned by its holder: a
+sector structure or a composed-coefficient cache entry owns one arena for all
+of its trees, so a held key keeps that arena alive. `BlockStructure` keeps sector/tree identity alongside degeneracy
 shapes, strides, and offsets. An owned dense tensor's reduced payload uses
 that checked layout; compact diagonal and lazy-adjoint representations retain
 their own structure instead of pretending to be dense storage.

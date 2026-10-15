@@ -2,34 +2,28 @@ use super::*;
 
 /// Braid state that is mutated step by step without a cached hash.
 ///
-/// `FusionTreeKey` caches its hash, so in-place `Arc::make_mut` swaps on a key
-/// would leave that cache stale between steps; keeping the working state in a
-/// hash-free struct makes the stale state unrepresentable and costs one hash
-/// at `freeze` instead of one per Artin step.
+/// `FusionTreeKey` stores its hash in an immutable arena, so the working
+/// state lives in the very buffers `freeze` moves into a one-row arena: one
+/// hash and one arena per braid instead of one per Artin step.
 pub(crate) struct UnhashedFusionTree {
-    uncoupled: Arc<[SectorId]>,
-    coupled: SectorId,
-    is_dual: Arc<[bool]>,
-    innerlines: Arc<[SectorId]>,
-    vertices: Arc<[MultiplicityIndex]>,
+    /// `uncoupled ‖ coupled ‖ innerlines`, the arena's sector layout.
+    sectors: Vec<SectorId>,
+    len_uncoupled: usize,
+    is_dual: Vec<bool>,
+    vertices: Vec<MultiplicityIndex>,
 }
 
 impl From<FusionTreeKey> for UnhashedFusionTree {
     fn from(key: FusionTreeKey) -> Self {
-        let FusionTreeKey {
-            uncoupled,
-            coupled,
-            is_dual,
-            innerlines,
-            vertices,
-            hash: _,
-        } = key;
+        let mut sectors = Vec::with_capacity(key.uncoupled().len() + 1 + key.innerlines().len());
+        sectors.extend_from_slice(key.uncoupled());
+        sectors.push(key.coupled());
+        sectors.extend_from_slice(key.innerlines());
         Self {
-            uncoupled,
-            coupled,
-            is_dual,
-            innerlines,
-            vertices,
+            sectors,
+            len_uncoupled: key.uncoupled().len(),
+            is_dual: key.is_dual().to_vec(),
+            vertices: key.vertices().to_vec(),
         }
     }
 }
@@ -39,25 +33,31 @@ impl UnhashedFusionTree {
         self.vertices.get(position).copied()
     }
 
+    #[inline]
+    fn uncoupled(&self) -> &[SectorId] {
+        &self.sectors[..self.len_uncoupled]
+    }
+
     pub(crate) fn freeze(self) -> FusionTreeKey {
-        FusionTreeKey::from_frozen(
-            self.uncoupled,
-            self.coupled,
+        TreeArenaBuilder::single(
+            self.sectors,
+            self.len_uncoupled,
             self.is_dual,
-            self.innerlines,
             self.vertices,
         )
+        .freeze()
+        .key(0)
     }
 }
 
 impl TreeView for UnhashedFusionTree {
     #[inline]
     fn coupled(&self) -> SectorId {
-        self.coupled
+        self.sectors[self.len_uncoupled]
     }
     #[inline]
     fn innerlines(&self) -> &[SectorId] {
-        &self.innerlines
+        &self.sectors[self.len_uncoupled + 1..]
     }
     fn vertex(&self, position: usize) -> Option<MultiplicityIndex> {
         self.vertex_at(position)
@@ -68,7 +68,7 @@ impl TreeView for UnhashedFusionTree {
 impl MultiplicityFreeTreeData for UnhashedFusionTree {
     #[inline]
     fn uncoupled(&self) -> &[SectorId] {
-        &self.uncoupled
+        UnhashedFusionTree::uncoupled(self)
     }
 }
 
@@ -83,9 +83,9 @@ where
     R::Scalar: Mul<Output = R::Scalar>,
 {
     let kernel = UniqueK(rule);
-    let site = ArtinSite::new(&kernel, &tree.uncoupled, index, inverse)?;
+    let site = ArtinSite::new(&kernel, tree.uncoupled(), index, inverse)?;
     let mut out = InPlaceArtinEdit {
-        innerline_count: tree.innerlines.len(),
+        innerline_count: tree.innerlines().len(),
         vertex_count: tree.vertices.len(),
         index,
         edit: None,
@@ -95,13 +95,13 @@ where
         message: "a unique-fusion braid emits exactly one tree",
     })?;
     if let Some((position, sector)) = innerline {
-        Arc::make_mut(&mut tree.innerlines)[position] = sector;
+        tree.sectors[tree.len_uncoupled + 1 + position] = sector;
     }
     if vertices == ArtinVertices::SwapUnit {
-        Arc::make_mut(&mut tree.vertices).swap(index - 1, index);
+        tree.vertices.swap(index - 1, index);
     }
-    Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
-    Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
+    tree.sectors[..tree.len_uncoupled].swap(index, index + 1);
+    tree.is_dual.swap(index, index + 1);
     Ok(coefficient)
 }
 
@@ -205,12 +205,29 @@ impl MultiplicityFreeTreeData for FusionTreeKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct MultiplicityFreeTreeFrame {
-    pub(super) uncoupled: Arc<[SectorId]>,
-    pub(super) is_dual: Arc<[bool]>,
-    vertices: Arc<[MultiplicityIndex]>,
+/// The externals of a multiplicity-free tree: uncoupled sectors and duality
+/// flags (every vertex is label one).
+///
+/// Why two forms: a frame split off a key borrows that key's arena (one
+/// refcount), while a frame a move derives owns two exact slices; a one-row
+/// arena would cost a third allocation and its row table for fields no frame
+/// reads.
+#[derive(Clone)]
+pub(crate) enum MultiplicityFreeTreeFrame {
+    Tree(FusionTreeKey),
+    Owned {
+        uncoupled: Box<[SectorId]>,
+        is_dual: Box<[bool]>,
+    },
 }
+
+impl PartialEq for MultiplicityFreeTreeFrame {
+    fn eq(&self, other: &Self) -> bool {
+        self.uncoupled() == other.uncoupled() && self.is_dual() == other.is_dual()
+    }
+}
+
+impl Eq for MultiplicityFreeTreeFrame {}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MultiplicityFreeTreeLocal {
@@ -530,24 +547,36 @@ impl MultiplicityFreeTreeLocal {
 }
 
 impl MultiplicityFreeTreeFrame {
-    pub(super) fn from_frozen_externals(uncoupled: Arc<[SectorId]>, is_dual: Arc<[bool]>) -> Self {
-        let vertices =
-            std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1))
-                .collect::<Vec<_>>()
-                .into();
-        Self {
-            uncoupled,
-            is_dual,
-            vertices,
+    /// A frame over new externals: one lone arena.
+    pub(super) fn from_externals<U, D>(uncoupled: U, is_dual: D) -> Self
+    where
+        U: IntoIterator<Item = SectorId>,
+        D: IntoIterator<Item = bool>,
+    {
+        Self::Owned {
+            uncoupled: uncoupled.into_iter().collect(),
+            is_dual: is_dual.into_iter().collect(),
+        }
+    }
+
+    #[inline]
+    pub(super) fn uncoupled(&self) -> &[SectorId] {
+        match self {
+            Self::Tree(tree) => tree.uncoupled(),
+            Self::Owned { uncoupled, .. } => uncoupled,
+        }
+    }
+
+    #[inline]
+    pub(super) fn is_dual(&self) -> &[bool] {
+        match self {
+            Self::Tree(tree) => tree.is_dual(),
+            Self::Owned { is_dual, .. } => is_dual,
         }
     }
 
     fn from_tree(tree: &FusionTreeKey) -> Self {
-        Self {
-            uncoupled: Arc::clone(&tree.uncoupled),
-            is_dual: Arc::clone(&tree.is_dual),
-            vertices: Arc::clone(&tree.vertices),
-        }
+        Self::Tree(tree.clone())
     }
 
     pub(super) fn split(
@@ -563,16 +592,68 @@ impl MultiplicityFreeTreeFrame {
     pub(super) fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
         // Why not split and compare frames: every source shares these slices,
         // while collecting rank > 8 frames would allocate once per source.
-        self.uncoupled.as_ref() == tree.uncoupled() && self.is_dual.as_ref() == tree.is_dual()
+        self.uncoupled() == tree.uncoupled() && self.is_dual() == tree.is_dual()
     }
 
     pub(super) fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
-        FusionTreeKey::from_frozen(
-            Arc::clone(&self.uncoupled),
+        let mut builder = TreeArenaBuilder::exact(
+            1,
+            self.uncoupled().len() + 1 + local.innerlines.len(),
+            self.uncoupled().len().saturating_sub(1),
+            self.is_dual().len(),
+        );
+        self.push_materialized(&mut builder, &local);
+        builder.freeze().key(0)
+    }
+
+    /// Every tree of `locals` over these externals, in one arena; tree `i`
+    /// is row `i`.
+    pub(super) fn materialize_all<'a>(
+        &self,
+        locals: impl ExactSizeIterator<Item = &'a MultiplicityFreeTreeLocal> + Clone,
+    ) -> Arc<TreeArena> {
+        let (uncoupled, is_dual) = (self.uncoupled(), self.is_dual());
+        let count = locals.len();
+        let inner = locals
+            .clone()
+            .map(|local| local.innerlines.len())
+            .sum::<usize>();
+        // Every tree shares the first one's externals.
+        let shared = count.min(1);
+        let mut builder = TreeArenaBuilder::exact(
+            count,
+            count + inner + shared * uncoupled.len(),
+            shared * uncoupled.len().saturating_sub(1),
+            shared * is_dual.len(),
+        );
+        for (index, local) in locals.enumerate() {
+            if index == 0 {
+                self.push_materialized(&mut builder, local);
+            } else {
+                builder.push_lines_with_externals_of(
+                    0,
+                    local.coupled,
+                    local.innerlines.iter().copied(),
+                );
+            }
+        }
+        builder.freeze()
+    }
+
+    /// Push the tree of `local` over these externals.
+    pub(super) fn push_materialized(
+        &self,
+        builder: &mut TreeArenaBuilder,
+        local: &MultiplicityFreeTreeLocal,
+    ) -> usize {
+        let (uncoupled, is_dual) = (self.uncoupled(), self.is_dual());
+        let vertices = uncoupled.len().saturating_sub(1);
+        builder.push_parts(
+            uncoupled.iter().copied(),
             local.coupled,
-            Arc::clone(&self.is_dual),
-            Arc::from(local.innerlines.as_slice()),
-            Arc::clone(&self.vertices),
+            is_dual.iter().copied(),
+            local.innerlines.iter().copied(),
+            std::iter::repeat_n(MultiplicityIndex::ONE, vertices),
         )
     }
 }
@@ -613,6 +694,12 @@ impl MultiplicityFreeTreePairLocal {
     }
 }
 
+/// Pair `index` of an arena from [`MultiplicityFreeTreePairFrame::materialize_all`].
+#[inline]
+pub(super) fn materialized_pair(arena: &Arc<TreeArena>, index: usize) -> FusionTreePairKey {
+    FusionTreePairKey::pair(arena.key(2 * index), arena.key(2 * index + 1))
+}
+
 impl MultiplicityFreeTreePairFrame {
     pub(super) fn split(
         tree_pair: ValidatedMultiplicityFreeTreePair<'_>,
@@ -633,11 +720,63 @@ impl MultiplicityFreeTreePairFrame {
             && self.domain.matches_tree(tree_pair.domain().key())
     }
 
+    /// Every pair of `locals` over these externals, all trees in one arena;
+    /// see [`materialized_pair`].
+    pub(super) fn materialize_all<'a>(
+        &self,
+        locals: impl ExactSizeIterator<Item = &'a MultiplicityFreeTreePairLocal> + Clone,
+    ) -> Arc<TreeArena> {
+        let (codomain, domain) = (self.codomain.uncoupled(), self.domain.uncoupled());
+        let count = locals.len();
+        let inner = locals
+            .clone()
+            .map(|local| local.codomain.innerlines.len() + local.domain.innerlines.len())
+            .sum::<usize>();
+        // Every pair shares the first pair's externals per side.
+        let shared = count.min(1);
+        let mut builder = TreeArenaBuilder::exact(
+            2 * count,
+            2 * count + inner + shared * (codomain.len() + domain.len()),
+            shared * (codomain.len().saturating_sub(1) + domain.len().saturating_sub(1)),
+            shared * (self.codomain.is_dual().len() + self.domain.is_dual().len()),
+        );
+        for (index, local) in locals.enumerate() {
+            if index == 0 {
+                self.codomain
+                    .push_materialized(&mut builder, &local.codomain);
+                self.domain.push_materialized(&mut builder, &local.domain);
+            } else {
+                for (row, side) in [(0, &local.codomain), (1, &local.domain)] {
+                    builder.push_lines_with_externals_of(
+                        row,
+                        side.coupled,
+                        side.innerlines.iter().copied(),
+                    );
+                }
+            }
+        }
+        builder.freeze()
+    }
+
+    /// Both trees in one arena.
     pub(super) fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreePairKey {
-        FusionTreePairKey::pair(
-            self.codomain.materialize(local.codomain),
-            self.domain.materialize(local.domain),
-        )
+        let (codomain, domain) = (self.codomain.uncoupled(), self.domain.uncoupled());
+        let mut builder = TreeArenaBuilder::exact(
+            2,
+            codomain.len()
+                + domain.len()
+                + 2
+                + local.codomain.innerlines.len()
+                + local.domain.innerlines.len(),
+            codomain.len().saturating_sub(1) + domain.len().saturating_sub(1),
+            self.codomain.is_dual().len() + self.domain.is_dual().len(),
+        );
+        let codomain = self
+            .codomain
+            .push_materialized(&mut builder, &local.codomain);
+        let domain = self.domain.push_materialized(&mut builder, &local.domain);
+        let arena = builder.freeze();
+        FusionTreePairKey::pair(arena.key(codomain), arena.key(domain))
     }
 }
 
@@ -671,16 +810,21 @@ pub(super) fn prepare_multiplicity_free_artin<R>(
 where
     R: MultiplicityFreeFusionSymbols,
 {
-    let site = ArtinSite::new(&SimpleK(rule), &frame.uncoupled, index, inverse)?;
-    let mut uncoupled = frame.uncoupled.to_vec();
-    uncoupled.swap(index, index + 1);
-    let mut is_dual = frame.is_dual.to_vec();
-    is_dual.swap(index, index + 1);
-    let output_frame = MultiplicityFreeTreeFrame {
-        uncoupled: uncoupled.into(),
-        is_dual: is_dual.into(),
-        vertices: Arc::clone(&frame.vertices),
+    let site = ArtinSite::new(&SimpleK(rule), frame.uncoupled(), index, inverse)?;
+    let swapped = |position: usize| {
+        if position == index {
+            index + 1
+        } else if position == index + 1 {
+            index
+        } else {
+            position
+        }
     };
+    let (uncoupled, is_dual) = (frame.uncoupled(), frame.is_dual());
+    let output_frame = MultiplicityFreeTreeFrame::from_externals(
+        (0..uncoupled.len()).map(|position| uncoupled[swapped(position)]),
+        (0..is_dual.len()).map(|position| is_dual[swapped(position)]),
+    );
     Ok(PreparedMultiplicityFreeArtin { output_frame, site })
 }
 

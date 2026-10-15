@@ -267,35 +267,28 @@ fn split_tree_structural(
     let rank = tree.uncoupled().len();
     if front_rank == rank {
         let coupled = tree.coupled();
-        let trace_tree = FusionTreeKey::new(
-            [coupled],
-            coupled,
-            [false],
-            Vec::<SectorId>::new(),
-            Vec::<MultiplicityIndex>::new(),
-        );
+        let trace_tree = FusionTreeKey::new([coupled], coupled, [false], [], []);
         return Ok((tree.clone(), trace_tree));
     }
+    let (uncoupled, is_dual) = (tree.uncoupled(), tree.is_dual());
+    let (innerlines, vertices) = (tree.innerlines(), tree.vertices());
+    // Both halves share one exactly sized arena of two rows.
+    let duals = is_dual.len() + 1;
 
     if front_rank == 1 {
-        let first = tree.uncoupled()[0];
-        let front_tree = FusionTreeKey::new(
-            [first],
-            first,
-            [tree.is_dual()[0]],
-            Vec::<SectorId>::new(),
-            Vec::<MultiplicityIndex>::new(),
-        );
-        let mut tail_is_dual = tree.is_dual().to_vec();
-        tail_is_dual[0] = false;
-        let tail_tree = FusionTreeKey::new(
-            tree.uncoupled().to_vec(),
+        let mut builder =
+            TreeArenaBuilder::exact(2, rank + innerlines.len() + 3, vertices.len(), duals);
+        let first = uncoupled[0];
+        builder.push_parts([first], first, [is_dual[0]], [], []);
+        builder.push_parts(
+            uncoupled.iter().copied(),
             tree.coupled(),
-            tail_is_dual,
-            tree.innerlines().to_vec(),
-            tree.vertices().to_vec(),
+            std::iter::once(false).chain(is_dual.iter().copied().skip(1)),
+            innerlines.iter().copied(),
+            vertices.iter().copied(),
         );
-        return Ok((front_tree, tail_tree));
+        let arena = builder.freeze();
+        return Ok((arena.key(0), arena.key(1)));
     }
 
     if front_rank == 0 {
@@ -304,66 +297,48 @@ fn split_tree_structural(
                 message: "split at zero requires a non-empty source fusion tree",
             });
         }
-        let front_tree = FusionTreeKey::new(
-            Vec::<SectorId>::new(),
-            unit,
-            Vec::<bool>::new(),
-            Vec::<SectorId>::new(),
-            Vec::<MultiplicityIndex>::new(),
-        );
-        let mut tail_uncoupled = Vec::with_capacity(rank + 1);
-        tail_uncoupled.push(unit);
-        tail_uncoupled.extend_from_slice(tree.uncoupled());
-        let mut tail_is_dual = Vec::with_capacity(rank + 1);
-        tail_is_dual.push(false);
-        tail_is_dual.extend_from_slice(tree.is_dual());
-        let mut tail_innerlines = Vec::with_capacity(rank.saturating_sub(1));
-        if rank >= 2 {
-            tail_innerlines.push(tree.uncoupled()[0]);
-            tail_innerlines.extend_from_slice(tree.innerlines());
-        }
-        let mut tail_vertices = Vec::with_capacity(rank);
-        tail_vertices.push(MultiplicityIndex::ONE);
-        tail_vertices.extend_from_slice(tree.vertices());
-        let tail_tree = FusionTreeKey::new(
-            tail_uncoupled,
+        let tail_innerlines = if rank >= 2 { innerlines.len() + 1 } else { 0 };
+        let mut builder =
+            TreeArenaBuilder::exact(2, rank + tail_innerlines + 3, vertices.len() + 1, duals);
+        builder.push_parts([], unit, [], [], []);
+        builder.push_parts(
+            std::iter::once(unit).chain(uncoupled.iter().copied()),
             tree.coupled(),
-            tail_is_dual,
-            tail_innerlines,
-            tail_vertices,
+            std::iter::once(false).chain(is_dual.iter().copied()),
+            (rank >= 2)
+                .then_some(uncoupled[0])
+                .into_iter()
+                .chain(innerlines.iter().copied())
+                .take(tail_innerlines),
+            std::iter::once(MultiplicityIndex::ONE).chain(vertices.iter().copied()),
         );
-        return Ok((front_tree, tail_tree));
+        let arena = builder.freeze();
+        return Ok((arena.key(0), arena.key(1)));
     }
 
-    let intermediate =
-        *tree
-            .innerlines()
-            .get(front_rank - 2)
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "split requires the intermediate innerline",
-            })?;
-    let front_tree = FusionTreeKey::new(
-        tree.uncoupled()[..front_rank].to_vec(),
+    let intermediate = *innerlines
+        .get(front_rank - 2)
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "split requires the intermediate innerline",
+        })?;
+    let mut builder =
+        TreeArenaBuilder::exact(2, rank + innerlines.len() + 2, vertices.len(), duals);
+    builder.push_parts(
+        uncoupled[..front_rank].iter().copied(),
         intermediate,
-        tree.is_dual()[..front_rank].to_vec(),
-        tree.innerlines()[..front_rank.saturating_sub(2)].to_vec(),
-        tree.vertices()[..front_rank - 1].to_vec(),
+        is_dual[..front_rank].iter().copied(),
+        innerlines[..front_rank.saturating_sub(2)].iter().copied(),
+        vertices[..front_rank - 1].iter().copied(),
     );
-
-    let mut tail_uncoupled = Vec::with_capacity(rank - front_rank + 1);
-    tail_uncoupled.push(intermediate);
-    tail_uncoupled.extend_from_slice(&tree.uncoupled()[front_rank..]);
-    let mut tail_is_dual = Vec::with_capacity(rank - front_rank + 1);
-    tail_is_dual.push(false);
-    tail_is_dual.extend_from_slice(&tree.is_dual()[front_rank..]);
-    let tail_tree = FusionTreeKey::new(
-        tail_uncoupled,
+    builder.push_parts(
+        std::iter::once(intermediate).chain(uncoupled[front_rank..].iter().copied()),
         tree.coupled(),
-        tail_is_dual,
-        tree.innerlines()[front_rank - 1..].to_vec(),
-        tree.vertices()[front_rank - 1..].to_vec(),
+        std::iter::once(false).chain(is_dual[front_rank..].iter().copied()),
+        innerlines[front_rank - 1..].iter().copied(),
+        vertices[front_rank - 1..].iter().copied(),
     );
-    Ok((front_tree, tail_tree))
+    let arena = builder.freeze();
+    Ok((arena.key(0), arena.key(1)))
 }
 
 /// Replace the first leaf of `tail` by `front` (TensorKit `join(f₁, f₂)`,
@@ -372,35 +347,29 @@ fn split_tree_structural(
 /// merges. The caller has checked the boundary leaf.
 fn join_tree_structural(front: &FusionTreeKey, tail: &FusionTreeKey) -> FusionTreeKey {
     match (front.uncoupled().len(), tail.uncoupled().len()) {
-        (1, _) => {
-            let mut is_dual = tail.is_dual().to_vec();
-            is_dual[0] = front.is_dual()[0];
-            FusionTreeKey::new(
-                tail.uncoupled().to_vec(),
-                tail.coupled(),
-                is_dual,
-                tail.innerlines().to_vec(),
-                tail.vertices().to_vec(),
-            )
-        }
+        (1, _) => FusionTreeKey::new(
+            tail.uncoupled().iter().copied(),
+            tail.coupled(),
+            std::iter::once(front.is_dual()[0]).chain(tail.is_dual().iter().copied().skip(1)),
+            tail.innerlines().iter().copied(),
+            tail.vertices().iter().copied(),
+        ),
         (_, 1) => front.clone(),
-        (_, _) => {
-            let mut uncoupled =
-                Vec::with_capacity(front.uncoupled().len() + tail.uncoupled().len() - 1);
-            uncoupled.extend_from_slice(front.uncoupled());
-            uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
-            let mut is_dual = Vec::with_capacity(front.is_dual().len() + tail.is_dual().len() - 1);
-            is_dual.extend_from_slice(front.is_dual());
-            is_dual.extend_from_slice(&tail.is_dual()[1..]);
-            let mut innerlines =
-                Vec::with_capacity(front.innerlines().len() + 1 + tail.innerlines().len());
-            innerlines.extend_from_slice(front.innerlines());
-            innerlines.push(front.coupled());
-            innerlines.extend_from_slice(tail.innerlines());
-            let mut vertices = Vec::with_capacity(front.vertices().len() + tail.vertices().len());
-            vertices.extend_from_slice(front.vertices());
-            vertices.extend_from_slice(tail.vertices());
-            FusionTreeKey::new(uncoupled, tail.coupled(), is_dual, innerlines, vertices)
-        }
+        (_, _) => FusionTreeKey::new(
+            front
+                .uncoupled()
+                .iter()
+                .chain(&tail.uncoupled()[1..])
+                .copied(),
+            tail.coupled(),
+            front.is_dual().iter().chain(&tail.is_dual()[1..]).copied(),
+            front
+                .innerlines()
+                .iter()
+                .copied()
+                .chain(std::iter::once(front.coupled()))
+                .chain(tail.innerlines().iter().copied()),
+            front.vertices().iter().chain(tail.vertices()).copied(),
+        ),
     }
 }

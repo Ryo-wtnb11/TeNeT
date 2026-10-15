@@ -1073,11 +1073,11 @@ impl TreeView for FramedLocal<'_> {
 impl FramedTree for FramedLocal<'_> {
     #[inline(always)]
     fn uncoupled(&self) -> &[SectorId] {
-        &self.frame.uncoupled
+        self.frame.uncoupled()
     }
     #[inline(always)]
     fn is_dual(&self) -> &[bool] {
-        &self.frame.is_dual
+        self.frame.is_dual()
     }
 }
 

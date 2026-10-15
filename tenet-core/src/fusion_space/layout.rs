@@ -452,6 +452,9 @@ pub(super) fn fusion_tree_layout_data_from_groups(
             }
         }
     }
+    // Rule O: the layout keys and the sector structure share one canonical
+    // arena; the structure then takes it without a copy.
+    rehome_canonical(&mut keys);
     let sector = SectorStructure::from_fusion_tree_keys(rank, &keys).map(Arc::new);
     FusionTreeHomSpaceLayoutData {
         keys: Arc::from(keys),
