@@ -33,17 +33,10 @@ where
 /// the domain. Every coupled-sector matrix must have at least as many rows as
 /// columns; otherwise this returns [`OperationError::InvalidArgument`] before
 /// entering the dense SVD.
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn left_polar<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn left_polar<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<
-    LeftPolar<BoundTensorMap<R, D, NOUT, NIN>, BoundTensorMap<R, D, NIN, NIN>>,
-    OperationError,
->
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<LeftPolar<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -84,17 +77,10 @@ where
 /// Every coupled-sector matrix must have at least as many columns as rows;
 /// otherwise this returns [`OperationError::InvalidArgument`] before entering
 /// the dense SVD.
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn right_polar<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn right_polar<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<
-    RightPolar<BoundTensorMap<R, D, NOUT, NOUT>, BoundTensorMap<R, D, NOUT, NIN>>,
-    OperationError,
->
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<RightPolar<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

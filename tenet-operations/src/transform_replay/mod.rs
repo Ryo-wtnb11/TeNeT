@@ -14,7 +14,6 @@ use num_traits::{One, Zero};
 use tenet_core::HostWritableStorage;
 use tenet_core::{BlockStructure, Placement};
 #[cfg(test)]
-use tenet_core::{HostReadableStorage, TensorMap};
 #[cfg(test)]
 use tenet_dense::DefaultDenseExecutor;
 use tenet_dense::{strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob};

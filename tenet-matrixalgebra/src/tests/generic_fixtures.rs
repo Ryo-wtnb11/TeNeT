@@ -244,10 +244,8 @@ pub(super) fn expert_generic_factorization_input(
     .unwrap()
     .try_bind_rule(source.provider())
     .unwrap();
-    let tensor = TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
-        typed_space,
-        0.0,
-        |key, indices| {
+    let tensor =
+        TestTensor::<f64>::from_block_fn_with_fusion_space(typed_space, 0.0, |key, indices| {
             let block = source_structure
                 .block(
                     source_structure
@@ -261,10 +259,9 @@ pub(super) fn expert_generic_factorization_input(
                     .zip(block.strides())
                     .map(|(&index, &stride)| index * stride)
                     .sum::<usize>()]
-        },
-    )
-    .unwrap();
-    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+        })
+        .unwrap();
+    let dynamic = tensor.fusion_space().clone();
     let bound =
         BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
             .unwrap();
@@ -474,10 +471,8 @@ where
     .unwrap()
     .try_bind_rule(source.provider())
     .unwrap();
-    let tensor = TensorMap::<D, 1, 1>::from_block_fn_with_fusion_space(
-        typed_space,
-        D::zero(),
-        |key, indices| {
+    let tensor =
+        TestTensor::<D>::from_block_fn_with_fusion_space(typed_space, D::zero(), |key, indices| {
             let block = source_structure
                 .block(
                     source_structure
@@ -491,10 +486,9 @@ where
                     .zip(block.strides())
                     .map(|(&index, &stride)| index * stride)
                     .sum::<usize>()]
-        },
-    )
-    .unwrap();
-    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+        })
+        .unwrap();
+    let dynamic = tensor.fusion_space().clone();
     let bound =
         BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
             .unwrap();
@@ -763,7 +757,7 @@ fn expert_generic_endomorphism_input(
     .unwrap()
     .try_bind_rule(source.provider())
     .unwrap();
-    let tensor = TensorMap::<Complex64, 2, 2>::from_block_fn_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_block_fn_with_fusion_space(
         typed_space,
         Complex64::zero(),
         |key, indices| {
@@ -779,7 +773,7 @@ fn expert_generic_endomorphism_input(
         },
     )
     .unwrap();
-    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+    let dynamic = tensor.fusion_space().clone();
     let bound =
         BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
             .unwrap();

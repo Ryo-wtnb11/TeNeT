@@ -1,6 +1,6 @@
 use super::*;
 
-fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
+fn malformed_simple_su2_tree_pair_tensors() -> (TestTensor<f64>, TestTensor<f64>) {
     let valid = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1],
@@ -26,11 +26,9 @@ fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<
     let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
-            .unwrap();
-    let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
+        .unwrap();
+    let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
     (dst, src)
 }
 
@@ -165,8 +163,7 @@ fn assert_invalid_simple_vertex(error: OperationError) {
     );
 }
 
-fn valid_simple_source_and_nonalias_malformed_destination(
-) -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
+fn valid_simple_source_and_nonalias_malformed_destination() -> (TestTensor<f64>, TestTensor<f64>) {
     let valid = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1],
@@ -192,13 +189,13 @@ fn valid_simple_source_and_nonalias_malformed_destination(
     let src_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(malformed, vec![2, 1])]).unwrap();
     assert_ne!(src_structure.content_id(), dst_structure.content_id());
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![3.0],
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         src_structure,
     )
     .unwrap();
-    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let dst = TestTensor::<f64>::from_vec_with_structure(
         vec![17.0, 19.0],
         TensorMapSpace::<2, 0>::from_dims([2, 1], []).unwrap(),
         dst_structure,
@@ -494,15 +491,11 @@ fn expert_layout_tree_transform_paths_compile_without_publishing() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let structure = simple_su2_vertex_structure(1);
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
-        vec![1.0],
-        space.clone(),
-        (*structure).clone(),
-    )
-    .unwrap();
-    let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space, (*structure).clone())
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0], space.clone(), (*structure).clone())
             .unwrap();
+    let dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0], space, (*structure).clone()).unwrap();
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
 
     let assert_uncached = |f: &mut dyn FnMut(&mut crate::tree_transform::TreeTransformPlanning)| {
@@ -659,14 +652,14 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
     // and replays exactly like the former materialized logical structure.
     assert_eq!(oriented, old);
     let space = TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap();
-    let src = TensorMap::<f64, 2, 2>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),
         (*storage).clone(),
     )
     .unwrap();
     let make_dst = || {
-        TensorMap::<f64, 2, 2>::from_vec_with_structure(
+        TestTensor::<f64>::from_vec_with_structure(
             vec![0.0, 0.0],
             space.clone(),
             (*logical).clone(),
@@ -1254,7 +1247,7 @@ fn malformed_source_precedes_noncategorical_destination_without_cache_mutation()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (_, src) = malformed_simple_su2_tree_pair_tensors();
     let dst_structure = packed_fixture_structure(2, [(BlockKey::opaque([9]), vec![1, 1])]).unwrap();
-    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let dst = TestTensor::<f64>::from_vec_with_structure(
         vec![0.0],
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         dst_structure,
@@ -1335,14 +1328,10 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
         .unwrap()])
         .unwrap();
         let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-        let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
-            vec![0.0],
-            space.clone(),
-            structure.clone(),
-        )
-        .unwrap();
-        let src =
-            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
+        let dst =
+            TestTensor::<f64>::from_vec_with_structure(vec![0.0], space.clone(), structure.clone())
+                .unwrap();
+        let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
         let cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
 
@@ -1408,11 +1397,9 @@ fn invalid_unique_source_does_not_count_eager_compile_misses() {
     let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
-            .unwrap();
-    let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
+        .unwrap();
+    let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
     let cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
@@ -1516,11 +1503,10 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope() {
     let dst_structure = packed_fixture_structure(3, [(dst_key, vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let dst_space = TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap();
-    let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![1.0, 2.0], src_space, src_structure)
-            .unwrap();
-    let _dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+    let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0, 2.0], src_space, src_structure)
         .unwrap();
+    let _dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0], dst_space, dst_structure).unwrap();
 
     let error = crate::build_all_codomain_tree_transform_group_plan(
         &SU2FusionRule,

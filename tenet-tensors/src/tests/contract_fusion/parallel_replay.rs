@@ -29,14 +29,14 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
 
         let lhs_space = space(homspace());
         let rhs_space = space(homspace());
-        let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        let lhs = TestTensor::<f64>::from_vec_with_fusion_space(
             (0..lhs_space.required_len().unwrap())
                 .map(|index| (index % 17) as f64 * 0.25 - 2.0)
                 .collect(),
             lhs_space,
         )
         .unwrap();
-        let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        let rhs = TestTensor::<f64>::from_vec_with_fusion_space(
             (0..rhs_space.required_len().unwrap())
                 .map(|index| (index % 13) as f64 * 0.5 - 3.0)
                 .collect(),
@@ -69,8 +69,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
 
         let dst_len = dst_space().required_len().unwrap();
         let mut serial_dst =
-            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space())
-                .unwrap();
+            TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space()).unwrap();
         let mut serial_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         context_contract_into(
             &mut serial_context,
@@ -85,8 +84,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
         .unwrap();
 
         let mut parallel_dst =
-            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space())
-                .unwrap();
+            TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space()).unwrap();
         let mut parallel_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         let backend = parallel_context.tree_context_mut().backend_mut();
         backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
@@ -173,19 +171,18 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
         )
         .unwrap()
     };
-    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.5, 1.5, 2.5, 3.5, 4.5],
         space(false, true),
     )
     .unwrap();
-    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![-1.25, -0.75, -0.25, 0.25, 0.75],
         space(true, false),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![0.0; 5], space(false, false))
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; 5], space(false, false)).unwrap();
 
     let mut backend = DenseTreeTransformOperations::default_executor();
     backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());

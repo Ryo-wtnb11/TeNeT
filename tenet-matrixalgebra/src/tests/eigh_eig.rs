@@ -522,11 +522,8 @@ fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     let later = regions.last().unwrap();
     let mut data = tensor.data().to_vec();
     data[later.range().start + 1] += 1.0;
-    let nonhermitian = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        data,
-        tensor.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
+    let nonhermitian =
+        TestTensor::<f64>::from_vec_with_fusion_space(data, tensor.fusion_space().clone()).unwrap();
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     crate::factorize::reset_eigh_copy_probe();
@@ -562,11 +559,9 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
         .map(|&value| Complex64::new(value, 0.0))
         .collect::<Vec<_>>();
     data[later.range().start + 1] += Complex64::new(1.0, 2.0);
-    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-        data,
-        real.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
+    let tensor =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(data, real.fusion_space().clone())
+            .unwrap();
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let adjoint_space = bound.space().adjoint_view().unwrap();
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
@@ -598,11 +593,8 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     let later = regions.last().unwrap();
     let mut data = tensor.data().to_vec();
     data[later.range().start + 1] += 1.0;
-    let nonhermitian = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        data,
-        tensor.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
+    let nonhermitian =
+        TestTensor::<f64>::from_vec_with_fusion_space(data, tensor.fusion_space().clone()).unwrap();
     let before = nonhermitian.data().to_vec();
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
@@ -624,7 +616,7 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
 
 /// `[[1, δ], [0, 2]]` passes when `|δ|/√2 ≤ tol·√(5 + δ²)`.
 /// Use the small-δ threshold `tol·√10` with a 3% margin.
-fn hermitian_threshold_pair<D: FactorScalar>(tol: f64, scale: f64) -> [TensorMap<D, 1, 1>; 2] {
+fn hermitian_threshold_pair<D: FactorScalar>(tol: f64, scale: f64) -> [TestTensor<D>; 2] {
     let threshold = tol * 10.0_f64.sqrt();
     let matrix = |delta: f64| {
         one_sector_matrix(
@@ -855,7 +847,7 @@ fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
     }
 }
 
-fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex64, 1, 1>) {
+fn unequal_fallback_eigh_fixtures() -> (TestTensor<f64>, TestTensor<Complex64>) {
     let source = mixed_rectangular_tensor((3, 3), (2, 2));
     let source_regions = source
         .structure()
@@ -879,17 +871,14 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
             };
         }
     }
-    let real = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        data,
-        source.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let real =
+        TestTensor::<f64>::from_vec_with_fusion_space(data, source.fusion_space().clone()).unwrap();
+    let complex = TestTensor::<Complex64>::from_vec_with_fusion_space(
         real.data()
             .iter()
             .map(|&value| Complex64::new(value, 0.0))
             .collect(),
-        real.fusion_space().unwrap().as_ref().clone(),
+        real.fusion_space().clone(),
     )
     .unwrap();
     let mut complex_data = complex.data().to_vec();
@@ -897,9 +886,9 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
         complex_data[region.range().start + 1] = Complex64::new(1.2, 1.6);
         complex_data[region.range().start + region.rows()] = Complex64::new(1.2, -1.6);
     }
-    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let complex = TestTensor::<Complex64>::from_vec_with_fusion_space(
         complex_data,
-        complex.fusion_space().unwrap().as_ref().clone(),
+        complex.fusion_space().clone(),
     )
     .unwrap();
     (real, complex)
@@ -1064,7 +1053,7 @@ fn eigh_vectors_retain_each_callers_exact_provider_arc() {
 #[test]
 fn eigh_direct_outputs_keep_executor_vector_owner() {
     // What: a one-region direct EIGH publishes the executor-returned V buffer.
-    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TestTensor<D>) {
         let mut dense = ScriptedExecutor::<RejectEighInto>::default();
         let eigh = eigh_full(
             &mut dense,
@@ -1077,17 +1066,17 @@ fn eigh_direct_outputs_keep_executor_vector_owner() {
     }
 
     let tensor = one_sector_matrix(vec![2.0_f64, 0.0, 0.0, 3.0]);
-    let space = tensor.fusion_space().unwrap().as_ref().clone();
+    let space = tensor.fusion_space().clone();
     check(&tensor);
     check(
-        &TensorMap::<f32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<f32>::from_vec_with_fusion_space(
             tensor.data().iter().map(|&value| value as f32).collect(),
             space.clone(),
         )
         .unwrap(),
     );
     check(
-        &TensorMap::<Complex32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex32>::from_vec_with_fusion_space(
             tensor
                 .data()
                 .iter()
@@ -1098,7 +1087,7 @@ fn eigh_direct_outputs_keep_executor_vector_owner() {
         .unwrap(),
     );
     check(
-        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex64>::from_vec_with_fusion_space(
             tensor
                 .data()
                 .iter()
@@ -1114,7 +1103,7 @@ fn eigh_direct_outputs_keep_executor_vector_owner() {
 fn eigh_fallback_keeps_owned_vectors_until_the_final_scatter_for_every_dtype() {
     // What: the fallback's executor V is the same allocation immediately before
     // TeNeT's required structural scatter, not the final factor allocation.
-    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TestTensor<D>) {
         let rule = Arc::new(Z2FusionRule);
         let bound = bound_tensor(Arc::clone(&rule), tensor);
         let adjoint = bound.space().adjoint_view().unwrap();
@@ -1143,22 +1132,22 @@ fn eigh_fallback_keeps_owned_vectors_until_the_final_scatter_for_every_dtype() {
 
     let (real, complex) = unequal_fallback_eigh_fixtures();
     check(&real);
-    let space = real.fusion_space().unwrap().as_ref().clone();
+    let space = real.fusion_space().clone();
     check(
-        &TensorMap::<f32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<f32>::from_vec_with_fusion_space(
             real.data().iter().map(|&value| value as f32).collect(),
             space.clone(),
         )
         .unwrap(),
     );
     check(
-        &TensorMap::<Complex32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex32>::from_vec_with_fusion_space(
             complex
                 .data()
                 .iter()
                 .map(|value| Complex32::new(value.re as f32, value.im as f32))
                 .collect(),
-            complex.fusion_space().unwrap().as_ref().clone(),
+            complex.fusion_space().clone(),
         )
         .unwrap(),
     );
@@ -1276,13 +1265,13 @@ fn eigh_full_does_not_relabel_the_lowest_u1_sector() {
         [vec![2, 2]],
     )
     .unwrap();
-    let tensor = TensorMap::from_vec_with_fusion_space(vec![4.0, 1.0, 1.0, 3.0], space).unwrap();
+    let tensor = TestTensor::from_vec_with_fusion_space(vec![4.0, 1.0, 1.0, 3.0], space).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
-    assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
+    assert_eq!(result.v.tensor().dims(), &[2, 2]);
+    assert_eq!(result.d.tensor().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
     assert_eq!(values.len(), 2);
     for (col, &value) in values.iter().enumerate() {
@@ -1384,12 +1373,12 @@ fn eigh_c64_reconstructs_multi_sector_hermitian_input_and_fixes_gauge() {
     // What: complex direct vectors reconstruct every sector and use the canonical phase gauge.
     let rule = Z2FusionRule;
     let real = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
-    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         real.data()
             .iter()
             .map(|&value| Complex64::new(value, 0.0))
             .collect(),
-        real.fusion_space().unwrap().as_ref().clone(),
+        real.fusion_space().clone(),
     )
     .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -1448,7 +1437,7 @@ fn eigh_c64_reconstructs_multi_sector_hermitian_input_and_fixes_gauge() {
 fn eigh_direct_regions_publish_vectors_by_factor_order_and_spectra_by_source_order() {
     // What: reversed source spans leave spectra in source traversal while V is
     // interpreted through the published factor's sector regions.
-    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TestTensor<D>) {
         let rule = Arc::new(Z2FusionRule);
         let bound = bound_tensor(Arc::clone(&rule), tensor);
         let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
@@ -1542,20 +1531,17 @@ fn eigh_direct_regions_publish_vectors_by_factor_order_and_spectra_by_source_ord
     }
     let real = reversed_complete_grid_copy(
         &rule,
-        &TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-            data,
-            source.fusion_space().unwrap().as_ref().clone(),
-        )
-        .unwrap(),
+        &TestTensor::<f64>::from_vec_with_fusion_space(data, source.fusion_space().clone())
+            .unwrap(),
     );
     check(&real);
     check(
-        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex64>::from_vec_with_fusion_space(
             real.data()
                 .iter()
                 .map(|&value| Complex64::new(value, 0.0))
                 .collect(),
-            real.fusion_space().unwrap().as_ref().clone(),
+            real.fusion_space().clone(),
         )
         .unwrap(),
     );
@@ -1581,20 +1567,20 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
     }
 
     // Promote t to complex (same space => same layout => elementwise cast).
-    let tensor_c = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let tensor_c = TestTensor::<Complex64>::from_vec_with_fusion_space(
         tensor
             .data()
             .iter()
             .map(|&value| Complex64::new(value, 0.0))
             .collect(),
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
 
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
-    let mut tv = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+    let mut tv = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
-        eig.v.fusion_space().unwrap().as_ref().clone(),
+        eig.v.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -1608,9 +1594,9 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    let mut vd = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+    let mut vd = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
-        eig.v.fusion_space().unwrap().as_ref().clone(),
+        eig.v.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -1682,18 +1668,17 @@ fn eigh_refuses_a_block_that_stays_hermitian_after_the_column_swap() {
         vec![vec![1; 4]; key_count],
     )
     .unwrap();
-    let canonical =
-        TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, _| {
-            let BlockKey::FusionTree(tree) = key else {
-                unreachable!("fusion-tree blocks")
-            };
-            if tree.codomain_tree() == tree.domain_tree() {
-                2.0
-            } else {
-                1.0
-            }
-        })
-        .unwrap();
+    let canonical = TestTensor::<f64>::from_block_fn_with_fusion_space(space, 0.0, |key, _| {
+        let BlockKey::FusionTree(tree) = key else {
+            unreachable!("fusion-tree blocks")
+        };
+        if tree.codomain_tree() == tree.domain_tree() {
+            2.0
+        } else {
+            1.0
+        }
+    })
+    .unwrap();
     let swapped = mis_stacked_endomorphism_copy(&rule, &canonical);
     let provider = Arc::new(rule);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();

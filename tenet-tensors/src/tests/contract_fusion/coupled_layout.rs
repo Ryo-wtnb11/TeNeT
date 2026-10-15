@@ -1,6 +1,6 @@
 use super::*;
 
-fn copy_blocks_between_layouts<D: Copy>(dst: &mut TensorMap<D, 2, 2>, src: &TensorMap<D, 2, 2>) {
+fn copy_blocks_between_layouts<D: Copy>(dst: &mut TestTensor<D>, src: &TestTensor<D>) {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let src_structure = std::sync::Arc::clone(src.structure());
     assert_eq!(dst_structure.block_count(), src_structure.block_count());
@@ -37,7 +37,7 @@ fn copy_blocks_between_layouts<D: Copy>(dst: &mut TensorMap<D, 2, 2>, src: &Tens
     }
 }
 
-fn assert_blocks_match(lhs: &TensorMap<f64, 2, 2>, rhs: &TensorMap<f64, 2, 2>) {
+fn assert_blocks_match(lhs: &TestTensor<f64>, rhs: &TestTensor<f64>) {
     let lhs_structure = std::sync::Arc::clone(lhs.structure());
     let rhs_structure = std::sync::Arc::clone(rhs.structure());
     assert_eq!(lhs_structure.block_count(), rhs_structure.block_count());
@@ -166,7 +166,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         .unwrap()
         .is_none());
     let lhs_len = lhs_packed_space.required_len().unwrap();
-    let lhs_packed = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let lhs_packed = TestTensor::<Complex64>::from_vec_with_fusion_space(
         (0..lhs_len)
             .map(|index| Complex64::new(index as f64 * 0.25 - 1.0, 0.125 * index as f64))
             .collect(),
@@ -180,7 +180,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         .unwrap()
         .is_none());
     let rhs_len = rhs_packed_space.required_len().unwrap();
-    let rhs_packed = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let rhs_packed = TestTensor::<Complex64>::from_vec_with_fusion_space(
         (0..rhs_len)
             .map(|index| Complex64::new(0.75 - index as f64 * 0.1, 0.5))
             .collect(),
@@ -199,12 +199,12 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
-    let mut lhs_coupled = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let mut lhs_coupled = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); lhs_len],
         lhs_coupled_space,
     )
     .unwrap();
-    let mut rhs_coupled = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let mut rhs_coupled = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); rhs_len],
         rhs_coupled_space,
     )
@@ -240,9 +240,9 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         .map(|index| Complex64::new(1.0 + index as f64 * 0.05, -0.25))
         .collect::<Vec<_>>();
     let mut dst_packed =
-        TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(initial, dst_packed_space.clone())
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial, dst_packed_space.clone())
             .unwrap();
-    let mut dst_coupled = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let mut dst_coupled = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); dst_len],
         dst_coupled_space,
     )
@@ -270,7 +270,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         beta,
     )
     .unwrap();
-    let mut coupled_in_packed_layout = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let mut coupled_in_packed_layout = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); dst_len],
         dst_packed_space,
     )
@@ -303,14 +303,12 @@ fn coupled_layout_complex_scalar_contraction_matches_closed_form() {
     let initial = Complex64::new(5.0, 0.5);
     let alpha = Complex64::new(0.75, -0.25);
     let beta = Complex64::new(-0.5, 0.125);
-    let lhs =
-        TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(vec![lhs_value], space.clone())
-            .unwrap();
-    let rhs =
-        TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(vec![rhs_value], space.clone())
-            .unwrap();
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(vec![lhs_value], space.clone())
+        .unwrap();
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(vec![rhs_value], space.clone())
+        .unwrap();
     let mut dst =
-        TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(vec![initial], space).unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![initial], space).unwrap();
     fusion_contract_into(
         &rule,
         &mut dst,
@@ -376,7 +374,7 @@ where
         .unwrap()
         .is_none());
     let lhs_len = lhs_packed_space.required_len().unwrap();
-    let lhs_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let lhs_packed = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..lhs_len).map(|i| (i % 11) as f64 * 0.5 - 2.0).collect(),
         lhs_packed_space,
     )
@@ -388,7 +386,7 @@ where
         .unwrap()
         .is_none());
     let rhs_len = rhs_packed_space.required_len().unwrap();
-    let rhs_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let rhs_packed = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..rhs_len).map(|i| (i % 7) as f64 * 0.25 - 1.0).collect(),
         rhs_packed_space,
     )
@@ -407,10 +405,10 @@ where
         .unwrap()
         .is_some());
     let mut lhs_coupled =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; lhs_len], lhs_coupled_space)
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; lhs_len], lhs_coupled_space)
             .unwrap();
     let mut rhs_coupled =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; rhs_len], rhs_coupled_space)
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; rhs_len], rhs_coupled_space)
             .unwrap();
     copy_blocks_between_layouts(&mut lhs_coupled, &lhs_packed);
     copy_blocks_between_layouts(&mut rhs_coupled, &rhs_packed);
@@ -444,16 +442,12 @@ where
             .unwrap()
             .is_some());
         let dst_len = dst_packed_space.required_len().unwrap();
-        let mut dst_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            vec![0.0; dst_len],
-            dst_packed_space,
-        )
-        .unwrap();
-        let mut dst_coupled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            vec![0.0; dst_len],
-            dst_coupled_space,
-        )
-        .unwrap();
+        let mut dst_packed =
+            TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_packed_space)
+                .unwrap();
+        let mut dst_coupled =
+            TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_coupled_space)
+                .unwrap();
 
         let axes =
             || TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes));
@@ -508,9 +502,9 @@ where
             assert_eq!(dst_packed.data(), ordinary);
             assert!(packed_context.last_resolution_is_core());
 
-            let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_packed.fusion_space().unwrap());
-            let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_packed.fusion_space().unwrap());
-            let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_packed.fusion_space().unwrap());
+            let dst_dynamic = dst_packed.fusion_space().unwrap().as_ref().clone();
+            let lhs_dynamic = lhs_packed.fusion_space().unwrap().as_ref().clone();
+            let rhs_dynamic = rhs_packed.fusion_space().unwrap().as_ref().clone();
             let mut dynamic = vec![0.0; ordinary.len()];
             packed_context
                 .tensorcontract_fusion_dyn_into_raw(
@@ -577,13 +571,13 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     };
     let lhs_space = space(homspace());
     let lhs_len = lhs_space.required_len().unwrap();
-    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..lhs_len).map(|i| i as f64 * 0.5).collect(),
         lhs_space,
     )
     .unwrap();
     let rhs_space = space(homspace());
-    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..lhs_len).map(|i| 1.0 - i as f64 * 0.25).collect(),
         rhs_space,
     )
@@ -600,13 +594,12 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     .unwrap();
     let dst_space = space(dst_hom);
     let dst_len = dst_space.required_len().unwrap();
-    let dst =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
 
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let dst_dyn = DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap());
-    let lhs_dyn = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
-    let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let dst_dyn = dst.fusion_space().unwrap().as_ref().clone();
+    let lhs_dyn = lhs.fusion_space().unwrap().as_ref().clone();
+    let rhs_dyn = rhs.fusion_space().unwrap().as_ref().clone();
     let resolution = context
         .plan_tensorcontract_fusion_dyn_raw(
             &rule,

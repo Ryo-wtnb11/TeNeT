@@ -90,22 +90,18 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
         let lhs_data = (0..lhs_space.required_len().unwrap())
             .map(|index| 1.0 + 0.0625 * index as f64)
             .collect::<Vec<_>>();
-        let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+        let lhs = TestTensor::<f64>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
         let rhs =
-            TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space.clone())
+            TestTensor::<f64>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space.clone())
                 .unwrap();
-        let mut expected = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-            initial_dst.clone(),
-            dst_space.clone(),
-        )
-        .unwrap();
+        let mut expected =
+            TestTensor::<f64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space.clone())
+                .unwrap();
         fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
 
-        let mut actual = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-            initial_dst.clone(),
-            dst_space.clone(),
-        )
-        .unwrap();
+        let mut actual =
+            TestTensor::<f64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space.clone())
+                .unwrap();
         if case_index == 2 {
             context_contract_into(
                 &mut context,
@@ -173,8 +169,8 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
     let rhs_data = (0..32)
         .map(|index| -3.0 + 0.25 * index as f64)
         .collect::<Vec<_>>();
-    let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
     let initial_dst = vec![2.0, -1.0, 4.0, -3.0];
     let alpha = -1.5;
     let beta = 0.25;
@@ -203,14 +199,11 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
             [vec![2, 2]],
         )
         .unwrap();
-        let mut expected = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-            initial_dst.clone(),
-            dst_space.clone(),
-        )
-        .unwrap();
-        let mut actual =
-            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+        let mut expected =
+            TestTensor::<f64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space.clone())
                 .unwrap();
+        let mut actual =
+            TestTensor::<f64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
 
         fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
         context_contract_into(
@@ -324,20 +317,16 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
         let rhs_data = (0..32)
             .map(|index| Complex64::new(-3.0 + 0.25 * index as f64, 0.75 - 0.03125 * index as f64))
             .collect::<Vec<_>>();
-        let lhs =
-            TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-        let rhs =
-            TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-        let mut expected = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+        let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+        let mut expected = TestTensor::<Complex64>::from_vec_with_fusion_space(
             initial_dst.clone(),
             dst_space.clone(),
         )
         .unwrap();
-        let mut actual = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-            initial_dst.clone(),
-            dst_space,
-        )
-        .unwrap();
+        let mut actual =
+            TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+                .unwrap();
 
         fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
         context_contract_into(

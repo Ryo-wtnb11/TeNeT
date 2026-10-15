@@ -87,18 +87,14 @@ fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numer
 fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
     let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
-        vec![1.0; 8],
-        space.clone(),
-        structure.clone(),
-    )
-    .unwrap();
-    let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], space, structure).unwrap();
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 8], space.clone(), structure.clone())
+            .unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_structure(vec![0.0; 8], space, structure).unwrap();
 
-    let err = TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let err = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],
@@ -114,9 +110,9 @@ fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
         }
     );
 
-    let err = TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let err = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[
             TreeTransformBlockSpec::single(0, 0, 1.0),
             TreeTransformBlockSpec::single(0, 1, 1.0),
@@ -138,11 +134,9 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
     let src_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
     let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure).unwrap();
     let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure).unwrap();
 
     let err = TreeTransformStructure::compile_keyed_shared_structures(
         Arc::clone(dst.structure()),
@@ -518,18 +512,15 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
         .all(|spec| spec.source_axes() == Some([1, 0, 2, 3].as_slice())));
 
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![5.0, 7.0],
         space.clone(),
         src_structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![11.0, 13.0],
-        space,
-        src_structure.clone(),
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![11.0, 13.0], space, src_structure.clone())
+            .unwrap();
     let compiled = plan
         .compile_structures(&src_structure, &src_structure)
         .unwrap();
@@ -668,13 +659,13 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
     )
     .unwrap();
     let space = TensorMapSpace::<4, 0>::from_dims([2, 2, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![99.0, 1.0, 2.0, 3.0, 4.0, 98.0, 97.0, 9.0, 10.0, 11.0, 12.0],
         space.clone(),
         padded_structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut dst = TestTensor::<f64>::from_vec_with_structure(
         vec![91.0, 5.0, 6.0, 7.0, 8.0, 92.0, 93.0, 13.0, 14.0, 15.0, 16.0],
         space,
         padded_structure.clone(),
@@ -828,13 +819,13 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
 
     let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
         src_structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut dst = TestTensor::<f64>::from_vec_with_structure(
         vec![0.0, 0.0],
         dst_space,
         src_structure.clone(),
@@ -890,15 +881,11 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
     .unwrap();
     let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![10.0, 20.0],
-        src_space,
-        structure.clone(),
-    )
-    .unwrap();
-    let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, structure)
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![10.0, 20.0], src_space, structure.clone())
             .unwrap();
+    let mut dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], dst_space, structure).unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
     let compiled = uncached_tree_pair_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
@@ -945,13 +932,13 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
     .unwrap();
     let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<Complex64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
         src_space,
         structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 4, 0>::from_vec_with_structure(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
         dst_space,
         structure.clone(),
@@ -1071,14 +1058,14 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     .unwrap();
     let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let mut src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
         block_structure.clone(),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let structure = uncached_tree_pair_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
@@ -1354,19 +1341,21 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     assert_eq!(all_codomain, serial);
 
     let tensor_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         tensor_space.clone(),
         structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut dst = TestTensor::<f64>::from_vec_with_structure(
         vec![5.0, 6.0, 7.0, 8.0],
         tensor_space,
         structure,
     )
     .unwrap();
-    let compiled = serial.compile(&dst, &src).unwrap();
+    let compiled = serial
+        .compile_structures(dst.structure(), src.structure())
+        .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     replay_into(

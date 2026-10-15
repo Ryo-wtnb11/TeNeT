@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use tenet_core::{
     BraidingStyleKind, CheckedGenericFusion, FusionProductSpace, FusionRule, FusionStyleKind,
     FusionTensorMapSpace, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec,
-    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
 use tenet_matrixalgebra::seam::{
@@ -32,33 +32,29 @@ use tenet_matrixalgebra::seam::{
 use tenet_matrixalgebra::{Lq, Qr};
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
-/// A typed U(1) tensor bound to its provider, built the way the facade binds
-/// one (`bind_multiplicity_free` over the tensor's own fusion space).
+/// A U(1) tensor bound to its provider, built the way the facade binds one
+/// (`bind_multiplicity_free` over the tensor's own fusion space).
 struct BoundTensorMap {
     space: BoundDynamicFusionMapSpace<U1FusionRule>,
-    tensor: TensorMap<f64, 2, 2>,
+    data: Vec<f64>,
 }
 
 impl BoundTensorMap {
-    fn try_new(provider: Arc<U1FusionRule>, tensor: TensorMap<f64, 2, 2>) -> Option<Self> {
-        let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(tensor.fusion_space()?),
-            provider,
-        )
-        .ok()?;
-        Some(Self { space, tensor })
+    fn try_new(
+        provider: Arc<U1FusionRule>,
+        space: DynamicFusionMapSpace,
+        data: Vec<f64>,
+    ) -> Option<Self> {
+        let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(space, provider).ok()?;
+        (space.space().required_len().ok()? == data.len()).then_some(Self { space, data })
     }
 
     fn space(&self) -> &BoundDynamicFusionMapSpace<U1FusionRule> {
         &self.space
     }
 
-    fn tensor(&self) -> &TensorMap<f64, 2, 2> {
-        &self.tensor
-    }
-
     fn data(&self) -> &[f64] {
-        self.tensor.data()
+        &self.data
     }
 }
 
@@ -104,8 +100,12 @@ fn u1_tensor_with(charges: &[i32], rows: usize, cols: usize) -> BoundTensorMap {
     let data = (0..len)
         .map(|i| ((i * 11 + 5) % 29) as f64 * 0.25 - 3.0)
         .collect();
-    let tensor = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(data, space).unwrap();
-    BoundTensorMap::try_new(Arc::new(rule), tensor).unwrap()
+    BoundTensorMap::try_new(
+        Arc::new(rule),
+        DynamicFusionMapSpace::from_typed(&space),
+        data,
+    )
+    .unwrap()
 }
 
 /// A Generic toy rule with one self-dual sector `x` whose `x ⊗ x` channel has
@@ -295,15 +295,7 @@ fn hermitian_u1_tensor(charges: &[i32]) -> BoundTensorMap {
     let tensor = u1_tensor(charges);
     let mut data = tensor.data().to_vec();
     symmetrize(tensor.space().space().structure(), 2, &mut data);
-    BoundTensorMap::try_new(
-        Arc::new(U1FusionRule),
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            data,
-            tensor.tensor().fusion_space().unwrap().as_ref().clone(),
-        )
-        .unwrap(),
-    )
-    .unwrap()
+    BoundTensorMap::try_new(Arc::new(U1FusionRule), tensor.space().space().clone(), data).unwrap()
 }
 
 fn symmetrize(structure: &tenet_core::BlockStructure, nout: usize, data: &mut [f64]) {

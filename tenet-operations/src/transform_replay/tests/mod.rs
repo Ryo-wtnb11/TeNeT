@@ -1,7 +1,7 @@
 use super::*;
 use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
 use std::time::Duration;
-use tenet_core::{BlockKey, BlockSpec, TensorMapSpace, Trivial};
+use tenet_core::{BlockKey, BlockSpec};
 use tenet_dense::{
     DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor,
     DenseGemmBatchJob, DenseRead, DenseScalar, DenseTensor, DenseWrite,
@@ -13,26 +13,49 @@ mod overwrite;
 mod profile;
 mod threaded;
 
-type TestTensor = TensorMap<f64, 1, 0, Trivial, Vec<f64>>;
+/// Test-only host operand: a block structure and the storage it describes.
+struct TestTensor {
+    structure: Arc<BlockStructure>,
+    data: Vec<f64>,
+}
+
+impl TestTensor {
+    fn new(data: Vec<f64>, structure: BlockStructure) -> Self {
+        assert_eq!(structure.required_len().unwrap(), data.len());
+        Self {
+            structure: Arc::new(structure),
+            data,
+        }
+    }
+
+    fn structure(&self) -> &Arc<BlockStructure> {
+        &self.structure
+    }
+
+    fn data(&self) -> &[f64] {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut [f64] {
+        &mut self.data
+    }
+}
 
 fn fixture() -> (TestTensor, TestTensor, TreeTransformStructure<f64>) {
-    let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
-    let dst_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
-    let src: TestTensor = TensorMap::from_vec_with_structure(
+    let src = TestTensor::new(
         vec![3.0],
-        TensorMapSpace::from_dims([1], []).unwrap(),
-        src_structure,
-    )
-    .unwrap();
-    let dst = TensorMap::from_vec_with_structure(
+        BlockStructure::packed_column_major(1, [vec![1]]).unwrap(),
+    );
+    let dst = TestTensor::new(
         vec![10.0, 20.0],
-        TensorMapSpace::from_dims([2], []).unwrap(),
-        dst_structure,
+        BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap(),
+    );
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
+        &[TreeTransformBlockSpec::single(0, 0, 2.0)],
     )
     .unwrap();
-    let structure =
-        TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 2.0)])
-            .unwrap();
     (dst, src, structure)
 }
 

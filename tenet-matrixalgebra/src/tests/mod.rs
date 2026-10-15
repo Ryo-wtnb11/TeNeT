@@ -8,8 +8,7 @@ use tenet_core::{
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, GenericFArray, GenericFusionSymbols,
     GenericRMatrix, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeFusionRule,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
-    Z2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
@@ -17,8 +16,8 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    dyn_space_of, map_square_sectors_dyn_into, pinv_cutoff, typed_from_bound_factor,
-    typed_from_dyn, validate_inverse_region_routes_for_test, BoundTensorMap,
+    map_square_sectors_dyn_into, pinv_cutoff, typed_from_bound_factor,
+    validate_inverse_region_routes_for_test, BoundTensorMap, TestTensor,
 };
 use crate::test_numerics::numerics;
 use crate::*;

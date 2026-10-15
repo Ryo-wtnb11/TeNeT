@@ -1,5 +1,8 @@
 use super::*;
 
+mod test_tensor;
+pub(crate) use test_tensor::TestTensor;
+
 /// Fixture layout: subblocks packed contiguously in key order. Not a product
 /// layout (the only one is the coupled sector matrix); fixtures use it to
 /// exercise the arbitrary-strided-view contract of `BlockStructure`.
@@ -47,45 +50,22 @@ pub(crate) fn entry_axes(
     )
 }
 
-/// The dynamic fusion space of a static-rank fixture.
-pub(crate) fn fixture_space<T, const NOUT: usize, const NIN: usize, S, DD>(
-    tensor: &TensorMap<T, NOUT, NIN, S, DD>,
-) -> Result<DynamicFusionMapSpace, OperationError>
-where
-    DD: TensorStorage<T>,
-{
-    tensor
-        .fusion_space()
-        .map(|space| DynamicFusionMapSpace::from_typed(space))
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))
+/// The fusion space of a symmetric fixture.
+pub(crate) fn fixture_space<T>(
+    tensor: &TestTensor<T>,
+) -> Result<DynamicFusionMapSpace, OperationError> {
+    Ok(tensor.dynamic_space().clone())
 }
 
 /// The eager fusion contraction `dst = alpha * contract(lhs, rhs) + beta *
-/// dst` of static-rank fixtures through `context`'s dynamic entry.
+/// dst` of fixtures through `context`'s dynamic entry.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn context_contract_into<
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn context_contract_into<BT, BC, R, D>(
     context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
@@ -97,9 +77,6 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     let dst_space = fixture_space(dst)?;
     let lhs_space = fixture_space(lhs)?;
@@ -118,31 +95,14 @@ where
     )
 }
 
-/// Plans the eager fusion contraction of static-rank fixtures once, for
+/// Plans the eager fusion contraction of fixtures once, for
 /// replay by [`fixture_execute_prepared`] without any cache lookup.
-pub(crate) fn fixture_prepare_contract<
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn fixture_prepare_contract<BT, BC, R, D>(
     context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
     rule: &R,
-    dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     axes: TensorContractSpec<'_>,
 ) -> Result<StorageContractResolution<R::Scalar>, OperationError>
 where
@@ -152,9 +112,6 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: TensorStorage<D>,
-    DLhs: TensorStorage<D>,
-    DRhs: TensorStorage<D>,
 {
     context.plan_tensorcontract_fusion_dyn_raw(
         rule,
@@ -168,30 +125,12 @@ where
 /// Replays a route [`fixture_prepare_contract`] planned:
 /// `dst = alpha * contract(lhs, rhs) + beta * dst`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn fixture_execute_prepared<
-    BT,
-    BC,
-    RuleKey,
-    C,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn fixture_execute_prepared<BT, BC, RuleKey, C, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>,
     resolution: &StorageContractResolution<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -201,9 +140,6 @@ where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     C: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     context.execute_contract_resolution_host(
@@ -218,26 +154,11 @@ where
 
 /// [`context_contract_into`] on a fresh default context, for fixtures that
 /// need no context reuse.
-pub(crate) fn fusion_contract_into<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn fusion_contract_into<R, D>(
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
@@ -247,9 +168,6 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     context_contract_into(
         &mut TensorContractFusionExecutionContext::<
@@ -269,21 +187,13 @@ where
     )
 }
 
-/// The fusion contraction plan of static-rank fixture spaces, each checked
+/// The fusion contraction plan of fixture spaces, each checked
 /// against `rule` first.
-pub(crate) fn fixture_contract_plan<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+pub(crate) fn fixture_contract_plan<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
@@ -293,39 +203,18 @@ where
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
     rhs.validate_rule(rule)?;
-    crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw(
-        rule,
-        &DynamicFusionMapSpace::from_typed(dst),
-        &DynamicFusionMapSpace::from_typed(lhs),
-        &DynamicFusionMapSpace::from_typed(rhs),
-        axes,
-    )
+    crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw(rule, dst, lhs, rhs, axes)
 }
 
 /// Executes a caller-supplied fusion contraction plan step by step (source
 /// transforms, core contraction, output transform) on default backends,
 /// uncached: the explicit-plan reference for fixtures.
-pub(crate) fn plan_contract_into<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn plan_contract_into<R, D>(
     rule: &R,
     plan: &FusionContractPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -333,9 +222,6 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
         &mut DenseTreeTransformOperations::default_executor(),
@@ -354,35 +240,23 @@ where
 
 /// Dense (non-fusion) contraction through the compiled structure on the
 /// default executor, for fixtures that pin contraction semantics.
-pub(crate) fn dense_contract_into<
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+pub(crate) fn dense_contract_into<D>(
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
-    let structure = tensorcontract_structure(dst, lhs, rhs, axes)?;
+    let structure = TensorContractStructure::compile_structures(
+        dst.structure(),
+        lhs.structure(),
+        rhs.structure(),
+        axes,
+    )?;
     replay_contract_structure_into(
         &mut DenseTreeTransformOperations::default_executor(),
         &mut TensorContractWorkspace::default(),
@@ -395,32 +269,16 @@ where
     )
 }
 
-/// Replays a compiled dense contraction structure on static-rank fixtures
+/// Replays a compiled dense contraction structure on fixtures
 /// through the backend's raw (rank-free) entry.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn replay_contract_structure_into<
-    B,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn replay_contract_structure_into<B, D, C>(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TensorContractStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -428,9 +286,6 @@ where
     B: TensorContractBackend<D, C>,
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy + num_traits::One,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     backend.tensorcontract_structure_into_raw(
@@ -447,26 +302,14 @@ where
     )
 }
 
-/// Replays a compiled tree transform on static-rank fixtures through the
+/// Replays a compiled tree transform on fixtures through the
 /// backend's raw (rank-free) entry.
-pub(crate) fn replay_into<
-    B,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn replay_into<B, D, C>(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -474,8 +317,6 @@ where
     B: TreeTransformBackend<D, C>,
     D: TreeTransformScalar,
     C: Copy,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     backend.tree_transform_structure_into_raw(
@@ -491,32 +332,18 @@ where
 }
 
 /// Overwrite form of [`replay_into`].
-pub(crate) fn replay_overwrite_into<
-    B,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn replay_overwrite_into<B, D, C>(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
 ) -> Result<(), OperationError>
 where
     B: TreeTransformBackend<D, C>,
     D: TreeTransformScalar + RecouplingCoefficientAction<C>,
     C: Copy,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     backend.tree_transform_structure_overwrite_into_raw(
@@ -534,29 +361,15 @@ where
 /// The multiplicity-free tree-pair transformer built directly from the
 /// public group-plan builder, bypassing the completed-transformer cache: the
 /// uncached oracle for fixtures that compare against cached resolution.
-pub(crate) fn uncached_tree_pair_structure<
-    R,
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn uncached_tree_pair_structure<R, TDst, TSrc>(
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &TestTensor<TDst>,
+    src: &TestTensor<TSrc>,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
 {
     build_tree_pair_transform_group_plan(rule, operation, src.structure())?
         .compile_shared_structures_with_storage_conjugation(
@@ -568,29 +381,15 @@ where
 
 /// The multiplicity-free all-codomain transformer built directly from the
 /// public group-plan builder: the uncached all-codomain oracle.
-pub(crate) fn uncached_all_codomain_structure<
-    R,
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn uncached_all_codomain_structure<R, TDst, TSrc>(
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &TestTensor<TDst>,
+    src: &TestTensor<TSrc>,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
 {
     build_all_codomain_tree_transform_group_plan(rule, operation, src.structure())?
         .compile_shared_structures_with_storage_conjugation(
@@ -602,24 +401,12 @@ where
 
 /// The eager multiplicity-free tree transform `dst = beta * dst + alpha *
 /// operation(src)` through `context`'s dynamic entry.
-pub(crate) fn context_tree_transform_into<
-    B,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn context_tree_transform_into<B, R, D>(
     context: &mut TreeTransformExecutionContext<D, RuleIdentity, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -635,8 +422,6 @@ where
         + Send
         + Sync,
     D: TreeTransformScalar,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     context.tree_transform_dyn_into(
@@ -652,24 +437,12 @@ where
 }
 
 /// Overwrite form of [`context_tree_transform_into`].
-pub(crate) fn context_tree_transform_overwrite_into<
-    B,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn context_tree_transform_overwrite_into<B, R, D>(
     context: &mut TreeTransformExecutionContext<D, RuleIdentity, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
 ) -> Result<(), OperationError>
 where
@@ -684,8 +457,6 @@ where
         + Send
         + Sync,
     D: TreeTransformScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     context.tree_transform_dyn_overwrite_into_ref(
@@ -701,22 +472,11 @@ where
 
 /// [`context_tree_transform_into`] on a fresh default context, for fixtures
 /// that need no context reuse.
-pub(crate) fn eager_tree_transform_into<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn eager_tree_transform_into<R, D>(
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -731,8 +491,6 @@ where
         + Send
         + Sync,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     context_tree_transform_into(
         &mut TreeTransformExecutionContext::<
@@ -750,52 +508,20 @@ where
     )
 }
 
-/// The dynamic fusion trace of static-rank fixtures that carry a fusion space.
-pub(crate) fn dynamic_trace_spaces<
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-) -> Result<(DynamicFusionMapSpace, DynamicFusionMapSpace), OperationError>
-where
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
-{
-    let missing = || OperationError::Core(CoreError::MissingFusionSpace);
-    let dst_space = dst.fusion_space().ok_or_else(missing)?;
-    let src_space = src.fusion_space().ok_or_else(missing)?;
-    Ok((
-        DynamicFusionMapSpace::from_typed(dst_space),
-        DynamicFusionMapSpace::from_typed(src_space),
-    ))
+/// The dynamic fusion trace of fixtures that carry a fusion space.
+pub(crate) fn dynamic_trace_spaces<TDst, TSrc>(
+    dst: &TestTensor<TDst>,
+    src: &TestTensor<TSrc>,
+) -> Result<(DynamicFusionMapSpace, DynamicFusionMapSpace), OperationError> {
+    Ok((dst.dynamic_space().clone(), src.dynamic_space().clone()))
 }
 
 /// The fusion trace `dst = beta * dst + alpha * trace(src)` through the
 /// dynamic trace entry.
-pub(crate) fn dynamic_tensortrace_fusion_into<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn dynamic_tensortrace_fusion_into<R, D>(
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     axes: TensorTraceAxisSpec<'_>,
     alpha: D,
     beta: D,
@@ -813,8 +539,6 @@ where
         + ConjugateValue
         + RecouplingCoefficientAction<R::Scalar>
         + strided_kernel::MaybeSendSync,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     let (dst_space, src_space) = dynamic_trace_spaces(dst, src)?;
     crate::tensortrace::tensortrace_fusion_dyn_into_raw(
@@ -830,22 +554,10 @@ where
 }
 
 /// The compiled fusion trace the dynamic trace entry replays.
-pub(crate) fn dynamic_tensortrace_fusion_structure<
-    R,
-    TDst,
-    TSrc,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn dynamic_tensortrace_fusion_structure<R, TDst, TSrc>(
     rule: &R,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &TestTensor<TDst>,
+    src: &TestTensor<TSrc>,
     axes: TensorTraceAxisSpec<'_>,
 ) -> Result<TensorTraceFusionStructure<R::Scalar>, OperationError>
 where
@@ -855,30 +567,17 @@ where
         + Mul<Output = R::Scalar>
         + Zero
         + RealStructuralCoefficient,
-    DDst: TensorStorage<TDst>,
-    DSrc: TensorStorage<TSrc>,
 {
     let (dst_space, src_space) = dynamic_trace_spaces(dst, src)?;
     TensorTraceFusionStructure::compile_fusion_dyn_raw(rule, &dst_space, &src_space, axes)
 }
 
-/// Replays a compiled fusion trace on static-rank fixtures through the
+/// Replays a compiled fusion trace on fixtures through the
 /// host trace replay.
-pub(crate) fn replay_tensortrace_fusion_into<
-    C,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
+pub(crate) fn replay_tensortrace_fusion_into<C, D>(
     structure: &TensorTraceFusionStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -893,8 +592,6 @@ where
         + ConjugateValue
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
 {
     tensortrace_fusion_structure_into_host(
         structure,
@@ -915,11 +612,10 @@ use tenet_core::{
     BlockSpec, BlockStructure, BraidingStyleKind, CoreError, DegeneracyStructure,
     FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray,
-    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement, ProductFusionRule, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, TensorMap, TensorMapSpace,
-    TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
+    ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
+    TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
 
@@ -947,110 +643,6 @@ where
     .expect("permutation lowering");
     assert_eq!(terms.len(), 1, "fixture permutation is not one-to-one");
     terms.pop().expect("single term")
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct TestHostStorage<T>(Vec<T>);
-
-#[derive(Clone, Debug, PartialEq)]
-struct TestHostReadStorage<T>(Vec<T>);
-
-impl<T> TestHostStorage<T> {
-    fn new(data: Vec<T>) -> Self {
-        Self(data)
-    }
-}
-
-impl<T> TestHostReadStorage<T> {
-    fn new(data: Vec<T>) -> Self {
-        Self(data)
-    }
-}
-
-impl<T> TensorStorage<T> for TestHostStorage<T> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-impl<T> HostReadableStorage<T> for TestHostStorage<T> {
-    fn as_slice(&self) -> &[T] {
-        &self.0
-    }
-}
-
-impl<T> HostWritableStorage<T> for TestHostStorage<T> {
-    fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.0
-    }
-}
-
-impl<T> TensorStorage<T> for TestHostReadStorage<T> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-impl<T> HostReadableStorage<T> for TestHostReadStorage<T> {
-    fn as_slice(&self) -> &[T] {
-        &self.0
-    }
-}
-
-fn test_host_tensor_map<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    space: TensorMapSpace<NOUT, NIN>,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
-    let structure = BlockStructure::trivial(space.dims()).unwrap();
-    TensorMap::from_storage_with_structure(TestHostStorage::new(data), space, structure).unwrap()
-}
-
-fn test_host_tensor_map_with_structure<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    space: TensorMapSpace<NOUT, NIN>,
-    structure: BlockStructure,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
-    TensorMap::from_storage_with_structure(TestHostStorage::new(data), space, structure).unwrap()
-}
-
-fn test_host_fusion_tensor_map<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    fusion_space: FusionTensorMapSpace<NOUT, NIN>,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
-    TensorMap::from_storage_with_fusion_space(TestHostStorage::new(data), fusion_space).unwrap()
-}
-
-fn test_host_read_tensor_map<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    space: TensorMapSpace<NOUT, NIN>,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
-    let structure = BlockStructure::trivial(space.dims()).unwrap();
-    TensorMap::from_storage_with_structure(TestHostReadStorage::new(data), space, structure)
-        .unwrap()
-}
-
-fn test_host_read_tensor_map_with_structure<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    space: TensorMapSpace<NOUT, NIN>,
-    structure: BlockStructure,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
-    TensorMap::from_storage_with_structure(TestHostReadStorage::new(data), space, structure)
-        .unwrap()
-}
-
-fn test_host_read_fusion_tensor_map<T, const NOUT: usize, const NIN: usize>(
-    data: Vec<T>,
-    fusion_space: FusionTensorMapSpace<NOUT, NIN>,
-) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
-    TensorMap::from_storage_with_fusion_space(TestHostReadStorage::new(data), fusion_space).unwrap()
 }
 
 fn fusion_tree_test_key<
@@ -1756,18 +1348,11 @@ impl GenericRigidSymbols for GenericMultiplicityRule {
 /// Runs the per-block strided reference driver (`tenet-operations/testing`).
 /// The host backend's batched-GEMM path only admits dense float scalars; the
 /// integer-dtype replay cases stay on the reference driver.
-fn reference_tree_transform<
-    D,
-    C,
-    const DO: usize,
-    const DI: usize,
-    const SO: usize,
-    const SI: usize,
->(
+fn reference_tree_transform<D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DO, DI>,
-    src: &TensorMap<D, SO, SI>,
+    dst: &mut TestTensor<D>,
+    src: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -1819,11 +1404,11 @@ fn assert_tree_single_dtype<T>(
         + RecouplingCoefficientAction<T>,
 {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
-    let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let src = TestTensor::<T>::from_vec(values, space.clone()).unwrap();
+    let mut dst = TestTensor::<T>::filled(fill, space).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::single(0, 0, coefficient)],
     )
     .unwrap();
@@ -1851,7 +1436,7 @@ where
     let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<T>::from_vec_with_structure(
         vec![
             T::one(),
             T::one() + T::one(),
@@ -1867,10 +1452,10 @@ where
     )
     .unwrap();
     let mut dst =
-        TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 8], space, dst_structure).unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<T>::from_vec_with_structure(vec![fill; 8], space, dst_structure).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],
@@ -1899,11 +1484,11 @@ fn assert_tree_single_mixed_dtype<D, C>(
     C: Copy,
 {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let src = TensorMap::<D, 2, 0>::from_vec(values, space.clone()).unwrap();
-    let mut dst = TensorMap::<D, 2, 0>::filled(fill, space).unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let src = TestTensor::<D>::from_vec(values, space.clone()).unwrap();
+    let mut dst = TestTensor::<D>::filled(fill, space).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::single(0, 0, coefficient)],
     )
     .unwrap();
@@ -1929,13 +1514,12 @@ fn assert_tree_multi_mixed_dtype<D, C>(
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src =
-        TensorMap::<D, 2, 0>::from_vec_with_structure(src_values, space.clone(), src_structure)
-            .unwrap();
+        TestTensor::<D>::from_vec_with_structure(src_values, space.clone(), src_structure).unwrap();
     let mut dst =
-        TensorMap::<D, 2, 0>::from_vec_with_structure(vec![fill; 8], space, dst_structure).unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<D>::from_vec_with_structure(vec![fill; 8], space, dst_structure).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],
@@ -1977,14 +1561,13 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
-        .unwrap();
+    let src =
+        TestTensor::<T>::from_vec_with_structure(src_values, src_space, src_structure).unwrap();
     let mut dst =
-        TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure)
-            .unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<T>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1, 2],
@@ -2016,14 +1599,13 @@ fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
-        .unwrap();
+    let src =
+        TestTensor::<T>::from_vec_with_structure(src_values, src_space, src_structure).unwrap();
     let mut dst =
-        TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure)
-            .unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<T>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1, 2],
@@ -2088,10 +1670,10 @@ fn assert_tree_multi_keyed_dtype<T>(
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )
     .unwrap();
-    let src = TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
-        .unwrap();
+    let src =
+        TestTensor::<T>::from_vec_with_structure(src_values, src_space, src_structure).unwrap();
     let mut dst =
-        TensorMap::<T, 2, 0>::from_vec_with_structure(vec![T::zero(); 4], dst_space, dst_structure)
+        TestTensor::<T>::from_vec_with_structure(vec![T::zero(); 4], dst_space, dst_structure)
             .unwrap();
     let structure = TreeTransformStructure::compile_keyed_shared_structures(
         std::sync::Arc::clone(dst.structure()),
@@ -2129,9 +1711,9 @@ where
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let lhs = TensorMap::<D, 2, 0>::from_vec(vec![lhs_value], lhs_space).unwrap();
-    let rhs = TensorMap::<D, 2, 0>::from_vec(vec![rhs_value], rhs_space).unwrap();
-    let mut dst = TensorMap::<D, 2, 0>::filled(fill, dst_space).unwrap();
+    let lhs = TestTensor::<D>::from_vec(vec![lhs_value], lhs_space).unwrap();
+    let rhs = TestTensor::<D>::from_vec(vec![rhs_value], rhs_space).unwrap();
+    let mut dst = TestTensor::<D>::filled(fill, dst_space).unwrap();
 
     dense_contract_into(
         &mut dst,
@@ -2153,13 +1735,13 @@ where
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let lhs = TensorMap::<D, 2, 0>::from_vec(vec![lhs_value], lhs_space).unwrap();
-    let rhs = TensorMap::<D, 2, 0>::from_vec(vec![rhs_value], rhs_space).unwrap();
-    let mut dst = TensorMap::<D, 2, 0>::from_vec(vec![fill], dst_space).unwrap();
-    let structure = TensorContractStructure::compile_with_block_specs(
-        &dst,
-        &lhs,
-        &rhs,
+    let lhs = TestTensor::<D>::from_vec(vec![lhs_value], lhs_space).unwrap();
+    let rhs = TestTensor::<D>::from_vec(vec![rhs_value], rhs_space).unwrap();
+    let mut dst = TestTensor::<D>::from_vec(vec![fill], dst_space).unwrap();
+    let structure = TensorContractStructure::compile_structures_with_block_specs(
+        dst.structure(),
+        lhs.structure(),
+        rhs.structure(),
         TensorContractSpec::with_default_output_order(&[1], &[0]),
         &[TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5)],
     )

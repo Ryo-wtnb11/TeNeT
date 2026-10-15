@@ -30,7 +30,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
     )
     .unwrap();
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![3.0, -4.0],
         space.clone(),
         block_structure.clone(),
@@ -47,7 +47,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
     let mut first = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     crate::tree_transform::take_completed_transformer_activity();
     let run = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>| {
-        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        let mut dst = TestTensor::<f64>::from_vec_with_structure(
             vec![1.0, 2.0],
             space.clone(),
             block_structure.clone(),
@@ -113,14 +113,14 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     .unwrap();
     let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
         block_structure.clone(),
     )
     .unwrap();
     let dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
     let direct_operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let miss_operation = TreeTransformOperation::braid(vec![0, 2, 1, 3], [], vec![0, 1, 2, 3], []);
@@ -249,32 +249,29 @@ fn all_codomain_plan_compiles_distinct_degeneracy_shapes() {
     .unwrap();
     let small_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let large_space = TensorMapSpace::<4, 0>::from_dims([2, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         small_space.clone(),
         small_structure.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-        vec![0.0, 0.0],
-        small_space,
-        small_structure,
-    )
-    .unwrap();
-    let src_large = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], small_space, small_structure)
+            .unwrap();
+    let src_large = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         large_space.clone(),
         large_structure.clone(),
     )
     .unwrap();
-    let dst_large = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let dst_large = TestTensor::<f64>::from_vec_with_structure(
         vec![0.0, 0.0, 0.0, 0.0],
         large_space,
         large_structure,
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let resolve = |dst: &TensorMap<f64, 4, 0>, src: &TensorMap<f64, 4, 0>| {
+    let resolve = |dst: &TestTensor<f64>, src: &TestTensor<f64>| {
         uncached_all_codomain_structure(&SU2FusionRule, operation.clone(), dst, src).unwrap()
     };
 
@@ -329,15 +326,14 @@ fn all_codomain_plan_replays_su2_recoupling() {
     )
     .unwrap();
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let mut src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),
         block_structure.clone(),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure).unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let structure = uncached_all_codomain_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
@@ -402,15 +398,14 @@ fn tree_pair_and_all_codomain_transforms_agree_on_an_all_codomain_source() {
     )
     .unwrap();
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),
         block_structure.clone(),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure).unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 

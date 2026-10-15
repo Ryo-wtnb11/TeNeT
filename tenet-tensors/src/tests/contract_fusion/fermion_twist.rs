@@ -34,10 +34,9 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         [vec![1, 1]],
     )
     .unwrap();
-    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
-    let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0], dst_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
+    let mut dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0], dst_space).unwrap();
 
     let specs = tensorcontract_fusion_block_specs(
         &rule,
@@ -89,12 +88,12 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         )
         .unwrap()
     };
-    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.5, 1.5, 2.5, 3.5, 4.5],
         space(false, true),
     )
     .unwrap();
-    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![-1.25, -0.75, -0.25, 0.25, 0.75],
         space(true, false),
     )
@@ -103,14 +102,14 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
     let alpha = 1.5;
     let beta = -0.25;
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.to_vec(), space(false, false))
+        TestTensor::<f64>::from_vec_with_fusion_space(initial.to_vec(), space(false, false))
             .unwrap();
     let facts: Vec<crate::contract::FusionContractCandidateFacts> =
         crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
-            &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
-            &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
-            &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+            &dst.fusion_space().unwrap().as_ref().clone(),
+            &lhs.fusion_space().unwrap().as_ref().clone(),
+            &rhs.fusion_space().unwrap().as_ref().clone(),
             TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
@@ -171,9 +170,9 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         );
     }
 
-    let dst_dynamic = DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap());
-    let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
-    let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let dst_dynamic = dst.fusion_space().unwrap().as_ref().clone();
+    let lhs_dynamic = lhs.fusion_space().unwrap().as_ref().clone();
+    let rhs_dynamic = rhs.fusion_space().unwrap().as_ref().clone();
     let candidate = crate::contract::contracted_axis_order_candidates(&[1], &[0]).remove(0);
     let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
         &rule,
@@ -185,8 +184,9 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         crate::contract::FusionContractOrientation::RhsLhs,
     )
     .unwrap();
-    let mut reverse_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let mut reverse_dst = TestTensor::<f64>::from_vec_with_dynamic_space(
         initial.to_vec(),
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -214,8 +214,9 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
             "reverse element {index}: got {actual}, TensorKit reference {want}"
         );
     }
-    let mut artifact_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let mut artifact_dst = TestTensor::<f64>::from_vec_with_dynamic_space(
         initial.to_vec(),
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -306,10 +307,8 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     // Dyadic values: every product and partial sum is exact.
     let lhs_data = vec![0.5, 1.5, -2.5, 3.5, 4.25];
     let rhs_data = vec![-1.25, 0.75, -0.75, -0.25, 0.25, 0.75, 1.5, -2.0, 0.5, 1.0];
-    let lhs =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space).unwrap();
-    let rhs =
-        TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space).unwrap();
     let initial = [0.25, -0.5, 1.0, -1.5, 2.0, 0.5, -0.25, 1.25, -1.0, 0.75];
     let (alpha, beta) = (1.5, -0.25);
 
@@ -332,8 +331,8 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
         crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
             &DynamicFusionMapSpace::from_typed(&dst_space),
-            &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
-            &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+            &lhs.fusion_space().unwrap().as_ref().clone(),
+            &rhs.fusion_space().unwrap().as_ref().clone(),
             axes,
         )
         .unwrap();
@@ -352,8 +351,7 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     assert_eq!(facts[0].total_materialized_elements(), 5);
 
     let new_dst = || {
-        TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(initial.to_vec(), dst_space.clone())
-            .unwrap()
+        TestTensor::<f64>::from_vec_with_fusion_space(initial.to_vec(), dst_space.clone()).unwrap()
     };
     // The eager entry.
     let mut plain = new_dst();

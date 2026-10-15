@@ -24,7 +24,7 @@ where
     .unwrap()
 }
 
-fn source_bytes(source: &TensorMap<f64, 1, 1>) -> Vec<u8> {
+fn source_bytes(source: &TestTensor<f64>) -> Vec<u8> {
     source
         .data()
         .iter()
@@ -39,7 +39,7 @@ fn sentinel_data(space: &FusionTensorMapSpace<1, 1>) -> Vec<f64> {
 }
 
 fn assert_complete_destination(
-    destination: &TensorMap<f64, 1, 1>,
+    destination: &TestTensor<f64>,
     initial: &[f64],
     retained_key: &FusionTreePairKey,
 ) {
@@ -87,14 +87,13 @@ where
     ));
 
     let source =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![SOURCE_VALUE], subset_space)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![SOURCE_VALUE], subset_space).unwrap();
     let bytes_before = source_bytes(&source);
     let admission_before = source.fusion_space().unwrap().admission().clone();
 
     let initial = sentinel_data(&complete_space);
     let mut add_destination =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
+        TestTensor::<f64>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
             .unwrap();
     eager_tree_transform_into(
         rule,
@@ -108,7 +107,7 @@ where
     assert_complete_destination(&add_destination, &initial, &retained_key);
 
     let mut trace_destination =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
+        TestTensor::<f64>::from_vec_with_fusion_space(initial.clone(), complete_space.clone())
             .unwrap();
     dynamic_tensortrace_fusion_into(
         rule,
@@ -121,14 +120,13 @@ where
     .unwrap();
     assert_complete_destination(&trace_destination, &initial, &retained_key);
 
-    let identity = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let identity = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![1.0; complete_space.required_len().unwrap()],
         complete_space.clone(),
     )
     .unwrap();
     let mut contract_destination =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(initial.clone(), complete_space).unwrap();
     fusion_contract_into(
         rule,
         &mut contract_destination,

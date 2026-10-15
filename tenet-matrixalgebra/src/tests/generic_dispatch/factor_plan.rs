@@ -199,14 +199,11 @@ fn typed_factor_axis_sum_overflow_is_exact_without_storage_materialization() {
     )
     .unwrap();
 
-    let error = typed_from_dyn::<_, f64, 1, 0>(
-        &rule,
-        (
-            tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
-            Vec::new(),
-        ),
+    let error = TestTensor::<f64>::from_dyn(
+        Vec::new(),
+        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
     )
     .unwrap_err();
 
-    assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
+    assert_eq!(error, CoreError::ElementCountOverflow);
 }

@@ -1,9 +1,6 @@
 use super::*;
 
-fn scale_vt_rows_by_singular_values<const NIN: usize>(
-    vt: &mut TensorMap<f64, 1, NIN>,
-    singular_values: &[SectorSpectrum],
-) {
+fn scale_vt_rows_by_singular_values(vt: &mut TestTensor<f64>, singular_values: &[SectorSpectrum]) {
     let structure = std::sync::Arc::clone(vt.structure());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
@@ -55,7 +52,7 @@ where
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, homspace, rule, shapes)
         .unwrap();
     let len = space.required_len().unwrap();
-    let tensor = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len)
             .map(|index| ((index * 7 + 3) % 23) as f64 * 0.5 - 5.0)
             .collect(),
@@ -87,9 +84,9 @@ where
     let mut scaled_vt = svd.vh.tensor().clone();
     scale_vt_rows_by_singular_values(&mut scaled_vt, &svd.singular_values);
 
-    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let mut reconstructed = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; len],
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
@@ -156,7 +153,7 @@ fn tsvd_fusion_reconstructs_product_rule_tensor() {
     run_tsvd_reconstruction_case(&rule, &sectors);
 }
 
-fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TestTensor<f64> {
     let rule = U1FusionRule;
     let minimum = U1Irrep::new(i32::MIN + 1).sector_id();
     let homspace = FusionTreeHomSpace::new(
@@ -170,7 +167,7 @@ fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
         [vec![rows, cols]],
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(
+    TestTensor::from_vec_with_fusion_space(
         (0..rows * cols)
             .map(|index| ((index * 7 + 3) % 17) as f64 - 5.0)
             .collect(),
@@ -209,9 +206,9 @@ fn compact_factors_do_not_relabel_the_lowest_u1_sector() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
-    assert_eq!(svd.u.tensor().space().dims(), &[3, 2]);
-    assert_eq!(svd.s.tensor().space().dims(), &[2, 2]);
-    assert_eq!(svd.vh.tensor().space().dims(), &[2, 2]);
+    assert_eq!(svd.u.tensor().dims(), &[3, 2]);
+    assert_eq!(svd.s.tensor().dims(), &[2, 2]);
+    assert_eq!(svd.vh.tensor().dims(), &[2, 2]);
     let singular = &svd.singular_values[0].values;
     let mut scaled_vh = svd.vh.data().to_vec();
     for col in 0..2 {
@@ -222,13 +219,13 @@ fn compact_factors_do_not_relabel_the_lowest_u1_sector() {
     assert_matrix_product(tensor.data(), 3, 2, 2, svd.u.data(), &scaled_vh);
 
     let Qr { q, r } = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
-    assert_eq!(q.tensor().space().dims(), &[3, 2]);
-    assert_eq!(r.tensor().space().dims(), &[2, 2]);
+    assert_eq!(q.tensor().dims(), &[3, 2]);
+    assert_eq!(r.tensor().dims(), &[2, 2]);
     assert_matrix_product(tensor.data(), 3, 2, 2, q.data(), r.data());
 
     let Lq { l, q } = lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
-    assert_eq!(l.tensor().space().dims(), &[3, 2]);
-    assert_eq!(q.tensor().space().dims(), &[2, 2]);
+    assert_eq!(l.tensor().dims(), &[3, 2]);
+    assert_eq!(q.tensor().dims(), &[2, 2]);
     assert_matrix_product(tensor.data(), 3, 2, 2, l.data(), q.data());
 }
 
@@ -252,7 +249,7 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
             [vec![rows, cols]],
         )
         .unwrap();
-        TensorMap::from_vec_with_fusion_space(data, space).unwrap()
+        TestTensor::from_vec_with_fusion_space(data, space).unwrap()
     };
     let rectangular = matrix(3, 2, vec![-2.0, 5.0, 1.0, 4.0, -3.0, 2.0]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -262,17 +259,17 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
         &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
     )
     .unwrap();
-    assert_eq!(svd.u.tensor().space().dims(), &[3, 2]);
-    assert_eq!(svd.s.tensor().space().dims(), &[2, 2]);
-    assert_eq!(svd.vh.tensor().space().dims(), &[2, 2]);
+    assert_eq!(svd.u.tensor().dims(), &[3, 2]);
+    assert_eq!(svd.s.tensor().dims(), &[2, 2]);
+    assert_eq!(svd.vh.tensor().dims(), &[2, 2]);
 
     let Qr { q, r } = qr_compact(
         &mut dense,
         &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
     )
     .unwrap();
-    assert_eq!(q.tensor().space().dims(), &[3, 2]);
-    assert_eq!(r.tensor().space().dims(), &[2, 2]);
+    assert_eq!(q.tensor().dims(), &[3, 2]);
+    assert_eq!(r.tensor().dims(), &[2, 2]);
     assert_matrix_product(rectangular.data(), 3, 2, 2, q.data(), r.data());
 
     let Lq { l, q } = lq_compact(
@@ -280,14 +277,14 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
         &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
     )
     .unwrap();
-    assert_eq!(l.tensor().space().dims(), &[3, 2]);
-    assert_eq!(q.tensor().space().dims(), &[2, 2]);
+    assert_eq!(l.tensor().dims(), &[3, 2]);
+    assert_eq!(q.tensor().dims(), &[2, 2]);
     assert_matrix_product(rectangular.data(), 3, 2, 2, l.data(), q.data());
 
     let hermitian = matrix(2, 2, vec![4.0, 1.0, 1.0, 3.0]);
     let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &hermitian)).unwrap();
-    assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
-    assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
+    assert_eq!(result.v.tensor().dims(), &[2, 2]);
+    assert_eq!(result.d.tensor().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
     assert_eq!(values.len(), 2);
     for (col, &value) in values.iter().enumerate() {
@@ -308,7 +305,7 @@ fn spectral_outputs_retain_the_exact_input_provider_allocation() {
     let provider = Arc::new(rule);
     let hermitian = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let hermitian_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&hermitian).unwrap(),
+        hermitian.fusion_space().clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -316,7 +313,7 @@ fn spectral_outputs_retain_the_exact_input_provider_allocation() {
         BoundDynamicTensorRef::try_new(&hermitian_space, hermitian.data()).unwrap();
     let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let general_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&general).unwrap(),
+        general.fusion_space().clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -424,9 +421,9 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
     let s_tensor = svd.s.clone();
 
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let mut u_s = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut u_s = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; svd.u.data().len()],
-        svd.u.fusion_space().unwrap().as_ref().clone(),
+        svd.u.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -441,9 +438,9 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
     )
     .unwrap();
 
-    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let mut reconstructed = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; tensor.data().len()],
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -479,7 +476,7 @@ fn full_factorizations_agree_with_compact_on_matching_square_support() {
         [vec![2, 2]],
     )
     .unwrap();
-    let tensor = TensorMap::from_vec_with_fusion_space(vec![-1.0, 3.0, 2.0, 4.0], space).unwrap();
+    let tensor = TestTensor::from_vec_with_fusion_space(vec![-1.0, 3.0, 2.0, 4.0], space).unwrap();
     let input = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
@@ -534,7 +531,7 @@ fn full_factorizations_skip_dense_backend_for_disjoint_support() {
         Vec::<Vec<usize>>::new(),
     )
     .unwrap();
-    let tensor = TensorMap::from_vec_with_fusion_space(Vec::<f64>::new(), space).unwrap();
+    let tensor = TestTensor::from_vec_with_fusion_space(Vec::<f64>::new(), space).unwrap();
     let input = bound_tensor(Arc::new(rule), &tensor);
 
     svd_full(
@@ -556,8 +553,8 @@ fn full_factorizations_skip_dense_backend_for_disjoint_support() {
 
 fn assert_value_region_paths_match<R, D>(
     rule: Arc<R>,
-    general: &TensorMap<D, 2, 2>,
-    hermitian: &TensorMap<D, 2, 2>,
+    general: &TestTensor<D>,
+    hermitian: &TestTensor<D>,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -678,14 +675,14 @@ fn value_region_paths_match_packed_oracles_for_complex64() {
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let general = tsvd_test_tensor(&rule, &sectors);
     let hermitian = hermitian_test_tensor(&rule, &sectors);
-    let general = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let general = TestTensor::<Complex64>::from_vec_with_fusion_space(
         general
             .data()
             .iter()
             .enumerate()
             .map(|(index, &value)| Complex64::new(value, (index % 7) as f64 * 0.125 - 0.25))
             .collect(),
-        general.fusion_space().unwrap().as_ref().clone(),
+        general.fusion_space().clone(),
     )
     .unwrap();
     let regions = hermitian
@@ -703,20 +700,18 @@ fn value_region_paths_match_packed_oracles_for_complex64() {
         hermitian_data[start + 1].im = -0.75;
         hermitian_data[start + region.rows()].im = 0.75;
     }
-    let hermitian = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let hermitian = TestTensor::<Complex64>::from_vec_with_fusion_space(
         hermitian_data,
-        hermitian.fusion_space().unwrap().as_ref().clone(),
+        hermitian.fusion_space().clone(),
     )
     .unwrap();
 
     assert_value_region_paths_match(Arc::new(rule), &general, &hermitian);
 }
 
-fn lowered_z2_binding<const NOUT: usize, const NIN: usize>(
-    tensor: &TensorMap<f64, NOUT, NIN>,
-) -> BoundDynamicFusionMapSpace<Z2FusionRule> {
+fn lowered_z2_binding(tensor: &TestTensor<f64>) -> BoundDynamicFusionMapSpace<Z2FusionRule> {
     let provider = Arc::new(Z2FusionRule);
-    let raw = dyn_space_of(tensor).unwrap();
+    let raw = tensor.fusion_space().clone();
     let hom = raw.homspace().clone();
     // Why not caller-supplied per-tree shapes: the #586 sweep narrowed the
     // shape-admission bridge to tenet-tensors; the kept public installer
@@ -733,7 +728,7 @@ fn ordinary_factorizations_and_composition_inherit_lowered_layout_strategy() {
     let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
     let bound = lowered_z2_binding(&tensor);
     let expert = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&tensor).unwrap(),
+        tensor.fusion_space().clone(),
         Arc::new(Z2FusionRule),
     )
     .unwrap();
@@ -768,7 +763,7 @@ fn derived_matrix_functions_inherit_the_exact_provider_arc() {
     let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
     let provider = Arc::new(Z2FusionRule);
     let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&tensor).unwrap(),
+        tensor.fusion_space().clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -814,7 +809,7 @@ fn adjoint_composition_gives_the_identity_on_the_bond() {
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
-    let qh = tenet_tensors::adjoint(&rule, &q).unwrap();
+    let qh = adjoint(&rule, &q).unwrap();
     let mut context = default_context();
     let identity = crate::compose::compose(&mut context, &rule, &qh, &q).unwrap();
     assert_identity_matrices(&dense_sector_matrices(1, &identity));

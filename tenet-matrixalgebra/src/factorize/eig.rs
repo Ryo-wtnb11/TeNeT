@@ -142,15 +142,15 @@ thread_local! {
 /// ([`ascending_eigh_order`]); `eigenvalues` keeps the signed values in that
 /// order and `D : W <- W` is their diagonal tensor.
 #[derive(Clone, Debug)]
-pub(crate) struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
-    pub d: BoundTensorMap<R, D, 1, 1>,
-    pub v: BoundTensorMap<R, D, NOUT, 1>,
+pub(crate) struct EighFull<R, D> {
+    pub d: BoundTensorMap<R, D>,
+    pub v: BoundTensorMap<R, D>,
     pub eigenvalues: Vec<SectorSpectrum>,
 }
 
 /// Dynamic-rank `EighFull`. Carries only the eigenvector map and the O(rank)
-/// spectrum; the dense diagonal `D` is built on demand by the typed `eigh_full`
-/// wrapper (which returns a `TensorMap`), so callers that keep `D` diagonal
+/// spectrum; the dense diagonal `D` is built on demand by the test-only
+/// `eigh_full` wrapper, so callers that keep `D` diagonal
 /// (the user layer, via compact diagonal storage) never pay the O(rank²)
 /// materialization.
 #[derive(Clone, Debug)]
@@ -178,10 +178,10 @@ impl<R, D> EighFullDyn<R, D> {
 ///
 /// Before any dense call, every coupled-sector block must pass the
 /// Hermiticity admission at [`HermitianTol::DEFAULT`].
-pub(crate) fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eigh_full<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<EighFull<R, D, NOUT, NIN>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<EighFull<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -189,7 +189,7 @@ where
 {
     let dynamic = input.dynamic();
     let out = eigh_full_dyn(dense, &dynamic, HermitianTol::DEFAULT)?;
-    // Materialize the dense diagonal here (the typed API returns a `TensorMap`);
+    // Materialize the dense diagonal here (this wrapper returns a dense `D`);
     // the dyn producer no longer builds it (#56 item N).
     let d = diagonal_bond_svd_factor(dynamic.space(), &out.eigenvalues, &D::from_real)?;
     Ok(EighFull {
@@ -522,9 +522,9 @@ pub(crate) fn eigenvector_gauge<D: FactorScalar>(
 /// `eig_full`): always complex, requires an endomorphism. Bond states are
 /// stored per sector in [`lexicographic_eig_order`].
 #[derive(Clone, Debug)]
-pub(crate) struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
-    pub d: BoundTensorMap<R, D::Eig, 1, 1>,
-    pub v: BoundTensorMap<R, D::Eig, NOUT, 1>,
+pub(crate) struct EigFull<R, D: FactorScalar> {
+    pub d: BoundTensorMap<R, D::Eig>,
+    pub v: BoundTensorMap<R, D::Eig>,
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
 
@@ -552,10 +552,10 @@ impl<R, D: FactorScalar> EigFullDyn<R, D> {
 
 #[cfg(test)]
 /// Full general eigendecomposition through the device boundary.
-pub(crate) fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eig_full<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<EigFull<R, D, NOUT, NIN>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<EigFull<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -563,7 +563,7 @@ where
 {
     let dynamic = input.dynamic();
     let out = eig_full_dyn::<E, R, D>(dense, &dynamic)?;
-    // Materialize the dense diagonal here (typed API returns a `TensorMap`); the
+    // Materialize the dense diagonal here (this wrapper returns a dense `D`); the
     // dyn producer no longer builds it (#56 item N).
     let d = diagonal_bond_svd_factor(
         dynamic.space(),
@@ -888,9 +888,9 @@ fn missing_compact_plan() -> OperationError {
 /// (MatrixAlgebraKit `eigh_vals`).
 ///
 /// Admits Hermitian blocks at [`HermitianTol::DEFAULT`].
-pub(crate) fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eigh_vals<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
+    input: &BoundTensorMapRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -929,9 +929,9 @@ where
 #[cfg(test)]
 /// All general eigenvalues per coupled sector in [`lexicographic_eig_order`]
 /// (MatrixAlgebraKit `eig_vals`).
-pub(crate) fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eig_vals<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
+    input: &BoundTensorMapRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
 where
     E: DenseExecutor + ?Sized,

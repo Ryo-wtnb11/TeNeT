@@ -18,10 +18,12 @@ fn prepared_tensorcontract_fusion_route_replays_like_the_eager_entry() {
     };
     // What: a route planned once replays to the eager entry's values.
     let space = fusion_space();
-    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], space.clone());
-    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], space.clone());
-    let mut dst_facade = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
-    let mut dst_prepared = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
+    let lhs = TestTensor::from_vec_with_fusion_space(vec![2.0_f64, 3.0], space.clone()).unwrap();
+    let rhs = TestTensor::from_vec_with_fusion_space(vec![5.0_f64, 7.0], space.clone()).unwrap();
+    let mut dst_facade =
+        TestTensor::from_vec_with_fusion_space(vec![10.0_f64, 20.0], space.clone()).unwrap();
+    let mut dst_prepared =
+        TestTensor::from_vec_with_fusion_space(vec![10.0_f64, 20.0], space.clone()).unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 

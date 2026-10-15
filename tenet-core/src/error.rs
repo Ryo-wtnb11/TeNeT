@@ -129,7 +129,6 @@ pub enum CoreError {
     MissingBlockKey {
         key: Box<BlockKey>,
     },
-    MissingFusionSpace,
     /// A bounded Generic provider cannot represent the
     /// requested space/sector exactly. Carries the full human-readable
     /// diagnosis; block dimensions are either exact or this error — never
@@ -302,7 +301,6 @@ impl fmt::Display for CoreError {
             Self::MissingBlockKey { key } => {
                 write!(f, "missing matching block for key {key:?}")
             }
-            Self::MissingFusionSpace => write!(f, "tensor does not carry a fusion-tree space"),
             Self::FusionOutsideTable { message } => write!(f, "{message}"),
             Self::ElementCountOverflow => write!(f, "block element count overflow"),
             Self::OffsetOverflow { value } => {

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use num_traits::One;
-use tenet_core::{BlockKey, BlockStructure, TensorMap, TensorStorage};
+use tenet_core::{BlockKey, BlockStructure};
 use tenet_dense::DenseDotConfig;
 
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
@@ -33,85 +33,10 @@ pub struct TensorContractStructure<C = f64> {
     rhs_storage_structure: Arc<BlockStructure>,
 }
 
-pub fn tensorcontract_structure<
-    TDst,
-    TLhs,
-    TRhs,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure, OperationError>
-where
-    DDst: TensorStorage<TDst>,
-    DLhs: TensorStorage<TLhs>,
-    DRhs: TensorStorage<TRhs>,
-{
-    TensorContractStructure::compile(dst, lhs, rhs, axes)
-}
-
-pub(crate) const PLAIN_TENSORCONTRACT_FUSION_REQUIRES_FUSION_API: &str =
-    "plain tensorcontract does not lower fusion-tree blocks; use tensorcontract_fusion_*";
 pub(crate) const PLAIN_TENSORCONTRACT_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse contraction enumeration is not implemented yet";
 
 impl TensorContractStructure<f64> {
-    pub fn compile<
-        TDst,
-        TLhs,
-        TRhs,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DLhs: TensorStorage<TLhs>,
-        DRhs: TensorStorage<TRhs>,
-    {
-        if dst.fusion_space().is_some()
-            || lhs.fusion_space().is_some()
-            || rhs.fusion_space().is_some()
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: PLAIN_TENSORCONTRACT_FUSION_REQUIRES_FUSION_API,
-            });
-        }
-        Self::compile_shared_structures(
-            Arc::clone(dst.structure()),
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            axes,
-        )
-    }
-
     pub fn compile_structures(
         dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,
@@ -124,37 +49,6 @@ impl TensorContractStructure<f64> {
             Arc::new(rhs_structure.clone()),
             axes,
         )
-    }
-
-    pub fn compile_with_block_specs<
-        TDst,
-        TLhs,
-        TRhs,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec<f64>],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DLhs: TensorStorage<TLhs>,
-        DRhs: TensorStorage<TRhs>,
-    {
-        Self::compile_with_block_specs_generic(dst, lhs, rhs, axes, block_specs)
     }
 
     pub fn compile_structures_with_block_specs(
@@ -205,45 +99,6 @@ impl<C> TensorContractStructure<C>
 where
     C: Copy + One,
 {
-    pub fn compile_with_block_specs_generic<
-        TDst,
-        TLhs,
-        TRhs,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec<C>],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DLhs: TensorStorage<TLhs>,
-        DRhs: TensorStorage<TRhs>,
-    {
-        Self::compile_shared_structures_with_block_specs(
-            Arc::clone(dst.structure()),
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            axes,
-            block_specs,
-        )
-    }
-
     pub fn compile_structures_with_block_specs_generic(
         dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,

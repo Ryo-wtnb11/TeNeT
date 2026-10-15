@@ -36,7 +36,7 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
     let output = pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.5).unwrap();
     assert_eq!(dense.counts().svd, 2);
     assert!(Arc::ptr_eq(output.space().provider_arc(), &provider));
-    let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
+    let output: BoundTensorMap<_, _> = typed_from_bound_factor(output).unwrap();
     assert_eq!(scalar_u1_block(output.tensor(), 0), 0.0);
     assert!((scalar_u1_block(output.tensor(), 1) - 1.0).abs() < 1e-12);
     // The padded input is packed once; no SVD factor is laid out.
@@ -160,7 +160,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     };
     let f32_space = space();
     let len = f32_space.required_len().unwrap();
-    let tensor_f32 = TensorMap::<f32, 2, 2>::from_vec_with_fusion_space(
+    let tensor_f32 = TestTensor::<f32>::from_vec_with_fusion_space(
         (0..len)
             .map(|i| ((i * 7 + 3) % 23) as f32 * 0.5 - 5.0)
             .collect(),
@@ -228,7 +228,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     // Complex32 general eigendecomposition returns Complex32 factors.
     let c32_space = space();
     let len = c32_space.required_len().unwrap();
-    let tensor_c32 = TensorMap::<Complex32, 2, 2>::from_vec_with_fusion_space(
+    let tensor_c32 = TestTensor::<Complex32>::from_vec_with_fusion_space(
         (0..len)
             .map(|i| {
                 Complex32::new(
@@ -251,5 +251,5 @@ fn single_precision_svd_and_eig_work_end_to_end() {
             assert!((pair[0].re, pair[0].im) <= (pair[1].re, pair[1].im));
         }
     }
-    let _: &TensorMap<Complex32, 2, 1> = &eig.v;
+    let _: &TestTensor<Complex32> = &eig.v;
 }

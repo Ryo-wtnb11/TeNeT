@@ -7,7 +7,9 @@
 //! the few that tests outside the crate use are forwarded only through the
 //! `testing` feature's `tenet_core::testing`, pinned separately below.
 //! `merge_fusion_trees_generic` and the `from_degeneracy_shapes` alias of
-//! `FusionTensorMapSpace::from_degeneracy_shapes_coupled` were deleted.
+//! `FusionTensorMapSpace::from_degeneracy_shapes_coupled` were deleted, and so
+//! were the static-rank `TensorMap` / `Tensor` and their `Trivial` marker
+//! (#2222).
 //!
 //! Why a source scan and not an import list: an import list only proves
 //! presence, not absence. The crate root re-exports its private modules with
@@ -309,13 +311,10 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "StructurallyValidatedFusionTreeSubset",
         "Su2SectorLayout",
         "SymbolShapeError",
-        "Tensor",
         "TensorKitProductCodec",
-        "TensorMap",
         "TensorMapSpace",
         "TensorStorage",
         "TreeRehomer",
-        "Trivial",
         "TypedSectorAdmission",
         "U1FusionRule",
         "U1Irrep",

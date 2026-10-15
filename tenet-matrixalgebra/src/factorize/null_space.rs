@@ -100,10 +100,10 @@ where
 ///
 /// Each sector keeps the `rows - cols` (when positive) trailing columns of its
 /// full QR's `Q`; sectors with no null directions drop out of `W`.
-pub(crate) fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn left_null<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<BoundTensorMap<R, D, NOUT, 1>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -132,10 +132,10 @@ where
 ///
 /// Each sector keeps the `cols - rows` (when positive) trailing rows of its
 /// full LQ's `Q`; sectors with no null directions drop out of `W`.
-pub(crate) fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn right_null<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<BoundTensorMap<R, D, 1, NIN>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

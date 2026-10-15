@@ -1,7 +1,7 @@
 use tenet_core::{
     multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CategoricalScalar,
-    FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
+    FusionRule, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
 };
 
 use crate::{DenseBlockScalar, OperationError};
@@ -66,31 +66,20 @@ impl ContractBlockSource for FusionOperandLayout<'_> {
     }
 }
 
-pub fn tensorcontract_fusion_block_specs<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+pub fn tensorcontract_fusion_block_specs<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
 ) -> Result<Vec<TensorContractBlockSpec<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    let dst = DynamicFusionMapSpace::from_typed(dst);
-    let lhs = DynamicFusionMapSpace::from_typed(lhs);
-    let rhs = DynamicFusionMapSpace::from_typed(rhs);
-    validate_fusion_contract_rule(rule, &dst, &lhs, &rhs)?;
+    validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
     reject_fusion_contract_conjugation(axes)?;
-    tensorcontract_fusion_block_specs_lowered(rule, &dst, &lhs, &rhs, axes)
+    tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)
 }
 
 fn tensorcontract_fusion_block_specs_lowered<R, S>(

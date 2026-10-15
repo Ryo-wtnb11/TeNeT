@@ -11,14 +11,11 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
         .unwrap()])
         .unwrap();
         let space = TensorMapSpace::<1, 0>::from_dims([1], []).unwrap();
-        let src = TensorMap::<f64, 1, 0>::from_vec_with_structure(
-            vec![3.0],
-            space.clone(),
-            structure.clone(),
-        )
-        .unwrap();
+        let src =
+            TestTensor::<f64>::from_vec_with_structure(vec![3.0], space.clone(), structure.clone())
+                .unwrap();
         let mut dst =
-            TensorMap::<f64, 1, 0>::from_vec_with_structure(vec![0.0], space, structure).unwrap();
+            TestTensor::<f64>::from_vec_with_structure(vec![0.0], space, structure).unwrap();
         let replay = TreeTransformStructure::compile_keyed_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
@@ -69,22 +66,21 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )
     .unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         src_space,
         src_structure,
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure).unwrap();
     let structure = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
         [key10, key20],
         [key100, key200, key300],
         vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
     )
     .unwrap()])
-    .compile(&dst, &src)
+    .compile_structures(dst.structure(), src.structure())
     .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -295,7 +291,7 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
 
     let src_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let src = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<Complex64>::from_vec_with_structure(
         vec![
             Complex64::new(1.0, 2.0),
             Complex64::new(3.0, 4.0),
@@ -308,13 +304,13 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
         storage_src_structure.as_ref().clone(),
     )
     .unwrap();
-    let mut grouped_dst = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+    let mut grouped_dst = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(0.0, 0.0); 6],
         dst_space.clone(),
         dst_structure.as_ref().clone(),
     )
     .unwrap();
-    let mut direct_dst = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+    let mut direct_dst = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(0.0, 0.0); 6],
         dst_space,
         dst_structure.as_ref().clone(),
@@ -358,18 +354,16 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     let src_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure).unwrap();
     let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure).unwrap();
 
     let err = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
         missing_key.clone(),
         present_key,
         1.0,
     )])
-    .compile(&dst, &src)
+    .compile_structures(dst.structure(), src.structure())
     .unwrap_err();
 
     assert_eq!(
@@ -581,12 +575,15 @@ fn tree_transform_group_block_spec_rejects_group_structure_mismatch() {
 fn tree_transform_rejects_incompatible_single_tree_shapes() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec(vec![1.0; 4], src_space).unwrap();
-    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let src = TestTensor::<f64>::from_vec(vec![1.0; 4], src_space).unwrap();
+    let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
 
-    let err =
-        TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 1.0)])
-            .unwrap_err();
+    let err = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
+        &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+    )
+    .unwrap_err();
 
     assert_eq!(
         err,
@@ -604,15 +601,13 @@ fn tree_transform_rejects_mismatched_multi_tree_element_count() {
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![3, 1], vec![3, 1]]).unwrap();
     let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 8], src_space, src_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 8], src_space, src_structure).unwrap();
     let dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 6], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 6], dst_space, dst_structure).unwrap();
 
-    let err = TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let err = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],
@@ -641,13 +636,13 @@ fn compile_multi_pair_shapes(
     let src_structure = BlockStructure::packed_column_major(2, src_shapes).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, dst_shapes).unwrap();
     let src =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 8], space.clone(), src_structure)
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 8], space.clone(), src_structure)
             .unwrap();
-    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], space, dst_structure)
-        .unwrap();
-    TreeTransformStructure::compile(
-        &dst,
-        &src,
+    let dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 8], space, dst_structure).unwrap();
+    TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],

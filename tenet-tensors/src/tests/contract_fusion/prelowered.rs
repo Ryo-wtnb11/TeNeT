@@ -276,7 +276,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
     // layouts are identical.
     assert_eq!(direct_prelowered, oracle);
 
-    let ordinary_tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let ordinary_tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         eager_lhs_data,
         crate::lowering::adjoint_fusion_space_view(&rule, &canonical_typed).unwrap(),
     )
@@ -286,7 +286,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
     // separate storage determinant.
     assert!(Arc::ptr_eq(
         ordinary_tensor.structure(),
-        ordinary_tensor.fusion_space().unwrap().subblock_structure(),
+        ordinary_tensor.fusion_space().unwrap().structure(),
     ));
 }
 

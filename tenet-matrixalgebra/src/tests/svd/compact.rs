@@ -88,13 +88,13 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
 
 fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
     let source = mixed_rectangular_c32_tensor();
-    let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<D>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| D::from_complex64(Complex64::new(value.re as f64, value.im as f64)))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
@@ -639,7 +639,7 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
 
 #[test]
 fn compact_svd_direct_outputs_keep_executor_factor_owners() {
-    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TestTensor<D>) {
         let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
         let bound = bound_tensor(Arc::new(Z2FusionRule), tensor);
         crate::factorize::reset_compact_svd_copy_probe();
@@ -656,16 +656,16 @@ fn compact_svd_direct_outputs_keep_executor_factor_owners() {
 
     let tensor = rectangular_svd_tensor(3, 2);
     check(&tensor);
-    let space = tensor.fusion_space().unwrap().as_ref().clone();
+    let space = tensor.fusion_space().clone();
     check(
-        &TensorMap::<f32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<f32>::from_vec_with_fusion_space(
             tensor.data().iter().map(|&value| value as f32).collect(),
             space.clone(),
         )
         .unwrap(),
     );
     check(
-        &TensorMap::<Complex32, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex32>::from_vec_with_fusion_space(
             tensor
                 .data()
                 .iter()
@@ -676,7 +676,7 @@ fn compact_svd_direct_outputs_keep_executor_factor_owners() {
         .unwrap(),
     );
     check(
-        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        &TestTensor::<Complex64>::from_vec_with_fusion_space(
             tensor
                 .data()
                 .iter()
@@ -707,11 +707,9 @@ fn compact_svd_direct_and_fallback_apply_the_same_gauge() {
             transposed_data[row + 3 * col] = tensor.data()[col + 3 * row];
         }
     }
-    let transposed = TensorMap::from_vec_with_fusion_space(
-        transposed_data,
-        tensor.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
+    let transposed =
+        TestTensor::from_vec_with_fusion_space(transposed_data, tensor.fusion_space().clone())
+            .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let direct = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &transposed)).unwrap();
     let bound = bound_tensor(Arc::new(rule), &tensor);
@@ -778,14 +776,14 @@ fn compact_svd_adjoint_accepts_padded_parent_layout() {
 fn compact_svd_adjoint_c64_padded_parent_reconstructs_literal_adjoint() {
     let rule = Z2FusionRule;
     let source = rectangular_svd_tensor(5, 3);
-    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let complex = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .enumerate()
             .map(|(index, &value)| Complex64::new(value, index as f64 * 0.125 - 0.5))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let parent = padded_copy(&rule, &complex);
@@ -848,7 +846,7 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
         shapes,
     )
     .unwrap();
-    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| {
                 Complex64::new(
@@ -924,13 +922,13 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
 fn compact_svd_adjoint_c64_padded_fallback_matches_canonical_gauge() {
     let rule = Z2FusionRule;
     let source = mixed_rectangular_c32_tensor();
-    let canonical = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let canonical = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| Complex64::new(value.re as f64, value.im as f64))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let padded = padded_copy(&rule, &canonical);
@@ -1049,20 +1047,16 @@ fn compact_svd_c32_direct_and_fallback_apply_the_same_gauge() {
         .enumerate()
         .map(|(index, &value)| Complex32::new(value as f32, (index as f32 - 3.0) * 0.25))
         .collect::<Vec<_>>();
-    let tensor =
-        TensorMap::from_vec_with_fusion_space(data, real.fusion_space().unwrap().as_ref().clone())
-            .unwrap();
+    let tensor = TestTensor::from_vec_with_fusion_space(data, real.fusion_space().clone()).unwrap();
     let mut transposed_data = vec![Complex32::new(0.0, 0.0); 9];
     for col in 0..3 {
         for row in 0..3 {
             transposed_data[row + 3 * col] = tensor.data()[col + 3 * row];
         }
     }
-    let transposed = TensorMap::from_vec_with_fusion_space(
-        transposed_data,
-        tensor.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
+    let transposed =
+        TestTensor::from_vec_with_fusion_space(transposed_data, tensor.fusion_space().clone())
+            .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_svd_copy_probe();
     let direct = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &transposed)).unwrap();
@@ -1126,8 +1120,8 @@ fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
         [vec![2, 2]],
     )
     .unwrap();
-    let tensor = TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 3.0, 4.0], space).unwrap();
-    let original_homspace = tensor.fusion_space().unwrap().homspace().clone();
+    let tensor = TestTensor::from_vec_with_fusion_space(vec![1.0, 2.0, 3.0, 4.0], space).unwrap();
+    let original_homspace = tensor.fusion_space().homspace().clone();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
@@ -1135,26 +1129,14 @@ fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
     assert_factor_layout_matches_legacy_shapes(result.u.space());
     assert_factor_layout_matches_legacy_shapes(result.s.space());
     assert_factor_layout_matches_legacy_shapes(result.vh.space());
-    assert_eq!(result.u.tensor().space().dims(), &[5, 2]);
-    assert_eq!(result.vh.tensor().space().dims(), &[2, 2]);
+    assert_eq!(result.u.tensor().dims(), &[5, 2]);
+    assert_eq!(result.vh.tensor().dims(), &[2, 2]);
     assert_eq!(
-        result
-            .u
-            .tensor()
-            .fusion_space()
-            .unwrap()
-            .homspace()
-            .codomain(),
+        result.u.tensor().fusion_space().homspace().codomain(),
         original_homspace.codomain()
     );
     assert_eq!(
-        result
-            .vh
-            .tensor()
-            .fusion_space()
-            .unwrap()
-            .homspace()
-            .domain(),
+        result.vh.tensor().fusion_space().homspace().domain(),
         original_homspace.domain()
     );
 }
@@ -1189,7 +1171,7 @@ fn svd_compact_preserves_asymmetric_non_self_dual_u1_factor_layouts() {
         shapes,
     )
     .unwrap();
-    let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
             .collect(),
@@ -1292,7 +1274,7 @@ fn public_svd_authority_rejects_same_type_with_different_identity_and_qdim() {
 fn svd_input_rejects_short_storage_before_dense_execution() {
     let tensor = tsvd_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
     let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&tensor).unwrap(),
+        tensor.fusion_space().clone(),
         Arc::new(Z2FusionRule),
     )
     .unwrap();

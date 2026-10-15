@@ -76,34 +76,6 @@ fn validate_uniform_layout_shapes(
 }
 
 impl<T: Copy> TreeTransformStructure<T> {
-    pub fn compile<
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        specs: &[TreeTransformBlockSpec<T>],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        Self::compile_shared_structures(
-            Arc::clone(dst.structure()),
-            Arc::clone(src.structure()),
-            specs,
-            false,
-        )
-    }
-
     pub fn compile_structures(
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,

@@ -135,8 +135,8 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
     // from the contraction homspace and per-tree shapes.
     let us_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
-        full.u.fusion_space().unwrap().homspace(),
-        full.s.fusion_space().unwrap().homspace(),
+        full.u.fusion_space().homspace(),
+        full.s.fusion_space().homspace(),
         &[2],
         &[0],
         &[0, 1, 2],
@@ -178,16 +178,15 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
             shape
         })
         .collect::<Vec<_>>();
-    let dims = full.u.tensor().space().dims();
+    let dims = full.u.tensor().dims();
     let us_space = FusionTensorMapSpace::<2, 1>::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.tensor().space().dims()[1]])
-            .unwrap(),
+        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.tensor().dims()[1]]).unwrap(),
         us_hom,
         &rule,
         shapes,
     )
     .unwrap();
-    let mut us = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut us = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; us_space.required_len().unwrap()],
         us_space,
     )
@@ -224,13 +223,13 @@ fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
 
 fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
     let source = mixed_rectangular_c32_tensor();
-    let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<D>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| D::from_complex64(Complex64::new(value.re as f64, value.im as f64)))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
@@ -259,13 +258,13 @@ fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
 #[test]
 fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     let source = mixed_rectangular_c32_tensor();
-    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| Complex64::new(value.re as f64, value.im as f64))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);

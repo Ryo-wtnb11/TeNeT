@@ -254,14 +254,10 @@ pub(super) fn scale_row<D: FactorScalar>(
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
 /// from one economy QR, augmenting with identity columns only when `m > n`.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn qr_full<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<Qr<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<Qr<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -328,14 +324,10 @@ where
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
 /// QR of the adjoint sector matrices.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn lq_full<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<Lq<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<Lq<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -389,14 +381,10 @@ where
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`. The
 /// positive-diagonal gauge is applied (MAK / TensorKit 0.17 default
 /// `positive = true`): `R`'s diagonal is real non-negative per sector.
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn qr_compact<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<Qr<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<Qr<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1063,14 +1051,10 @@ where
 /// coupled sector and `L : codomain <- W`. The positive-diagonal gauge is
 /// applied (MAK / TensorKit 0.17 default `positive = true`): `L`'s diagonal
 /// is real non-negative per sector.
-#[expect(
-    clippy::type_complexity,
-    reason = "static-rank factors differ in rank, so the named result spells both factor types"
-)]
-pub(crate) fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn lq_compact<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<Lq<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<Lq<BoundTensorMap<R, D>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

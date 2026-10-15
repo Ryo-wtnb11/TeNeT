@@ -5,56 +5,181 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-/// Dynamic-rank factor tensor: an expert-layer space handle plus flat data in
-/// the coupled-sector matrix layout (the same pair `tenet_tensors::adjoint_dyn`
-/// returns).
-pub(crate) type DynFactor<D> = (DynamicFusionMapSpace, Vec<D>);
-
-#[cfg(test)]
-/// Typed tensor plus the sole provider authority accepted by provider-sensitive
-/// factorization and matrix-function APIs.
-pub(crate) struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
-    pub(super) space: &'a BoundDynamicFusionMapSpace<R>,
-    pub(super) tensor: &'a TensorMap<D, NOUT, NIN>,
-}
-
-#[cfg(test)]
-/// Owned typed tensor that retains the provider authority for its fusion
-/// space. Provider-sensitive operations consume this type or its borrowed
-/// view instead of accepting an independently supplied rule.
-///
-/// The fields are private so a tensor and an unrelated provider-bound space
-/// cannot be paired without validation.
-///
-/// ```compile_fail
-/// use tenet_core::TensorMap;
-/// use tenet_matrixalgebra::BoundTensorMap;
-/// use tenet_tensors::BoundDynamicFusionMapSpace;
-///
-/// fn forge<R, D>(
-///     space: BoundDynamicFusionMapSpace<R>,
-///     tensor: TensorMap<D, 1, 1>,
-/// ) -> BoundTensorMap<R, D, 1, 1> {
-///     BoundTensorMap { space, tensor }
-/// }
-/// ```
+/// Test-only rank-erased operand: a complete dynamic fusion space plus its
+/// flat data in the coupled-sector matrix layout. The rank is a runtime
+/// property of the space, as on every dynamic entry these tests exercise.
 #[derive(Clone, Debug)]
-pub(crate) struct BoundTensorMap<R, D, const NOUT: usize, const NIN: usize> {
-    pub(super) space: BoundDynamicFusionMapSpace<R>,
-    pub(super) tensor: TensorMap<D, NOUT, NIN>,
+pub(crate) struct TestTensor<D> {
+    space: Arc<DynamicFusionMapSpace>,
+    dims: Vec<usize>,
+    data: Vec<D>,
 }
 
 #[cfg(test)]
-impl<R, D, const NOUT: usize, const NIN: usize> BoundTensorMap<R, D, NOUT, NIN>
+/// A fixture space: a typed construction or an already rank-erased one.
+pub(crate) trait IntoTestSpace {
+    fn into_test_space(self) -> DynamicFusionMapSpace;
+}
+
+#[cfg(test)]
+impl<const NOUT: usize, const NIN: usize> IntoTestSpace for FusionTensorMapSpace<NOUT, NIN> {
+    fn into_test_space(self) -> DynamicFusionMapSpace {
+        DynamicFusionMapSpace::from_typed(&self)
+    }
+}
+
+#[cfg(test)]
+impl IntoTestSpace for DynamicFusionMapSpace {
+    fn into_test_space(self) -> DynamicFusionMapSpace {
+        self
+    }
+}
+
+#[cfg(test)]
+impl<D> TestTensor<D> {
+    pub(crate) fn from_dyn(data: Vec<D>, space: DynamicFusionMapSpace) -> Result<Self, CoreError> {
+        let required = space.structure().required_len()?;
+        if data.len() != required {
+            return Err(CoreError::DimensionMismatch {
+                expected: required,
+                actual: data.len(),
+            });
+        }
+        // SectorLeg is the complete axis-space authority, including sectors
+        // with no participating tree.
+        let dims = space
+            .homspace()
+            .codomain()
+            .legs()
+            .iter()
+            .chain(space.homspace().domain().legs())
+            .map(|leg| {
+                leg.degeneracies().iter().try_fold(0usize, |total, &dim| {
+                    total
+                        .checked_add(dim)
+                        .ok_or(CoreError::ElementCountOverflow)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            space: Arc::new(space),
+            dims,
+            data,
+        })
+    }
+
+    pub(crate) fn from_vec_with_fusion_space(
+        data: Vec<D>,
+        space: impl IntoTestSpace,
+    ) -> Result<Self, CoreError> {
+        Self::from_dyn(data, space.into_test_space())
+    }
+
+    pub(crate) fn from_block_fn_with_fusion_space<F>(
+        space: impl IntoTestSpace,
+        background: D,
+        fill: F,
+    ) -> Result<Self, CoreError>
+    where
+        D: Clone,
+        F: FnMut(&BlockKey, &[usize]) -> D,
+    {
+        let space = space.into_test_space();
+        let len = space.required_len()?;
+        let mut tensor = Self::from_dyn(vec![background; len], space)?;
+        tensor.fill_block_elements(fill)?;
+        Ok(tensor)
+    }
+
+    pub(crate) fn fusion_space(&self) -> &DynamicFusionMapSpace {
+        &self.space
+    }
+
+    pub(crate) fn structure(&self) -> &Arc<BlockStructure> {
+        self.space.structure()
+    }
+
+    pub(crate) fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+
+    pub(crate) fn data(&self) -> &[D] {
+        &self.data
+    }
+
+    pub(crate) fn data_mut(&mut self) -> &mut [D] {
+        &mut self.data
+    }
+
+    /// Fills every block element with `fill(key, indices)`, independent of
+    /// the storage layout.
+    pub(crate) fn fill_block_elements<F>(&mut self, mut fill: F) -> Result<(), CoreError>
+    where
+        F: FnMut(&BlockKey, &[usize]) -> D,
+    {
+        let structure = Arc::clone(self.structure());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let shape = block.shape();
+            let strides = block.strides();
+            let count: usize = shape.iter().product();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = block.offset()
+                    + indices
+                        .iter()
+                        .zip(strides)
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                self.data[position] = fill(block.key(), &indices);
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn block_by_key(
+        &self,
+        key: &BlockKey,
+    ) -> Result<tenet_core::BlockView<'_, D>, CoreError> {
+        let block = self.structure().block_by_key(key)?;
+        tenet_core::BlockView::new(&self.data, block.shape(), block.strides(), block.offset())
+    }
+}
+
+#[cfg(test)]
+/// Test operand plus the sole provider authority accepted by
+/// provider-sensitive factorization and matrix-function APIs.
+pub(crate) struct BoundTensorMapRef<'a, R, D> {
+    pub(super) space: &'a BoundDynamicFusionMapSpace<R>,
+    pub(super) tensor: &'a TestTensor<D>,
+}
+
+#[cfg(test)]
+/// Owned test operand that retains the provider authority for its fusion
+/// space.
+#[derive(Clone, Debug)]
+pub(crate) struct BoundTensorMap<R, D> {
+    pub(super) space: BoundDynamicFusionMapSpace<R>,
+    pub(super) tensor: TestTensor<D>,
+}
+
+#[cfg(test)]
+impl<R, D> BoundTensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    pub fn try_new(
-        provider: Arc<R>,
-        tensor: TensorMap<D, NOUT, NIN>,
-    ) -> Result<Self, OperationError> {
-        let space =
-            BoundDynamicFusionMapSpace::bind_multiplicity_free(dyn_space_of(&tensor)?, provider)?;
+    pub fn try_new(provider: Arc<R>, tensor: TestTensor<D>) -> Result<Self, OperationError> {
+        let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            tensor.fusion_space().clone(),
+            provider,
+        )?;
         BoundDynamicTensorRef::try_new(&space, tensor.data())?;
         Ok(Self { space, tensor })
     }
@@ -63,7 +188,7 @@ where
         &self.space
     }
 
-    pub fn tensor(&self) -> &TensorMap<D, NOUT, NIN> {
+    pub fn tensor(&self) -> &TestTensor<D> {
         &self.tensor
     }
 
@@ -71,23 +196,21 @@ where
         self.tensor.data()
     }
 
-    pub fn as_ref(&self) -> BoundTensorMapRef<'_, R, D, NOUT, NIN> {
+    pub fn as_ref(&self) -> BoundTensorMapRef<'_, R, D> {
         BoundTensorMapRef {
             space: &self.space,
             tensor: &self.tensor,
         }
     }
 
-    pub fn into_parts(self) -> (BoundDynamicFusionMapSpace<R>, TensorMap<D, NOUT, NIN>) {
+    pub fn into_parts(self) -> (BoundDynamicFusionMapSpace<R>, TestTensor<D>) {
         (self.space, self.tensor)
     }
 }
 
 #[cfg(test)]
-impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
-    for BoundTensorMap<R, D, NOUT, NIN>
-{
-    type Target = TensorMap<D, NOUT, NIN>;
+impl<R, D> std::ops::Deref for BoundTensorMap<R, D> {
+    type Target = TestTensor<D>;
 
     fn deref(&self) -> &Self::Target {
         &self.tensor
@@ -95,7 +218,7 @@ impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
 }
 
 #[cfg(test)]
-impl<'a, R, D, const NOUT: usize, const NIN: usize> BoundTensorMapRef<'a, R, D, NOUT, NIN>
+impl<'a, R, D> BoundTensorMapRef<'a, R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -103,7 +226,7 @@ where
         self.space
     }
 
-    pub fn tensor(&self) -> &'a TensorMap<D, NOUT, NIN> {
+    pub fn tensor(&self) -> &'a TestTensor<D> {
         self.tensor
     }
 
@@ -207,78 +330,14 @@ where
 }
 
 #[cfg(test)]
-/// Rank-erases the fusion space of a typed tensor (shared handles, no copy).
-pub(crate) fn dyn_space_of<D, const NOUT: usize, const NIN: usize>(
-    tensor: &TensorMap<D, NOUT, NIN>,
-) -> Result<DynamicFusionMapSpace, OperationError> {
-    Ok(DynamicFusionMapSpace::from_typed(
-        tensor
-            .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    ))
-}
-
-#[cfg(test)]
-/// Rebuilds a typed tensor from a dynamic factor: the subblock structure and
-/// hom space are shared as-is (identical layout by construction), only the
-/// dense bookkeeping dims are recomputed as per-axis degeneracy totals.
-pub(crate) fn typed_from_dyn<R, D, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    (space, data): DynFactor<D>,
-) -> Result<TensorMap<D, NOUT, NIN>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    if space.nout() != NOUT || space.nin() != NIN {
-        return Err(OperationError::RankMismatch {
-            expected: NOUT + NIN,
-            actual: space.rank(),
-        });
-    }
-    let axis_dim = |leg: &SectorLeg| {
-        leg.degeneracies().iter().try_fold(0usize, |total, &dim| {
-            total
-                .checked_add(dim)
-                .ok_or(CoreError::ElementCountOverflow)
-        })
-    };
-    let mut codomain_dims = [0usize; NOUT];
-    for (dim, leg) in codomain_dims
-        .iter_mut()
-        .zip(space.homspace().codomain().legs())
-    {
-        *dim = axis_dim(leg).map_err(OperationError::from_core_preserving_context)?;
-    }
-    let mut domain_dims = [0usize; NIN];
-    for (dim, leg) in domain_dims.iter_mut().zip(space.homspace().domain().legs()) {
-        *dim = axis_dim(leg).map_err(OperationError::from_core_preserving_context)?;
-    }
-    // Why not recover axis dimensions from populated fusion-tree blocks:
-    // SectorLeg is the complete axis-space authority, including sectors with
-    // no participating tree. External relabeling is irrelevant to a dimension
-    // sum and can fail for a finite encoded dual after dense factorization.
-    let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
-        TensorMapSpace::<NOUT, NIN>::from_dims(codomain_dims, domain_dims)
-            .map_err(OperationError::from_core_preserving_context)?,
-        space.homspace().clone(),
-        Arc::clone(space.structure()),
-    )
-    .map_err(OperationError::from_core_preserving_context)?
-    .try_bind_rule(rule)
-    .map_err(OperationError::from_core_preserving_context)?;
-    TensorMap::from_vec_with_fusion_space(data, typed_space)
-        .map_err(OperationError::from_core_preserving_context)
-}
-
-#[cfg(test)]
-pub(crate) fn typed_from_bound_factor<R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn typed_from_bound_factor<R, D>(
     factor: BoundDynFactor<R, D>,
-) -> Result<BoundTensorMap<R, D, NOUT, NIN>, OperationError>
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let (space, data) = factor.into_parts();
-    let provider = Arc::clone(space.provider_arc());
-    let tensor = typed_from_dyn(provider.as_ref(), (space.space().clone(), data))?;
+    let tensor = TestTensor::from_dyn(data, space.space().clone())
+        .map_err(OperationError::from_core_preserving_context)?;
     Ok(BoundTensorMap { space, tensor })
 }

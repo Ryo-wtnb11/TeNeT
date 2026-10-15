@@ -2,8 +2,8 @@
 //!
 //! Each type only names the factors; it neither computes nor converts them.
 //! The type parameter is the factor type: `tenet::typed::TensorMap` on the
-//! user facade (Host or CUDA storage), [`crate::BoundDynFactor`] or
-//! [`crate::BoundTensorMap`] on this crate's expert entry points.
+//! user facade (Host or CUDA storage), [`crate::BoundDynFactor`] on this
+//! crate's expert entry points.
 
 /// Singular-value decomposition `t = u * s * vh`.
 ///
@@ -106,31 +106,25 @@ pub struct Eig<T> {
 }
 
 /// QR factorization `t = q * r` (compact or full).
-///
-/// The second parameter differs from the first only on the static-rank
-/// entry points of this crate, whose two factors have different ranks.
 #[derive(Clone, Debug)]
-pub struct Qr<Q, R = Q> {
+pub struct Qr<T> {
     /// Factor with orthonormal columns (unitary for the full QR),
     /// `codomain(t) <- W`.
-    pub q: Q,
+    pub q: T,
     /// Upper-triangular factor with real non-negative diagonal,
     /// `W <- domain(t)`.
-    pub r: R,
+    pub r: T,
 }
 
 /// LQ factorization `t = l * q` (compact or full).
-///
-/// The second parameter differs from the first only on the static-rank
-/// entry points of this crate, whose two factors have different ranks.
 #[derive(Clone, Debug)]
-pub struct Lq<L, Q = L> {
+pub struct Lq<T> {
     /// Lower-triangular factor with real non-negative diagonal,
     /// `codomain(t) <- W`.
-    pub l: L,
+    pub l: T,
     /// Factor with orthonormal rows (unitary for the full LQ),
     /// `W <- domain(t)`.
-    pub q: Q,
+    pub q: T,
 }
 
 /// Left polar decomposition `t = w * p` (TensorKit `left_polar`, which
@@ -139,19 +133,19 @@ pub struct Lq<L, Q = L> {
 /// Left and right polar are separate types because their factors differ in
 /// order and in which one is the isometry.
 #[derive(Clone, Debug)]
-pub struct LeftPolar<W, P = W> {
+pub struct LeftPolar<T> {
     /// Isometry on the input space, `codomain(t) <- domain(t)`.
-    pub w: W,
+    pub w: T,
     /// Positive-semidefinite factor, `domain(t) <- domain(t)`.
-    pub p: P,
+    pub p: T,
 }
 
 /// Right polar decomposition `t = p * wh` (TensorKit `right_polar`, which
 /// returns `P, Wᴴ`).
 #[derive(Clone, Debug)]
-pub struct RightPolar<P, Wh = P> {
+pub struct RightPolar<T> {
     /// Positive-semidefinite factor, `codomain(t) <- codomain(t)`.
-    pub p: P,
+    pub p: T,
     /// Coisometry on the input space, `codomain(t) <- domain(t)`.
-    pub wh: Wh,
+    pub wh: T,
 }

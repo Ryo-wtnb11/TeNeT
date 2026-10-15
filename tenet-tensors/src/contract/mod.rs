@@ -102,11 +102,11 @@ pub(crate) use fusion::{
     prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
     select_complete_tensorcontract_fusion_plan,
 };
+pub use structure::TensorContractBlockSpec;
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
 #[cfg(test)]
 pub(crate) use structure::TensorContractStructure;
-pub use structure::{tensorcontract_structure, TensorContractBlockSpec};
 
 #[cfg(test)]
 pub(crate) use dynamic_space::encoded_layout_primer;

@@ -11,8 +11,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use tenet_core::FusionRule;
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedGenericFusion, CoreError, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, CheckedGenericFusion, CoreError, FusionTreeHomSpace,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols,
 };
 
 #[cfg(test)]
@@ -583,55 +583,6 @@ where
     Ok((adjoint_space, result))
 }
 
-/// Eager blockwise adjoint; the output uses the coupled-sector matrix layout.
-pub fn adjoint<R, D, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    tensor: &TensorMap<D, NOUT, NIN>,
-) -> Result<TensorMap<D, NIN, NOUT>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: AdjointScalar,
-{
-    let fusion_space = tensor
-        .fusion_space()
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    fusion_space
-        .validate_rule(rule)
-        .map_err(OperationError::Core)?;
-    validate_adjoint_data_extent(fusion_space.required_len(), tensor.storage_dim())?;
-    validate_adjoint_source_structure(rule, fusion_space.homspace(), tensor.structure())?;
-    let homspace = fusion_space.homspace();
-    let adjoint_hom =
-        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
-
-    let dims = tensor.space().dims();
-    let mut domain_dims = [0usize; NIN];
-    domain_dims.copy_from_slice(&dims[NOUT..]);
-    let mut codomain_dims = [0usize; NOUT];
-    codomain_dims.copy_from_slice(&dims[..NOUT]);
-    let dense_space = TensorMapSpace::<NIN, NOUT>::from_dims(domain_dims, codomain_dims)
-        .map_err(OperationError::from_core_preserving_context)?;
-    let subblock_structure = adjoint_hom
-        .coupled_subblock_structure_from_leg_degeneracies(rule)
-        .map_err(OperationError::from_core_preserving_context)?;
-    let space = FusionTensorMapSpace::from_shared_subblock_structure(
-        dense_space,
-        adjoint_hom,
-        subblock_structure,
-    )
-    .map_err(OperationError::from_core_preserving_context)?
-    .try_bind_rule(rule)
-    .map_err(OperationError::from_core_preserving_context)?;
-    let data = materialize_adjoint_data_dyn(
-        &DynamicFusionMapSpace::from_typed(fusion_space),
-        &DynamicFusionMapSpace::from_typed(&space),
-        tensor.data(),
-    )?;
-    let result = TensorMap::<D, NIN, NOUT>::from_vec_with_fusion_space(data, space)
-        .map_err(OperationError::from_core_preserving_context)?;
-    Ok(result)
-}
-
 #[cfg(test)]
 #[path = "../../tests/support/generic_toy_fusion.rs"]
 mod generic_toy_fusion;
@@ -705,6 +656,8 @@ mod cache_tests {
     }
 
     use super::generic_toy_fusion::ToyGenericRule;
+    use crate::tests::TestTensor;
+    use tenet_core::{FusionTensorMapSpace, TensorMapSpace};
 
     fn triple_rule() -> TripleRule {
         TripleRule::new(
@@ -800,10 +753,10 @@ mod cache_tests {
         domain_dim: usize,
         homspace: FusionTreeHomSpace,
         structure: BlockStructure,
-    ) -> TensorMap<OutputObservedValue, 1, 1> {
+    ) -> TestTensor<OutputObservedValue> {
         let space = typed_u1_expert_space(codomain_dim, domain_dim, homspace, structure).unwrap();
         let len = space.required_len().unwrap();
-        TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
+        TestTensor::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
     }
 
     fn toy_generic_bound<const ID: u8>() -> BoundDynamicFusionMapSpace<ToyGenericRule<ID>> {
@@ -829,7 +782,7 @@ mod cache_tests {
         .unwrap()
     }
 
-    fn typed_u1_tensor() -> TensorMap<OutputObservedValue, 1, 1> {
+    fn typed_u1_tensor() -> TestTensor<OutputObservedValue> {
         let rule = U1FusionRule;
         let one = U1Irrep::new(1).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(one, 2)], false)]);
@@ -843,7 +796,7 @@ mod cache_tests {
         )
         .unwrap();
         let len = space.required_len().unwrap();
-        TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
+        TestTensor::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
     }
 
     fn canonical_dynamic_source<R>(rule: &R, homspace: FusionTreeHomSpace) -> DynamicFusionMapSpace
@@ -969,25 +922,6 @@ mod cache_tests {
         assert_eq!(dynamic.nin(), 1);
         assert_eq!(dynamic.homspace(), legacy.homspace());
         assert_eq!(dynamic_data, expected_data);
-
-        let dense_space =
-            TensorMapSpace::<1, 1>::from_dims([codomain_degeneracy], [domain_degeneracy]).unwrap();
-        let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
-            dense_space,
-            homspace,
-            Arc::clone(source.structure()),
-        )
-        .unwrap()
-        .try_bind_rule(rule)
-        .unwrap();
-        let tensor = TensorMap::from_vec_with_fusion_space(data, typed_space).unwrap();
-        let typed = adjoint(rule, &tensor).unwrap();
-        assert_complete_structure_eq(typed.structure(), legacy.structure());
-        assert_eq!(
-            typed.space().dims(),
-            &[domain_degeneracy, codomain_degeneracy]
-        );
-        assert_eq!(typed.data(), expected_data);
     }
 
     #[test]
@@ -1058,21 +992,6 @@ mod cache_tests {
         assert_eq!(dynamic.nin(), 2);
         assert_eq!(dynamic.homspace(), legacy.homspace());
         assert_eq!(dynamic_data, expected_data);
-
-        let dense_space = TensorMapSpace::<2, 2>::from_dims([3, 3], [4, 4]).unwrap();
-        let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
-            dense_space,
-            homspace,
-            Arc::clone(source.structure()),
-        )
-        .unwrap()
-        .try_bind_rule(&rule)
-        .unwrap();
-        let tensor = TensorMap::from_vec_with_fusion_space(data, typed_space).unwrap();
-        let typed = adjoint(&rule, &tensor).unwrap();
-        assert_complete_structure_eq(typed.structure(), legacy.structure());
-        assert_eq!(typed.space().dims(), &[4, 4, 3, 3]);
-        assert_eq!(typed.data(), expected_data);
     }
 
     #[test]
@@ -1182,7 +1101,7 @@ mod cache_tests {
         let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let error = adjoint(&SU2FusionRule, &tensor).unwrap_err();
+        let error = tensor.adjoint(&SU2FusionRule).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1212,7 +1131,7 @@ mod cache_tests {
         let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+        let error = tensor.adjoint(&U1FusionRule).unwrap_err();
 
         assert_eq!(
             error,
@@ -1308,7 +1227,7 @@ mod cache_tests {
             let tensor = typed_u1_expert_tensor(2, 2, homspace.clone(), structure);
             OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
 
-            let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+            let error = tensor.adjoint(&U1FusionRule).unwrap_err();
 
             assert_eq!(error, OperationError::StructureMismatch { tensor: "src" });
             assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
@@ -1346,7 +1265,7 @@ mod cache_tests {
         )
         .unwrap();
         let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
-        let reordered = DynamicFusionMapSpace::from_typed(reordered_tensor.fusion_space().unwrap());
+        let reordered = reordered_tensor.dynamic_space().clone();
 
         let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
         assert_eq!(
@@ -1495,14 +1414,13 @@ mod cache_tests {
     }
 
     #[test]
-    fn typed_eager_adjoint_accepts_exact_storage() {
-        // What: typed eager adjoint keeps its ordinary exact-storage path after
-        // the obsolete length-changing TensorMap test escape is removed.
+    fn eager_adjoint_accepts_exact_storage() {
+        // What: the eager adjoint keeps its ordinary exact-storage path.
         let exact = typed_u1_tensor();
         let expected = exact.structure().required_len().unwrap();
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let output = adjoint(&U1FusionRule, &exact).unwrap();
-        assert_eq!(output.storage_dim(), expected);
+        let output = exact.adjoint(&U1FusionRule).unwrap();
+        assert_eq!(output.data().len(), expected);
         // #1290: the canonical output tiles its storage, so no element is
         // zero-filled before its block overwrites it.
         assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);

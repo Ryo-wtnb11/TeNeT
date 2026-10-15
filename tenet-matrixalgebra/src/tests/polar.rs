@@ -79,10 +79,8 @@ fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_f
     .unwrap()
     .try_bind_rule(&FactorGenericRule)
     .unwrap();
-    let tensor = TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
-        typed_space,
-        0.0,
-        |key, indices| {
+    let tensor =
+        TestTensor::<f64>::from_block_fn_with_fusion_space(typed_space, 0.0, |key, indices| {
             let block = base_structure
                 .block(base_structure.find_block_index_by_key(key).unwrap())
                 .unwrap();
@@ -92,9 +90,8 @@ fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_f
                     .zip(block.strides())
                     .map(|(&index, &stride)| index * stride)
                     .sum::<usize>()]
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     // The typed space was admitted for `FactorGenericRule`, so this
     // never-failing spy answers under that identity.
     let provider = Arc::new(LateGenericSpy {
@@ -104,7 +101,7 @@ fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_f
         identity: FactorGenericRule.rule_identity(),
     });
     let source = BoundDynamicFusionMapSpace::bind_generic(
-        DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+        tensor.fusion_space().clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -217,7 +214,7 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     .unwrap();
     let reconstructed = crate::compose::compose(&mut context, &rule, &isometry, &positive).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
-    let wh = tenet_tensors::adjoint(&rule, &isometry).unwrap();
+    let wh = adjoint(&rule, &isometry).unwrap();
     let unit = crate::compose::compose(&mut context, &rule, &wh, &isometry).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &unit));
 
@@ -255,7 +252,7 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
     }
 }
 
-fn assert_polar_direction_error_before_dense(tensor: &TensorMap<f64, 1, 1>, left: bool) {
+fn assert_polar_direction_error_before_dense(tensor: &TestTensor<f64>, left: bool) {
     let before = tensor.data().to_vec();
     let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let input = bound_tensor(Arc::new(U1FusionRule), tensor);
@@ -273,7 +270,7 @@ fn assert_polar_direction_error_before_dense(tensor: &TensorMap<f64, 1, 1>, left
     assert_eq!(tensor.data(), before);
 }
 
-fn assert_valid_unmatched_left_polar(tensor: &TensorMap<f64, 1, 1>) {
+fn assert_valid_unmatched_left_polar(tensor: &TestTensor<f64>) {
     let provider = Arc::new(U1FusionRule);
     let input = bound_tensor(Arc::clone(&provider), tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -288,14 +285,14 @@ fn assert_valid_unmatched_left_polar(tensor: &TensorMap<f64, 1, 1>) {
     let reconstructed =
         crate::compose::compose(&mut context, provider.as_ref(), &isometry, &positive).unwrap();
     assert_svd_blocks_match(tensor, &reconstructed);
-    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &isometry).unwrap();
+    let adjoint = adjoint(provider.as_ref(), &isometry).unwrap();
     let gram =
         crate::compose::compose(&mut context, provider.as_ref(), &adjoint, &isometry).unwrap();
     assert_identity_matrices(&dense_sector_matrices(1, &gram));
     assert_identity_matrices(&dense_sector_matrices(1, &positive));
 }
 
-fn assert_valid_unmatched_right_polar(tensor: &TensorMap<f64, 1, 1>) {
+fn assert_valid_unmatched_right_polar(tensor: &TestTensor<f64>) {
     let provider = Arc::new(U1FusionRule);
     let input = bound_tensor(Arc::clone(&provider), tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -310,7 +307,7 @@ fn assert_valid_unmatched_right_polar(tensor: &TensorMap<f64, 1, 1>) {
     let reconstructed =
         crate::compose::compose(&mut context, provider.as_ref(), &positive, &isometry).unwrap();
     assert_svd_blocks_match(tensor, &reconstructed);
-    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &isometry).unwrap();
+    let adjoint = adjoint(provider.as_ref(), &isometry).unwrap();
     let gram =
         crate::compose::compose(&mut context, provider.as_ref(), &isometry, &adjoint).unwrap();
     assert_identity_matrices(&dense_sector_matrices(1, &gram));
@@ -373,7 +370,7 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
         shapes,
     )
     .unwrap();
-    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], space).unwrap();
+    let scalar = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0], space).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let input = bound_tensor(Arc::new(rule), &scalar);
     // `P = (sqrt(S) Vh)^H (sqrt(S) Vh)` (MAK `PolarViaSVD`): `sqrt(2)^2`

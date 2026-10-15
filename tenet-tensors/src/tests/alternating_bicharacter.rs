@@ -124,7 +124,7 @@ fn single_block<const NOUT: usize, const NIN: usize>(
     codomain: [usize; NOUT],
     domain: [usize; NIN],
     value: Complex64,
-) -> TensorMap<Complex64, NOUT, NIN> {
+) -> TestTensor<Complex64> {
     let rule = AlternatingZ3SquaredRule;
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<NOUT, NIN>::from_dims([1; NOUT], [1; NIN]).unwrap(),
@@ -133,13 +133,10 @@ fn single_block<const NOUT: usize, const NIN: usize>(
         [vec![1; NOUT + NIN]],
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(vec![value], space).unwrap()
+    TestTensor::from_vec_with_fusion_space(vec![value], space).unwrap()
 }
 
-fn assert_single_value<const NOUT: usize, const NIN: usize>(
-    tensor: &TensorMap<Complex64, NOUT, NIN>,
-    expected: Complex64,
-) {
+fn assert_single_value(tensor: &TestTensor<Complex64>, expected: Complex64) {
     assert_eq!(tensor.data().len(), 1);
     let actual = tensor.data()[0];
     assert!(

@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
-    U1FusionRule, U1Irrep,
+    MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMapSpace, U1FusionRule,
+    U1Irrep,
 };
 use tenet_matrixalgebra::seam::{svd_vals_dyn, BoundDynamicTensorRef};
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
@@ -76,11 +76,14 @@ where
         vec![vec![DEGENERACY; 4]; key_count],
     )
     .unwrap();
-    let len = space.required_len().unwrap();
-    let mut tensor =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space).unwrap();
+    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(&space),
+        Arc::new(rule.clone()),
+    )
+    .unwrap();
+    let mut data = vec![0.0; space.space().required_len().unwrap()];
 
-    let structure = std::sync::Arc::clone(tensor.structure());
+    let structure = std::sync::Arc::clone(space.space().structure());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
@@ -108,7 +111,7 @@ where
                             + i2 * strides[1]
                             + j1 * strides[2]
                             + j2 * strides[3];
-                        tensor.data_mut()[position] = fill_value(
+                        data[position] = fill_value(
                             labels[0],
                             labels[1],
                             labels[2],
@@ -126,12 +129,7 @@ where
     }
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
-        Arc::new(rule.clone()),
-    )
-    .unwrap();
-    let input = BoundDynamicTensorRef::try_new(&space, tensor.data()).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let spectra = svd_vals_dyn(&mut dense, &input).unwrap();
     let mut entries: Vec<(i64, Vec<f64>)> = spectra
         .iter()

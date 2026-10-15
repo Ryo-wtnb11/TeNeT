@@ -1,9 +1,22 @@
 use super::*;
 
-pub(super) fn bound_tensor<R, D, const NOUT: usize, const NIN: usize>(
-    provider: Arc<R>,
-    tensor: &TensorMap<D, NOUT, NIN>,
-) -> BoundTensorMap<R, D, NOUT, NIN>
+/// Eager blockwise adjoint of an unbound test operand through the bound
+/// dynamic entry.
+pub(super) fn adjoint<R, D>(
+    rule: &R,
+    tensor: &TestTensor<D>,
+) -> Result<TestTensor<D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + Clone,
+    D: FactorScalar,
+{
+    let bound = BoundTensorMap::try_new(Arc::new(rule.clone()), tensor.clone())?;
+    let (space, data) = tenet_tensors::adjoint_bound_dyn(bound.space(), bound.data())?;
+    TestTensor::from_dyn(data, space.space().clone())
+        .map_err(OperationError::from_core_preserving_context)
+}
+
+pub(super) fn bound_tensor<R, D>(provider: Arc<R>, tensor: &TestTensor<D>) -> BoundTensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: Clone,
@@ -11,10 +24,7 @@ where
     BoundTensorMap::try_new(provider, tensor.clone()).unwrap()
 }
 
-pub(super) fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
-    lhs: &TensorMap<f64, NOUT, NIN>,
-    rhs: &TensorMap<f64, NOUT, NIN>,
-) {
+pub(super) fn assert_svd_blocks_match(lhs: &TestTensor<f64>, rhs: &TestTensor<f64>) {
     let lhs_structure = std::sync::Arc::clone(lhs.structure());
     let rhs_structure = std::sync::Arc::clone(rhs.structure());
     assert_eq!(lhs_structure.block_count(), rhs_structure.block_count());
@@ -248,7 +258,7 @@ pub(super) fn c64_eigh_outputs(order: usize) -> Vec<DenseTensor> {
         .unwrap()
 }
 
-pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TestTensor<f64> {
     let rule = Z2FusionRule;
     let even = SectorId::new(0);
     let homspace = FusionTreeHomSpace::new(
@@ -267,7 +277,7 @@ pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64,
         shapes,
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(
+    TestTensor::from_vec_with_fusion_space(
         (0..rows * cols)
             .map(|index| ((index * 11 + 2) % 19) as f64 - 7.0)
             .collect(),
@@ -279,7 +289,7 @@ pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64,
 pub(super) fn mixed_rectangular_tensor(
     even_shape: (usize, usize),
     odd_shape: (usize, usize),
-) -> TensorMap<f64, 1, 1> {
+) -> TestTensor<f64> {
     let rule = Z2FusionRule;
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
@@ -313,7 +323,7 @@ pub(super) fn mixed_rectangular_tensor(
         shapes,
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(
+    TestTensor::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
             .collect(),
@@ -323,28 +333,24 @@ pub(super) fn mixed_rectangular_tensor(
 }
 
 pub(super) fn transposed_rectangular_tensor(
-    tensor: &TensorMap<f64, 1, 1>,
+    tensor: &TestTensor<f64>,
     rows: usize,
     cols: usize,
-) -> TensorMap<f64, 1, 1> {
+) -> TestTensor<f64> {
     let mut data = vec![0.0; rows * cols];
     for col in 0..cols {
         for row in 0..rows {
             data[col + cols * row] = tensor.data()[row + rows * col];
         }
     }
-    TensorMap::from_vec_with_fusion_space(
+    TestTensor::from_vec_with_fusion_space(
         data,
-        rectangular_svd_tensor(cols, rows)
-            .fusion_space()
-            .unwrap()
-            .as_ref()
-            .clone(),
+        rectangular_svd_tensor(cols, rows).fusion_space().clone(),
     )
     .unwrap()
 }
 
-pub(super) fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
+pub(super) fn mixed_rectangular_c32_tensor() -> TestTensor<Complex32> {
     let rule = Z2FusionRule;
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
@@ -368,7 +374,7 @@ pub(super) fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
         shapes,
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(
+    TestTensor::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| {
                 Complex32::new(
@@ -382,7 +388,7 @@ pub(super) fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
     .unwrap()
 }
 
-pub(super) fn tsvd_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+pub(super) fn tsvd_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TestTensor<f64>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -402,7 +408,7 @@ where
     )
     .unwrap();
     let len = space.required_len().unwrap();
-    TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len)
             .map(|index| ((index * 11 + 5) % 29) as f64 * 0.25 - 3.0)
             .collect(),
@@ -414,21 +420,12 @@ where
 /// The eager fusion contraction `dst = alpha * contract(lhs, rhs) + beta *
 /// dst` of typed fixtures through the context's bound dynamic entry.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn context_contract_into<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+pub(super) fn context_contract_into<R, D>(
     context: &mut TensorContractFusionExecutionContext<D, R::Key>,
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
@@ -441,19 +438,16 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     D: tenet_tensors::DenseRecouplingScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    fn bind<R: MultiplicityFreeFusionRule, const NOUT: usize, const NIN: usize>(
+    fn bind<R: MultiplicityFreeFusionRule>(
         provider: &Arc<R>,
-        space: &FusionTensorMapSpace<NOUT, NIN>,
+        space: &DynamicFusionMapSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError> {
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(space),
-            Arc::clone(provider),
-        )
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::clone(provider))
     }
     let provider = Arc::new(rule.clone());
-    let dst_space = bind(&provider, dst.fusion_space().unwrap())?;
-    let lhs_space = bind(&provider, lhs.fusion_space().unwrap())?;
-    let rhs_space = bind(&provider, rhs.fusion_space().unwrap())?;
+    let dst_space = bind(&provider, dst.fusion_space())?;
+    let lhs_space = bind(&provider, lhs.fusion_space())?;
+    let rhs_space = bind(&provider, rhs.fusion_space())?;
     context.tensorcontract_fusion_dyn_into(
         &dst_space,
         dst.data_mut(),
@@ -469,16 +463,16 @@ where
 
 pub(super) fn contract_pair<R>(
     rule: &R,
-    template: &TensorMap<f64, 2, 2>,
-    left: &TensorMap<f64, 2, 1>,
-    right: &TensorMap<f64, 1, 2>,
-) -> TensorMap<f64, 2, 2>
+    template: &TestTensor<f64>,
+    left: &TestTensor<f64>,
+    right: &TestTensor<f64>,
+) -> TestTensor<f64>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
-    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let mut reconstructed = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
-        template.fusion_space().unwrap().as_ref().clone(),
+        template.fusion_space().clone(),
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
@@ -496,7 +490,7 @@ where
     reconstructed
 }
 
-pub(super) fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+pub(super) fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TestTensor<f64>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -528,7 +522,7 @@ where
         }
         label
     };
-    TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+    TestTensor::<f64>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
         let BlockKey::FusionTree(tree) = key else {
             return 0.0;
         };
@@ -545,17 +539,17 @@ where
 
 pub(super) fn assert_eigen_equation<R>(
     rule: &R,
-    tensor: &TensorMap<f64, 2, 2>,
-    v: &TensorMap<f64, 2, 1>,
-    d: &TensorMap<f64, 1, 1>,
+    tensor: &TestTensor<f64>,
+    v: &TestTensor<f64>,
+    d: &TestTensor<f64>,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
     // t . V
-    let mut tv = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut tv = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; v.data().len()],
-        v.fusion_space().unwrap().as_ref().clone(),
+        v.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -570,9 +564,9 @@ pub(super) fn assert_eigen_equation<R>(
     )
     .unwrap();
     // V . D
-    let mut vd = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut vd = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; v.data().len()],
-        v.fusion_space().unwrap().as_ref().clone(),
+        v.fusion_space().clone(),
     )
     .unwrap();
     context_contract_into(
@@ -595,9 +589,9 @@ pub(super) fn assert_eigen_equation<R>(
     }
 }
 
-pub(super) fn dense_sector_matrices<const A: usize, const B: usize>(
+pub(super) fn dense_sector_matrices(
     tensor_nout: usize,
-    t: &TensorMap<f64, A, B>,
+    t: &TestTensor<f64>,
 ) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
     // Matricize per coupled sector (rows = codomain trees x degeneracy,
     // cols = domain trees x degeneracy) for dense checks in tests.
@@ -724,19 +718,19 @@ pub(super) fn assert_orthonormal_columns(matrices: &[(SectorId, usize, usize, Ve
     }
 }
 
-pub(super) fn one_sector_matrix<D: Clone>(data: Vec<D>) -> TensorMap<D, 1, 1> {
+pub(super) fn one_sector_matrix<D: Clone>(data: Vec<D>) -> TestTensor<D> {
     one_sector_rectangular_matrix(data, 2, 2)
 }
 
 pub(super) fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
-    tensor: &TensorMap<D, 1, 1>,
+    tensor: &TestTensor<D>,
     accepted: bool,
 ) {
     assert_eigh_preflight_at(tensor, accepted, HermitianTol::DEFAULT);
 }
 
 pub(super) fn assert_eigh_preflight_at<D: FactorScalar + std::fmt::Debug>(
-    tensor: &TensorMap<D, 1, 1>,
+    tensor: &TestTensor<D>,
     accepted: bool,
     hermitian_tol: HermitianTol,
 ) {
@@ -762,7 +756,7 @@ pub(super) fn one_sector_rectangular_matrix<D: Clone>(
     data: Vec<D>,
     rows: usize,
     cols: usize,
-) -> TensorMap<D, 1, 1> {
+) -> TestTensor<D> {
     let rule = Z2FusionRule;
     let codomain = SectorLeg::new([(SectorId::new(0), rows)], false);
     let domain = SectorLeg::new([(SectorId::new(0), cols)], false);
@@ -777,7 +771,7 @@ pub(super) fn one_sector_rectangular_matrix<D: Clone>(
         vec![vec![rows, cols]],
     )
     .unwrap();
-    TensorMap::from_vec_with_fusion_space(data, space).unwrap()
+    TestTensor::from_vec_with_fusion_space(data, space).unwrap()
 }
 
 /// Path agreement of two spectra: sectors and kept counts exact, values under
@@ -801,10 +795,60 @@ pub(super) fn assert_real_spectra_close(lhs: &[SectorSpectrum], rhs: &[SectorSpe
     }
 }
 
-pub(super) fn padded_copy<R, D, const NOUT: usize, const NIN: usize>(
+/// `source`'s space over the caller-chosen block layout `structure`.
+///
+/// Why a rank match: `FusionTensorMapSpace::new_unbound` is the only public
+/// installer of a gapped or reordered fixture layout, and it is typed by rank.
+pub(super) fn relayout<R, D>(
     rule: &R,
-    source: &TensorMap<D, NOUT, NIN>,
-) -> TensorMap<D, NOUT, NIN>
+    source: &TestTensor<D>,
+    structure: BlockStructure,
+) -> DynamicFusionMapSpace
+where
+    R: FusionRule,
+{
+    let space = source.fusion_space();
+    let (dims, homspace) = (source.dims(), space.homspace().clone());
+    macro_rules! typed {
+        ($(($nout:literal, $nin:literal)),*) => {
+            match (space.nout(), space.nin()) {
+                $(($nout, $nin) => DynamicFusionMapSpace::from_typed(
+                    &FusionTensorMapSpace::new_unbound(
+                        TensorMapSpace::<$nout, $nin>::from_dims(
+                            dims[..$nout].try_into().unwrap(),
+                            dims[$nout..].try_into().unwrap(),
+                        )
+                        .unwrap(),
+                        homspace,
+                        structure,
+                    )
+                    .unwrap()
+                    .try_bind_rule(rule)
+                    .unwrap(),
+                ),)*
+                ranks => unimplemented!("fixture rank {ranks:?}"),
+            }
+        };
+    }
+    typed!(
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 1),
+        (3, 2),
+        (3, 3)
+    )
+}
+
+pub(super) fn padded_copy<R, D>(rule: &R, source: &TestTensor<D>) -> TestTensor<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -819,17 +863,10 @@ where
         );
         offset += block.shape().iter().product::<usize>() + 1;
     }
-    let source_space = source.fusion_space().unwrap();
-    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
-    let padded_space = FusionTensorMapSpace::new_unbound(
-        source_space.dense_space().clone(),
-        source_space.homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(rule)
-    .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(padded_space, D::zero(), |key, indices| {
+    let structure =
+        BlockStructure::from_blocks_with_rank(source.fusion_space().rank(), blocks).unwrap();
+    let padded_space = relayout(rule, source, structure);
+    TestTensor::from_block_fn_with_fusion_space(padded_space, D::zero(), |key, indices| {
         let block = source.block_by_key(key).unwrap();
         let position = block.offset()
             + indices
@@ -842,10 +879,7 @@ where
     .unwrap()
 }
 
-pub(super) fn reversed_complete_grid_copy<R, D, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    source: &TensorMap<D, NOUT, NIN>,
-) -> TensorMap<D, NOUT, NIN>
+pub(super) fn reversed_complete_grid_copy<R, D>(rule: &R, source: &TestTensor<D>) -> TestTensor<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -860,17 +894,10 @@ where
         );
         offset += block.shape().iter().product::<usize>();
     }
-    let source_space = source.fusion_space().unwrap();
-    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
-    let reordered_space = FusionTensorMapSpace::new_unbound(
-        source_space.dense_space().clone(),
-        source_space.homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(rule)
-    .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(reordered_space, D::zero(), |key, indices| {
+    let structure =
+        BlockStructure::from_blocks_with_rank(source.fusion_space().rank(), blocks).unwrap();
+    let reordered_space = relayout(rule, source, structure);
+    TestTensor::from_block_fn_with_fusion_space(reordered_space, D::zero(), |key, indices| {
         let block = source.block_by_key(key).unwrap();
         let position = block.offset()
             + indices
@@ -883,10 +910,10 @@ where
     .unwrap()
 }
 
-pub(super) fn reversed_coupled_tree_basis_copy<R, D, const NOUT: usize, const NIN: usize>(
+pub(super) fn reversed_coupled_tree_basis_copy<R, D>(
     rule: &R,
-    source: &TensorMap<D, NOUT, NIN>,
-) -> TensorMap<D, NOUT, NIN>
+    source: &TestTensor<D>,
+) -> TestTensor<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -901,18 +928,16 @@ where
             (key.clone(), block.shape().to_vec())
         })
         .collect();
-    let structure =
-        BlockStructure::coupled_sector_matrix_with_keys(rule, NOUT, NOUT + NIN, blocks).unwrap();
-    let source_space = source.fusion_space().unwrap();
-    let space = FusionTensorMapSpace::new_unbound(
-        source_space.dense_space().clone(),
-        source_space.homspace().clone(),
-        structure,
+    let source_space = source.fusion_space();
+    let structure = BlockStructure::coupled_sector_matrix_with_keys(
+        rule,
+        source_space.nout(),
+        source_space.rank(),
+        blocks,
     )
-    .unwrap()
-    .try_bind_rule(rule)
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+    let space = relayout(rule, source, structure);
+    TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
         let block = source.block_by_key(key).unwrap();
         block.data()[block.offset()
             + indices
@@ -948,7 +973,7 @@ pub(super) fn default_context() -> TensorContractFusionExecutionContext<f64, Rul
 pub(super) fn u1_cross_space_map<D: FactorScalar>(
     codomain: &[(i32, usize)],
     domain: &[(i32, usize)],
-) -> TensorMap<D, 1, 1> {
+) -> TestTensor<D> {
     let codomain_leg = SectorLeg::new(
         codomain
             .iter()
@@ -987,7 +1012,7 @@ pub(super) fn u1_cross_space_map<D: FactorScalar>(
         shapes,
     )
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |_, indices| {
+    TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |_, indices| {
         if indices[0] == indices[1] {
             D::one()
         } else {
@@ -997,7 +1022,7 @@ pub(super) fn u1_cross_space_map<D: FactorScalar>(
     .unwrap()
 }
 
-pub(super) fn u1_block_endomorphism<D>(blocks: &[(i32, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
+pub(super) fn u1_block_endomorphism<D>(blocks: &[(i32, usize, Vec<D>)]) -> TestTensor<D>
 where
     D: Copy + Zero,
 {
@@ -1014,7 +1039,7 @@ where
 pub(super) fn block_endomorphism<R, D>(
     rule: &R,
     blocks: &[(SectorId, usize, Vec<D>)],
-) -> TensorMap<D, 1, 1>
+) -> TestTensor<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: Copy + Zero,
@@ -1049,7 +1074,7 @@ where
         shapes,
     )
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+    TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
         let BlockKey::FusionTree(tree) = key else {
             return D::zero();
         };
@@ -1063,11 +1088,11 @@ where
     .unwrap()
 }
 
-pub(super) fn scalar_u1_block<D: Copy>(tensor: &TensorMap<D, 1, 1>, charge: i32) -> D {
+pub(super) fn scalar_u1_block<D: Copy>(tensor: &TestTensor<D>, charge: i32) -> D {
     scalar_block(tensor, U1Irrep::new(charge).sector_id())
 }
 
-pub(super) fn scalar_block<D: Copy>(tensor: &TensorMap<D, 1, 1>, sector: SectorId) -> D {
+pub(super) fn scalar_block<D: Copy>(tensor: &TestTensor<D>, sector: SectorId) -> D {
     let structure = tensor.structure();
     let block = (0..structure.block_count())
         .map(|index| structure.block(index).unwrap())
@@ -1123,7 +1148,7 @@ pub(super) fn exp_oracle_block<D: FactorScalar>(charge: i32, order: usize, scale
     data
 }
 
-pub(super) fn exp_oracle_tensor<D: FactorScalar>(scale: f64) -> TensorMap<D, 1, 1> {
+pub(super) fn exp_oracle_tensor<D: FactorScalar>(scale: f64) -> TestTensor<D> {
     u1_block_endomorphism(&[
         (0, 3, exp_oracle_block::<D>(0, 3, scale)),
         (1, 2, exp_oracle_block::<D>(1, 2, scale)),
@@ -1133,10 +1158,7 @@ pub(super) fn exp_oracle_tensor<D: FactorScalar>(scale: f64) -> TensorMap<D, 1, 
 /// Copy of `source` whose coupled sectors stack rows by ascending codomain
 /// tree and columns by descending domain tree: the same operator, but row `i`
 /// and column `i` of a multi-tree sector name different tree states.
-pub(super) fn mis_stacked_endomorphism_copy<R, D>(
-    rule: &R,
-    source: &TensorMap<D, 2, 2>,
-) -> TensorMap<D, 2, 2>
+pub(super) fn mis_stacked_endomorphism_copy<R, D>(rule: &R, source: &TestTensor<D>) -> TestTensor<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -1164,16 +1186,8 @@ where
             .any(|region| region.row_trees() != region.col_trees()),
         "the fixture must mis-stack at least one coupled sector"
     );
-    let source_space = source.fusion_space().unwrap();
-    let space = FusionTensorMapSpace::new_unbound(
-        source_space.dense_space().clone(),
-        source_space.homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(rule)
-    .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+    let space = relayout(rule, source, structure);
+    TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
         let block = source.block_by_key(key).unwrap();
         block.data()[block.offset()
             + indices

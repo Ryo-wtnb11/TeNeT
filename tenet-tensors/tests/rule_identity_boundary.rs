@@ -2,11 +2,11 @@ use std::sync::Arc;
 use tenet_core::{
     BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SectorId, SectorVec, TensorMap,
-    TensorMapSpace, U1FusionRule, Z2FusionRule,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SectorId, SectorVec, TensorMapSpace,
+    U1FusionRule, Z2FusionRule,
 };
 use tenet_tensors::{
-    adjoint, tensorcontract_fusion_block_specs, BoundDynamicFusionMapSpace,
+    tensorcontract_fusion_block_specs, BoundDynamicFusionMapSpace,
     TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
 };
 use tenet_tensors::{DynamicFusionMapSpace, OperationError};
@@ -197,13 +197,34 @@ fn fusion_contract_block_specs_rejects_each_unbound_operand() {
     let axes = TensorContractSpec::with_default_output_order(&[], &[]);
 
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(&rule, &unbound(), &bound(), &bound(), axes).unwrap_err(),
+        tensorcontract_fusion_block_specs(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&unbound()),
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            axes,
+        )
+        .unwrap_err(),
     );
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(&rule, &bound(), &unbound(), &bound(), axes).unwrap_err(),
+        tensorcontract_fusion_block_specs(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            &DynamicFusionMapSpace::from_typed(&unbound()),
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            axes,
+        )
+        .unwrap_err(),
     );
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(&rule, &bound(), &bound(), &unbound(), axes).unwrap_err(),
+        tensorcontract_fusion_block_specs(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            &DynamicFusionMapSpace::from_typed(&bound()),
+            &DynamicFusionMapSpace::from_typed(&unbound()),
+            axes,
+        )
+        .unwrap_err(),
     );
 }
 
@@ -279,26 +300,6 @@ fn dynamic_trace_rejects_same_type_rule_when_only_symbols_differ() {
     // public trace APIs cannot accept an independent provider afterwards.
     let error =
         BoundDynamicFusionMapSpace::bind_multiplicity_free(space, Arc::new(second)).unwrap_err();
-    assert!(matches!(
-        error,
-        OperationError::Core(CoreError::FusionRuleMismatch { .. })
-    ));
-}
-
-#[test]
-fn typed_eager_adjoint_rejects_same_type_rule_when_only_symbols_differ() {
-    let first = SymbolOnlyRule::new(1.0);
-    let second = SymbolOnlyRule::new(-1.0);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
-        &first,
-        [vec![1]],
-    )
-    .unwrap();
-    let tensor = TensorMap::from_vec_with_fusion_space(vec![1.0], space).unwrap();
-
-    let error = adjoint(&second, &tensor).unwrap_err();
     assert!(matches!(
         error,
         OperationError::Core(CoreError::FusionRuleMismatch { .. })

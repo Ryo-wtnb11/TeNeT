@@ -46,11 +46,10 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
         packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-    let src = TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![7.0], src_space, src_structure)
-        .unwrap();
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![7.0], src_space, src_structure).unwrap();
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![2.0], dst_space, dst_structure).unwrap();
     eager_tree_transform_into(
         &SU2FusionRule,
         TreeTransformOperation::permute([1], [0]),
@@ -80,13 +79,13 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
         packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-    let src = TensorMap::<Complex64, 1, 1>::from_vec_with_structure(
+    let src = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(7.0, 1.0)],
         src_space,
         src_structure,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_structure(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(2.0, -3.0)],
         dst_space,
         dst_structure,
@@ -177,10 +176,10 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
         packed_fixture_structure(3, [(BlockKey::from(dst_tree), vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
     let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
-    let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
-        .unwrap();
-    let dst = TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
-        .unwrap();
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![7.0], src_space, src_structure).unwrap();
+    let dst =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0], dst_space, dst_structure).unwrap();
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -358,11 +357,10 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
     let dst_structure = packed_fixture_structure(3, [(dst_key.clone(), vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
     let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
-    let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
-        .unwrap();
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![7.0], src_space, src_structure).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![2.0], dst_space, dst_structure).unwrap();
 
     eager_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
 
@@ -394,11 +392,10 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
     let wrong_dst_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
     let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
-    let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
+    let src =
+        TestTensor::<f64>::from_vec_with_structure(vec![7.0], src_space, src_structure).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_structure(vec![0.0], dst_space, wrong_dst_structure)
         .unwrap();
-    let dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, wrong_dst_structure)
-            .unwrap();
 
     let err = uncached_tree_pair_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
 
@@ -672,20 +669,17 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
     );
 
     let space = TensorMapSpace::<9, 0>::from_dims([1; 9], []).unwrap();
-    let source = TensorMap::<f64, 9, 0>::from_vec_with_structure(
+    let source = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0],
         space.clone(),
         structure.clone(),
     )
     .unwrap();
-    let mut output = TensorMap::<f64, 9, 0>::from_vec_with_structure(
-        vec![0.0; 3],
-        space.clone(),
-        structure.clone(),
-    )
-    .unwrap();
+    let mut output =
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 3], space.clone(), structure.clone())
+            .unwrap();
     let mut oracle_output =
-        TensorMap::<f64, 9, 0>::from_vec_with_structure(vec![0.0; 3], space, structure).unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 3], space, structure).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     replay_into(
@@ -798,23 +792,27 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
     assert_eq!(tree_pair_lowering_calls(), (1, 0));
 
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),
         structure.clone(),
     )
     .unwrap();
-    let mut direct_dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+    let mut direct_dst = TestTensor::<f64>::from_vec_with_structure(
         vec![0.0, 0.0],
         space.clone(),
         structure.clone(),
     )
     .unwrap();
     let mut legacy_dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, structure.clone())
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0, 0.0], space, structure.clone())
             .unwrap();
-    let direct_structure = direct.compile(&direct_dst, &src).unwrap();
-    let legacy_structure = legacy.compile(&legacy_dst, &src).unwrap();
+    let direct_structure = direct
+        .compile_structures(direct_dst.structure(), src.structure())
+        .unwrap();
+    let legacy_structure = legacy
+        .compile_structures(legacy_dst.structure(), src.structure())
+        .unwrap();
     let mut direct_backend = DenseTreeTransformOperations::default();
     let mut legacy_backend = DenseTreeTransformOperations::default();
     let mut direct_workspace = TreeTransformWorkspace::default();
@@ -894,11 +892,9 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone()).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone()).unwrap();
     let initial_dst = dst.data().to_vec();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
@@ -932,10 +928,8 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
 fn product_tree_transformers_are_shared_by_independent_resolutions() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
-    let dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
+    let src = TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -969,10 +963,8 @@ fn product_tree_transformers_are_shared_by_independent_resolutions() {
 fn recoupling_threads_do_not_change_cached_tree_transform_result() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
-    let dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
+    let src = TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
+    let dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
 
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
@@ -1000,13 +992,15 @@ fn recoupling_threads_do_not_change_cached_tree_transform_result() {
     assert_eq!(eager.blocks(), cached.blocks());
     assert_eq!(eager.layouts(), cached.layouts());
 
-    let mut cached_dst = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut cached_dst = TestTensor::<f64>::from_vec_with_dynamic_space(
         vec![1.0, 2.0],
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut eager_dst = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut eager_dst = TestTensor::<f64>::from_vec_with_dynamic_space(
         vec![1.0, 2.0],
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -1064,10 +1058,9 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src_data = vec![10.0, 20.0];
     let initial_dst = vec![1.0, 2.0];
-    let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data.clone(), src_space).unwrap();
+    let src = TestTensor::<f64>::from_vec_with_fusion_space(src_data.clone(), src_space).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
     eager_tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0).unwrap();
     let expected = dst.data().to_vec();
 
@@ -1087,9 +1080,9 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
     )
     .unwrap();
     let rebuilt_src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data, rebuilt_src_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(src_data, rebuilt_src_space).unwrap();
     let mut rebuilt_dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst, rebuilt_dst_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(initial_dst, rebuilt_dst_space).unwrap();
     eager_tree_transform_into(&rule, operation, &mut rebuilt_dst, &rebuilt_src, 2.0, 3.0).unwrap();
 
     assert_eq!(rebuilt_dst.data(), expected.as_slice());
@@ -1099,12 +1092,12 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
 fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let src = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+    let src = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
         src_space.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(1.0, 3.0), Complex64::new(2.0, -4.0)],
         dst_space.clone(),
     )
@@ -1141,11 +1134,9 @@ fn tree_transform_structure_replays_product_without_recompiling() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone()).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone()).unwrap();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
     let structure = uncached_tree_pair_structure(&rule, operation, &dst, &src).unwrap();
@@ -1218,8 +1209,8 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let src = test_host_read_fusion_tensor_map(vec![10.0_f64, 20.0], src_space);
-    let mut dst = test_host_fusion_tensor_map(vec![1.0_f64, 2.0], dst_space);
+    let src = TestTensor::from_vec_with_fusion_space(vec![10.0_f64, 20.0], src_space).unwrap();
+    let mut dst = TestTensor::from_vec_with_fusion_space(vec![1.0_f64, 2.0], dst_space).unwrap();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
     let expected = expected_single_tree_pair_replay(
@@ -1248,16 +1239,15 @@ fn tree_transform_overwrite_context_ignores_destination_bits() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
-    let mut expected = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let src = TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
+    let mut expected = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; dst_space.required_len().unwrap()],
         dst_space.clone(),
     )
     .unwrap();
     eager_tree_transform_into(&rule, operation.clone(), &mut expected, &src, 2.0, 0.0).unwrap();
 
-    let mut cached = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let mut cached = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![f64::NAN; dst_space.required_len().unwrap()],
         dst_space,
     )
@@ -1320,29 +1310,27 @@ fn product_resolution_compiles_distinct_degeneracy_shapes() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone()).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone()).unwrap();
     let src_large_structure =
         column_major_structure_like(src_space.subblock_structure(), vec![2, 1, 1]);
     let dst_large_structure =
         column_major_structure_like(dst_space.subblock_structure(), vec![1, 2, 1]);
     let large_space = TensorMapSpace::<2, 1>::from_dims([2, 1], [1]).unwrap();
-    let src_large = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+    let src_large = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         large_space.clone(),
         src_large_structure,
     )
     .unwrap();
-    let dst_large = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+    let dst_large = TestTensor::<f64>::from_vec_with_structure(
         vec![0.0, 0.0, 0.0, 0.0],
         large_space,
         dst_large_structure,
     )
     .unwrap();
-    let resolve = |dst: &TensorMap<f64, 2, 1>, src: &TensorMap<f64, 2, 1>| {
+    let resolve = |dst: &TestTensor<f64>, src: &TestTensor<f64>| {
         resolve_tree_pair(&rule, &operation, dst.structure(), src.structure(), false).unwrap()
     };
     let small = resolve(&dst, &src);
@@ -1398,11 +1386,9 @@ fn tree_transform_execution_context_replays_product_tree_pair_transforms() {
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone()).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone()).unwrap();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
@@ -1470,11 +1456,9 @@ fn tree_transform_execution_context_separates_tree_pair_operations() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let src =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone()).unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone()).unwrap();
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1576,14 +1560,14 @@ macro_rules! assert_rank5_compact_transpose_replays_like_per_pair {
         let source_data = (0..source_len)
             .map(|index| $value(((index * 37 + 11) % 101) as f64 / 7.0 - 5.0))
             .collect::<Vec<_>>();
-        let source = TensorMap::<T, 2, 3>::from_vec_with_structure(
+        let source = TestTensor::<T>::from_vec_with_structure(
             source_data,
             TensorMapSpace::<2, 3>::from_dims([1; 2], [1; 3]).unwrap(),
             src_structure.clone(),
         )
         .unwrap();
         let replay = |compiled: &tenet_operations::TreeTransformStructure<T>| {
-            let mut output = TensorMap::<T, 3, 2>::from_vec_with_structure(
+            let mut output = TestTensor::<T>::from_vec_with_structure(
                 vec![T::zero(); dst_structure.required_len().unwrap()],
                 TensorMapSpace::<3, 2>::from_dims([1; 3], [1; 2]).unwrap(),
                 dst_structure.clone(),

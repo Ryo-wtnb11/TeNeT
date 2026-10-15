@@ -923,7 +923,7 @@ fn values_only_public_boundaries_distinguish_empty_sectors_from_a_scalar() {
         shapes,
     )
     .unwrap();
-    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![-3.0], space).unwrap();
+    let scalar = TestTensor::<f64>::from_vec_with_fusion_space(vec![-3.0], space).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &scalar)).unwrap();
     let eigh = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &scalar)).unwrap();

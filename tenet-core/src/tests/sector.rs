@@ -536,38 +536,29 @@ fn direct_leg_degeneracy_layout_matches_legacy_for_supported_rules() {
 }
 
 #[test]
-fn fusion_sector_getters_report_sector_metadata_errors_before_storage_extent() {
-    // What: immutable sector getters preserve the mutable getter's error
-    // precedence when both the sector tuple and host slice are malformed.
+fn external_sector_lookup_rejects_a_short_sector_tuple() {
+    // What: both the all-keys and the unique-key lookup reject a sector tuple
+    // whose length is not the hom space's leg count.
     let sectors = [Z2Irrep::EVEN.sector_id()];
     let metadata_error = CoreError::DimensionMismatch {
         expected: 2,
         actual: 1,
     };
 
-    for actual_len in [0, 2] {
-        let (mut tensor, _) = adversarial_fusion_host_tensor(actual_len);
+    let homspace = FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]);
 
-        assert_eq!(
-            tensor
-                .subblocks_by_sectors(&Z2FusionRule, &sectors)
-                .unwrap_err(),
-            metadata_error
-        );
-        assert_eq!(
-            tensor
-                .subblock_by_sectors(&Z2FusionRule, &sectors)
-                .unwrap_err(),
-            metadata_error
-        );
-        assert_eq!(
-            tensor
-                .subblock_mut_by_sectors(&Z2FusionRule, &sectors)
-                .unwrap_err(),
-            metadata_error
-        );
-        assert_eq!(tensor.data(), vec![10; actual_len]);
-    }
+    assert_eq!(
+        homspace
+            .fusion_tree_keys_from_external_sectors(&Z2FusionRule, &sectors)
+            .unwrap_err(),
+        metadata_error
+    );
+    assert_eq!(
+        homspace
+            .unique_fusion_tree_key_from_external_sectors(&Z2FusionRule, &sectors)
+            .unwrap_err(),
+        metadata_error
+    );
 }
 
 #[test]
