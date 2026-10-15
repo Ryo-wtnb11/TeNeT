@@ -4,11 +4,12 @@
 //! at once, so adding or removing one fails here and is reviewed as an API
 //! change. Every name below is used by another workspace crate, by an
 //! integration test or example of this crate, or by a retained public
-//! signature, or belongs to the remaining static-rank contraction entries
-//! (`contract/api.rs`). The 2026-10-14 maintainer decision (#2222, superseding
-//! A14) deletes the static-rank layer; the `facade.rs` entries and their
-//! backend traits are gone, and the remaining static names leave with leaves
-//! (b) and (c). The structure caches, the
+//! signature. The 2026-10-14 maintainer decision (#2222, superseding A14)
+//! deletes the static-rank layer: the `facade.rs` entries and their backend
+//! traits (leaf (a)) and the static contraction context, plan and replay
+//! entries (leaf (b)) are gone; the names still taking `tenet_core::TensorMap`
+//! (`tensorcontract_structure`, `TensorContractStructure::compile*`) follow
+//! leaf (c). The structure caches, the
 //! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
 //! `tenet_operations` internals were narrowed to `pub(crate)`.
 //!
@@ -184,9 +185,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "execute_storage_contract_members_cuda",
         "execute_storage_contract_resolution_on_cuda",
         "plan_compose",
-        "prepare_tensorcontract_fusion_plan",
         "prepare_tensorcontract_fusion_plan_dyn",
-        "tensorcontract_execute_with",
         "tensorcontract_fusion_block_specs",
         "try_compile_storage_contract_core_route",
         "zero_copy_contract_order_for_output_permute",
@@ -211,7 +210,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "HostTensorContractWorkspace",
         "MultiplicityFreeContractStage",
         "PreparedCheckedGenericDynamicSpace",
-        "PreparedTensorContractFusion",
         "StagedContract",
         "StorageContractResolution",
         "TensorContractBackend",

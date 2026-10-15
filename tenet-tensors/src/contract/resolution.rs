@@ -25,9 +25,8 @@ use super::fusion::{
     min_dynamic_tree_materialized_elements, FusionContractOrientation, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
-    compile_fusion_block_contract_plan_core_geometry, compile_fusion_block_contract_plan_validated,
-    try_compile_oriented_canonical_core_plan, try_compile_scaled_canonical_core_plan,
-    CoreContractPreflight, ValidatedCoreContract,
+    compile_fusion_block_contract_plan_core_geometry, try_compile_oriented_canonical_core_plan,
+    try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
 };
 
 /// Host-compiled, owned route of one contraction whose payloads are not
@@ -630,24 +629,6 @@ where
     )
 }
 
-/// Compiles the coupled block plan for already-materialized core operands.
-pub(crate) fn compile_core_plan<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
-    super::fusion::reject_fusion_contract_conjugation(axes)?;
-    let validated = preflight.require_core_geometry()?;
-    compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs).map(Arc::new)
-}
-
 /// Compiles the coupled block plan of the core operands a
 /// [`FusionContractPlan`] derived from an already validated contraction.
 ///
@@ -660,8 +641,7 @@ where
 /// contracted HomSpace the plan compile already checked. The contracted leg
 /// pairs are the checked pairs in candidate order, and every derived space
 /// is bound to `rule`. Re-running the preflight would only repeat those
-/// checks on every warm call; `compile_core_plan` keeps them for operands
-/// that did not come from such a plan.
+/// checks on every warm call.
 pub(crate) fn compile_derived_core_plan<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,

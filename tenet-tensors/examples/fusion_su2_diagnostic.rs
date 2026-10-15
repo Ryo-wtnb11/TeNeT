@@ -4,12 +4,21 @@ use tenet_core::{
     BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
-    prepare_tensorcontract_fusion_plan, OutputAxisOrder, RuleIdentity,
-    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformExecutionContext,
+    prepare_tensorcontract_fusion_plan_dyn, BoundDynamicFusionMapSpace, DynamicFusionMapSpace,
+    OutputAxisOrder, RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
+    TreeTransformExecutionContext,
 };
 
 fn main() {
     let rule = SU2FusionRule;
+    let provider = Arc::new(rule);
+    let bind = |space: &FusionTensorMapSpace<1, 1>| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(space),
+            Arc::clone(&provider),
+        )
+        .unwrap()
+    };
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
     let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
@@ -111,14 +120,19 @@ fn main() {
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, -1.0, 4.0, -3.0], dst_space)
             .unwrap();
-    let plan = prepare_tensorcontract_fusion_plan(
-        &rule,
-        dst.fusion_space().unwrap(),
-        lhs.fusion_space().unwrap(),
-        rhs.fusion_space().unwrap(),
-        axes,
+    let lhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
+        Arc::clone(&provider),
     )
     .unwrap();
+    let rhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst_bound = bind(dst.fusion_space().unwrap());
+    let plan =
+        prepare_tensorcontract_fusion_plan_dyn(&dst_bound, &lhs_bound, &rhs_bound, axes).unwrap();
     let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let lhs_core_structure = Arc::clone(lhs_core.structure());
     tree_context
@@ -149,14 +163,14 @@ fn main() {
     println!("lhs_core_data {:?}", lhs_core.data());
     println!("rhs_core_data {:?}", rhs_core.data());
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
-        .tensorcontract_fusion_prepared_into(
-            &rule,
-            &plan,
-            &mut dst,
-            &mut lhs_core,
-            &mut rhs_core,
-            &lhs,
-            &rhs,
+        .tensorcontract_fusion_dyn_into(
+            &dst_bound,
+            dst.data_mut(),
+            &lhs_bound,
+            lhs.data(),
+            &rhs_bound,
+            rhs.data(),
+            axes,
             -1.5,
             0.25,
         )
@@ -193,56 +207,15 @@ fn main() {
         tensorkit_dst_space,
     )
     .unwrap();
-    let tensorkit_order_plan = prepare_tensorcontract_fusion_plan(
-        &rule,
-        tensorkit_order_dst.fusion_space().unwrap(),
-        lhs.fusion_space().unwrap(),
-        rhs.fusion_space().unwrap(),
-        tensorkit_axes,
-    )
-    .unwrap();
-    let mut lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_core_space.required_len().unwrap()],
-        lhs_core_space,
-    )
-    .unwrap();
-    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_core_space.required_len().unwrap()],
-        rhs_core_space,
-    )
-    .unwrap();
-    let core_dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
-        &rule,
-        lhs.fusion_space().unwrap().homspace(),
-        rhs.fusion_space().unwrap().homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        &[0, 1],
-        1,
-    )
-    .unwrap();
-    let core_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        core_dst_hom,
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
-    let mut core_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        vec![0.0; core_dst_space.required_len().unwrap()],
-        core_dst_space,
-    )
-    .unwrap();
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
-        .tensorcontract_fusion_prepared_into_core_dst(
-            &rule,
-            &tensorkit_order_plan,
-            &mut tensorkit_order_dst,
-            &mut core_dst,
-            &mut lhs_core,
-            &mut rhs_core,
-            &lhs,
-            &rhs,
+        .tensorcontract_fusion_dyn_into(
+            &bind(tensorkit_order_dst.fusion_space().unwrap()),
+            tensorkit_order_dst.data_mut(),
+            &lhs_bound,
+            lhs.data(),
+            &rhs_bound,
+            rhs.data(),
+            tensorkit_axes,
             -1.5,
             0.25,
         )

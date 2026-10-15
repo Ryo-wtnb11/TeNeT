@@ -1,14 +1,11 @@
-use std::any::Any;
 use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CheckedFusionAlgebra, CoreError, FusionTensorMapSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement,
-    TensorMap,
+    BlockStructure, CheckedFusionAlgebra, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, Placement,
 };
 
-use super::route_host::Stage;
 use crate::mode::{
     ContractRequest, ContractSide, ContractStaging, MultiplicityFreePlanningScalar,
     PlanningAlgebra, StagedContraction, TreeStructureSource,
@@ -24,25 +21,25 @@ use tenet_operations::{
 };
 
 use super::backend::TensorContractBackend;
+#[cfg(test)]
+use super::dynamic_space::encoded_layout_primer;
 use super::dynamic_space::{
-    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
-    LayoutKeyBuilder,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, LayoutKeyBuilder,
 };
+use super::fusion::prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical;
 #[cfg(test)]
 use super::fusion::FusionContractOrientation;
-use super::fusion::{
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical, FusionContractPlan,
-    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-};
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::try_compile_oriented_storage_contract_plan;
 use super::resolution::{
-    compile_core_plan, try_compile_oriented_storage_contract_candidate_plan, ContractKind,
-    ContractRoute, CopyCRoute, CoreMiss, CoreRoute, ExecCaps, StorageContractResolution,
+    try_compile_oriented_storage_contract_candidate_plan, ContractKind, ContractRoute, CopyCRoute,
+    CoreMiss, CoreRoute, ExecCaps, StorageContractResolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use crate::host_scratch::HostScratchBuffer;
-use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
+use tenet_operations::TensorContractFusionProfile;
+#[cfg(test)]
+use tenet_operations::TensorContractFusionRoute;
 
 pub struct TensorContractFusionExecutionContext<
     D,
@@ -390,71 +387,8 @@ where
     BT: TreeTransformBackend<D, C>,
     BC: TensorContractBackend<D, C>,
 {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the context already owns execution resources, leaving the public contraction operands, spec, and alpha/beta explicit"
-    )]
-    pub fn tensorcontract_fusion_into<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let dst_space = typed_dynamic_space(dst)?;
-        let lhs_space = typed_dynamic_space(lhs)?;
-        let rhs_space = typed_dynamic_space(rhs)?;
-        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
-        let axes = lowered.as_spec();
-        let output_axes = spec_output_axes(axes, dst_space.rank());
-        self.tensorcontract_planned_raw_into::<MultiplicityFreeAdmissionMode, R>(
-            &mut (),
-            PlanTarget {
-                rule,
-                space: &dst_space,
-                authority: encoded_layout_primer::<R>,
-            },
-            dst.data_mut(),
-            (legacy_operand(&lhs_space, axes.lhs_conjugate()), lhs.data()),
-            (legacy_operand(&rhs_space, axes.rhs_conjugate()), rhs.data()),
-            PlannedContraction::Contract((
-                axes.lhs_contracting_axes(),
-                axes.rhs_contracting_axes(),
-                &output_axes,
-            )),
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-        )
-        .map(drop)
-    }
-
-    /// Dynamic-rank `tensorcontract!`: same eager route selection and gates
-    /// as [`Self::tensorcontract_fusion_into`], operating on
-    /// [`DynamicFusionMapSpace`] handles plus raw slices in the
+    /// Dynamic-rank `tensorcontract!`: the eager Host contraction over
+    /// [`BoundDynamicFusionMapSpace`] handles plus raw slices in the
     /// coupled-sector matrix layout. `dst_data` must be sized for
     /// `dst_space.required_len()`.
     #[allow(clippy::too_many_arguments)]
@@ -576,6 +510,101 @@ where
             ContractDestinationInit::Axpby(beta),
         )
         .map(drop)
+    }
+
+    /// Test-only: the planning step of
+    /// [`Self::tensorcontract_fusion_dyn_into_raw`] alone, for fixtures that
+    /// replay the route through [`Self::execute_contract_resolution_host`].
+    #[cfg(test)]
+    pub(crate) fn plan_tensorcontract_fusion_dyn_raw<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        lhs_space: &DynamicFusionMapSpace,
+        rhs_space: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let lowered = lower_legacy_axes(lhs_space, rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
+            PlanTarget {
+                rule,
+                space: dst_space,
+                authority: encoded_layout_primer::<R>,
+            },
+            legacy_operand(lhs_space, axes.lhs_conjugate()),
+            legacy_operand(rhs_space, axes.rhs_conjugate()),
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
+            None,
+        )
+    }
+
+    /// [`Self::tensorcontract_fusion_dyn_into_raw`] with its planning and
+    /// each executed stage timed into `profile`: the profile reports the
+    /// route the unprofiled entry takes.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensorcontract_fusion_dyn_into_raw_profiled<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+        profile: &mut TensorContractFusionProfile,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let total_start = std::time::Instant::now();
+        let start = std::time::Instant::now();
+        let lowered = lower_legacy_axes(lhs_space, rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        profile.typed_space_setup += start.elapsed();
+        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
+            PlanTarget {
+                rule,
+                space: dst_space,
+                authority: encoded_layout_primer::<R>,
+            },
+            legacy_operand(lhs_space, axes.lhs_conjugate()),
+            legacy_operand(rhs_space, axes.rhs_conjugate()),
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
+            Some(profile),
+        )?;
+        self.record_contract_route(&resolution);
+        let result = self.execute_contract_route_host_profiled(
+            &resolution,
+            dst_space.structure(),
+            dst_data,
+            (lhs_space.structure(), lhs_data),
+            (rhs_space.structure(), rhs_data),
+            alpha,
+            beta,
+            profile,
+        );
+        profile.total += total_start.elapsed();
+        result
     }
 
     /// The prelowered operand seam: logical spaces are the categorical
@@ -1065,7 +1094,7 @@ where
     }
 
     /// [`Self::plan_contract`] for a destination given as provider, space and
-    /// layout primer, not bound: the static-rank entries plan with their
+    /// layout primer, not bound: the test-only raw entries plan with their
     /// caller's rule without binding a space per call. `profile` attributes
     /// the planning time (see the [`TensorContractFusionProfile`] fields).
     pub(crate) fn plan_contract_raw<X: ExecCaps, R>(
@@ -1238,6 +1267,7 @@ where
 
     /// [`Self::execute_contract_route_host`] with each stage timed into
     /// `profile`; `CopyC`'s permute counts as the output transform.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn execute_contract_route_host_profiled(
         &mut self,
@@ -1318,611 +1348,6 @@ where
             profile,
         )
     }
-
-    /// Resolves the contraction route and plan once, returning a handle that
-    /// [`Self::execute_prepared_tensorcontract_fusion`] replays without any
-    /// cache lookups. Valid for tensors that share the prepared tensors'
-    /// fusion-space handles.
-    pub fn prepare_tensorcontract_fusion<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        rule: &R,
-        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<PreparedTensorContractFusion<RuleKey, C>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let missing = || OperationError::Core(CoreError::MissingFusionSpace);
-        let dst_fusion = dst.fusion_space().ok_or_else(missing)?;
-        let lhs_fusion = lhs.fusion_space().ok_or_else(missing)?;
-        let rhs_fusion = rhs.fusion_space().ok_or_else(missing)?;
-        let dst_space = DynamicFusionMapSpace::from_typed(dst_fusion);
-        let lhs_space = DynamicFusionMapSpace::from_typed(lhs_fusion);
-        let rhs_space = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
-        let axes = lowered.as_spec();
-        let output_axes = spec_output_axes(axes, dst_space.rank());
-        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
-            PlanTarget {
-                rule,
-                space: &dst_space,
-                authority: encoded_layout_primer::<R>,
-            },
-            legacy_operand(&lhs_space, axes.lhs_conjugate()),
-            legacy_operand(&rhs_space, axes.rhs_conjugate()),
-            (
-                axes.lhs_contracting_axes(),
-                axes.rhs_contracting_axes(),
-                &output_axes,
-            ),
-            None,
-        )?;
-        Ok(PreparedTensorContractFusion {
-            rule: rule.tree_transform_rule_cache_key(),
-            dst_fusion_space: PreparedFusionSpaceWitness::new(dst_fusion, dst.structure()),
-            lhs_fusion_space: PreparedFusionSpaceWitness::new(lhs_fusion, lhs.structure()),
-            rhs_fusion_space: PreparedFusionSpaceWitness::new(rhs_fusion, rhs.structure()),
-            resolution,
-        })
-    }
-
-    /// Replays a prepared contraction. The tensors must share the prepared
-    /// tensors' fusion-space handles, so tensors created from the same
-    /// `FusionTensorMapSpace` handle (or clones of the prepared ones) are
-    /// valid.
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_prepared_tensorcontract_fusion<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        prepared: &PreparedTensorContractFusion<RuleKey, C>,
-        rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let Some(dst_fusion) = dst.fusion_space() else {
-            return Err(OperationError::StructureMismatch {
-                tensor: "prepared contraction",
-            });
-        };
-        let Some(lhs_fusion) = lhs.fusion_space() else {
-            return Err(OperationError::StructureMismatch {
-                tensor: "prepared contraction",
-            });
-        };
-        let Some(rhs_fusion) = rhs.fusion_space() else {
-            return Err(OperationError::StructureMismatch {
-                tensor: "prepared contraction",
-            });
-        };
-        if prepared.rule != rule.tree_transform_rule_cache_key()
-            || !prepared
-                .dst_fusion_space
-                .matches(dst_fusion, dst.structure())
-            || !prepared
-                .lhs_fusion_space
-                .matches(lhs_fusion, lhs.structure())
-            || !prepared
-                .rhs_fusion_space
-                .matches(rhs_fusion, rhs.structure())
-        {
-            return Err(OperationError::StructureMismatch {
-                tensor: "prepared contraction",
-            });
-        }
-        let dst_structure = Arc::clone(dst.structure());
-        self.execute_contract_route_host(
-            &prepared.resolution,
-            &dst_structure,
-            dst.data_mut(),
-            (lhs.structure(), lhs.data()),
-            (rhs.structure(), rhs.data()),
-            alpha,
-            ContractDestinationInit::Axpby(beta),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_into_profiled<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-        profile: &mut TensorContractFusionProfile,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        let total_start = std::time::Instant::now();
-
-        let start = std::time::Instant::now();
-        let dst_space = typed_dynamic_space(dst)?;
-        let lhs_space = typed_dynamic_space(lhs)?;
-        let rhs_space = typed_dynamic_space(rhs)?;
-        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
-        let axes = lowered.as_spec();
-        let output_axes = spec_output_axes(axes, dst_space.rank());
-        let (lhs_operand, rhs_operand) = (
-            legacy_operand(&lhs_space, axes.lhs_conjugate()),
-            legacy_operand(&rhs_space, axes.rhs_conjugate()),
-        );
-        profile.typed_space_setup += start.elapsed();
-
-        // The eager planner and executor, timed: the profile reports the
-        // route the unprofiled entry takes.
-        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
-            PlanTarget {
-                rule,
-                space: &dst_space,
-                authority: encoded_layout_primer::<R>,
-            },
-            lhs_operand,
-            rhs_operand,
-            (
-                axes.lhs_contracting_axes(),
-                axes.rhs_contracting_axes(),
-                &output_axes,
-            ),
-            Some(profile),
-        )?;
-        #[cfg(test)]
-        self.record_contract_route(&resolution);
-        let result = self.execute_contract_route_host_profiled(
-            &resolution,
-            dst_space.structure(),
-            dst.data_mut(),
-            (lhs_space.structure(), lhs.data()),
-            (rhs_space.structure(), rhs.data()),
-            alpha,
-            beta,
-            profile,
-        );
-        profile.total += total_start.elapsed();
-        result
-    }
-
-    /// Executes a caller-supplied source-transform plan and compiles its core
-    /// block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
-    /// [`PreparedTensorContractFusion`] when the complete contraction should
-    /// be compiled once and replayed without lookups.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the context owns execution resources while FusionContractPlan and caller-owned core tensors retain separate authority"
-    )]
-    pub fn tensorcontract_fusion_prepared_into<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        const LHS_CAN_NOUT: usize,
-        const LHS_CAN_NIN: usize,
-        const RHS_CAN_NOUT: usize,
-        const RHS_CAN_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        SLhsCan,
-        SRhsCan,
-    >(
-        &mut self,
-        rule: &R,
-        plan: &FusionContractPlan,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
-        rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        plan.require_forward_scratch()?;
-        if !plan.output_transform_is_identity()
-            || DST_NOUT != plan.core_dst_open_lhs_rank()
-            || DST_NIN != plan.core_dst_open_rhs_rank()
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-            });
-        }
-        self.transform_sources_and_contract(
-            rule, plan, dst, lhs_core, rhs_core, lhs, rhs, alpha, beta,
-        )
-    }
-
-    /// Executes a caller-supplied source/output-transform plan and compiles its
-    /// core block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
-    /// [`PreparedTensorContractFusion`] for complete compile-once replay.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the context owns execution resources while the prepared plan's source, core, and output tensors remain explicit"
-    )]
-    pub fn tensorcontract_fusion_prepared_into_core_dst<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const DST_CAN_NOUT: usize,
-        const DST_CAN_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        const LHS_CAN_NOUT: usize,
-        const LHS_CAN_NIN: usize,
-        const RHS_CAN_NOUT: usize,
-        const RHS_CAN_NIN: usize,
-        SDst,
-        SDstCan,
-        SLhs,
-        SRhs,
-        SLhsCan,
-        SRhsCan,
-    >(
-        &mut self,
-        rule: &R,
-        plan: &FusionContractPlan,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        core_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan>,
-        lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
-        rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        plan.require_forward_scratch()?;
-        if DST_CAN_NOUT != plan.core_dst_open_lhs_rank()
-            || DST_CAN_NIN != plan.core_dst_open_rhs_rank()
-        {
-            return Err(OperationError::StructureRankMismatch {
-                expected: plan.core_dst_open_lhs_rank() + plan.core_dst_open_rhs_rank(),
-                actual: DST_CAN_NOUT + DST_CAN_NIN,
-            });
-        }
-        core_dst.data_mut().fill(D::zero());
-        self.transform_sources_and_contract(
-            rule,
-            plan,
-            core_dst,
-            lhs_core,
-            rhs_core,
-            lhs,
-            rhs,
-            alpha,
-            D::zero(),
-        )?;
-        let structure = self.tree_context.tree_structure(
-            rule,
-            plan.output_transform(),
-            dst.structure(),
-            TreeStructureSource::Stored {
-                structure: core_dst.structure(),
-                storage_conjugate: false,
-            },
-        )?;
-        self.tree_context
-            .backend_mut()
-            .tree_transform_structure_into(
-                &mut self.stage_workspaces[Stage::Output as usize],
-                &structure,
-                dst,
-                core_dst,
-                D::one(),
-                beta,
-            )
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the private prepared replay keeps each source beside its caller-owned transformed scratch tensor"
-    )]
-    fn transform_sources_and_contract<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        const LHS_CAN_NOUT: usize,
-        const LHS_CAN_NIN: usize,
-        const RHS_CAN_NOUT: usize,
-        const RHS_CAN_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        SLhsCan,
-        SRhsCan,
-    >(
-        &mut self,
-        rule: &R,
-        plan: &FusionContractPlan,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
-        rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        if LHS_CAN_NOUT != plan.lhs_open_rank() || LHS_CAN_NIN != plan.lhs_contract_rank() {
-            return Err(OperationError::StructureRankMismatch {
-                expected: plan.lhs_open_rank() + plan.lhs_contract_rank(),
-                actual: LHS_CAN_NOUT + LHS_CAN_NIN,
-            });
-        }
-        if RHS_CAN_NOUT != plan.rhs_contract_rank() || RHS_CAN_NIN != plan.rhs_open_rank() {
-            return Err(OperationError::StructureRankMismatch {
-                expected: plan.rhs_contract_rank() + plan.rhs_open_rank(),
-                actual: RHS_CAN_NOUT + RHS_CAN_NIN,
-            });
-        }
-
-        self.transform_source_into_core(
-            rule,
-            Stage::Lhs,
-            plan.lhs_transform().clone(),
-            plan.lhs_source_conjugate(),
-            lhs_core,
-            lhs,
-        )?;
-        self.transform_source_into_core(
-            rule,
-            Stage::Rhs,
-            plan.rhs_transform().clone(),
-            plan.rhs_source_conjugate(),
-            rhs_core,
-            rhs,
-        )?;
-
-        let dst_space = DynamicFusionMapSpace::from_typed(
-            dst.fusion_space()
-                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
-        );
-        let lhs_space = DynamicFusionMapSpace::from_typed(
-            lhs_core
-                .fusion_space()
-                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
-        );
-        let rhs_space = DynamicFusionMapSpace::from_typed(
-            rhs_core
-                .fusion_space()
-                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
-        );
-        let block_plan = compile_core_plan(
-            rule,
-            &dst_space,
-            &lhs_space,
-            &rhs_space,
-            plan.core_axes().as_spec(),
-        )?;
-        let dst_structure = std::sync::Arc::clone(dst.structure());
-        let lhs_structure = std::sync::Arc::clone(lhs_core.structure());
-        let rhs_structure = std::sync::Arc::clone(rhs_core.structure());
-        block_plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter::default(),
-            &mut super::fusion_block::BackendRank2Gemm::new(
-                &mut self.contract_backend,
-                &mut self.contract_workspace,
-            ),
-            &mut self.fusion_block_workspace,
-            &dst_structure,
-            dst.data_mut(),
-            &lhs_structure,
-            lhs_core.data(),
-            &rhs_structure,
-            rhs_core.data(),
-            alpha,
-            beta,
-        )
-    }
-
-    fn transform_source_into_core<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-    >(
-        &mut self,
-        rule: &R,
-        stage: Stage,
-        operation: crate::TreeTransformOperation,
-        source_conjugate: bool,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        let src_fusion = src
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let dst_structure = Arc::clone(dst.structure());
-        // A conjugated source is read through its parent's storage under the
-        // oriented key (parent content, orientation, basis order), as the
-        // context `tensoradd` does: a per-call adjoint view would key every
-        // call on a fresh content id that only evicts live transformers.
-        let structure = if source_conjugate {
-            let storage_src = DynamicFusionMapSpace::from_typed(src_fusion);
-            let oriented_src = FusionOperand::prepare_storage_ordered_adjoint(&storage_src, rule)?;
-            self.tree_context.tree_structure(
-                rule,
-                &operation,
-                &dst_structure,
-                TreeStructureSource::Oriented(&oriented_src),
-            )?
-        } else {
-            self.tree_context.tree_structure(
-                rule,
-                &operation,
-                &dst_structure,
-                TreeStructureSource::Stored {
-                    structure: src.structure(),
-                    storage_conjugate: false,
-                },
-            )?
-        };
-        crate::tree_context::replay_structure_overwrite(
-            self.tree_context.backend_mut(),
-            &mut self.stage_workspaces[stage as usize],
-            &structure,
-            &dst_structure,
-            src.structure(),
-            dst.data_mut(),
-            src.data(),
-            D::one(),
-            &[],
-            None,
-        )
-    }
-}
-
-#[derive(Clone)]
-struct PreparedFusionSpaceWitness {
-    allocation: Arc<dyn Any + Send + Sync>,
-    structure: Arc<BlockStructure>,
-}
-
-impl PreparedFusionSpaceWitness {
-    fn new<const NOUT: usize, const NIN: usize>(
-        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
-        structure: &Arc<BlockStructure>,
-    ) -> Self {
-        Self {
-            allocation: Arc::clone(fusion_space) as Arc<dyn Any + Send + Sync>,
-            structure: Arc::clone(structure),
-        }
-    }
-
-    fn matches<const NOUT: usize, const NIN: usize>(
-        &self,
-        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
-        structure: &Arc<BlockStructure>,
-    ) -> bool {
-        let same_allocation = self
-            .allocation
-            .downcast_ref::<FusionTensorMapSpace<NOUT, NIN>>()
-            .is_some_and(|prepared| std::ptr::eq(prepared, fusion_space.as_ref()));
-        let same_structure = Arc::ptr_eq(&self.structure, structure)
-            || self.structure.content_id() == structure.content_id()
-            || self.structure.as_ref() == structure.as_ref();
-        same_allocation && same_structure
-    }
-}
-
-impl std::fmt::Debug for PreparedFusionSpaceWitness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PreparedFusionSpaceWitness")
-            .field("structure_content_id", &self.structure.content_id())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Resolved contraction handle: plan-once/execute-many without per-call
-/// cache lookups. Created by
-/// [`TensorContractFusionExecutionContext::prepare_tensorcontract_fusion`].
-#[derive(Clone, Debug)]
-pub struct PreparedTensorContractFusion<RuleKey, C = f64> {
-    rule: RuleKey,
-    dst_fusion_space: PreparedFusionSpaceWitness,
-    lhs_fusion_space: PreparedFusionSpaceWitness,
-    rhs_fusion_space: PreparedFusionSpaceWitness,
-    resolution: StorageContractResolution<C>,
-}
-
-/// The fusion space of a typed tensor, as the planner's dynamic space.
-fn typed_dynamic_space<D, const NOUT: usize, const NIN: usize, S, DD>(
-    tensor: &TensorMap<D, NOUT, NIN, S, DD>,
-) -> Result<DynamicFusionMapSpace, OperationError>
-where
-    DD: tenet_core::TensorStorage<D>,
-{
-    tensor
-        .fusion_space()
-        .map(|space| DynamicFusionMapSpace::from_typed(space))
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))
 }
 
 /// A legacy conjugation flag on an owned space requests its categorical
@@ -1972,8 +1397,8 @@ fn spec_output_axes(axes: TensorContractSpec<'_>, rank: usize) -> smallvec::Smal
 
 /// The destination a contraction is planned for: its provider, its space and
 /// the mode's authority over spaces derived from it (the multiplicity-free
-/// layout primer by default). Bound spaces carry all three; the static-rank
-/// entries pass their caller's rule.
+/// layout primer by default). Bound spaces carry all three; the test-only
+/// raw entries pass their caller's rule.
 pub(crate) struct PlanTarget<'a, R, A = LayoutKeyBuilder<R>> {
     pub(crate) rule: &'a R,
     pub(crate) space: &'a DynamicFusionMapSpace,

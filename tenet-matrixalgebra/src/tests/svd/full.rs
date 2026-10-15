@@ -193,17 +193,17 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut us,
-            &full.u,
-            &full.s,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut us,
+        &full.u,
+        &full.s,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
     let reconstructed = contract_pair(&rule, &tensor, &us, &full.vh);
     assert_svd_blocks_match(&tensor, &reconstructed);
 }

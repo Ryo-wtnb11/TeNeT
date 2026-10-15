@@ -570,16 +570,6 @@ fn expert_layout_tree_transform_paths_compile_without_publishing() {
             )
             .unwrap();
     });
-    assert_uncached(&mut |cache| {
-        cache
-            .resolve_all_codomain(
-                &SU2FusionRule,
-                &operation.clone(),
-                dst.structure(),
-                src.structure(),
-            )
-            .unwrap();
-    });
 }
 
 #[test]
@@ -1467,36 +1457,7 @@ fn direct_tree_pair_rejects_nonalias_malformed_destination_without_writing() {
 }
 
 #[test]
-fn typed_all_codomain_rejects_nonalias_malformed_destination_without_state_or_output_change() {
-    let _guard = crate::test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (mut dst, src) = valid_simple_source_and_nonalias_malformed_destination();
-    let before_output = dst.data().to_vec();
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    owner_activity();
-
-    let error = context
-        .all_codomain_tree_transform_into(
-            &SU2FusionRule,
-            TreeTransformOperation::permute([0, 1], []),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap_err();
-
-    // What: typed constructors canonicalize equal content identities, so this
-    // nonalias fixture proves all-codomain destination admission without a
-    // fabricated raw-Arc alias.
-    assert_invalid_simple_vertex(error);
-    assert_owner_untouched(owner_activity());
-    assert_eq!(dst.data(), before_output);
-}
-
-#[test]
-fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
+fn all_codomain_pair_mismatch_is_rejected_before_source_scope() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1558,19 +1519,15 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![1.0, 2.0], src_space, src_structure)
             .unwrap();
-    let dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+    let _dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
         .unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
-    owner_activity();
 
-    let error = cache
-        .resolve_all_codomain(
-            &SU2FusionRule,
-            &TreeTransformOperation::permute([0, 1, 2], []),
-            dst.structure(),
-            src.structure(),
-        )
-        .unwrap_err();
+    let error = crate::build_all_codomain_tree_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0, 1, 2], []),
+        src.structure(),
+    )
+    .unwrap_err();
 
     assert_eq!(
         error,
@@ -1579,14 +1536,12 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         })
     );
 
-    let error = cache
-        .resolve_all_codomain(
-            &SU2FusionRule,
-            &TreeTransformOperation::permute([0, 0, 2], []),
-            dst.structure(),
-            src.structure(),
-        )
-        .unwrap_err();
+    let error = crate::build_all_codomain_tree_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0, 0, 2], []),
+        src.structure(),
+    )
+    .unwrap_err();
     assert_eq!(
         error,
         OperationError::Core(CoreError::MalformedFusionTree {
@@ -1594,24 +1549,18 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         })
     );
 
-    let error = cache
-        .resolve_all_codomain(
-            &SU2FusionRule,
-            &TreeTransformOperation::transpose([0, 1, 2], []),
-            dst.structure(),
-            src.structure(),
-        )
-        .unwrap_err();
+    let error = crate::build_all_codomain_tree_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::transpose([0, 1, 2], []),
+        src.structure(),
+    )
+    .unwrap_err();
     assert_eq!(
         error,
         OperationError::Core(CoreError::MalformedFusionTree {
             message: "fusion tree pair requires matching coupled sectors",
         })
     );
-
-    // What: whole-pair source admission also precedes all-codomain operation
-    // scope without publishing cache state.
-    assert_owner_untouched(owner_activity());
 }
 
 #[test]
@@ -1741,12 +1690,6 @@ fn every_tree_transform_entry_reports_the_operation_fusion_style_error() {
     assert_eq!(
         cache
             .resolve_tree_pair(&generic, &operation, &structure, &structure, false)
-            .unwrap_err(),
-        rejected(FusionStyleKind::Generic)
-    );
-    assert_eq!(
-        cache
-            .resolve_all_codomain(&generic, &operation, &structure, &structure)
             .unwrap_err(),
         rejected(FusionStyleKind::Generic)
     );

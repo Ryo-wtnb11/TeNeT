@@ -36,10 +36,7 @@ pub use contract::tensorcontract_structure;
 #[cfg(test)]
 pub(crate) use contract::TensorContractFusionRoute;
 #[cfg(test)]
-pub(crate) use contract::{
-    contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
-    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-};
+pub(crate) use contract::{contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind};
 #[doc(hidden)]
 pub use contract::{
     copy_c_output_transform, CopyCRoute, CoreMiss, CoreRoute, DirectCoreExecutor, ExecCaps,
@@ -52,13 +49,11 @@ pub use contract::{
     StorageContractResolution,
 };
 pub use contract::{
-    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
-    tensorcontract_execute_with, tensorcontract_fusion_block_specs,
+    prepare_tensorcontract_fusion_plan_dyn, tensorcontract_fusion_block_specs,
     zero_copy_contract_order_for_output_permute, FusionContractOrientation, FusionContractPlan,
-    HostTensorContractBackend, HostTensorContractWorkspace, PreparedTensorContractFusion,
-    TensorContractBackend, TensorContractBlockSpec, TensorContractFusionExecutionContext,
-    TensorContractFusionProfile, TensorContractStructure, TensorContractStructureTerm,
-    TensorContractWorkspace,
+    HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
+    TensorContractBlockSpec, TensorContractFusionExecutionContext, TensorContractFusionProfile,
+    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,

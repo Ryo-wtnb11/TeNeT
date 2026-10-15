@@ -230,7 +230,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
 
     let mut explicit_dst =
         TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
-    let plan = prepare_tensorcontract_fusion_plan(
+    let plan = fixture_contract_plan(
         &rule,
         explicit_dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -243,29 +243,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     assert_eq!(plan.core_axes().lhs_contracting_axes(), &[1, 2, 3]);
     assert_eq!(plan.core_axes().rhs_contracting_axes(), &[0, 1, 2]);
 
-    let mut explicit_lhs_core = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); lhs_core_space.required_len().unwrap()],
-        lhs_core_space,
-    )
-    .unwrap();
-    let mut explicit_rhs_core = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); rhs_core_space.required_len().unwrap()],
-        rhs_core_space,
-    )
-    .unwrap();
-    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
-        .tensorcontract_fusion_prepared_into(
-            &rule,
-            &plan,
-            &mut explicit_dst,
-            &mut explicit_lhs_core,
-            &mut explicit_rhs_core,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        )
-        .unwrap();
+    plan_contract_into(&rule, &plan, &mut explicit_dst, &lhs, &rhs, alpha, beta).unwrap();
 
     for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
         assert!(
@@ -281,9 +259,17 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     crate::tree_transform::take_completed_transformer_activity();
-    context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
     for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).norm() < 1.0e-10,
@@ -300,9 +286,17 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context);
-    context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
     for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).norm() < 1.0e-10,
@@ -426,7 +420,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
             }
         );
 
-    let plan = prepare_tensorcontract_fusion_plan(
+    let plan = fixture_contract_plan(
         &rule,
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -504,9 +498,17 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<Complex64, _>::default();
-    context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
     for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).norm() < 1.0e-12,
@@ -517,9 +519,17 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     context_dst
         .data_mut()
         .copy_from_slice(&[Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)]);
-    context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -724,18 +734,18 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
     let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
     let mut profile = TensorContractFusionProfile::default();
 
-    context
-        .tensorcontract_fusion_into_profiled(
-            &rule,
-            &mut dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            2.0,
-            3.0,
-            &mut profile,
-        )
-        .unwrap();
+    context_contract_into_profiled(
+        &mut context,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        2.0,
+        3.0,
+        &mut profile,
+    )
+    .unwrap();
 
     // What: only the output repartitions (TensorKit's copyC); the canonical
     // nondual product RHS is read directly while alpha and beta remain on

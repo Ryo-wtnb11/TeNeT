@@ -93,17 +93,17 @@ where
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-    context
-        .tensorcontract_fusion_into(
-            rule,
-            &mut reconstructed,
-            &svd.u,
-            &scaled_vt,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        rule,
+        &mut reconstructed,
+        &svd.u,
+        &scaled_vt,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
@@ -429,34 +429,34 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
         svd.u.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut u_s,
-            &svd.u,
-            &s_tensor,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut u_s,
+        &svd.u,
+        &s_tensor,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; tensor.data().len()],
         tensor.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut reconstructed,
-            &u_s,
-            &svd.vh,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut reconstructed,
+        &u_s,
+        &svd.vh,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     assert_svd_blocks_match(&tensor, &reconstructed);
 }

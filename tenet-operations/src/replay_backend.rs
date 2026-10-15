@@ -1,16 +1,15 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
+use tenet_core::{BlockStructure, Placement};
 use tenet_dense::{CpuBackendKind, DefaultDenseExecutor, DenseExecutor};
 
 use crate::ReportsPlacement;
 
 use crate::{
-    tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
-    HostKernelAdapter, OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter,
-    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
-    TreeTransformWorkspace,
+    ConjugateValue, DenseRecouplingScalar, HostKernelAdapter, OperationError,
+    RecouplingCoefficientAction, StridedHostKernelAdapter, TreeTransformReplayProfile,
+    TreeTransformScalar, TreeTransformStructure, TreeTransformWorkspace,
 };
 
 /// Legacy/current tree-transform execution contract over host-accessible data.
@@ -33,28 +32,6 @@ where
     fn recoupling_threads(&self) -> NonZeroUsize {
         NonZeroUsize::MIN
     }
-
-    fn tree_transform_structure_into<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>;
 
     #[expect(
         clippy::too_many_arguments,
@@ -431,42 +408,6 @@ where
         DenseTreeTransformOperations::recoupling_threads(self)
     }
 
-    fn tree_transform_structure_into<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>,
-    {
-        let threads = self.effective_recoupling_threads(dst.storage().len());
-        tree_transform_structure_with_structural_recoupling(
-            &mut self.kernel_adapter(),
-            &mut self.dense,
-            workspace,
-            structure,
-            dst,
-            src,
-            alpha,
-            beta,
-            threads,
-        )
-    }
-
     fn tree_transform_structure_into_raw(
         &mut self,
         workspace: &mut Self::Workspace,
@@ -604,32 +545,6 @@ mod tests {
 
     impl TreeTransformBackend<f64, f64> for RequiredMethodsOnlyBackend {
         type Workspace = TreeTransformWorkspace<f64>;
-
-        fn tree_transform_structure_into<
-            const DST_NOUT: usize,
-            const DST_NIN: usize,
-            const SRC_NOUT: usize,
-            const SRC_NIN: usize,
-            SDst,
-            SSrc,
-            DDst,
-            DSrc,
-        >(
-            &mut self,
-            workspace: &mut Self::Workspace,
-            structure: &TreeTransformStructure<f64>,
-            dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
-            src: &TensorMap<f64, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-            alpha: f64,
-            beta: f64,
-        ) -> Result<(), OperationError>
-        where
-            DDst: HostWritableStorage<f64>,
-            DSrc: HostReadableStorage<f64>,
-        {
-            DenseTreeTransformOperations::default_executor()
-                .tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
-        }
 
         fn tree_transform_structure_into_raw(
             &mut self,

@@ -433,13 +433,16 @@ fn overwrite_validates_before_mutation_and_accepts_rank_boundaries() {
 fn structural_serial_replay_scales_inactive_destinations() {
     for beta in [0.0, 0.5, 1.0] {
         let (mut dst, src, structure) = fixture();
-        tree_transform_structure_with_structural_recoupling(
+        let dst_structure = Arc::clone(dst.structure());
+        tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
-            &mut dst,
-            &src,
+            &dst_structure,
+            src.structure(),
+            dst.data_mut(),
+            src.data(),
             1.0,
             beta,
             1,
@@ -453,13 +456,16 @@ fn structural_serial_replay_scales_inactive_destinations() {
 fn structural_threaded_replay_scales_inactive_destinations() {
     for beta in [0.0, 0.5, 1.0] {
         let (mut dst, src, structure) = fixture();
-        tree_transform_structure_with_structural_recoupling(
+        let dst_structure = Arc::clone(dst.structure());
+        tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
-            &mut dst,
-            &src,
+            &dst_structure,
+            src.structure(),
+            dst.data_mut(),
+            src.data(),
             1.0,
             beta,
             2,

@@ -10,7 +10,11 @@ use allocation_oracle::join as pool_join;
 use rayon::join as pool_join;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
+#[cfg(any(test, feature = "testing"))]
+use tenet_core::HostWritableStorage;
+use tenet_core::{BlockStructure, Placement};
+#[cfg(test)]
+use tenet_core::{HostReadableStorage, TensorMap};
 #[cfg(test)]
 use tenet_dense::DefaultDenseExecutor;
 use tenet_dense::{strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob};

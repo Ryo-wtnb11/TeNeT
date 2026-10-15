@@ -53,17 +53,17 @@ fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
     dst.data_mut()
         .copy_from_slice(&[Complex64::new(10.0, 0.0), Complex64::new(20.0, 0.0)]);
     let mut context = TensorContractFusionExecutionContext::<Complex64, _>::default();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut dst,
-            &lhs,
-            &rhs,
-            axes,
-            Complex64::one(),
-            Complex64::zero(),
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        axes,
+        Complex64::one(),
+        Complex64::zero(),
+    )
+    .unwrap();
     assert_eq!(
         dst.data(),
         &[Complex64::new(12.0, -1.0), Complex64::new(23.0, 1.0)]
@@ -727,23 +727,23 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
 
     dst.data_mut().copy_from_slice(&[Complex64::new(0.0, 0.0)]);
     let mut context = TensorContractFusionExecutionContext::<Complex64, _>::default();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::new_with_conjugation(
-                &[],
-                &[],
-                OutputAxisOrder::identity(),
-                true,
-                false,
-            ),
-            Complex64::one(),
-            Complex64::zero(),
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::new_with_conjugation(
+            &[],
+            &[],
+            OutputAxisOrder::identity(),
+            true,
+            false,
+        ),
+        Complex64::one(),
+        Complex64::zero(),
+    )
+    .unwrap();
     assert_eq!(dst.data(), &[Complex64::new(5.0, -5.0)]);
 }
 

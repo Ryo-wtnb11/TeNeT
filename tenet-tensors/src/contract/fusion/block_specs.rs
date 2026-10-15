@@ -326,8 +326,6 @@ where
     Ok(specs)
 }
 
-pub(crate) const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST: &str =
-    "explicit fusion contraction with output tree-pair transform requires caller-owned core_dst";
 pub(crate) const FUSION_TENSORCONTRACT_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT: &str =
     "fusion tensorcontract with conjugation requires categorical adjoint lowering";
 pub(crate) const SOURCE_TRANSFORM_REQUIRES_EXPLICIT: &str =

@@ -637,29 +637,13 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
         .unwrap()
         .has_pack_gemm_scatter_blocks());
 
-    use crate::tree_transform::{
-        build_all_codomain_tree_transform_group_plan_validated_with_threads,
-        validate_multiplicity_free_all_codomain_preflight,
-    };
-    let build = |threads: usize| {
-        let proof = validate_multiplicity_free_all_codomain_preflight(
+    let serial =
+        crate::tree_transform::build_multiplicity_free_all_codomain_tree_transform_group_plan(
             &SU2FusionRule,
-            &operation,
+            operation.clone(),
             &structure,
         )
         .unwrap();
-        build_all_codomain_tree_transform_group_plan_validated_with_threads(
-            &proof,
-            operation.clone(),
-            threads,
-            None,
-        )
-        .unwrap()
-        .into_owned()
-    };
-    let serial = build(1);
-    let parallel = build(4);
-    assert_eq!(parallel, serial);
 
     // What: direct replay honors alpha/beta and overwrite on strided blocks
     // without touching storage padding or allocating pack/GEMM/scatter jobs.
@@ -1191,60 +1175,6 @@ fn parallel_plan_compile_matches_serial_plan() {
     let serial_plan = build(1);
     let parallel_plan = build(8);
     assert_eq!(parallel_plan, serial_plan);
-}
-
-#[test]
-fn all_codomain_canonical_empty_domain_row_is_thread_count_invariant() {
-    use crate::tree_transform::{
-        build_all_codomain_tree_transform_group_plan_validated_with_threads,
-        validate_multiplicity_free_all_codomain_preflight,
-    };
-
-    let codomain = FusionTreeKey::try_new_for_rule(
-        &SU2FusionRule,
-        [SectorId::new(1), SectorId::new(1)],
-        SectorId::new(0),
-        [false, false],
-        [],
-        [MultiplicityIndex::ONE],
-    )
-    .unwrap();
-    let keys = [FusionTreePairKey::pair(codomain, empty_fusion_tree())];
-    let structure =
-        packed_fixture_structure(2, keys.iter().cloned().map(|key| (key, vec![1, 1]))).unwrap();
-    for operation in [
-        TreeTransformOperation::braid([0, 1], [], [7, 3], []),
-        TreeTransformOperation::braid([1, 0], [], [0, 1], []),
-    ] {
-        let build = |threads| {
-            let proof = validate_multiplicity_free_all_codomain_preflight(
-                &SU2FusionRule,
-                &operation,
-                &structure,
-            )
-            .unwrap();
-            build_all_codomain_tree_transform_group_plan_validated_with_threads(
-                &proof,
-                operation.clone(),
-                threads,
-                None,
-            )
-            .unwrap()
-            .into_owned()
-        };
-
-        let mut expected_plan = None;
-        for threads in [1, 2, 4] {
-            let cold = build(threads);
-            // What: the mandatory vacuum removes the prior empty-domain alias,
-            // and its canonical transform is worker-count-independent.
-            if let Some(expected) = &expected_plan {
-                assert_eq!(&cold, expected);
-            } else {
-                expected_plan = Some(cold.clone());
-            }
-        }
-    }
 }
 
 #[test]

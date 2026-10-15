@@ -138,50 +138,6 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 }
 
 #[test]
-fn unique_all_codomain_context_resolves_through_the_completed_transformer_owner() {
-    let _guard = crate::test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
-    let dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
-    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
-    let dst_structure = packed_fixture_structure(2, [(dst_key, vec![1, 1])]).unwrap();
-    let src_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![3.0], src_space, src_structure)
-        .unwrap();
-    let mut dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
-            .unwrap();
-    let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
-
-    context
-        .all_codomain_tree_transform_into(
-            &Z2FusionRule,
-            operation.clone(),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-    assert_eq!(dst.data(), &[3.0]);
-
-    dst.data_mut().fill(0.0);
-    context
-        .all_codomain_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
-        .unwrap();
-    assert_eq!(dst.data(), &[3.0]);
-    // What: all-codomain Unique lowering resolves through the same completed
-    // transformer owner as the tree-pair route; these expert packed layouts
-    // are not canonical, so each call builds and nothing is published.
-    let activity = crate::tree_transform::take_completed_transformer_activity();
-    assert_eq!((activity.builds, activity.publications), (2, 0));
-}
-
-#[test]
 fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
     let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();

@@ -54,23 +54,20 @@ fn fibonacci_complex_provider_replays_crossing_free_prepared_contraction() {
         DenseTreeTransformOperations,
         Complex64,
     >::default();
-    let prepared = context
-        .prepare_tensorcontract_fusion(&rule, &dst, &lhs, &rhs, axes)
-        .unwrap();
+    let prepared = fixture_prepare_contract(&mut context, &rule, &dst, &lhs, &rhs, axes).unwrap();
 
     for _ in 0..2 {
         dst.data_mut()[0] = Complex64::new(0.0, 0.0);
-        context
-            .execute_prepared_tensorcontract_fusion(
-                &prepared,
-                &rule,
-                &mut dst,
-                &lhs,
-                &rhs,
-                Complex64::new(1.0, 0.0),
-                Complex64::new(0.0, 0.0),
-            )
-            .unwrap();
+        fixture_execute_prepared(
+            &mut context,
+            &prepared,
+            &mut dst,
+            &lhs,
+            &rhs,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
     }
 
     assert_eq!(dst.data(), &[Complex64::new(8.0, -1.0)]);
@@ -396,47 +393,47 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut context_dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            2.0,
-            3.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
 
     context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut context_dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            2.0,
-            3.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
 
     context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
     let mut profile = TensorContractFusionProfile::default();
-    context
-        .tensorcontract_fusion_into_profiled(
-            &rule,
-            &mut context_dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            2.0,
-            3.0,
-            &mut profile,
-        )
-        .unwrap();
+    context_contract_into_profiled(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        2.0,
+        3.0,
+        &mut profile,
+    )
+    .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
     assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
     assert_eq!(profile.lhs_transform_calls, 0);
@@ -512,17 +509,17 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
     let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            2.0,
-            3.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
 
     assert_eq!(dst.data(), &[50.0, 102.0]);
 }

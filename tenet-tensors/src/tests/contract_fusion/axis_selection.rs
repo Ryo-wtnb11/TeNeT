@@ -73,7 +73,7 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
             assert!((a - b).abs() < 1.0e-10, "candidate mismatch: {a} vs {b}");
         }
     }
-    let selected = prepare_tensorcontract_fusion_plan(
+    let selected = fixture_contract_plan(
         &rule,
         &space,
         &space,
@@ -317,7 +317,7 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     let mut dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0], space).unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]);
     crate::contract::reset_source_layout_homspace_id_comparisons();
-    let _pure_plan = prepare_tensorcontract_fusion_plan(
+    let _pure_plan = fixture_contract_plan(
         &rule,
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -332,9 +332,7 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     crate::tree_transform::take_completed_transformer_activity();
 
-    context
-        .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap();
+    context_contract_into(&mut context, &rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0).unwrap();
     // What: eager resolution scores four candidates and builds only the
     // reusable completed transformers, which it publishes.
     assert_eq!(crate::contract::candidate_score_calls(), 4);
@@ -343,9 +341,7 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     let cold = crate::tree_transform::take_completed_transformer_activity();
     assert_eq!(cold.publications + cold.hits, 2, "{cold:?}");
 
-    context
-        .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap();
+    context_contract_into(&mut context, &rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0).unwrap();
     // What: an ordinary repeat resolves eagerly and hits the published
     // transformers instead of rebuilding them.
     assert_eq!(crate::contract::candidate_score_calls(), 8);
@@ -481,65 +477,22 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
             crate::contract::FusionContractOrientation::RhsLhs,
         )
         .unwrap();
-    let reverse_unsupported = OperationError::UnsupportedTensorContractScope {
-        message: "caller-owned fusion contraction scratch supports only LhsRhs orientation",
-    };
+    // What: the reverse-orientation plan, executed step by step, matches the
+    // reduced-block oracle.
     let mut explicit_dst =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
             .unwrap();
-    let mut explicit_core_dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        vec![9.0; initial.len()],
-        dst_space.clone(),
+    plan_contract_into(
+        &rule,
+        &reverse_plan,
+        &mut explicit_dst,
+        &lhs,
+        &rhs,
+        alpha,
+        beta,
     )
     .unwrap();
-    let mut explicit_lhs_core = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        vec![8.0; lhs.data().len()],
-        lhs.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let mut explicit_rhs_core = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        vec![7.0; rhs.data().len()],
-        rhs.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let explicit_dst_before = explicit_dst.data().to_vec();
-    let explicit_core_dst_before = explicit_core_dst.data().to_vec();
-    let explicit_lhs_before = explicit_lhs_core.data().to_vec();
-    let explicit_rhs_before = explicit_rhs_core.data().to_vec();
-    let mut explicit_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    assert_eq!(
-        explicit_context.tensorcontract_fusion_prepared_into(
-            &rule,
-            &reverse_plan,
-            &mut explicit_dst,
-            &mut explicit_lhs_core,
-            &mut explicit_rhs_core,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        ),
-        Err(reverse_unsupported.clone())
-    );
-    assert_eq!(
-        explicit_context.tensorcontract_fusion_prepared_into_core_dst(
-            &rule,
-            &reverse_plan,
-            &mut explicit_dst,
-            &mut explicit_core_dst,
-            &mut explicit_lhs_core,
-            &mut explicit_rhs_core,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        ),
-        Err(reverse_unsupported)
-    );
-    assert_eq!(explicit_dst.data(), explicit_dst_before);
-    assert_eq!(explicit_core_dst.data(), explicit_core_dst_before);
-    assert_eq!(explicit_lhs_core.data(), explicit_lhs_before);
-    assert_eq!(explicit_rhs_core.data(), explicit_rhs_before);
+    assert_oracle(explicit_dst.data());
 
     let fresh_dst = || {
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
@@ -602,7 +555,8 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         let mut dynamic_dst = initial.clone();
         let typed_call = |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
                           dst: &mut TensorMap<f64, 2, 2>| {
-            context.tensorcontract_fusion_into(
+            context_contract_into(
+                context,
                 provider.as_ref(),
                 dst,
                 &lhs,
@@ -654,7 +608,8 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         let ordinary_call =
             |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
              dst: &mut TensorMap<f64, 2, 2>| {
-                context.tensorcontract_fusion_into(
+                context_contract_into(
+                    context,
                     provider.as_ref(),
                     dst,
                     &lhs,
@@ -668,7 +623,8 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
             |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
              dst: &mut TensorMap<f64, 2, 2>| {
                 let mut profile = TensorContractFusionProfile::default();
-                context.tensorcontract_fusion_into_profiled(
+                context_contract_into_profiled(
+                    context,
                     provider.as_ref(),
                     dst,
                     &lhs,
@@ -721,9 +677,17 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
     let mut context_dst =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let error = context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap_err();
+    let error = context_contract_into(
+        &mut context,
+        &rule,
+        &mut context_dst,
+        &lhs,
+        &rhs,
+        axes,
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
     // What: duplicate axes retain validation precedence and leave all buffers untouched.
     assert_eq!(
         error,
@@ -826,7 +790,7 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
             assert!((a - b).norm() < 1.0e-10, "candidate mismatch: {a} vs {b}");
         }
     }
-    let selected = prepare_tensorcontract_fusion_plan(
+    let selected = fixture_contract_plan(
         &rule,
         &space,
         &space,
@@ -1036,7 +1000,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
             assert!((*lhs - *rhs).norm() < 1.0e-10);
         }
     }
-    let selected = prepare_tensorcontract_fusion_plan(
+    let selected = fixture_contract_plan(
         &rule,
         &dst_space,
         lhs.fusion_space().unwrap(),

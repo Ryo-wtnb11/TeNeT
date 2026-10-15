@@ -1,6 +1,4 @@
-use tenet_core::{
-    FusionSpaceAdmission, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-};
+use tenet_core::{FusionSpaceAdmission, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
 use smallvec::SmallVec;
 
@@ -461,15 +459,6 @@ impl FusionContractPlan {
         self.orientation
     }
 
-    pub(crate) fn require_forward_scratch(&self) -> Result<(), OperationError> {
-        if self.orientation == FusionContractOrientation::RhsLhs {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "caller-owned fusion contraction scratch supports only LhsRhs orientation",
-            });
-        }
-        Ok(())
-    }
-
     #[inline]
     pub fn lhs_transform(&self) -> &TreeTransformOperation {
         &self.lhs_transform
@@ -541,39 +530,8 @@ impl FusionContractPlan {
     }
 }
 
-pub fn prepare_tensorcontract_fusion_plan<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
-    rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-    axes: TensorContractSpec<'_>,
-) -> Result<FusionContractPlan, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    dst.validate_rule(rule)?;
-    lhs.validate_rule(rule)?;
-    rhs.validate_rule(rule)?;
-    prepare_tensorcontract_fusion_plan_dyn_raw(
-        rule,
-        &DynamicFusionMapSpace::from_typed(dst),
-        &DynamicFusionMapSpace::from_typed(lhs),
-        &DynamicFusionMapSpace::from_typed(rhs),
-        axes,
-    )
-}
-
-/// Dynamic-rank variant of [`prepare_tensorcontract_fusion_plan`] retaining
-/// the checked provider authority carried by the input spaces.
+/// The fusion contraction plan over bound dynamic spaces, retaining the
+/// checked provider authority carried by the input spaces.
 pub fn prepare_tensorcontract_fusion_plan_dyn<R>(
     dst: &BoundDynamicFusionMapSpace<R>,
     lhs: &BoundDynamicFusionMapSpace<R>,

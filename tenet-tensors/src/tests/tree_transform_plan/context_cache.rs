@@ -217,11 +217,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
 }
 
 #[test]
-fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
-    // Composed-coefficient hits must not race a clearing sibling test.
-    let _guard = crate::test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn all_codomain_plan_compiles_distinct_degeneracy_shapes() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -278,48 +274,15 @@ fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let planning = crate::tree_transform::TreeTransformPlanning::default();
     let resolve = |dst: &TensorMap<f64, 4, 0>, src: &TensorMap<f64, 4, 0>| {
-        planning
-            .resolve_all_codomain(&SU2FusionRule, &operation, dst.structure(), src.structure())
-            .unwrap()
+        uncached_all_codomain_structure(&SU2FusionRule, operation.clone(), dst, src).unwrap()
     };
 
     let small = resolve(&dst, &src);
-    crate::tree_transform::take_coefficient_group_activity();
     let large = resolve(&dst_large, &src_large);
     assert!(small.has_pack_gemm_scatter_blocks() && large.has_pack_gemm_scatter_blocks());
-    // What: a degeneracy change is a distinct layout, hence a distinct core,
-    // but it recomposes no source group (all-codomain scope, cache 4), and
-    // the bound result equals the uncached eager producer.
+    // What: a degeneracy change is a distinct layout, hence a distinct core.
     assert_ne!(small.layouts(), large.layouts());
-    let groups = crate::tree_transform::take_coefficient_group_activity();
-    assert_eq!(
-        (groups.hits, groups.misses, groups.publications),
-        (src_large.structure().fusion_tree_groups().len(), 0, 0)
-    );
-    let eager =
-        crate::tree_transform::build_multiplicity_free_all_codomain_tree_transform_group_plan(
-            &SU2FusionRule,
-            operation.clone(),
-            src_large.structure(),
-        )
-        .unwrap()
-        .compile_shared_structures_with_storage_conjugation(
-            Arc::clone(dst_large.structure()),
-            Arc::clone(src_large.structure()),
-            false,
-        )
-        .unwrap();
-    assert_eq!(large, eager);
-    let bits = |structure: &TreeTransformStructure<f64>| {
-        structure
-            .gathered_coefficients()
-            .iter()
-            .map(|coefficient| coefficient.to_bits())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(bits(&large), bits(&eager));
 
     let structure = resolve(&dst, &src);
     let mut backend = DenseTreeTransformOperations::default();
@@ -340,7 +303,7 @@ fn all_codomain_resolution_compiles_distinct_degeneracy_shapes() {
 }
 
 #[test]
-fn tree_transform_execution_context_replays_all_codomain_transforms() {
+fn all_codomain_plan_replays_su2_recoupling() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -376,27 +339,36 @@ fn tree_transform_execution_context_replays_all_codomain_transforms() {
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    let structure = uncached_all_codomain_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
 
-    context
-        .all_codomain_tree_transform_into(
-            &SU2FusionRule,
-            operation.clone(),
-            &mut dst,
-            &src,
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    replay_into(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
     assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
 
     src.data_mut().copy_from_slice(&[3.0, -4.0]);
     dst.data_mut().copy_from_slice(&[1.0, 2.0]);
-    context
-        .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 2.0, -1.0)
-        .unwrap();
+    replay_into(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &src,
+        2.0,
+        -1.0,
+    )
+    .unwrap();
 
     let c = 0.866_025_403_784_438_6;
     assert!((dst.data()[0] - (-1.0 + 2.0 * (0.5 * 3.0 + c * -4.0))).abs() < 1.0e-12);
@@ -404,7 +376,7 @@ fn tree_transform_execution_context_replays_all_codomain_transforms() {
 }
 
 #[test]
-fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes() {
+fn tree_pair_and_all_codomain_transforms_agree_on_an_all_codomain_source() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -455,11 +427,19 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     let tree_pair = dst.data().to_vec();
 
     dst.data_mut().copy_from_slice(&[0.0, 0.0]);
-    context
-        .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
-        .unwrap();
+    let structure = uncached_all_codomain_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    replay_into(
+        &mut DenseTreeTransformOperations::default(),
+        &mut TreeTransformWorkspace::default(),
+        &structure,
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
-    // What: the two scopes are distinct key families that agree here.
+    // What: the tree-pair and all-codomain lowerings agree here.
     assert_eq!(tree_pair, dst.data());
     assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
     assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);

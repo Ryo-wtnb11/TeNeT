@@ -150,7 +150,9 @@ fn every_key_determinant_splits_entries_and_equal_keys_hit() {
     assert!(misses(reuse(
         rule.clone(),
         TransformerMode::MultiplicityFree,
-        TreeTransformScope::AllCodomain,
+        TreeTransformScope::TraceTerms {
+            open_codomain_rank: 0,
+        },
         &operation,
         direct,
     )));
