@@ -78,7 +78,7 @@ fn degeneracy_shape_for_tree_side(
     shape: &mut [usize],
 ) -> Result<usize, CoreError> {
     #[cfg(test)]
-    observe_coupled_grid_side_derivation();
+    crate::probe::hit(crate::probe::Event::CoupledGridSideDerivation);
     if tree.uncoupled().len() != space.len() {
         return Err(CoreError::StructureRankMismatch {
             expected: space.len(),

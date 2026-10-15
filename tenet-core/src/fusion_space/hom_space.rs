@@ -1092,7 +1092,7 @@ impl FusionTreeHomSpace {
                 CompleteHomSpaceStructureCacheKey::generic(rule_identity.clone(), &destination);
             if let Some(resident) = complete_hom_space_structure_cached(&key) {
                 #[cfg(test)]
-                PERMUTED_MEMO_HITS.set(PERMUTED_MEMO_HITS.get() + 1);
+                crate::probe::hit(crate::probe::Event::PermutedMemoHit);
                 let prepared = PreparedBlockStructure::complete_hit(
                     destination.clone(),
                     resident.homspace_id(),

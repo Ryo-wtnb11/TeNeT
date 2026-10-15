@@ -632,12 +632,15 @@ fn borrowed_unique_schedule_derivation_uses_quadratic_position_queries() {
     )
     .unwrap();
 
-    reset_unique_borrowed_position_queries();
+    let recording = crate::probe::record();
     let steps = prepared
         .plan
         .artin_steps()
         .expect("reverse permutation must prepare a braid")
         .count();
     assert_eq!(steps, rank * (rank - 1) / 2);
-    assert_eq!(unique_borrowed_position_queries(), rank * (rank - 1));
+    assert_eq!(
+        recording.get(crate::probe::Event::UniqueBorrowedPositionQuery),
+        rank * (rank - 1)
+    );
 }

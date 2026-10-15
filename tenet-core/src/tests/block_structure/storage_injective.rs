@@ -60,11 +60,11 @@ fn expert_fusion_space_accepts_exact_non_overlapping_strided_storage() {
         vec![BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 3], vec![3, 1], 0).unwrap()],
         vec![BlockSpec::with_key(BlockKey::ordinal(0), vec![1, 2], vec![0, 1], 0).unwrap()],
     ];
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     for blocks in rank_two_cases {
         expert_layout_storage(2, blocks).unwrap();
     }
-    assert!(exact_storage_fallback_count() > 0);
+    assert!(recording.get(crate::probe::Event::ExactStorageFallback) > 0);
 
     let rank_one_cases = [
         vec![
@@ -177,7 +177,7 @@ fn external_aliased_storage_keeps_exact_rejection() {
     ])
     .unwrap();
     assert!(!aliased.storage_tiling_proven());
-    reset_exact_storage_fallback_count();
+    let recording = crate::probe::record();
     assert_eq!(
         validate_block_storage_injective(&aliased),
         Err(CoreError::OverlappingBlockStorage {
@@ -186,5 +186,5 @@ fn external_aliased_storage_keeps_exact_rejection() {
             offset: 1,
         })
     );
-    assert!(exact_storage_fallback_count() > 0);
+    assert!(recording.get(crate::probe::Event::ExactStorageFallback) > 0);
 }

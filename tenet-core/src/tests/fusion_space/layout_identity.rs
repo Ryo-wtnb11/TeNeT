@@ -73,7 +73,7 @@ fn canonical_coupled_grid_derives_each_row_and_column_once() {
         FusionProductSpace::new([leg.clone(), leg.clone()]),
         FusionProductSpace::new([leg.clone(), leg]),
     );
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let layout = homspace.fusion_tree_layout_data_uncached(&rule);
     let expected_derivations = layout
         .sectors
@@ -84,7 +84,13 @@ fn canonical_coupled_grid_derives_each_row_and_column_once() {
     let expected = legacy_leg_degeneracy_structure(&rule, &homspace);
     assert_eq!(*actual.0, *expected.sector_structure());
     assert_eq!(actual.1, *expected.degeneracy_structure());
-    assert_eq!(coupled_grid_build_observations(), (0, expected_derivations));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::CoupledGridReconstructionInsert),
+            recording.get(crate::probe::Event::CoupledGridSideDerivation)
+        ),
+        (0, expected_derivations)
+    );
 }
 
 #[test]

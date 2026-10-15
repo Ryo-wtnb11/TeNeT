@@ -154,12 +154,24 @@ fn warm_layout_commit_publishes_nothing() {
     clear_structure_caches();
     let hom = singleton_rank_hom(su2(1), 5);
 
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let cold = hom.cached_fusion_tree_layout(&SU2FusionRule);
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (1, 1)
+    );
 
     let warm = hom.cached_fusion_tree_layout(&SU2FusionRule);
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (1, 1)
+    );
     assert!(Arc::ptr_eq(&cold, &warm));
 }
 
@@ -171,7 +183,7 @@ fn prepared_layout_publishes_only_at_commit() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_structure_caches();
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let hom = singleton_rank_hom(su2(1), 5);
 
     let prepared = hom
@@ -180,11 +192,23 @@ fn prepared_layout_publishes_only_at_commit() {
     // Why not inspect global cache totals: unrelated parallel tests may
     // populate the same process cache. These thread-local probes attribute
     // publication exactly to this transaction.
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 
     let keys = prepared.commit();
     assert!(!keys.is_empty());
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (1, 1)
+    );
 }
 
 #[test]
@@ -202,18 +226,36 @@ fn prepared_final_structure_reuses_one_checked_enumeration() {
         .unwrap();
 
     clear_structure_caches();
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let prepared = hom
         .prepare_fusion_tree_layout_checked(&SU2FusionRule)
         .unwrap();
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 
     let actual = prepared.build_from_leg_degeneracies(&hom).unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 
     prepared.commit();
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (1, 1)
+    );
 }
 
 #[test]
@@ -314,15 +356,21 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
     let walk = one_walk_side_derivations(&U1FusionRule, &hom);
     assert!(walk > 2);
 
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let first = finalize_complete(&U1FusionRule, &hom).unwrap();
-    assert_eq!(coupled_grid_build_observations().1, walk);
+    assert_eq!(
+        recording.get(crate::probe::Event::CoupledGridSideDerivation),
+        walk
+    );
     let after_miss = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!((after_miss.misses(), after_miss.admissions()), (1, 1));
 
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let second = finalize_complete(&U1FusionRule, &hom).unwrap();
-    assert_eq!(coupled_grid_build_observations().1, 0);
+    assert_eq!(
+        recording.get(crate::probe::Event::CoupledGridSideDerivation),
+        0
+    );
     assert!(Arc::ptr_eq(&first, &second));
     let after_hit = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(after_hit.hits(), after_miss.hits() + 1);
@@ -336,9 +384,12 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
     crate::set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
     let evicted = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(evicted.entries(), 0);
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     finalize_complete(&U1FusionRule, &hom).unwrap();
-    assert_eq!(coupled_grid_build_observations().1, walk);
+    assert_eq!(
+        recording.get(crate::probe::Event::CoupledGridSideDerivation),
+        walk
+    );
     let rewalked = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(rewalked.misses(), evicted.misses() + 1);
     assert_eq!(rewalked.admissions(), evicted.admissions() + 1);
@@ -388,14 +439,14 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
     );
     let bosonic = finalize_complete(&Z2FusionRule, &parity_hom).unwrap();
     let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let fermionic = finalize_complete(&FermionParityFusionRule, &parity_hom).unwrap();
     let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     // The geometry is equal, but distinct rule keys own distinct complete
     // entries and therefore distinct monotonic operation ids.
     assert_eq!(bosonic, fermionic);
     assert_ne!(bosonic.content_id(), fermionic.content_id());
-    assert!(coupled_grid_build_observations().1 > 0);
+    assert!(recording.get(crate::probe::Event::CoupledGridSideDerivation) > 0);
     assert_eq!(after.misses(), before.misses() + 1);
     assert_eq!(after.admissions(), before.admissions() + 1);
     assert_eq!(after.entries(), before.entries() + 1);
@@ -442,10 +493,13 @@ fn complete_structure_overflow_is_rejected_beside_cached_neighbour() {
         before
     );
 
-    reset_coupled_grid_build_observations();
+    let recording = crate::probe::record();
     let hit = finalize_complete(&U1FusionRule, &neighbour).unwrap();
     assert!(Arc::ptr_eq(&cached, &hit));
-    assert_eq!(coupled_grid_build_observations().1, 0);
+    assert_eq!(
+        recording.get(crate::probe::Event::CoupledGridSideDerivation),
+        0
+    );
     assert_eq!(
         structure_cache_info(StructureCacheKind::DegeneracyStructure).hits(),
         before.hits() + 1
@@ -468,7 +522,7 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
     let prepared = source
         .prepare_fusion_tree_layout_checked(&U1FusionRule)
         .unwrap();
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let mismatched = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(u1(2), 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(u1(2), 3)], true)]),
@@ -483,7 +537,13 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
             message: "prepared layout does not match HomSpace sector signature",
         }
     );
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
     let duality_mismatched = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(u1(1), 2)], true)]),
         FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
@@ -496,7 +556,13 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
             message: "prepared layout does not match HomSpace sector signature",
         }
     );
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 
     let target = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(u1(1), 5)], false)]),
@@ -507,7 +573,13 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
         structure.degeneracy_structure().block(0).unwrap().shape(),
         &[5, 7]
     );
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 }
 
 #[test]
@@ -527,12 +599,18 @@ fn cached_commit_readmits_after_core_reset() {
         .unwrap();
     let retained = prepared.keys_arc();
     clear_structure_caches();
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
 
     let committed = prepared.commit();
 
     assert!(Arc::ptr_eq(&retained, &committed));
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 1));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 1)
+    );
 }
 
 #[test]
@@ -550,13 +628,19 @@ fn concurrent_commits_share_one_layout_admission() {
             let hom = hom.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                reset_fusion_tree_layout_probe_side_effect_calls();
+                let recording = crate::probe::record();
                 let prepared = hom
                     .prepare_fusion_tree_layout_checked(&SU2FusionRule)
                     .unwrap();
                 barrier.wait();
                 let keys = prepared.commit();
-                (keys, fusion_tree_layout_probe_side_effect_calls())
+                (
+                    keys,
+                    (
+                        recording.get(crate::probe::Event::LayoutBuild),
+                        recording.get(crate::probe::Event::LayoutAdmission),
+                    ),
+                )
             })
         })
         .collect::<Vec<_>>();
@@ -707,10 +791,16 @@ fn assert_failed_checked_build_is_transactional<R>(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_structure_caches();
-    reset_fusion_tree_layout_probe_side_effect_calls();
+    let recording = crate::probe::record();
     let error = hom.prepare_fusion_tree_layout_checked(rule).unwrap_err();
     assert_eq!(error, expected);
-    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+    assert_eq!(
+        (
+            recording.get(crate::probe::Event::LayoutBuild),
+            recording.get(crate::probe::Event::LayoutAdmission)
+        ),
+        (0, 0)
+    );
 }
 
 #[test]

@@ -484,24 +484,11 @@ pub struct GenericBlockStepCounts {
     pub spread_multiplies: u64,
 }
 
-#[cfg(any(test, feature = "testing"))]
-std::thread_local! {
-    static GENERIC_BLOCK_STEP_COUNTS: std::cell::Cell<GenericBlockStepCounts> =
-        const {
-            std::cell::Cell::new(GenericBlockStepCounts {
-                steps: 0,
-                moves: 0,
-                per_source_moves: 0,
-                spread_multiplies: 0,
-            })
-        };
-}
-
 /// This thread's composer step counts since the last call.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn take_generic_block_step_counts() -> GenericBlockStepCounts {
-    GENERIC_BLOCK_STEP_COUNTS.with(|counts| counts.replace(GenericBlockStepCounts::default()))
+    crate::probe::take_steps()
 }
 
 /// Apply one move to the whole current basis (TensorKit `U = U_tmp * U` on a
@@ -567,18 +554,15 @@ where
         column_start.push(entries.len());
     }
     #[cfg(any(test, feature = "testing"))]
-    GENERIC_BLOCK_STEP_COUNTS.with(|counts| {
-        let mut next = counts.get();
-        next.steps += 1;
-        next.moves += basis.len() as u64;
-        next.per_source_moves += columns.entries.len() as u64;
-        next.spread_multiplies += columns
+    crate::probe::add_step(
+        basis.len() as u64,
+        columns.entries.len() as u64,
+        columns
             .entries
             .iter()
             .map(|(row, _)| (move_start[row + 1] - move_start[*row]) as u64)
-            .sum::<u64>();
-        counts.set(next);
-    });
+            .sum::<u64>(),
+    );
     Ok((
         next_basis,
         GenericSourceColumns {

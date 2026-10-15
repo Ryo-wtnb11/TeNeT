@@ -231,9 +231,9 @@ impl PreparedFusionTreeLayout {
         #[cfg(test)]
         if Arc::ptr_eq(&published, &layout) {
             if cold {
-                FUSION_TREE_LAYOUT_BUILDS.set(FUSION_TREE_LAYOUT_BUILDS.get() + 1);
+                crate::probe::hit(crate::probe::Event::LayoutBuild);
             }
-            FUSION_TREE_LAYOUT_ADMISSIONS.set(FUSION_TREE_LAYOUT_ADMISSIONS.get() + 1);
+            crate::probe::hit(crate::probe::Event::LayoutAdmission);
         }
         #[cfg(not(test))]
         let _ = cold;
@@ -253,58 +253,6 @@ impl std::ops::Deref for FusionTreeHomSpaceLayout {
     fn deref(&self) -> &Self::Target {
         &self.data
     }
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static FUSION_TREE_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_fusion_tree_layout_probe_side_effect_calls() {
-    FUSION_TREE_LAYOUT_BUILDS.set(0);
-    FUSION_TREE_LAYOUT_ADMISSIONS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn fusion_tree_layout_probe_side_effect_calls() -> (usize, usize) {
-    (
-        FUSION_TREE_LAYOUT_BUILDS.get(),
-        FUSION_TREE_LAYOUT_ADMISSIONS.get(),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn reset_coupled_grid_build_observations() {
-    COUPLED_GRID_BUILD_OBSERVATIONS.set((0, 0));
-}
-
-#[cfg(test)]
-pub(crate) fn coupled_grid_build_observations() -> (usize, usize) {
-    COUPLED_GRID_BUILD_OBSERVATIONS.get()
-}
-
-#[cfg(test)]
-fn observe_coupled_grid_reconstruction_insert() {
-    COUPLED_GRID_BUILD_OBSERVATIONS.set({
-        let (reconstruction_inserts, side_derivations) = COUPLED_GRID_BUILD_OBSERVATIONS.get();
-        (reconstruction_inserts + 1, side_derivations)
-    });
-}
-
-#[cfg(test)]
-pub(super) fn observe_coupled_grid_side_derivation() {
-    COUPLED_GRID_BUILD_OBSERVATIONS.set({
-        let (reconstruction_inserts, side_derivations) = COUPLED_GRID_BUILD_OBSERVATIONS.get();
-        (reconstruction_inserts, side_derivations + 1)
-    });
 }
 
 #[cfg(test)]
@@ -345,7 +293,7 @@ pub(crate) fn reconstructed_fusion_tree_layout_data_from_keys(
                     let index = row_indices.len();
                     row_indices.insert(keys[run_end].codomain_tree().clone(), index);
                     row_key_offsets.push(run_end - run_start);
-                    observe_coupled_grid_reconstruction_insert();
+                    crate::probe::hit(crate::probe::Event::CoupledGridReconstructionInsert);
                     index
                 }
             };
@@ -355,7 +303,7 @@ pub(crate) fn reconstructed_fusion_tree_layout_data_from_keys(
                     let index = col_indices.len();
                     col_indices.insert(keys[run_end].domain_tree().clone(), index);
                     col_key_offsets.push(run_end - run_start);
-                    observe_coupled_grid_reconstruction_insert();
+                    crate::probe::hit(crate::probe::Event::CoupledGridReconstructionInsert);
                     index
                 }
             };
