@@ -41,21 +41,20 @@ use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockStructure, ErasedStructureCacheControl, FusionTreePairKey, FusionTreePairOrientation,
-    HomSpaceId, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, StructureCache, StructureCacheInfo,
+    HomSpaceId, MultiplicityFreeRigidSymbols, RuleIdentity, StructureCache, StructureCacheInfo,
     StructureCacheKind, WeakHomSpaceId,
 };
+
+#[cfg(test)]
+use tenet_core::LocallyValidatedFusionTreeBlockStructure;
 
 use crate::{OperationError, TreeTransformStructure};
 use tenet_operations::{TreeTransformOperationKind, TreeTransformReplay};
 
 use super::operation::TreeTransformOperation;
 use super::plan::{
-    build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_multiplicity_free_tree_pair_plan_after_capability_with_threads,
     build_oriented_tree_pair_transform_group_plan_capability_validated,
-    validate_all_codomain_namespace_before_cache,
-    validate_multiplicity_free_all_codomain_preflight_after_capability,
     validate_multiplicity_free_tree_transform_capability,
     validate_tree_pair_namespace_before_cache,
 };
@@ -249,10 +248,9 @@ pub(crate) enum TransformerMode {
     CheckedGeneric,
 }
 
-/// The plan family: tree-pair or all-codomain recoupling.
+/// The plan family: a tree-pair recoupling or a trace's lowered terms.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TreeTransformScope {
-    AllCodomain,
     TreePair,
     /// A trace's lowered terms (cache 4 only; cache 3 never keys it). The
     /// open codomain rank is keyed because the `(p…, q…)` operation alone
@@ -1037,76 +1035,6 @@ impl TreeTransformPlanning {
             dst_structure,
             storage_src_structure,
             build,
-        )
-    }
-
-    /// The all-codomain recoupling transformer.
-    ///
-    /// Fusion-tree block keys in `dst` and `src` follow
-    /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
-    /// precondition.
-    pub(crate) fn resolve_all_codomain<R, T>(
-        &self,
-        rule: &R,
-        operation: &TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-    ) -> Result<TreeTransformStructure<T>, OperationError>
-    where
-        R: MultiplicityFreeFusionSymbols<Scalar = T> + Sync,
-        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
-    {
-        let epoch = tenet_core::core_reset_epoch();
-        validate_multiplicity_free_tree_transform_capability(rule, operation)?;
-        validate_all_codomain_namespace_before_cache(operation, src_structure)?;
-        let key = CompletedTransformerKey::new::<T>(
-            rule.rule_identity(),
-            TransformerMode::MultiplicityFree,
-            TreeTransformScope::AllCodomain,
-            operation,
-            FusionTreePairOrientation::Direct,
-            OrientedBasisOrder::Canonical,
-            false,
-            None,
-            dst_structure,
-            src_structure,
-        );
-        let may_publish = publishable([dst_structure.as_ref(), src_structure.as_ref()]);
-        let threads = self.recoupling_threads.get();
-        resolve(
-            key,
-            may_publish,
-            epoch,
-            dst_structure,
-            src_structure,
-            || {
-                let source_proof =
-                    validate_multiplicity_free_all_codomain_preflight_after_capability(
-                        rule,
-                        operation,
-                        src_structure,
-                    )?;
-                LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
-                    .map_err(OperationError::from_core_preserving_context)?;
-                let reuse = multiplicity_free_reuse(
-                    rule,
-                    TreeTransformScope::AllCodomain,
-                    operation,
-                    FusionTreePairOrientation::Direct,
-                );
-                let plan = build_all_codomain_tree_transform_group_plan_validated_with_threads(
-                    &source_proof,
-                    operation.clone(),
-                    threads,
-                    Some(&reuse),
-                )?;
-                reuse.into_pending().publish(epoch);
-                plan.compile_shared_structures_with_storage_conjugation(
-                    Arc::clone(dst_structure),
-                    Arc::clone(src_structure),
-                    false,
-                )
-            },
         )
     }
 }

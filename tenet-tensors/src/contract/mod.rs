@@ -1,4 +1,3 @@
-mod api;
 mod backend;
 mod checked_generic;
 pub(crate) use checked_generic::{
@@ -43,6 +42,7 @@ pub use fusion::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use fusion::{
     candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+    prepare_tensorcontract_fusion_plan_dyn_raw,
     prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
     reset_candidate_score_calls, FusionContractCandidateFacts,
 };
@@ -69,7 +69,6 @@ mod scratch;
 mod storage_contract_tests;
 mod structure;
 
-pub use api::tensorcontract_execute_with;
 #[cfg(test)]
 pub(crate) use backend::tensorcontract_structure_with_dense_executor_raw;
 pub use backend::{
@@ -80,8 +79,7 @@ pub use checked_generic::CheckedContractStage;
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
-    plan_compose, try_compile_storage_contract_core_route, PreparedTensorContractFusion,
-    TensorContractFusionExecutionContext,
+    plan_compose, try_compile_storage_contract_core_route, TensorContractFusionExecutionContext,
 };
 pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]
@@ -97,14 +95,11 @@ pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
-pub(crate) use fusion::rhs_contract_twist_factor_oriented;
 #[cfg(test)]
-pub(crate) use fusion::{
-    contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-};
+pub(crate) use fusion::contracted_fusion_tree_basis_matches;
+pub(crate) use fusion::rhs_contract_twist_factor_oriented;
 pub use fusion::{
-    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
-    tensorcontract_fusion_block_specs, FusionContractPlan,
+    prepare_tensorcontract_fusion_plan_dyn, tensorcontract_fusion_block_specs, FusionContractPlan,
 };
 pub(crate) use fusion::{
     prepare_tensorcontract_fusion_plan_dyn_raw_canonical,

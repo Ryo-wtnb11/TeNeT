@@ -131,7 +131,9 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::AllCodomain,
+            TreeTransformScope::TraceTerms {
+                open_codomain_rank: 0,
+            },
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,

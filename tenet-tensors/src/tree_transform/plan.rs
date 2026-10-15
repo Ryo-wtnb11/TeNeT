@@ -460,25 +460,6 @@ where
     LocallyValidatedAllCodomainFusionTreeBlockStructure::try_new(rule, operation, src_structure)
 }
 
-pub(crate) fn validate_multiplicity_free_all_codomain_preflight_after_capability<
-    'rule,
-    'structure,
-    R,
->(
-    rule: &'rule R,
-    operation: &TreeTransformOperation,
-    src_structure: &'structure BlockStructure,
-) -> Result<LocallyValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R>, OperationError>
-where
-    R: FusionRule,
-{
-    LocallyValidatedAllCodomainFusionTreeBlockStructure::try_new_after_capability(
-        rule,
-        operation,
-        src_structure,
-    )
-}
-
 fn validate_tree_transform_operation_syntax(
     operation: &TreeTransformOperation,
     src_structure: &BlockStructure,
@@ -672,39 +653,6 @@ where
         threads,
         reuse,
     )
-}
-
-pub(crate) fn build_all_codomain_tree_transform_group_plan_validated_with_threads<R>(
-    source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
-    operation: TreeTransformOperation,
-    threads: usize,
-    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<ComposedPlan<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeFusionSymbols + Sync,
-    R::Scalar:
-        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
-{
-    if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        let Some(reuse) = reuse else {
-            return build_unique_all_codomain_tree_transform_group_plan_validated(
-                source_proof,
-                operation,
-            )
-            .map(ComposedPlan::Owned);
-        };
-        let source_axes = operation_source_axes(&operation);
-        build_unique_groups_reusing(source_proof.structure(), reuse, |index| {
-            unique_all_codomain_spec(source_proof, &operation, &source_axes, index)
-        })
-    } else {
-        build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with_threads(
-            source_proof,
-            operation,
-            threads,
-            reuse,
-        )
-    }
 }
 
 #[cfg(test)]
@@ -1189,49 +1137,6 @@ where
         });
     }
     Ok(specs)
-}
-
-fn build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with_threads<R>(
-    source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
-    operation: TreeTransformOperation,
-    threads: usize,
-    reuse: Option<&CoefficientGroupReuse<R::Scalar>>,
-) -> Result<ComposedPlan<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeFusionSymbols + Sync,
-    R::Scalar:
-        'static + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
-{
-    let src_structure = source_proof.structure();
-    let all_groups = src_structure.fusion_tree_group_slice();
-    // Why the full source pairs key a group: a destination key carries the
-    // source's domain tree, not only the recoupled codomain tree.
-    let flat_keys = reuse
-        .map(|_| source_group_key_refs(src_structure))
-        .transpose()?;
-    let groups = flat_keys.as_deref().map(|keys| {
-        split_source_groups(
-            all_groups
-                .iter()
-                .map(|group| (group.group_key(), group.block_indices().len())),
-            keys,
-        )
-    });
-    let source_axes = operation_source_axes(&operation);
-    build_groups_reusing(reuse.zip(groups.as_deref()), all_groups.len(), |missing| {
-        let groups = missing
-            .into_iter()
-            .map(|index| &all_groups[index])
-            .collect::<Vec<_>>();
-        execute_staged_groups(groups, threads, |group| {
-            build_one_multiplicity_free_all_codomain_group(
-                source_proof,
-                &operation,
-                &source_axes,
-                group,
-            )
-        })
-    })
 }
 
 type TransformRows<K, T> = Vec<(K, T)>;

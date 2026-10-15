@@ -23,10 +23,6 @@ where
     )
 }
 
-/// The static-rank eager contraction on a fresh default context: the shape
-/// of the removed free `tensorcontract_fusion_into`, for fixtures that need
-/// no context reuse.
-#[allow(clippy::too_many_arguments)]
 /// A direct operand of a contraction entry: its space, stored as itself.
 pub(crate) fn direct_side<'a, R, D>(
     space: &'a crate::BoundDynamicFusionMapSpace<R>,
@@ -51,6 +47,237 @@ pub(crate) fn entry_axes(
     )
 }
 
+/// The dynamic fusion space of a static-rank fixture.
+pub(crate) fn fixture_space<T, const NOUT: usize, const NIN: usize, S, DD>(
+    tensor: &TensorMap<T, NOUT, NIN, S, DD>,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    DD: TensorStorage<T>,
+{
+    tensor
+        .fusion_space()
+        .map(|space| DynamicFusionMapSpace::from_typed(space))
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))
+}
+
+/// The eager fusion contraction `dst = alpha * contract(lhs, rhs) + beta *
+/// dst` of static-rank fixtures through `context`'s dynamic entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_contract_into<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    axes: TensorContractSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let dst_space = fixture_space(dst)?;
+    let lhs_space = fixture_space(lhs)?;
+    let rhs_space = fixture_space(rhs)?;
+    context.tensorcontract_fusion_dyn_into_raw(
+        rule,
+        &dst_space,
+        dst.data_mut(),
+        &lhs_space,
+        lhs.data(),
+        &rhs_space,
+        rhs.data(),
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+/// [`context_contract_into`] with its planning and stages timed into
+/// `profile`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_contract_into_profiled<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    axes: TensorContractSpec<'_>,
+    alpha: D,
+    beta: D,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let dst_space = fixture_space(dst)?;
+    let lhs_space = fixture_space(lhs)?;
+    let rhs_space = fixture_space(rhs)?;
+    context.tensorcontract_fusion_dyn_into_raw_profiled(
+        rule,
+        &dst_space,
+        dst.data_mut(),
+        &lhs_space,
+        lhs.data(),
+        &rhs_space,
+        rhs.data(),
+        axes,
+        alpha,
+        beta,
+        profile,
+    )
+}
+
+/// Plans the eager fusion contraction of static-rank fixtures once, for
+/// replay by [`fixture_execute_prepared`] without any cache lookup.
+pub(crate) fn fixture_prepare_contract<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    context: &mut TensorContractFusionExecutionContext<D, R::Key, BT, BC, R::Scalar>,
+    rule: &R,
+    dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    axes: TensorContractSpec<'_>,
+) -> Result<StorageContractResolution<R::Scalar>, OperationError>
+where
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: TensorStorage<D>,
+    DLhs: TensorStorage<D>,
+    DRhs: TensorStorage<D>,
+{
+    context.plan_tensorcontract_fusion_dyn_raw(
+        rule,
+        &fixture_space(dst)?,
+        &fixture_space(lhs)?,
+        &fixture_space(rhs)?,
+        axes,
+    )
+}
+
+/// Replays a route [`fixture_prepare_contract`] planned:
+/// `dst = alpha * contract(lhs, rhs) + beta * dst`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fixture_execute_prepared<
+    BT,
+    BC,
+    RuleKey,
+    C,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>,
+    resolution: &StorageContractResolution<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    C: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    context.execute_contract_resolution_host(
+        resolution,
+        (&dst_structure, dst.data_mut()),
+        (lhs.structure(), lhs.data()),
+        (rhs.structure(), rhs.data()),
+        alpha,
+        ContractDestinationInit::Axpby(beta),
+    )
+}
+
+/// [`context_contract_into`] on a fresh default context, for fixtures that
+/// need no context reuse.
 pub(crate) fn fusion_contract_into<
     R,
     D,
@@ -77,20 +304,112 @@ pub(crate) fn fusion_contract_into<
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
 {
-    TensorContractFusionExecutionContext::<
-        D,
-        R::Key,
-        DenseTreeTransformOperations,
-        DenseTreeTransformOperations,
-        R::Scalar,
-    >::default()
-    .tensorcontract_fusion_into(rule, dst, lhs, rhs, axes, alpha, beta)
+    context_contract_into(
+        &mut TensorContractFusionExecutionContext::<
+            D,
+            R::Key,
+            DenseTreeTransformOperations,
+            DenseTreeTransformOperations,
+            R::Scalar,
+        >::default(),
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+/// The fusion contraction plan of static-rank fixture spaces, each checked
+/// against `rule` first.
+pub(crate) fn fixture_contract_plan<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
+    crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw(
+        rule,
+        &DynamicFusionMapSpace::from_typed(dst),
+        &DynamicFusionMapSpace::from_typed(lhs),
+        &DynamicFusionMapSpace::from_typed(rhs),
+        axes,
+    )
+}
+
+/// Executes a caller-supplied fusion contraction plan step by step (source
+/// transforms, core contraction, output transform) on default backends,
+/// uncached: the explicit-plan reference for fixtures.
+pub(crate) fn plan_contract_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    rule: &R,
+    plan: &FusionContractPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+        &mut DenseTreeTransformOperations::default_executor(),
+        &mut TreeTransformWorkspace::default(),
+        &mut DenseTreeTransformOperations::default_executor(),
+        &mut TensorContractWorkspace::default(),
+        rule,
+        plan,
+        dst,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
 }
 
 /// Dense (non-fusion) contraction through the compiled structure on the
@@ -124,13 +443,65 @@ where
     DRhs: HostReadableStorage<D>,
 {
     let structure = tensorcontract_structure(dst, lhs, rhs, axes)?;
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut DenseTreeTransformOperations::default_executor(),
         &mut TensorContractWorkspace::default(),
         &structure,
         dst,
         lhs,
         rhs,
+        alpha,
+        beta,
+    )
+}
+
+/// Replays a compiled dense contraction structure on static-rank fixtures
+/// through the backend's raw (rank-free) entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replay_contract_structure_into<
+    B,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TensorContractStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TensorContractBackend<D, C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + num_traits::One,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    backend.tensorcontract_structure_into_raw(
+        workspace,
+        structure,
+        &dst_structure,
+        lhs.structure(),
+        rhs.structure(),
+        dst.data_mut(),
+        lhs.data(),
+        rhs.data(),
         alpha,
         beta,
     )
@@ -248,6 +619,40 @@ where
     DSrc: TensorStorage<TSrc>,
 {
     build_tree_pair_transform_group_plan(rule, operation, src.structure())?
+        .compile_shared_structures_with_storage_conjugation(
+            std::sync::Arc::clone(dst.structure()),
+            std::sync::Arc::clone(src.structure()),
+            false,
+        )
+}
+
+/// The multiplicity-free all-codomain transformer built directly from the
+/// public group-plan builder: the uncached all-codomain oracle.
+pub(crate) fn uncached_all_codomain_structure<
+    R,
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
+    build_all_codomain_tree_transform_group_plan(rule, operation, src.structure())?
         .compile_shared_structures_with_storage_conjugation(
             std::sync::Arc::clone(dst.structure()),
             std::sync::Arc::clone(src.structure()),
@@ -1820,7 +2225,7 @@ where
     )
     .unwrap();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut DenseTreeTransformOperations::default_executor(),
         &mut TensorContractWorkspace::default(),
         &structure,

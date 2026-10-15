@@ -678,7 +678,6 @@ mod tests {
     use crate::contract::backend::TensorContractBackend;
     use crate::contract::structure::TensorContractStructure;
     use crate::DenseTreeTransformOperations;
-    use tenet_core::{HostReadableStorage, HostWritableStorage, TensorMap};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Query {
@@ -929,37 +928,6 @@ mod tests {
     impl TensorContractBackend<f64, f64> for FailingBackend {
         type Workspace =
             <DenseTreeTransformOperations as TensorContractBackend<f64, f64>>::Workspace;
-
-        fn tensorcontract_structure_into<
-            const DST_NOUT: usize,
-            const DST_NIN: usize,
-            const LHS_NOUT: usize,
-            const LHS_NIN: usize,
-            const RHS_NOUT: usize,
-            const RHS_NIN: usize,
-            SDst,
-            SLhs,
-            SRhs,
-            DDst,
-            DLhs,
-            DRhs,
-        >(
-            &mut self,
-            _workspace: &mut Self::Workspace,
-            _structure: &TensorContractStructure<f64>,
-            _dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
-            _lhs: &TensorMap<f64, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-            _rhs: &TensorMap<f64, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-            _alpha: f64,
-            _beta: f64,
-        ) -> Result<(), OperationError>
-        where
-            DDst: HostWritableStorage<f64>,
-            DLhs: HostReadableStorage<f64>,
-            DRhs: HostReadableStorage<f64>,
-        {
-            unreachable!("the route executor runs rank-2 GEMM jobs only")
-        }
 
         fn tensorcontract_structure_into_raw(
             &mut self,

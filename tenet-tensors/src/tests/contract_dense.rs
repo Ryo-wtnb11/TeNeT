@@ -37,7 +37,7 @@ fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TensorContractWorkspace::default();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -514,7 +514,7 @@ fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
         DenseTreeTransformOperations::new(ContractLayoutCheckingDenseExecutor::default());
     let mut workspace = TensorContractWorkspace::default();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -637,7 +637,7 @@ fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TensorContractWorkspace::default();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -648,7 +648,7 @@ fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
         0.0,
     )
     .unwrap();
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -686,7 +686,7 @@ fn tensorcontract_workspace_reuse_clears_conjugating_route_output() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TensorContractWorkspace::default();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -697,7 +697,7 @@ fn tensorcontract_workspace_reuse_clears_conjugating_route_output() {
         0.0,
     )
     .unwrap();
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -923,7 +923,7 @@ fn tensorcontract_structure_rejects_incompatible_replay_structure_before_dense_e
     let mut backend = DenseTreeTransformOperations::new(PanicDenseExecutor);
     let mut workspace = TensorContractWorkspace::default();
 
-    let err = tensorcontract_execute_with(
+    let err = replay_contract_structure_into(
         &mut backend,
         &mut workspace,
         &structure,
@@ -1055,7 +1055,7 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
     )
     .unwrap();
 
-    tensorcontract_execute_with(
+    replay_contract_structure_into(
         &mut DenseTreeTransformOperations::default_executor(),
         &mut TensorContractWorkspace::default(),
         &structure,

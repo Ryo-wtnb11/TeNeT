@@ -5,9 +5,8 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, TensorMap,
+    BlockStructure, CheckedGenericAdmissionMode, CheckedGenericRigidSymbols,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, Placement, RuleIdentity,
 };
 
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand};
@@ -1119,43 +1118,5 @@ where
             destination_scales,
             None,
         )
-    }
-
-    pub fn all_codomain_tree_transform_into<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeFusionSymbols<Scalar = C>
-            + TreeTransformRuleCacheKey<Key = RuleKey>
-            + Sync,
-        DDst: HostWritableStorage<D>,
-        DSrc: HostReadableStorage<D>,
-    {
-        let Self {
-            backend,
-            workspace,
-            planning,
-            ..
-        } = self;
-        planning.set_recoupling_threads(backend.recoupling_threads());
-        let structure =
-            planning.resolve_all_codomain(rule, &operation, dst.structure(), src.structure())?;
-        backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
 }

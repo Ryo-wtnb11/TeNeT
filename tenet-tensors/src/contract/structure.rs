@@ -2,20 +2,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use num_traits::One;
-use tenet_core::{
-    BlockKey, BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage,
-};
+use tenet_core::{BlockKey, BlockStructure, TensorMap, TensorStorage};
 use tenet_dense::DenseDotConfig;
 
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
-use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
+use crate::OperationError;
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::{
     fusion_scale_block_layouts_excluding, permutation_axes_inline,
     validate_destination_layouts_injective, AxisVec, FusionScaleBlockLayout, TensorContractSpec,
 };
-
-use super::backend::TensorContractBackend;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorContractStructure<C = f64> {
@@ -435,45 +431,6 @@ where
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("lhs", &self.lhs_storage_structure, lhs_structure)?;
         validate_structure_identity("rhs", &self.rhs_storage_structure, rhs_structure)
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the compiled structure execution boundary keeps backend resources, three operands, and alpha/beta explicit"
-    )]
-    pub fn execute_with<
-        B,
-        D,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &self,
-        backend: &mut B,
-        workspace: &mut B::Workspace,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        B: TensorContractBackend<D, C>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        backend.tensorcontract_structure_into(workspace, self, dst, lhs, rhs, alpha, beta)
     }
 }
 

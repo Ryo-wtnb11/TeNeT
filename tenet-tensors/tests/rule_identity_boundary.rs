@@ -121,6 +121,23 @@ fn unbound_scalar_space_like(bound: &FusionTensorMapSpace<0, 0>) -> FusionTensor
     .unwrap()
 }
 
+/// Binds a typed scalar space to `rule` at the dynamic ingress, the one
+/// place a contraction's provider meets its spaces.
+fn bind<R>(
+    rule: &R,
+    space: &FusionTensorMapSpace<0, 0>,
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeFusionRule + Clone,
+{
+    BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(space),
+        Arc::new(rule.clone()),
+    )
+}
+
+/// The scalar contraction `dst = 1 * lhs * rhs` with every space bound to
+/// `rule`: the error of the first rejected binding, else of the contraction.
 fn scalar_contract_error<R>(
     rule: &R,
     dst_space: FusionTensorMapSpace<0, 0>,
@@ -129,13 +146,32 @@ fn scalar_contract_error<R>(
     axes: TensorContractSpec<'_>,
 ) -> OperationError
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
 {
-    let mut dst = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
-    let lhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
+    let bound = (|| {
+        Ok::<_, OperationError>((
+            bind(rule, &dst_space)?,
+            bind(rule, &lhs_space)?,
+            bind(rule, &rhs_space)?,
+        ))
+    })();
+    let (dst, lhs, rhs) = match bound {
+        Ok(bound) => bound,
+        Err(error) => return error,
+    };
     TensorContractFusionExecutionContext::<f64, R::Key>::default()
-        .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
+        .tensorcontract_fusion_dyn_into(
+            &dst,
+            &mut [0.0],
+            &lhs,
+            &[2.0],
+            &rhs,
+            &[3.0],
+            axes,
+            1.0,
+            0.0,
+        )
         .unwrap_err()
 }
 
@@ -150,36 +186,6 @@ fn assert_rule_mismatch(error: OperationError) {
     assert!(matches!(
         error,
         OperationError::Core(CoreError::FusionRuleMismatch { .. })
-    ));
-}
-
-#[test]
-fn fusion_contract_one_shot_rejects_each_unbound_operand_on_direct_route() {
-    let rule = Z2FusionRule;
-    let bound = || bound_scalar_space(&rule);
-    let unbound = || unbound_scalar_space(&rule);
-    let axes = TensorContractSpec::with_default_output_order(&[], &[]);
-
-    assert_missing_rule_identity(scalar_contract_error(
-        &rule,
-        unbound(),
-        bound(),
-        bound(),
-        axes,
-    ));
-    assert_missing_rule_identity(scalar_contract_error(
-        &rule,
-        bound(),
-        unbound(),
-        bound(),
-        axes,
-    ));
-    assert_missing_rule_identity(scalar_contract_error(
-        &rule,
-        bound(),
-        bound(),
-        unbound(),
-        axes,
     ));
 }
 
@@ -199,20 +205,6 @@ fn fusion_contract_block_specs_rejects_each_unbound_operand() {
     assert_missing_rule_identity(
         tensorcontract_fusion_block_specs(&rule, &bound(), &bound(), &unbound(), axes).unwrap_err(),
     );
-}
-
-#[test]
-fn fusion_contract_fallback_rejects_unbound_operand_before_conjugation_lowering() {
-    let rule = Z2FusionRule;
-    let error = scalar_contract_error(
-        &rule,
-        bound_scalar_space(&rule),
-        unbound_scalar_space(&rule),
-        bound_scalar_space(&rule),
-        TensorContractSpec::with_default_output_order_and_conjugation(&[], &[], true, false),
-    );
-
-    assert_missing_rule_identity(error);
 }
 
 #[test]
@@ -251,54 +243,25 @@ fn fusion_contract_bound_same_rule_matches_on_direct_and_fallback_routes() {
         TensorContractSpec::with_default_output_order(&[], &[]),
         TensorContractSpec::with_default_output_order_and_conjugation(&[], &[], true, false),
     ] {
-        let mut dst = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-            vec![7.0],
-            bound_scalar_space(&rule),
-        )
-        .unwrap();
-        let lhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-            vec![2.0],
-            bound_scalar_space(&rule),
-        )
-        .unwrap();
-        let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-            vec![5.0],
-            bound_scalar_space(&rule),
-        )
-        .unwrap();
+        let space = || bind(&rule, &bound_scalar_space(&rule)).unwrap();
+        let mut dst = [7.0];
 
         TensorContractFusionExecutionContext::<f64, _>::default()
-            .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 2.0, 3.0)
+            .tensorcontract_fusion_dyn_into(
+                &space(),
+                &mut dst,
+                &space(),
+                &[2.0],
+                &space(),
+                &[5.0],
+                axes,
+                2.0,
+                3.0,
+            )
             .unwrap();
 
-        assert_eq!(dst.data(), &[41.0]);
+        assert_eq!(dst, [41.0]);
     }
-}
-
-#[test]
-fn fusion_contract_context_rejects_unbound_space_after_a_valid_call() {
-    let rule = Z2FusionRule;
-    let bound = bound_scalar_space(&rule);
-    let axes = TensorContractSpec::with_default_output_order(&[], &[]);
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let mut dst =
-        TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], bound.clone()).unwrap();
-    let lhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], bound.clone()).unwrap();
-    let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![3.0], bound.clone()).unwrap();
-    context
-        .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap();
-    let mut unbound_dst = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-        vec![0.0],
-        unbound_scalar_space_like(&bound),
-    )
-    .unwrap();
-
-    let error = context
-        .tensorcontract_fusion_into(&rule, &mut unbound_dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap_err();
-
-    assert_missing_rule_identity(error);
 }
 
 #[test]

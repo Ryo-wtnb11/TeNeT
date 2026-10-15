@@ -1597,33 +1597,33 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
         eig.v.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut tv,
-            &tensor_c,
-            &eig.v,
-            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 0.0),
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut tv,
+        &tensor_c,
+        &eig.v,
+        TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
     let mut vd = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
         eig.v.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut vd,
-            &eig.v,
-            &eig.d,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 0.0),
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        &rule,
+        &mut vd,
+        &eig.v,
+        &eig.d,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
     for (index, (lhs, rhs)) in tv.data().iter().zip(vd.data()).enumerate() {
         assert!(
             (lhs - rhs).norm() < 1e-8,

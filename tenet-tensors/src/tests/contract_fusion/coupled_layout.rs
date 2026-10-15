@@ -458,8 +458,45 @@ where
         let axes =
             || TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes));
         let mut packed_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-        packed_context
-            .tensorcontract_fusion_into(
+        context_contract_into(
+            &mut packed_context,
+            rule,
+            &mut dst_packed,
+            &lhs_packed,
+            &rhs_packed,
+            axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        if workload_index == 0 {
+            let ordinary = dst_packed.data().to_vec();
+            let prepared = fixture_prepare_contract(
+                &mut packed_context,
+                rule,
+                &dst_packed,
+                &lhs_packed,
+                &rhs_packed,
+                axes(),
+            )
+            .unwrap();
+            dst_packed.data_mut().fill(0.0);
+            fixture_execute_prepared(
+                &mut packed_context,
+                &prepared,
+                &mut dst_packed,
+                &lhs_packed,
+                &rhs_packed,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            assert_eq!(dst_packed.data(), ordinary);
+
+            dst_packed.data_mut().fill(0.0);
+            let mut profile = TensorContractFusionProfile::default();
+            context_contract_into_profiled(
+                &mut packed_context,
                 rule,
                 &mut dst_packed,
                 &lhs_packed,
@@ -467,41 +504,9 @@ where
                 axes(),
                 1.0,
                 0.0,
+                &mut profile,
             )
             .unwrap();
-        if workload_index == 0 {
-            let ordinary = dst_packed.data().to_vec();
-            let prepared = packed_context
-                .prepare_tensorcontract_fusion(rule, &dst_packed, &lhs_packed, &rhs_packed, axes())
-                .unwrap();
-            dst_packed.data_mut().fill(0.0);
-            packed_context
-                .execute_prepared_tensorcontract_fusion(
-                    &prepared,
-                    rule,
-                    &mut dst_packed,
-                    &lhs_packed,
-                    &rhs_packed,
-                    1.0,
-                    0.0,
-                )
-                .unwrap();
-            assert_eq!(dst_packed.data(), ordinary);
-
-            dst_packed.data_mut().fill(0.0);
-            let mut profile = TensorContractFusionProfile::default();
-            packed_context
-                .tensorcontract_fusion_into_profiled(
-                    rule,
-                    &mut dst_packed,
-                    &lhs_packed,
-                    &rhs_packed,
-                    axes(),
-                    1.0,
-                    0.0,
-                    &mut profile,
-                )
-                .unwrap();
             assert_eq!(dst_packed.data(), ordinary);
             assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
             assert!(profile.core_contract_groups > 0);
@@ -527,17 +532,17 @@ where
             assert_eq!(dynamic, ordinary);
         }
         let mut coupled_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-        coupled_context
-            .tensorcontract_fusion_into(
-                rule,
-                &mut dst_coupled,
-                &lhs_coupled,
-                &rhs_coupled,
-                axes(),
-                1.0,
-                0.0,
-            )
-            .unwrap();
+        context_contract_into(
+            &mut coupled_context,
+            rule,
+            &mut dst_coupled,
+            &lhs_coupled,
+            &rhs_coupled,
+            axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
 
         assert_blocks_match(&dst_packed, &dst_coupled);
     }
@@ -605,18 +610,18 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     let axes =
         || TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
     let mut profile = TensorContractFusionProfile::default();
-    context
-        .tensorcontract_fusion_into_profiled(
-            &rule,
-            &mut dst,
-            &lhs,
-            &rhs,
-            axes(),
-            1.0,
-            0.0,
-            &mut profile,
-        )
-        .unwrap();
+    context_contract_into_profiled(
+        &mut context,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        axes(),
+        1.0,
+        0.0,
+        &mut profile,
+    )
+    .unwrap();
 
     assert!(profile.core_contract_groups > 0);
     assert_eq!(

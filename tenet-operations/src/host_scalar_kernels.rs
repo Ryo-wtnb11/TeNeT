@@ -526,157 +526,6 @@ where
     raw_strided_scale_loop(dst_data, shape, dst_strides, dst_offset, beta)
 }
 
-/// Traces a raw strided source after validating all ranks and reachable ranges.
-/// Invalid layout metadata is returned before destination storage is changed.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) fn tensortrace_raw_strided_kernel<T>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    output_shape: &[usize],
-    trace_shape: &[usize],
-    dst_strides: &[isize],
-    src_output_strides: &[isize],
-    src_trace_strides: &[isize],
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
-{
-    let (output_len, trace_len) = validate_tensortrace_raw_layout(
-        dst_data.len(),
-        src_data.len(),
-        output_shape,
-        trace_shape,
-        dst_strides,
-        src_output_strides,
-        src_trace_strides,
-        dst_offset,
-        src_offset,
-    )?;
-    tensortrace_raw_strided_kernel_loop(
-        dst_data,
-        src_data,
-        output_shape,
-        trace_shape,
-        dst_strides,
-        src_output_strides,
-        src_trace_strides,
-        dst_offset,
-        src_offset,
-        source_conjugate,
-        alpha,
-        beta,
-        output_len,
-        trace_len,
-    )
-}
-
-/// Executes a raw trace layout already admitted by a tensor trace descriptor.
-///
-/// The caller must provide matching shape/stride ranks and ranges reachable
-/// within `dst_data` and `src_data`. Empty traces require representable,
-/// nonnegative source output bases but do not require those bases to index
-/// `src_data`.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn tensortrace_raw_strided_kernel_trusted<T>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    output_shape: &[usize],
-    trace_shape: &[usize],
-    dst_strides: &[isize],
-    src_output_strides: &[isize],
-    src_trace_strides: &[isize],
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
-{
-    #[cfg(debug_assertions)]
-    let (output_len, trace_len) = validate_tensortrace_raw_layout(
-        dst_data.len(),
-        src_data.len(),
-        output_shape,
-        trace_shape,
-        dst_strides,
-        src_output_strides,
-        src_trace_strides,
-        dst_offset,
-        src_offset,
-    )?;
-    #[cfg(not(debug_assertions))]
-    let (output_len, trace_len) = (
-        crate::strided::element_count(output_shape)?,
-        crate::strided::element_count(trace_shape)?,
-    );
-    tensortrace_raw_strided_kernel_loop(
-        dst_data,
-        src_data,
-        output_shape,
-        trace_shape,
-        dst_strides,
-        src_output_strides,
-        src_trace_strides,
-        dst_offset,
-        src_offset,
-        source_conjugate,
-        alpha,
-        beta,
-        output_len,
-        trace_len,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tensortrace_raw_strided_kernel_loop<T>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    output_shape: &[usize],
-    trace_shape: &[usize],
-    dst_strides: &[isize],
-    src_output_strides: &[isize],
-    src_trace_strides: &[isize],
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    alpha: T,
-    beta: T,
-    output_len: usize,
-    trace_len: usize,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
-{
-    for output_linear in 0..output_len {
-        let dst_index =
-            strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
-        let src_base =
-            strided_linear_offset(output_linear, output_shape, src_output_strides, src_offset)?;
-        let src_base = isize::try_from(src_base)
-            .map_err(|_| OperationError::OffsetOverflow { value: src_base })?;
-        // TensorOperations' `stridedtensortrace!`: `C = scale(C, β)`, then
-        // `C += scale(aᵢ, α)` per traced element; see the coefficient loop.
-        let mut accumulator = scale_value(dst_data[dst_index], beta);
-        for trace_linear in 0..trace_len {
-            let src_index =
-                strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
-            accumulator =
-                accumulator + scale_value(src_data[src_index].maybe_conj(source_conjugate), alpha);
-        }
-        dst_data[dst_index] = accumulator;
-    }
-    Ok(())
-}
-
 /// Adds a coefficient-weighted raw trace after validating all ranks and
 /// reachable ranges. Invalid layout metadata is returned before destination
 /// storage is changed.
@@ -739,8 +588,10 @@ where
 /// Executes a coefficient-weighted raw trace layout already admitted by a
 /// tensor trace descriptor.
 ///
-/// The caller must uphold the same layout preconditions as
-/// [`tensortrace_raw_strided_kernel_trusted`].
+/// The caller must provide matching shape/stride ranks and ranges reachable
+/// within `dst_data` and `src_data`. Empty traces require representable,
+/// nonnegative source output bases but do not require those bases to index
+/// `src_data`.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_raw_strided_kernel_add_with_coefficient_trusted<T, C>(
@@ -1522,7 +1373,7 @@ mod tests {
     #[test]
     fn tensortrace_raw_rejects_short_destination_stride_rank() {
         let mut dst = [0.0; 4];
-        let error = tensortrace_raw_strided_kernel(
+        let error = tensortrace_raw_strided_kernel_add_with_coefficient(
             &mut dst,
             &[1.0, 2.0, 3.0, 4.0],
             &[2, 2],
@@ -1551,7 +1402,7 @@ mod tests {
     fn tensortrace_raw_rejects_combined_source_range_before_writing() {
         let mut dst = [7.0, 8.0];
         let original = dst;
-        let error = tensortrace_raw_strided_kernel(
+        let error = tensortrace_raw_strided_kernel_add_with_coefficient(
             &mut dst,
             &[1.0, 2.0, 3.0, 4.0],
             &[2],
@@ -1584,24 +1435,6 @@ mod tests {
         for (dst_strides, src_output_strides, src_trace_strides, expected, actual) in cases {
             let mut dst = [7.0, 8.0];
             let original = dst;
-            let error = tensortrace_raw_strided_kernel(
-                &mut dst,
-                &[1.0, 2.0, 3.0],
-                &[2],
-                &[2],
-                dst_strides,
-                src_output_strides,
-                src_trace_strides,
-                0,
-                0,
-                false,
-                1.0,
-                0.0,
-            )
-            .unwrap_err();
-            assert_eq!(error, OperationError::RankMismatch { expected, actual });
-            assert_eq!(dst, original);
-
             let error = tensortrace_raw_strided_kernel_add_with_coefficient(
                 &mut dst,
                 &[1.0, 2.0, 3.0],
@@ -1650,83 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn tensortrace_raw_accepts_reversed_and_broadcast_strides() {
-        let mut dst = [10.0, 20.0, 30.0];
-        tensortrace_raw_strided_kernel(
-            &mut dst,
-            &[1.0, 3.0],
-            &[2],
-            &[2],
-            &[-1],
-            &[0],
-            &[-1],
-            1,
-            1,
-            false,
-            2.0,
-            3.0,
-        )
-        .unwrap();
-
-        assert_eq!(dst, [38.0, 68.0, 30.0]);
-    }
-
-    #[test]
-    fn tensortrace_raw_preserves_scalar_and_zero_extent_semantics() {
-        let mut scalar = [2.0];
-        tensortrace_raw_strided_kernel(
-            &mut scalar,
-            &[3.0],
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            0,
-            0,
-            false,
-            2.0,
-            5.0,
-        )
-        .unwrap();
-        assert_eq!(scalar, [16.0]);
-
-        tensortrace_raw_strided_kernel(
-            &mut [],
-            &[],
-            &[0],
-            &[usize::MAX],
-            &[isize::MAX],
-            &[isize::MIN],
-            &[0],
-            isize::MIN,
-            isize::MAX,
-            false,
-            2.0,
-            3.0,
-        )
-        .unwrap();
-
-        let mut empty_trace = [1.0, 2.0];
-        tensortrace_raw_strided_kernel(
-            &mut empty_trace,
-            &[],
-            &[2],
-            &[0],
-            &[1],
-            &[1],
-            &[isize::MAX],
-            0,
-            100,
-            false,
-            2.0,
-            3.0,
-        )
-        .unwrap();
-        assert_eq!(empty_trace, [3.0, 6.0]);
-    }
-
-    #[test]
     fn tensortrace_raw_rejects_coordinate_and_intermediate_overflow() {
         for (output_shape, dst_strides, src_output_strides, src_offset) in [
             (&[usize::MAX][..], &[0][..], &[0][..], 0),
@@ -1734,7 +1490,7 @@ mod tests {
         ] {
             let mut dst = [9.0];
             let original = dst;
-            let error = tensortrace_raw_strided_kernel(
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
                 &mut dst,
                 &[1.0],
                 output_shape,
@@ -1768,7 +1524,7 @@ mod tests {
         ] {
             let mut dst = [9.0];
             let original = dst;
-            let error = tensortrace_raw_strided_kernel(
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
                 &mut dst,
                 &[1.0],
                 output_shape,
@@ -1795,7 +1551,7 @@ mod tests {
         {
             let mut dst = [7.0, 8.0];
             let original = dst;
-            let error = tensortrace_raw_strided_kernel(
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
                 &mut dst,
                 &[1.0, 2.0],
                 &[2],
@@ -2191,66 +1947,6 @@ mod tests {
         scale_raw_strided_kernel_trusted(&mut dst, &[3], &[1], 0, 2.0).unwrap();
         assert!(dst[0].is_nan());
         assert_eq!(dst[1..], [f64::INFINITY, -2.0]);
-    }
-
-    fn full_trace<T>(dst: &mut [T], src: &[T], alpha: T, beta: T)
-    where
-        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
-    {
-        // The full trace of a column-major `2 x 2` matrix.
-        tensortrace_raw_strided_kernel(
-            dst,
-            src,
-            &[],
-            &[2],
-            &[],
-            &[],
-            &[3],
-            0,
-            0,
-            false,
-            alpha,
-            beta,
-        )
-        .unwrap();
-    }
-
-    /// What: the plain trace applies `α` to every traced element before
-    /// adding it, and a zero `α` or `β` gives an exact zero:
-    /// `tensortrace!(C, [1e308 0; 0 1e308], ((), ()), ((1,), (2,)), false,
-    /// 0.5, 0.0)` is `1.0e308` (the traced sum overflows); with `α = 0` and
-    /// `A = [Inf 0; 0 NaN]`, `C = 1.0, β = 1` gives `1.0`, `C = NaN, β = 0`
-    /// gives `0.0`, and `C = -0.0, β = 1` gives `0.0`; for `ComplexF64`,
-    /// `C = 1 + 2im, α = 0, β = 1` gives `1.0 + 2.0im` and
-    /// `A = (1e308 + 1e308im) I, α = 0.5 + 0im, β = 0` gives
-    /// `1.0e308 + 1.0e308im`.
-    #[test]
-    fn tensortrace_raw_matches_tensoroperations_scaling() {
-        let mut dst = [7.0];
-        full_trace(&mut dst, &[1e308, 0.0, 0.0, 1e308], 0.5, 0.0);
-        assert_eq!(dst, [1e308]);
-
-        let non_finite = [f64::INFINITY, 0.0, 0.0, f64::NAN];
-        for (initial, beta, want) in [(1.0, 1.0, 1.0), (f64::NAN, 0.0, 0.0), (-0.0, 1.0, 0.0)] {
-            let mut dst = [initial];
-            full_trace(&mut dst, &non_finite, 0.0, beta);
-            assert_eq!(bits(&dst), bits(&[want]), "C = {initial}, beta = {beta}");
-        }
-
-        let non_finite = non_finite.map(|v| Complex64::new(v, 0.0));
-        let mut dst = [Complex64::new(1.0, 2.0)];
-        full_trace(&mut dst, &non_finite, Complex64::zero(), Complex64::one());
-        assert_eq!(bit_pairs(&dst), bit_pairs(&[Complex64::new(1.0, 2.0)]));
-
-        let big = Complex64::new(1e308, 1e308);
-        let mut dst = [Complex64::zero()];
-        full_trace(
-            &mut dst,
-            &[big, Complex64::zero(), Complex64::zero(), big],
-            Complex64::new(0.5, 0.0),
-            Complex64::zero(),
-        );
-        assert_eq!(dst, [big]);
     }
 
     /// What: the coefficient trace skips a zero coefficient, as TensorKit's

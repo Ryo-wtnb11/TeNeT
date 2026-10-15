@@ -411,6 +411,62 @@ where
     .unwrap()
 }
 
+/// The eager fusion contraction `dst = alpha * contract(lhs, rhs) + beta *
+/// dst` of typed fixtures through the context's bound dynamic entry.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn context_contract_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    context: &mut TensorContractFusionExecutionContext<D, R::Key>,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
+    axes: TensorContractSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeFusionRule
+        + TreeTransformRuleCacheKey
+        + Clone,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    D: tenet_tensors::DenseRecouplingScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    fn bind<R: MultiplicityFreeFusionRule, const NOUT: usize, const NIN: usize>(
+        provider: &Arc<R>,
+        space: &FusionTensorMapSpace<NOUT, NIN>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError> {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(space),
+            Arc::clone(provider),
+        )
+    }
+    let provider = Arc::new(rule.clone());
+    let dst_space = bind(&provider, dst.fusion_space().unwrap())?;
+    let lhs_space = bind(&provider, lhs.fusion_space().unwrap())?;
+    let rhs_space = bind(&provider, rhs.fusion_space().unwrap())?;
+    context.tensorcontract_fusion_dyn_into(
+        &dst_space,
+        dst.data_mut(),
+        &lhs_space,
+        lhs.data(),
+        &rhs_space,
+        rhs.data(),
+        axes,
+        alpha,
+        beta,
+    )
+}
+
 pub(super) fn contract_pair<R>(
     rule: &R,
     template: &TensorMap<f64, 2, 2>,
@@ -418,7 +474,7 @@ pub(super) fn contract_pair<R>(
     right: &TensorMap<f64, 1, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
@@ -426,17 +482,17 @@ where
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-    context
-        .tensorcontract_fusion_into(
-            rule,
-            &mut reconstructed,
-            left,
-            right,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        rule,
+        &mut reconstructed,
+        left,
+        right,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
     reconstructed
 }
 
@@ -493,7 +549,7 @@ pub(super) fn assert_eigen_equation<R>(
     v: &TensorMap<f64, 2, 1>,
     d: &TensorMap<f64, 1, 1>,
 ) where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
     let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
     // t . V
@@ -502,34 +558,34 @@ pub(super) fn assert_eigen_equation<R>(
         v.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            rule,
-            &mut tv,
-            tensor,
-            v,
-            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        rule,
+        &mut tv,
+        tensor,
+        v,
+        TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
     // V . D
     let mut vd = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         vec![0.0; v.data().len()],
         v.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    context
-        .tensorcontract_fusion_into(
-            rule,
-            &mut vd,
-            v,
-            d,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    context_contract_into(
+        &mut context,
+        rule,
+        &mut vd,
+        v,
+        d,
+        TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     for (index, (lhs, rhs)) in tv.data().iter().zip(vd.data()).enumerate() {
         assert!(

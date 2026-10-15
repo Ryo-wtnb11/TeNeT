@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2Irrep, SectorId,
-    SectorLeg, TensorKitProductCodec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, ProductFusionRule,
+    ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, TensorKitProductCodec, TensorMap,
+    TensorMapSpace, U1FusionRule, U1Irrep,
 };
+use tenet_operations::ContractDestinationInit;
 use tenet_tensors::{
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, HostEagerExecutor,
     OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
     TreeTransformRuleCacheKey,
 };
@@ -42,9 +47,20 @@ fn product_sectors() -> Vec<SectorId> {
 
 fn assert_replay_allocates_nothing<R>(rule: &R, sectors: &[SectorId])
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
-    R::Key: Clone + Eq + std::hash::Hash,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeFusionRule
+        + TreeTransformRuleCacheKey
+        + Clone,
+    R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
 {
+    let provider = Arc::new(rule.clone());
+    let bind = |tensor: &TensorMap<f64, 2, 2>| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+            Arc::clone(&provider),
+        )
+        .unwrap()
+    };
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
     let homspace = || {
         FusionTreeHomSpace::new(
@@ -108,36 +124,48 @@ where
         )
         .unwrap();
         let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
+        let (dst_bound, lhs_bound, rhs_bound) = (bind(&expected), bind(&lhs), bind(&rhs));
+        let dst_structure = Arc::clone(expected.structure());
         context
-            .tensorcontract_fusion_into(rule, &mut expected, &lhs, &rhs, axes(), 1.0, 0.0)
+            .tensorcontract_fusion_dyn_into(
+                &dst_bound,
+                expected.data_mut(),
+                &lhs_bound,
+                lhs.data(),
+                &rhs_bound,
+                rhs.data(),
+                axes(),
+                1.0,
+                0.0,
+            )
             .unwrap();
         let mut actual = expected.clone();
         let prepared = context
-            .prepare_tensorcontract_fusion(rule, &actual, &lhs, &rhs, axes())
+            .plan_contract::<HostEagerExecutor, R>(
+                &dst_bound,
+                FusionOperand::direct(lhs_bound.space()),
+                FusionOperand::direct(rhs_bound.space()),
+                &lhs_axes,
+                &rhs_axes,
+                &output_axes,
+            )
             .unwrap();
+        let replay = |context: &mut TensorContractFusionExecutionContext<f64, R::Key>,
+                      dst: &mut [f64]| {
+            context.execute_contract_resolution_host(
+                &prepared,
+                (&dst_structure, dst),
+                (lhs.structure(), lhs.data()),
+                (rhs.structure(), rhs.data()),
+                1.0,
+                ContractDestinationInit::Axpby(0.0),
+            )
+        };
         for _ in 0..2 {
-            context
-                .execute_prepared_tensorcontract_fusion(
-                    &prepared,
-                    rule,
-                    &mut actual,
-                    &lhs,
-                    &rhs,
-                    1.0,
-                    0.0,
-                )
-                .unwrap();
+            replay(&mut context, actual.data_mut()).unwrap();
         }
         counting_alloc::start();
-        let result = context.execute_prepared_tensorcontract_fusion(
-            &prepared,
-            rule,
-            &mut actual,
-            &lhs,
-            &rhs,
-            1.0,
-            0.0,
-        );
+        let result = replay(&mut context, actual.data_mut());
         let allocs = counting_alloc::stop();
         result.unwrap();
 

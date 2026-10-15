@@ -72,9 +72,17 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space())
                 .unwrap();
         let mut serial_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-        serial_context
-            .tensorcontract_fusion_into(rule, &mut serial_dst, &lhs, &rhs, axes, 1.0, 0.0)
-            .unwrap();
+        context_contract_into(
+            &mut serial_context,
+            rule,
+            &mut serial_dst,
+            &lhs,
+            &rhs,
+            axes,
+            1.0,
+            0.0,
+        )
+        .unwrap();
 
         let mut parallel_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space())
@@ -85,9 +93,17 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
         backend.set_transform_parallel_min_len(0);
         // Two runs: cold (structure compile + replay) and warm (replay only).
         for _ in 0..2 {
-            parallel_context
-                .tensorcontract_fusion_into(rule, &mut parallel_dst, &lhs, &rhs, axes, 1.0, 0.0)
-                .unwrap();
+            context_contract_into(
+                &mut parallel_context,
+                rule,
+                &mut parallel_dst,
+                &lhs,
+                &rhs,
+                axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
         }
 
         assert_eq!(parallel_dst.data(), serial_dst.data());
@@ -174,11 +190,11 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
     let mut backend = DenseTreeTransformOperations::default_executor();
     backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
-    TensorContractFusionExecutionContext::<f64, RuleIdentity>::new(
-        DenseTreeTransformOperations::default_executor(),
-        backend,
-    )
-    .tensorcontract_fusion_into(
+    context_contract_into(
+        &mut TensorContractFusionExecutionContext::<f64, RuleIdentity>::new(
+            DenseTreeTransformOperations::default_executor(),
+            backend,
+        ),
         &rule,
         &mut dst,
         &lhs,

@@ -122,19 +122,6 @@ where
         axes,
     )?
     .require_core_geometry()?;
-    compile_fusion_block_contract_plan_validated(validated, dst_space, lhs_space, rhs_space)
-}
-
-pub(crate) fn compile_fusion_block_contract_plan_validated<R>(
-    validated: ValidatedCoreContract<'_, R>,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_space: &DynamicFusionMapSpace,
-    rhs_space: &DynamicFusionMapSpace,
-) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
     compile_fusion_block_contract_plan_core_geometry(
         validated.preflight.rule,
         dst_space,

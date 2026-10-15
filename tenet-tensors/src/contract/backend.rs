@@ -1,6 +1,6 @@
 use num_traits::One;
 use std::sync::Arc;
-use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
+use tenet_core::{BlockStructure, Placement};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 use tenet_operations::fusion_replay::{
     direct_slice, direct_slice_mut, MatrixOp, Rank2GemmBatchJob,
@@ -31,38 +31,6 @@ where
     C: Copy + One,
 {
     type Workspace;
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the backend trait keeps workspace, compiled structure, three operands, and alpha/beta explicit"
-    )]
-    fn tensorcontract_structure_into<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TensorContractStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>;
 
     #[expect(
         clippy::too_many_arguments,
@@ -271,46 +239,6 @@ where
     C: Copy + One,
 {
     type Workspace = TensorContractWorkspace<D>;
-
-    fn tensorcontract_structure_into<
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        workspace: &mut Self::Workspace,
-        structure: &TensorContractStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
-    {
-        tensorcontract_structure_with_dense_executor(
-            self.dense_mut(),
-            workspace,
-            structure,
-            dst,
-            lhs,
-            rhs,
-            alpha,
-            beta,
-        )
-    }
 
     fn tensorcontract_structure_into_raw(
         &mut self,
@@ -525,62 +453,6 @@ where
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the dense adapter preserves the backend trait's workspace, structure, operands, and alpha/beta boundary"
-)]
-fn tensorcontract_structure_with_dense_executor<
-    E,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    dense: &mut E,
-    workspace: &mut TensorContractWorkspace<D>,
-    structure: &TensorContractStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    E: DenseExecutor,
-    D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
-    C: Copy + One,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    let lhs_structure = Arc::clone(lhs.structure());
-    let rhs_structure = Arc::clone(rhs.structure());
-    tensorcontract_structure_with_dense_executor_raw(
-        dense,
-        workspace,
-        structure,
-        &dst_structure,
-        &lhs_structure,
-        &rhs_structure,
-        dst.data_mut(),
-        lhs.data(),
-        rhs.data(),
-        alpha,
-        beta,
-    )
-}
-
 /// Replays a prepared tensor contraction structure on host slices.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_structure_with_dense_executor_raw<E, D, C>(
@@ -749,37 +621,6 @@ mod tests {
 
     impl TensorContractBackend<f64, f64> for DefaultBatchBackend {
         type Workspace = usize;
-
-        fn tensorcontract_structure_into<
-            const DST_NOUT: usize,
-            const DST_NIN: usize,
-            const LHS_NOUT: usize,
-            const LHS_NIN: usize,
-            const RHS_NOUT: usize,
-            const RHS_NIN: usize,
-            SDst,
-            SLhs,
-            SRhs,
-            DDst,
-            DLhs,
-            DRhs,
-        >(
-            &mut self,
-            _workspace: &mut Self::Workspace,
-            _structure: &TensorContractStructure<f64>,
-            _dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
-            _lhs: &TensorMap<f64, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-            _rhs: &TensorMap<f64, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-            _alpha: f64,
-            _beta: f64,
-        ) -> Result<(), OperationError>
-        where
-            DDst: HostWritableStorage<f64>,
-            DLhs: HostReadableStorage<f64>,
-            DRhs: HostReadableStorage<f64>,
-        {
-            unreachable!("default batch tests do not execute structure replay")
-        }
 
         fn tensorcontract_structure_into_raw(
             &mut self,

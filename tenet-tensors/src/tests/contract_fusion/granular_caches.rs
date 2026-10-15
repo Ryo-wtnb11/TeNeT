@@ -108,24 +108,32 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
         .unwrap();
         if case_index == 2 {
             let mut profile = TensorContractFusionProfile::default();
-            context
-                .tensorcontract_fusion_into_profiled(
-                    &rule,
-                    &mut actual,
-                    &lhs,
-                    &rhs,
-                    axes,
-                    alpha,
-                    beta,
-                    &mut profile,
-                )
-                .unwrap();
+            context_contract_into_profiled(
+                &mut context,
+                &rule,
+                &mut actual,
+                &lhs,
+                &rhs,
+                axes,
+                alpha,
+                beta,
+                &mut profile,
+            )
+            .unwrap();
             // What: profiling replays the ordinary artifact for padded expert storage.
             assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
         } else {
-            context
-                .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
-                .unwrap();
+            context_contract_into(
+                &mut context,
+                &rule,
+                &mut actual,
+                &lhs,
+                &rhs,
+                axes,
+                alpha,
+                beta,
+            )
+            .unwrap();
         }
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!(
@@ -206,9 +214,17 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
                 .unwrap();
 
         fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
-        context
-            .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
-            .unwrap();
+        context_contract_into(
+            &mut context,
+            &rule,
+            &mut actual,
+            &lhs,
+            &rhs,
+            axes,
+            alpha,
+            beta,
+        )
+        .unwrap();
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!(
                 (actual - expected).abs() < 1.0e-10,
@@ -325,9 +341,17 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
         .unwrap();
 
         fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
-        context
-            .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
-            .unwrap();
+        context_contract_into(
+            &mut context,
+            &rule,
+            &mut actual,
+            &lhs,
+            &rhs,
+            axes,
+            alpha,
+            beta,
+        )
+        .unwrap();
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!(
                 (actual - expected).norm() < 1.0e-10,

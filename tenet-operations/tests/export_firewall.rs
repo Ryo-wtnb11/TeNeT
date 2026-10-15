@@ -294,7 +294,6 @@ fn tenet_operations_root_exports_exactly_the_pinned_names() {
         "tensoradd_raw_strided_kernel",
         "bilinear_raw_strided_kernel_mapped",
         "tensortrace_raw_strided_kernel_add_with_coefficient_trusted",
-        "tensortrace_raw_strided_kernel_trusted",
         // kernel adapter
         "BakedFusedLayout",
         "HostKernelAdapter",
@@ -353,7 +352,6 @@ const CRATE_INTERNAL: &[&str] = &[
     // Raw kernels; the `_trusted` drivers are the routed entries.
     "axpby_raw_strided_kernel",
     "tensoradd_raw_strided_kernel_trusted",
-    "tensortrace_raw_strided_kernel",
     "tensortrace_raw_strided_kernel_add_with_coefficient",
     // Fusion-tree helpers.
     "block_indices_for_keys",
@@ -367,7 +365,6 @@ const CRATE_INTERNAL: &[&str] = &[
     "validate_recoupling_lens",
     "with_host_pool",
     // Unrouted replay entries.
-    "tree_transform_structure_with_structural_recoupling",
     "tree_transform_structure_overwrite_with_structural_recoupling",
     "tree_transform_structure_with_structural_recoupling_raw",
     "tree_transform_structure_with_structural_recoupling_raw_profiled",

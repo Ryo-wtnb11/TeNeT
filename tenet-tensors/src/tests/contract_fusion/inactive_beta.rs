@@ -64,9 +64,7 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     assert_eq!(specs, vec![TensorContractBlockSpec::new(0, 0, 0)]);
 
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta)
-        .unwrap();
+    context_contract_into(&mut context, &rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
     // What: an irregular packed Core plan replays the active block and scales
     // the inactive one by beta.
     assert!(context.last_resolution_is_core());
@@ -193,9 +191,17 @@ fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_or
         actual
             .data_mut()
             .copy_from_slice(&[Complex64::new(10.0, 4.0), Complex64::new(20.0, -2.0)]);
-        context
-            .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, conjugate_axes, alpha, beta)
-            .unwrap();
+        context_contract_into(
+            &mut context,
+            &rule,
+            &mut actual,
+            &lhs,
+            &rhs,
+            conjugate_axes,
+            alpha,
+            beta,
+        )
+        .unwrap();
         assert_eq!(actual.data(), oracle.as_slice());
     }
 }
