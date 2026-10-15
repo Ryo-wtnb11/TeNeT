@@ -103,9 +103,9 @@ four dtypes before this leaf; no dtype dispatch was added there.
   over a naive `f32` sum, which TeNeT chooses deliberately over TensorKit's
   scaled per-block `LinearAlgebra.norm`.
 * **Plan-cache observability is aggregated, not per dtype.**
-  `Runtime::tree_transform_cache_info` and `clear_tree_transform_cache` report
-  and clear single- and double-precision activity together, because the plans
-  are structural and the store is shared. Recorded in the `TensorScalar`
+  `tenet::cache::stats` and `tenet::cache::clear` (the Runtime wrappers of
+  this audit's time were removed in #2217) report and clear single- and
+  double-precision activity together, because the plans are structural and the store is shared. Recorded in the `TensorScalar`
   rustdoc. Nothing dtype-dependent is stored under a dtype-free key: the
   recoupling scratch is a `Vec<D>` inside a `Ctx<D>` workspace, so cross-dtype
   reuse is impossible by type, and the network pools key on `TypeId<(R,D,S)>`.

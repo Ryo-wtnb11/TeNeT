@@ -428,8 +428,6 @@ fn a_warm_general_contraction_uploads_only_its_output() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-// Exercises the deprecated per-Runtime wrapper's device-state clear.
-#[allow(deprecated)]
 fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path() {
     let _cache = cache_exclusive();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -472,7 +470,7 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     );
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), high_water);
 
-    runtime.clear_tree_transform_cache();
+    runtime.clear_cuda_caches();
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), 0);
     numerics::assert_nonzero_slices_close(
         "after clear",

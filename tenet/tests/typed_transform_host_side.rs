@@ -119,8 +119,6 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
 }
 
 #[test]
-// Exercises the deprecated per-Runtime wrapper's device-state clear.
-#[allow(deprecated)]
 fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears() {
     // Isolated: the completed-transformer counters are process-global.
     if run_isolated_or_return(
@@ -129,9 +127,10 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
     ) {
         return;
     }
-    // The device half of `clear_tree_transform_cache` is reached only through
-    // the device lease, so a device-less Runtime must clear its Host store and
-    // do nothing else — including when the `cuda` feature is compiled in.
+    // Device state is reached only through the device lease, so on a
+    // device-less Runtime the device clear does nothing and the semantic
+    // clear empties the Host-side caches, including when the `cuda` feature
+    // is compiled in.
     let runtime = Runtime::builder().build().unwrap();
     #[cfg(feature = "cuda")]
     assert!(runtime.cuda_tree_transform_stats().is_none());
@@ -140,13 +139,18 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
     let tensor: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
     let _ = tensor.permute(&[1, 0], &[3, 2]).unwrap();
-    assert!(completed_transformers().entries() > 0);
+    let entries = completed_transformers().entries();
+    assert!(entries > 0);
 
-    runtime.clear_tree_transform_cache();
+    #[cfg(feature = "cuda")]
+    {
+        runtime.clear_cuda_caches();
+        assert_eq!(completed_transformers().entries(), entries);
+        assert!(runtime.cuda_tree_transform_stats().is_none());
+    }
+    tenet::cache::clear();
 
     assert_eq!(completed_transformers().entries(), 0);
-    #[cfg(feature = "cuda")]
-    assert!(runtime.cuda_tree_transform_stats().is_none());
 }
 
 // ---------------------------------------------------------------------------

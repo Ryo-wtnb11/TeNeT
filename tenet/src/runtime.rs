@@ -10,22 +10,6 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::{Complex32, Complex64};
 use tenet_core::{HomSpaceId, RuleIdentity};
-pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
-
-/// Snapshot returned by the deprecated [`Runtime::tree_transform_cache_info`];
-/// removed with it. Observability only.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct TreeTransformCacheInfo {
-    /// The process-global completed-transformer cache.
-    pub structures: RuntimeTreeTransformCacheInfo,
-    /// Always empty: the categorical-plan tier was removed in #2014-4
-    /// (plans are assembled from the composed-coefficient cache).
-    pub plans: RuntimeTreeTransformCacheInfo,
-    /// The process-global composed-coefficient cache (per fusion-tree group,
-    /// every fusion style), shared by every Runtime since #2014-4.
-    pub groups: RuntimeTreeTransformCacheInfo,
-}
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseTreeTransformOperations, TensorContractFusionExecutionContext,
     TreeTransformOperation,
@@ -782,8 +766,8 @@ impl std::ops::DerefMut for CudaLease<'_> {
 ///
 /// Read-only: nothing here is a knob. `executor_bytes` is what the executor
 /// retains (uploaded coefficient and recoupling vectors plus the pack/scatter
-/// workspaces) and is released by the deprecated
-/// [`Runtime::clear_tree_transform_cache`]. `context_scalar_operand_bytes` is
+/// workspaces) and is released by [`Runtime::clear_cuda_caches`].
+/// `context_scalar_operand_bytes` is
 /// the device context's own ones and zero templates, which many device
 /// operations share and which the executor does not own; the two are reported
 /// separately so neither is charged twice. Neither is charged to
@@ -1097,52 +1081,6 @@ impl Runtime {
         &self.inner.execution_config
     }
 
-    /// Deprecated (one release): use [`crate::cache::stats`].
-    ///
-    /// `structures` reports the process-global completed-transformer cache
-    /// and `groups` the process-global composed-coefficient cache, both
-    /// shared by every Runtime: `entry_capacity` = `usize::MAX` (byte-bounded
-    /// only), `misses` = builds offered for admission, `admission_bypasses` =
-    /// oversize rejections. `plans` is always empty: that tier was removed
-    /// in #2014-4. The caches are sampled one after another, not atomically.
-    #[deprecated(note = "use `tenet::cache::stats`; see the method documentation")]
-    pub fn tree_transform_cache_info(&self) -> TreeTransformCacheInfo {
-        let global = |kind| {
-            RuntimeTreeTransformCacheInfo::from_structure_cache(tenet_core::structure_cache_info(
-                kind,
-            ))
-        };
-        TreeTransformCacheInfo {
-            structures: global(tenet_core::StructureCacheKind::CompletedTreeTransformer),
-            plans: RuntimeTreeTransformCacheInfo::default(),
-            groups: global(tenet_core::StructureCacheKind::TreeTransformCoefficients),
-        }
-    }
-
-    /// Deprecated (one release): clears the process-global structure caches,
-    /// composed coefficients included, for **every** Runtime
-    /// ([`crate::cache::clear`]), then this Runtime's prepared device
-    /// transform state and contraction scratch. The steps run one after
-    /// another, never nested.
-    ///
-    /// The device state is dropped under the maintenance lease, after the
-    /// host clears have returned, so this never inverts a lock order; on a
-    /// Runtime with a device it blocks behind a device operation in
-    /// progress. A device lock poisoned by an earlier panic is recovered
-    /// rather than propagated: dropping prepared device state is always safe.
-    #[deprecated(
-        note = "use `tenet::cache::clear`; this also clears every Runtime's structure caches"
-    )]
-    pub fn clear_tree_transform_cache(&self) {
-        crate::cache::clear();
-        #[cfg(feature = "cuda")]
-        if let Some(mut lease) = self.lease_cuda_for_maintenance() {
-            let (dense, executor, scratch) = lease.split_contract();
-            executor.clear(dense);
-            scratch.clear();
-        }
-    }
-
     /// The resolved transformer of a typed Host `*_into` request whose spaces
     /// were proved to match once before (the exact-layout memo on the
     /// process-global entry of coefficient type `C`); `None` takes the full
@@ -1344,8 +1282,7 @@ impl Runtime {
     /// scratch holds, or `None` when the Runtime has no device.
     ///
     /// Read-only and grow-only: the scratch keeps its high-water allocation
-    /// per payload dtype until the deprecated
-    /// [`Self::clear_tree_transform_cache`]. It is
+    /// per payload dtype until [`Self::clear_cuda_caches`]. It is
     /// reported apart from [`CudaTreeTransformStats`] so each device byte is
     /// counted once, and is not charged to
     /// `tenet-network`'s `PlanCacheConfig::workspace_budget_bytes`. Takes the device lease like
@@ -1375,6 +1312,38 @@ impl Runtime {
             .plan_cache_stats()
             .map(Some)
             .map_err(|error| Error::from(tenet_operations::OperationError::Dense(error)))
+    }
+
+    /// Drops this Runtime's retained device execution state; a no-op when the
+    /// Runtime has no device.
+    ///
+    /// Clears the tree-transform executor's prepared structures (uploaded
+    /// coefficient and recoupling vectors), its pack/scatter workspaces and
+    /// the plan-entry reservation it holds on the device context, and the
+    /// general contraction's operand and core-destination scratch. After it,
+    /// [`CudaTreeTransformStats`]'s `prepared_structures`, `executor_bytes`,
+    /// `workspace_bytes` and `required_plan_entries` and
+    /// [`Self::cuda_contract_scratch_bytes`] read 0; the next device operation
+    /// re-prepares what it needs, so this is a memory decision, never a
+    /// correctness one.
+    ///
+    /// It does not touch the process-global semantic caches shared by every
+    /// Runtime ([`crate::cache::clear`] does that, and leaves device state
+    /// alone), the device context's shared scalar operands
+    /// (`context_scalar_operand_bytes`) or its cuTENSOR plan cache, which the
+    /// context owns and bounds itself, or `tenet-network`'s per-Runtime plan
+    /// cache (`clear_plan_cache`).
+    ///
+    /// Takes the device lease, so it waits behind a device operation in
+    /// progress. A device lock poisoned by an earlier panic is recovered
+    /// rather than propagated: dropping prepared device state is always safe.
+    #[cfg(feature = "cuda")]
+    pub fn clear_cuda_caches(&self) {
+        if let Some(mut lease) = self.lease_cuda_for_maintenance() {
+            let (dense, executor, scratch) = lease.split_contract();
+            executor.clear(dense);
+            scratch.clear();
+        }
     }
 }
 
@@ -2336,7 +2305,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn runtimes_share_completed_transformers_and_expired_weak_handles_run_eagerly() {
         if crate::test_cache::run_isolated_or_return(
             "TENET_RUNTIMES_SHARE_ISOLATED",
@@ -2374,21 +2342,8 @@ mod tests {
             expected_b.dense_data().unwrap()
         );
 
-        // The deprecated per-Runtime clear clears the global caches for
-        // every Runtime, and reports the shared cache through either one.
-        runtime_a.clear_tree_transform_cache();
+        crate::cache::clear();
         assert_eq!(crate::test_cache::completed().entries(), 0);
-        assert_eq!(
-            runtime_b.tree_transform_cache_info().structures.entries(),
-            0
-        );
-        assert_eq!(
-            runtime_b
-                .tree_transform_cache_info()
-                .structures
-                .entry_capacity(),
-            usize::MAX
-        );
 
         let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
         let source_space = source_b.test_bound_space();
@@ -2422,6 +2377,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(actual, expected_data);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn clearing_cuda_caches_without_a_device_leaves_the_semantic_caches_intact() {
+        if crate::test_cache::run_isolated_or_return(
+            "TENET_CLEAR_CUDA_CACHES_ISOLATED",
+            "runtime::tests::clearing_cuda_caches_without_a_device_leaves_the_semantic_caches_intact",
+        ) {
+            return;
+        }
+        let runtime = Runtime::builder().build().unwrap();
+        let space = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+        )
+        .unwrap();
+        let source: TensorMap<SU2FusionRule, f64> =
+            TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 2217).unwrap();
+        let _ = source.permute(&[1], &[2, 0]).unwrap();
+        let before = crate::test_cache::completed().entries();
+        assert!(before > 0);
+
+        runtime.clear_cuda_caches();
+
+        assert_eq!(crate::test_cache::completed().entries(), before);
+        assert!(runtime.cuda_tree_transform_stats().is_none());
+        assert!(runtime.cuda_contract_scratch_bytes().is_none());
     }
 
     /// Compile-level gate for the device-state ownership of #1322: the lease is

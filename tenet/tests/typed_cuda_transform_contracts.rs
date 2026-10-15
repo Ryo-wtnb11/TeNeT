@@ -174,9 +174,7 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-// Exercises the deprecated per-Runtime wrapper's device-state clear.
-#[allow(deprecated)]
-fn clearing_the_transform_cache_releases_the_device_executor_state() {
+fn clearing_the_cuda_caches_releases_only_the_device_executor_state() {
     let _cache = cache_exclusive();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
@@ -185,8 +183,10 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
     let before = runtime.cuda_tree_transform_stats().unwrap();
     assert!(before.prepared_structures >= 2, "{before:?}");
     assert!(before.executor_bytes > 0, "{before:?}");
+    let semantic_before = completed_transformers().entries();
+    assert!(semantic_before > 0);
 
-    runtime.clear_tree_transform_cache();
+    runtime.clear_cuda_caches();
 
     let after = runtime.cuda_tree_transform_stats().unwrap();
     assert_eq!(after.prepared_structures, 0, "{after:?}");
@@ -199,7 +199,8 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
         after.context_scalar_operand_bytes, before.context_scalar_operand_bytes,
         "context operands are counted once and are not the executor's to drop"
     );
-    assert_eq!(completed_transformers().entries(), 0);
+    // Device state only: the process-global semantic caches are untouched.
+    assert_eq!(completed_transformers().entries(), semantic_before);
 
     // Re-preparing after the clear still produces the same answer.
     let expected = fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap();
@@ -209,11 +210,9 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-// Exercises the deprecated per-Runtime wrapper's device-state clear.
-#[allow(deprecated)]
 fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
     let _cache = cache_exclusive();
-    // What: `clear_tree_transform_cache` returns the executor's plan-entry
+    // What: `clear_cuda_caches` returns the executor's plan-entry
     // reservation, so repeated clear/re-prepare cycles of the same structures
     // leave the ledger and the cap where the first preparation put them.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -236,7 +235,7 @@ fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
     assert_eq!(reserved, required);
 
     for cycle in 0..3 {
-        runtime.clear_tree_transform_cache();
+        runtime.clear_cuda_caches();
         let cleared = runtime.cuda_plan_cache_stats().unwrap().unwrap();
         assert_eq!(cleared.reserved_entries, 0, "cycle {cycle}");
         prepare();

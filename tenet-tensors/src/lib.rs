@@ -139,9 +139,9 @@ pub use tree_transform::{
 };
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    CheckedGenericPlanError, RuntimeTreeTransformCacheInfo, TreeTransformBlockSpec,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
-    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
+    CheckedGenericPlanError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
+    TreeTransformGroupPlan, TreeTransformKeyBlockSpec, TreeTransformOperation,
+    TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{

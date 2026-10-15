@@ -7,7 +7,6 @@
 //! a cold Runtime's. A sector change must still compose the new groups.
 //! Unique fusion is cached too, unlike TensorKit's `NoCache`: a U(1)/Z2
 //! degeneracy-only change must not rebuild its phases either.
-#![allow(deprecated)]
 
 use std::sync::Arc;
 use tenet::cache::{StructureCacheInfo, StructureCacheKind};
@@ -213,37 +212,4 @@ fn checked_generic_su3_degeneracy_change_reuses_the_composed_coefficients() {
         leg(&[([1, 0], 1), ([1, 1], 2)]),
         leg(&[([0, 0], 1), ([1, 0], 2), ([1, 1], 1)]),
     );
-}
-
-#[test]
-fn deprecated_runtime_wrappers_report_and_clear_the_global_coefficient_cache() {
-    let _serial = serial();
-    tenet::cache::clear();
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let other = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(
-        Arc::new(SU2FusionRule),
-        [
-            (SU2Irrep::from_twice_spin(0), 1),
-            (SU2Irrep::from_twice_spin(1), 1),
-        ],
-    )
-    .unwrap();
-    let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
-    let before = runtime.tree_transform_cache_info();
-    // What: `groups` is the one process-global cache, seen alike through
-    // every Runtime; the removed plan tier always reads empty.
-    assert_eq!(before.groups, other.tree_transform_cache_info().groups);
-    assert!(before.groups.entries() > 0 && before.groups.charged_payload_bytes() > 0);
-    assert_eq!(before.groups.entries(), groups().entries());
-    assert_eq!(before.groups.entry_capacity(), usize::MAX);
-    assert!(before.groups.charged_payload_bytes() <= before.groups.byte_budget());
-    assert_eq!(before.plans, Default::default());
-
-    other.clear_tree_transform_cache();
-    let after = runtime.tree_transform_cache_info().groups;
-    assert_eq!(after.entries(), 0);
-    assert_eq!(after.charged_payload_bytes(), 0);
-    assert_eq!(after.misses(), 0);
-    assert_eq!(after.hits(), 0);
 }
