@@ -37,8 +37,8 @@ use tenet_dense::{
 
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
-    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, SharedPayload,
-    StructureCache, StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
+    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, PreparedDeviceCache,
+    SharedPayload, StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
 use crate::fusion_replay::{FusionScaleBlockLayout, FusionStridedBlockLayout};
 use crate::opaque_admission::{
@@ -619,7 +619,7 @@ struct DeviceWorkspace {
 /// `CudaDenseContext`, inside the same device mutex the GL-3 lease takes; it
 /// is deliberately not global and not owned by any structure.
 pub struct CudaTreeTransformExecutor {
-    prepared: StructureCache<PreparedStructure>,
+    prepared: PreparedDeviceCache<PreparedStructure>,
     /// One transform workspace per (payload dtype, context) actually replayed;
     /// in practice one or two. It is keyed rather than shared because a device
     /// buffer carries its payload dtype, and it is owned here rather than by a
@@ -690,7 +690,7 @@ impl CudaTreeTransformExecutor {
         structure_entries: usize,
     ) -> Self {
         Self {
-            prepared: StructureCache::new(coefficient_budget_bytes, structure_entries),
+            prepared: PreparedDeviceCache::new(coefficient_budget_bytes, structure_entries),
             workspaces: Vec::new(),
             coefficient_budget_bytes,
             structure_entries,
@@ -779,7 +779,8 @@ impl CudaTreeTransformExecutor {
     /// context can take them back; their structures are gone, so each is
     /// released at that context's next refresh or clear.
     pub fn clear(&mut self, ctx: &mut CudaDenseContext) {
-        self.prepared = StructureCache::new(self.coefficient_budget_bytes, self.structure_entries);
+        self.prepared =
+            PreparedDeviceCache::new(self.coefficient_budget_bytes, self.structure_entries);
         self.workspaces.clear();
         self.required_plan_entries = 0;
         let context = ctx.identity();

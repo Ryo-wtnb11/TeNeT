@@ -451,7 +451,7 @@ struct CacheEntry<V> {
     value: V,
 }
 
-/// Entries a [`StructureCache`] keeps by default, whatever the byte budget
+/// Entries a [`PreparedDeviceCache`] keeps by default, whatever the byte budget
 /// allows.
 ///
 /// A byte budget alone bounds the device memory but not the entry count, so a
@@ -483,14 +483,14 @@ pub(crate) trait SharedPayload {
 /// binds on them; the charge moves to a remaining holder when its entry
 /// leaves. Bytes are reported so the owner of the device memory budget can
 /// charge them.
-pub(crate) struct StructureCache<V> {
+pub(crate) struct PreparedDeviceCache<V> {
     entries: Vec<CacheEntry<V>>,
     budget_bytes: usize,
     max_entries: usize,
     bytes: usize,
 }
 
-impl<V: SharedPayload> StructureCache<V> {
+impl<V: SharedPayload> PreparedDeviceCache<V> {
     pub(crate) fn new(budget_bytes: usize, max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -782,7 +782,7 @@ mod tests {
             scalar: TypeId::of::<f64>(),
             context: 3,
         };
-        let mut cache = StructureCache::new(usize::MAX, DEFAULT_STRUCTURE_CACHE_ENTRIES);
+        let mut cache = PreparedDeviceCache::new(usize::MAX, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         for index in 0..structures.len() {
             cache.insert(key(index), index, 1);
         }
@@ -973,7 +973,7 @@ mod tests {
             scalar,
             context,
         };
-        let mut cache = StructureCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
+        let mut cache = PreparedDeviceCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(key(&live, TypeId::of::<f64>(), 1), "f64@1", 8);
 
         assert_eq!(
@@ -990,7 +990,7 @@ mod tests {
     fn a_dropped_structure_is_purged_and_its_bytes_released() {
         let live = Arc::new(());
         let doomed = Arc::new(());
-        let mut cache = StructureCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
+        let mut cache = PreparedDeviceCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(
             StructureKey {
                 structure: Arc::downgrade(&doomed),
@@ -1027,7 +1027,7 @@ mod tests {
             scalar: TypeId::of::<f64>(),
             context: 7,
         };
-        let mut cache = StructureCache::new(100, DEFAULT_STRUCTURE_CACHE_ENTRIES);
+        let mut cache = PreparedDeviceCache::new(100, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(key(0), 0, 60);
         cache.insert(key(1), 1, 30);
         // Touching 0 makes 1 the least recently used.
@@ -1069,7 +1069,7 @@ mod tests {
             context: 7,
         };
         let shared = Arc::new(());
-        let mut cache = StructureCache::new(100, 3);
+        let mut cache = PreparedDeviceCache::new(100, 3);
         cache.insert(key(0), Holder(Arc::clone(&shared)), 40);
         cache.insert(key(1), Holder(Arc::clone(&shared)), 40);
         assert_eq!((cache.entry_count(), cache.retained_bytes()), (2, 40));
