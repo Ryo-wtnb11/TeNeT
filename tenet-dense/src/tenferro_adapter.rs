@@ -77,40 +77,6 @@ fn note_backend_admission() {
     }
 }
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
-use std::cell::RefCell;
-
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
-thread_local! {
-    static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-}
-
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
-pub(crate) fn reset_owned_full_svd_input_pointers() {
-    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
-}
-
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
-pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
-    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
-}
-
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_cpu::with_cpu_exec_session;
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
@@ -1152,7 +1118,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                 any(feature = "cpu-faer", feature = "cpu-blas-core"),
                 not(feature = "provider-inject")
             ))]
-            OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
+            {
                 fn slice_ptr<T: tenferro_tensor::TensorScalar>(
                     input: &tenferro_tensor::Tensor,
                 ) -> Option<usize> {
@@ -1165,8 +1131,8 @@ impl DenseExecutor for DefaultDenseExecutor {
                     .or_else(|| slice_ptr::<num_complex::Complex32>(&input))
                     .or_else(|| slice_ptr::<num_complex::Complex64>(&input))
                     .expect("DenseOwned only contains supported full-SVD dtypes");
-                pointers.borrow_mut().push(pointer);
-            });
+                crate::probe::owned_full_svd_input(pointer);
+            }
             note_session_opened();
             let outputs = self
                 .backend

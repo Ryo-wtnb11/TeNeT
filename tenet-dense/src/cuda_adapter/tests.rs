@@ -408,11 +408,10 @@ fn cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata() {
     data[1] = data[n];
     let storage = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
 
-    CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
-    CUDA_METADATA_DOWNLOAD_BYTES.with(|cell| cell.set(0));
+    let downloads = crate::probe::record();
     assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &storage, 0, n).unwrap());
-    assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.with(Cell::get), 0);
-    assert!(CUDA_METADATA_DOWNLOAD_BYTES.with(Cell::get) <= 4 * 8);
+    assert_eq!(downloads.get(crate::probe::Event::CudaFullDownloadBytes), 0);
+    assert!(downloads.get(crate::probe::Event::CudaMetadataDownloadBytes) <= 4 * 8);
 
     let tol = default_tolerance::<f64>();
     let near_threshold = |ctx: &CudaDenseContext, delta: f64| {
@@ -461,16 +460,17 @@ fn cuda_transfer_bytes_scale_with_the_payload_dtype() {
         .map(|index| Complex64::new(index as f64, -(index as f64) - 0.5))
         .collect();
 
-    CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
+    let real_downloads = crate::probe::record();
     let real_device = CudaDenseStorage::upload::<f64>(&ctx, &real).unwrap();
     assert_eq!(real_device.dtype(), DenseDType::F64);
     assert_eq!(real_device.download::<f64>(&ctx).unwrap(), real);
-    let real_bytes = CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0));
+    let real_bytes = real_downloads.get(crate::probe::Event::CudaFullDownloadBytes);
+    let complex_downloads = crate::probe::record();
 
     let complex_device = CudaDenseStorage::upload::<Complex64>(&ctx, &complex).unwrap();
     assert_eq!(complex_device.dtype(), DenseDType::C64);
     assert_eq!(complex_device.download::<Complex64>(&ctx).unwrap(), complex);
-    let complex_bytes = CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0));
+    let complex_bytes = complex_downloads.get(crate::probe::Event::CudaFullDownloadBytes);
 
     assert_eq!(real_bytes, elements * std::mem::size_of::<f64>());
     assert_eq!(
@@ -506,7 +506,7 @@ fn cuda_transfer_counters_attribute_one_upload_download_and_gemm() {
     let rhs_host = vec![5.0_f64, 6.0, 7.0, 8.0];
 
     reset_cuda_transfer_stats();
-    CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
+    let downloads = crate::probe::record();
     let lhs = CudaDenseStorage::upload::<f64>(&ctx, &lhs_host).unwrap();
     let rhs = CudaDenseStorage::upload::<f64>(&ctx, &rhs_host).unwrap();
     let mut dst = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0_f64; n * n]).unwrap();
@@ -542,7 +542,7 @@ fn cuda_transfer_counters_attribute_one_upload_download_and_gemm() {
     // The finer-grained test counter stays consistent with the always
     // compiled one for the same download.
     assert_eq!(
-        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0)) as u64,
+        downloads.get(crate::probe::Event::CudaFullDownloadBytes) as u64,
         after_download.d2h_bytes
     );
 

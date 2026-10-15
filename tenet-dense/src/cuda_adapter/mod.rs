@@ -296,11 +296,6 @@ fn record(update: impl FnOnce(&mut CudaTransferStats)) {
         cell.set(stats);
     });
 }
-#[cfg(test)]
-std::thread_local! {
-    static CUDA_FULL_DOWNLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
-    static CUDA_METADATA_DOWNLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
-}
 /// A snapshot of the calling thread's CUDA boundary observation counters.
 ///
 /// Observability only: nothing in this module reads these values back, so no
@@ -443,7 +438,7 @@ fn download_values<R: CudaRealScalar>(
         .map_err(|err| cuda_error("cuda_download", err))?;
     let bytes = std::mem::size_of_val(values.as_slice());
     #[cfg(test)]
-    CUDA_METADATA_DOWNLOAD_BYTES.with(|cell| cell.set(cell.get() + bytes));
+    crate::probe::add(crate::probe::Event::CudaMetadataDownloadBytes, bytes);
     record_d2h(bytes);
     Ok(values.into_iter().map(R::widen).collect())
 }
