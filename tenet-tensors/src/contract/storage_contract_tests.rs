@@ -2833,14 +2833,14 @@ fn the_planner_walks_the_requested_order_once() {
     let u1_v = || u1_leg(false);
     let walks = |case: &Case<U1FusionRule>| {
         let dst = case.dst();
-        let before = super::resolution::candidate_walks();
+        let walks_rec = crate::probe::record();
         let route = planner_route(
             &dst,
             (&case.lhs, FusionOperand::direct(case.lhs.space())),
             (&case.rhs, FusionOperand::direct(case.rhs.space())),
             (&case.lhs_axes, &case.rhs_axes, &case.output_axes),
         );
-        (route, super::resolution::candidate_walks() - before)
+        (route, walks_rec.get(crate::probe::Event::CandidateWalk))
     };
     // Core: the requested order only.
     assert_eq!(

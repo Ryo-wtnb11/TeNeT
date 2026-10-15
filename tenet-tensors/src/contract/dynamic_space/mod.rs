@@ -30,82 +30,6 @@ pub(crate) use metadata::{
 };
 pub use operand::FusionOperand;
 pub(crate) use operand::FusionOperandLayout;
-#[cfg(test)]
-pub(crate) use operand::{
-    fusion_operand_projection_prepares, reset_fusion_operand_projection_prepares,
-};
-
-#[cfg(test)]
-thread_local! {
-    static FINAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static LEGACY_SHAPE_PATH_BUILDS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static SCRATCH_STRUCTURE_BUILDS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-}
-
-#[cfg(test)]
-thread_local! {
-    static DERIVED_HOMSPACE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Counts every permuted or contracted HomSpace a layout capability builds.
-#[inline]
-fn observe_derived_homspace_build() {
-    #[cfg(test)]
-    DERIVED_HOMSPACE_BUILDS.set(DERIVED_HOMSPACE_BUILDS.get() + 1);
-}
-
-#[cfg(test)]
-pub(crate) fn reset_derived_homspace_builds() {
-    DERIVED_HOMSPACE_BUILDS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn derived_homspace_builds() -> usize {
-    DERIVED_HOMSPACE_BUILDS.get()
-}
-
-#[inline]
-fn observe_final_result_layout_build() {
-    #[cfg(test)]
-    FINAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(builds.get() + 1));
-}
-
-#[cfg(test)]
-fn reset_final_result_layout_builds() {
-    FINAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(0));
-}
-
-#[cfg(test)]
-fn final_result_layout_builds() -> usize {
-    FINAL_RESULT_LAYOUT_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn reset_legacy_shape_path_builds() {
-    LEGACY_SHAPE_PATH_BUILDS.with(|builds| builds.set(0));
-}
-
-#[cfg(test)]
-fn legacy_shape_path_builds() -> usize {
-    LEGACY_SHAPE_PATH_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn reset_scratch_structure_builds() {
-    SCRATCH_STRUCTURE_BUILDS.set(0);
-}
-
-/// Scratch structures built on this thread since the last reset.
-#[cfg(test)]
-pub(crate) fn scratch_structure_builds() -> usize {
-    SCRATCH_STRUCTURE_BUILDS.get()
-}
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
 /// spaces enumerate the full tree set of their hom spaces, so the coupled
@@ -124,7 +48,7 @@ where
     R: FusionRule,
 {
     #[cfg(test)]
-    SCRATCH_STRUCTURE_BUILDS.set(SCRATCH_STRUCTURE_BUILDS.get() + 1);
+    crate::probe::hit(crate::probe::Event::ScratchStructureBuild);
     let mut tree_blocks = Vec::with_capacity(blocks.len());
     for (index, (key, shape)) in blocks.iter().enumerate() {
         match key {
@@ -369,7 +293,8 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols,
     {
-        observe_final_result_layout_build();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::FinalResultLayoutBuild);
         let staged = match prepared {
             PreparedLayoutKeys::Checked(prepared) => Some(prepared),
             PreparedLayoutKeys::Encoded | PreparedLayoutKeys::Staged(_) => None,
@@ -416,7 +341,8 @@ impl DynamicFusionMapSpace {
         R: FusionRule,
     {
         validate_generic_provider_style(rule)?;
-        observe_final_result_layout_build();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::FinalResultLayoutBuild);
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let (homspace, subblock_structure) = homspace
@@ -558,7 +484,7 @@ impl DynamicFusionMapSpace {
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         #[cfg(test)]
-        LEGACY_SHAPE_PATH_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        crate::probe::hit(crate::probe::Event::LegacyShapePathBuild);
         let shapes = shapes
             .into_iter()
             .map(Into::into)

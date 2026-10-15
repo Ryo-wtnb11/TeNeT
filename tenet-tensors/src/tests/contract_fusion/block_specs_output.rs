@@ -838,7 +838,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     let pinned =
         fixture_prepare_contract(&mut context, &rule, &context_dst, &lhs, &rhs, axes).unwrap();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     for _ in 0..2 {
         context_dst
             .data_mut()
@@ -859,7 +859,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         // What: a prepared dynamic contraction owns the complete artifact;
         // replay does not consult the completed-transformer cache.
         assert_eq!(
-            crate::tree_transform::take_completed_transformer_activity(),
+            crate::probe::take_completed_transformer_activity(),
             Default::default()
         );
     }
@@ -973,7 +973,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         );
     }
 
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
@@ -996,7 +996,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     // What: the warm call plans its route again, as TensorKit's `contract!`
     // does; its output permute is one completed-transformer hit, no build.
-    let warm = crate::tree_transform::take_completed_transformer_activity();
+    let warm = crate::probe::take_completed_transformer_activity();
     assert_eq!((warm.builds, warm.hits), (0, 1));
 
     automatic_context_dst

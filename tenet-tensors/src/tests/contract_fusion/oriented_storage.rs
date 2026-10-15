@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
@@ -240,7 +241,7 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
                 }
             })
             .collect::<Vec<_>>();
-        crate::contract::reset_fusion_operand_projection_prepares();
+        let fusion_operand_projection_prepares_rec = probe::record();
 
         let mut contracted = vec![0.0; dst.space().required_len().unwrap()];
         let mut contract_gemm = CpuOrientedGemm::default();
@@ -293,7 +294,10 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
         )
         .unwrap();
         assert_eq!(composed, expected);
-        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+        assert_eq!(
+            fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
+            0
+        );
 
         if lhs_adjoint && !rhs_adjoint {
             let outer_dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free(
@@ -330,7 +334,10 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
             );
             assert!(rejected_gemm.calls.is_empty());
             assert_eq!(rejected, sentinel);
-            assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+            assert_eq!(
+                fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
+                0
+            );
         }
     }
 }
@@ -394,7 +401,7 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
         } else {
             crate::FusionOperand::direct(&rhs_parent)
         };
-        crate::contract::reset_fusion_operand_projection_prepares();
+        let fusion_operand_projection_prepares_rec = probe::record();
 
         let mut contracted = vec![0.0];
         let mut contract_gemm = CpuOrientedGemm::default();
@@ -430,6 +437,9 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
         )
         .unwrap();
         assert_eq!(composed, [6.0]);
-        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+        assert_eq!(
+            fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
+            0
+        );
     }
 }

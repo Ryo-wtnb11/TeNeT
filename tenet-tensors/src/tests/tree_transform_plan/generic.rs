@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 // ======================================================================
 // Stage B2c: Generic-fusion (outer-multiplicity) plan compile.
@@ -942,8 +943,6 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
 
 #[test]
 fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
-    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
-
     // What: a GenericFusion R matrix whose core rows are structurally
     // singleton and destination-injective uses the same direct replay contract.
     let rule = ToyGenericRule {
@@ -983,10 +982,13 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     assert!(core_rows.iter().all(|row| row.len() == 1));
     assert_ne!(core_rows[0][0].0, core_rows[1][0].0);
 
-    reset_tree_pair_lowering_calls();
+    let tree_pair_lowering_calls_rec = probe::record();
     let plan = build_generic_tree_pair_transform_group_plan(&rule, operation, &structure).unwrap();
     assert_eq!(
-        tree_pair_lowering_calls(),
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
         (structure.fusion_tree_groups().len(), 0)
     );
     assert_eq!(plan.specs().len(), 2);
@@ -1495,7 +1497,7 @@ fn measure_checked_generic_transform_case(
             .unwrap()
     });
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     let (cold_space, cold_data) =
         measured_provider_phase(provider.as_ref(), case, "runtime_cold_seed", || {
             context
@@ -1508,7 +1510,7 @@ fn measure_checked_generic_transform_case(
                 )
                 .unwrap()
         });
-    let cold_info = crate::tree_transform::take_completed_transformer_activity();
+    let cold_info = crate::probe::take_completed_transformer_activity();
     let mut samples_ns = Vec::with_capacity(7);
     let mut warm_calls = None;
     let mut warm_output = None;
@@ -1525,7 +1527,7 @@ fn measure_checked_generic_transform_case(
         warm_output = Some(output);
     }
     samples_ns.sort_unstable();
-    let warm_info = crate::tree_transform::take_completed_transformer_activity();
+    let warm_info = crate::probe::take_completed_transformer_activity();
     println!(
         "case={case} phase=runtime_warm_hit samples_ns={samples_ns:?} median_ns={} calls={:?} cold={cold_info:?} warm={warm_info:?}",
         samples_ns[samples_ns.len() / 2], warm_calls.unwrap()

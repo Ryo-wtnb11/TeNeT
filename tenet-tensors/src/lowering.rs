@@ -5,21 +5,6 @@ use tenet_operations::{
     permutation_axes_inline, AxisVec, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
 };
 
-#[cfg(test)]
-thread_local! {
-    static ADJOINT_VIEW_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_adjoint_view_build_count() {
-    ADJOINT_VIEW_BUILDS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn adjoint_view_build_count() -> usize {
-    ADJOINT_VIEW_BUILDS.with(std::cell::Cell::get)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoweredTensorTraceAxisSpec {
     output_axes: Vec<usize>,
@@ -182,7 +167,7 @@ pub(crate) fn adjoint_block_structure_view(
     source: &BlockStructure,
 ) -> Result<BlockStructure, OperationError> {
     #[cfg(test)]
-    ADJOINT_VIEW_BUILDS.with(|count| count.set(count.get() + 1));
+    crate::probe::hit(crate::probe::Event::AdjointViewBuild);
     let rank = nout
         .checked_add(nin)
         .ok_or_else(|| OperationError::ElementCountOverflow)?;

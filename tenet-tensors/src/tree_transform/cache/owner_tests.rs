@@ -12,9 +12,10 @@ use tenet_core::{
 };
 
 use super::{
-    resolve, take_completed_transformer_activity, CompletedTransformerKey, OrientedBasisOrder,
-    TransformerMode, TreePairKeyRef, TreeTransformOperationView, TreeTransformPlanning,
+    resolve, CompletedTransformerKey, OrientedBasisOrder, TransformerMode, TreePairKeyRef,
+    TreeTransformOperationView, TreeTransformPlanning,
 };
+use crate::probe::take_completed_transformer_activity;
 use crate::{BoundDynamicFusionMapSpace, OperationError, TreeTransformOperation};
 
 /// A canonical U(1) space `V^2 ← V` whose degeneracies (`7 + seed`) no other
@@ -415,7 +416,7 @@ fn a_build_straddling_a_clear_or_failing_is_not_published() {
     let (dst, src, operation) = fixture(4);
     let mut planning = TreeTransformPlanning::default();
     take_completed_transformer_activity();
-    super::before_next_completed_publication(Box::new(tenet_core::clear_structure_caches));
+    crate::probe::set_before_publish_hook(Box::new(tenet_core::clear_structure_caches));
     let straddling = planning
         .resolve_tree_pair(&U1FusionRule, &operation, &dst, &src, false)
         .unwrap();

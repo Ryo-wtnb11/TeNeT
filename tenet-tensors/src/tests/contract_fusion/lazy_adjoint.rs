@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
@@ -844,8 +845,8 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     };
     for pass in 0..2 {
         let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
-        crate::lowering::reset_adjoint_view_build_count();
-        crate::contract::reset_fusion_operand_projection_prepares();
+        let mut adjoint_view_build_count_rec = probe::record();
+        let fusion_operand_projection_prepares_rec = probe::record();
         for _ in 0..2 {
             let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
             ctx.tensorcontract_prelowered_into(
@@ -895,7 +896,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
             // What: a conjugation flag on an owned space is that space's lazy
             // adjoint, so the ordinary call takes the parent-storage core.
             assert!(ctx.last_resolution_is_core());
-            crate::lowering::reset_adjoint_view_build_count();
+            adjoint_view_build_count_rec = probe::record();
 
             let mut folded_again =
                 vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
@@ -917,8 +918,11 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         // What: neither cold/reset execution nor NoCache may reconstruct the
         // full categorical adjoint view or prepare a logical block projection
         // for a canonical parent-owned coupled-region contraction.
-        assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
-        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+        assert_eq!(adjoint_view_build_count_rec.get(Event::AdjointViewBuild), 0);
+        assert_eq!(
+            fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
+            0
+        );
     }
 
     let typed_dst_hom = dst_space.homspace().clone();

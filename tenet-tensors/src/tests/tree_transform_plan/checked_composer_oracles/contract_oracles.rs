@@ -293,7 +293,7 @@ where
     let rhs = space(rule, &pick(&case.rhs[0]), &pick(&case.rhs[1]));
     let (lhs_data, rhs_data) = (payload::<D>(&lhs, 0.0), payload::<D>(&rhs, 0.5));
     let mut context = TensorContractFusionExecutionContext::<D, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     let (output, data) = context
         .tensorcontract_checked_generic_in(
             direct_side(&lhs, &lhs_data),
@@ -322,7 +322,7 @@ where
             "{what}"
         );
     }
-    let built = crate::tree_transform::take_completed_transformer_activity().builds;
+    let built = crate::probe::take_completed_transformer_activity().builds;
     assert!(built <= case.transforms, "{what}: {built} transforms");
 
     let all = |side: &[Vec<usize>; 2]| {

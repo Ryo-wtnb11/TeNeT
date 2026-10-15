@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 use num_complex::Complex64;
 use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
@@ -145,14 +146,14 @@ where
     );
 
     let mut context = TensorContractFusionExecutionContext::<D, R::Key>::default();
-    crate::lowering::reset_adjoint_view_build_count();
+    let adjoint_view_build_count_rec = probe::record();
     for _ in 0..5 {
         let actual = conjugated_contract(&mut context, &dst, &lhs, &lhs_data, &rhs, &rhs_data);
         assert_eq!(actual, expected);
     }
     // What: a conjugation flag is the lazy adjoint of the owned space, which
     // the planner reads in place: no adjoint structure is built.
-    assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
+    assert_eq!(adjoint_view_build_count_rec.get(Event::AdjointViewBuild), 0);
 
     let memoized = lhs.space().adjoint_view().unwrap();
     let rebuilt = crate::lowering::adjoint_block_structure_view(

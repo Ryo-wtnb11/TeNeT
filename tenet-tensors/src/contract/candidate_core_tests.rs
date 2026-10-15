@@ -4,6 +4,7 @@
 //! Core GEMM and never projects or transforms an operand. Independent value
 //! oracles live in `tenet/tests/contract_candidate_core.rs`.
 
+use crate::probe::{self, Event};
 use std::sync::Arc;
 
 use tenet_core::{
@@ -216,8 +217,8 @@ where
             rhs_lazy,
         );
         let mut dst = vec![0.0; len];
-        crate::lowering::reset_adjoint_view_build_count();
-        crate::contract::reset_fusion_operand_projection_prepares();
+        let adjoint_view_build_count_rec = probe::record();
+        let fusion_operand_projection_prepares_rec = probe::record();
         if lhs_lazy || rhs_lazy {
             context
                 .tensorcontract_prelowered_into(
@@ -245,11 +246,15 @@ where
         assert_eq!(context.last_resolution_orientation(), swapped, "{name}");
         // What: no logical key projection or adjoint view of a lazy operand.
         assert_eq!(
-            crate::contract::fusion_operand_projection_prepares(),
+            fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
             0,
             "{name}"
         );
-        assert_eq!(crate::lowering::adjoint_view_build_count(), 0, "{name}");
+        assert_eq!(
+            adjoint_view_build_count_rec.get(Event::AdjointViewBuild),
+            0,
+            "{name}"
+        );
         assert!(dst.iter().any(|&x| x != 0.0), "{name}: empty fixture");
 
         // What: the device compile route takes the same Core candidate.

@@ -4,15 +4,15 @@ pub(crate) use plan::contracted_axis_order_candidates;
 #[cfg(test)]
 pub(crate) use plan::ContractAxisOrderCandidate;
 pub use plan::FusionContractOrientation;
-#[cfg(test)]
-pub(crate) use plan::{
-    candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
-    prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-    reset_candidate_score_calls, FusionContractCandidateFacts,
-};
 pub(crate) use plan::{
     contract_twist_on_physical_lhs, min_dynamic_tree_materialized_elements,
     select_complete_tensorcontract_fusion_plan, CACHED_ORIENTATIONS,
+};
+#[cfg(test)]
+pub(crate) use plan::{
+    prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+    prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
+    FusionContractCandidateFacts,
 };
 
 #[cfg(test)]

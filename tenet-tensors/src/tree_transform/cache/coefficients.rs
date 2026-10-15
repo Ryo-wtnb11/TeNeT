@@ -183,55 +183,6 @@ fn coefficient_groups() -> &'static StructureCache<CoefficientGroupKey, ErasedEn
     })
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static GROUP_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static GROUP_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static GROUP_PUBLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TRACE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TRACE_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TRACE_PUBLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn bump(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
-    counter.set(counter.get() + 1);
-}
-
-/// This thread's composed-coefficient activity since the last take.
-/// Thread-local, so concurrent tests do not move it.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CoefficientGroupActivity {
-    /// Group lookups answered by a resident entry.
-    pub(crate) hits: usize,
-    /// Group lookups that found none (each is built unless an earlier
-    /// group's build fails).
-    pub(crate) misses: usize,
-    /// Built groups offered for publication.
-    pub(crate) publications: usize,
-}
-
-#[cfg(test)]
-pub(crate) fn take_coefficient_group_activity() -> CoefficientGroupActivity {
-    CoefficientGroupActivity {
-        hits: GROUP_HITS.replace(0),
-        misses: GROUP_MISSES.replace(0),
-        publications: GROUP_PUBLICATIONS.replace(0),
-    }
-}
-
-/// This thread's trace-column activity since the last take; transform
-/// groups are counted apart by [`take_coefficient_group_activity`].
-#[cfg(test)]
-pub(crate) fn take_trace_column_activity() -> CoefficientGroupActivity {
-    CoefficientGroupActivity {
-        hits: TRACE_HITS.replace(0),
-        misses: TRACE_MISSES.replace(0),
-        publications: TRACE_PUBLICATIONS.replace(0),
-    }
-}
-
 /// One source group: its external-sector key and its ordered tree pairs.
 pub(crate) type SourceGroup<'a> = (&'a FusionTreeGroupKey, &'a [&'a FusionTreePairKey]);
 
@@ -258,11 +209,11 @@ impl PendingCoefficientGroups {
     pub(crate) fn publish(self, epoch: usize) {
         for (key, entry, bytes) in self.groups {
             #[cfg(test)]
-            bump(
+            crate::probe::hit(
                 if matches!(key.context.scope, TreeTransformScope::TraceTerms { .. }) {
-                    &TRACE_PUBLICATIONS
+                    crate::probe::Event::TracePublication
                 } else {
-                    &GROUP_PUBLICATIONS
+                    crate::probe::Event::GroupPublication
                 },
             );
             let _ = coefficient_groups().publish(&key, entry, bytes, epoch);
@@ -468,14 +419,14 @@ where
             .map(|&group| match self.context.get(group) {
                 Ok(entry) => {
                     #[cfg(test)]
-                    bump(&GROUP_HITS);
+                    crate::probe::hit(crate::probe::Event::GroupHit);
                     GroupSlot::Hit(entry.downcast::<CoefficientGroupEntry<T>>().unwrap_or_else(
                         |_| unreachable!("the key's TypeId and scope fix the entry type"),
                     ))
                 }
                 Err(hash) => {
                     #[cfg(test)]
-                    bump(&GROUP_MISSES);
+                    crate::probe::hit(crate::probe::Event::GroupMiss);
                     GroupSlot::Miss(hash)
                 }
             })
@@ -576,14 +527,14 @@ where
         match self.context.get(group) {
             Ok(entry) => {
                 #[cfg(test)]
-                bump(&TRACE_HITS);
+                crate::probe::hit(crate::probe::Event::TraceHit);
                 Ok(entry.downcast::<TraceTerms<T>>().unwrap_or_else(|_| {
                     unreachable!("the key's TypeId and scope fix the entry type")
                 }))
             }
             Err(hash) => {
                 #[cfg(test)]
-                bump(&TRACE_MISSES);
+                crate::probe::hit(crate::probe::Event::TraceMiss);
                 Err(hash)
             }
         }

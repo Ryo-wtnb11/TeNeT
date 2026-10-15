@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
@@ -467,7 +468,7 @@ fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection()
     )
     .unwrap();
     let data = vec![1.0; source.space().required_len().unwrap()];
-    crate::contract::reset_fusion_operand_projection_prepares();
+    let fusion_operand_projection_prepares_rec = probe::record();
 
     crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default()
         .tree_transform_owned_checked_generic_in(
@@ -479,7 +480,10 @@ fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection()
         )
         .unwrap();
 
-    assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+    assert_eq!(
+        fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
+        0
+    );
 }
 
 #[test]
@@ -575,7 +579,7 @@ fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
     let data = vec![1.0; source.space().required_len().unwrap()];
     let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
 
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     provider
@@ -592,7 +596,7 @@ fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
         "{error:?}"
     );
     assert!(provider.call_count(CheckedPlanCall::R) > 0);
-    let failed = crate::tree_transform::take_coefficient_group_activity();
+    let failed = crate::probe::take_coefficient_group_activity();
     assert!(failed.misses > 0);
     assert_eq!((failed.hits, failed.publications), (0, 0));
 
@@ -602,7 +606,7 @@ fn checked_generic_commit_failure_publishes_no_composed_coefficients() {
     context
         .tree_transform_owned_checked_generic_in(&source, None, &data, &operation, 1.0)
         .unwrap();
-    let committed = crate::tree_transform::take_coefficient_group_activity();
+    let committed = crate::probe::take_coefficient_group_activity();
     assert_eq!(
         (committed.hits, committed.misses, committed.publications),
         (0, failed.misses, failed.misses)

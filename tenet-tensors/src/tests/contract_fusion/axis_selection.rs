@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn forced_axis_order_candidates_have_identical_u1_result() {
@@ -273,7 +274,7 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     let rhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![3.0], space.clone()).unwrap();
     let mut dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0], space).unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]);
-    crate::contract::reset_source_layout_homspace_id_comparisons();
+    let source_layout_homspace_id_comparisons_rec = probe::record();
     let _pure_plan = fixture_contract_plan(
         &rule,
         dst.fusion_space().unwrap(),
@@ -283,26 +284,29 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     )
     .unwrap();
     // What: cold candidate scoring never enters the runtime HomSpace identity path.
-    assert_eq!(crate::contract::source_layout_homspace_id_comparisons(), 0);
+    assert_eq!(
+        source_layout_homspace_id_comparisons_rec.get(Event::SourceLayoutHomspaceIdComparison),
+        0
+    );
     tenet_core::clear_structure_caches();
-    crate::contract::reset_candidate_score_calls();
+    let candidate_score_calls_rec = probe::record();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
 
     context_contract_into(&mut context, &rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0).unwrap();
     // What: eager resolution scores four candidates and builds only the
     // reusable completed transformers, which it publishes.
-    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    assert_eq!(candidate_score_calls_rec.get(Event::CandidateScore), 4);
     // The canonical fixture may be shared with a sibling test that already
     // published one of these keys.
-    let cold = crate::tree_transform::take_completed_transformer_activity();
+    let cold = crate::probe::take_completed_transformer_activity();
     assert_eq!(cold.publications + cold.hits, 2, "{cold:?}");
 
     context_contract_into(&mut context, &rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0).unwrap();
     // What: an ordinary repeat resolves eagerly and hits the published
     // transformers instead of rebuilding them.
-    assert_eq!(crate::contract::candidate_score_calls(), 8);
-    let warm = crate::tree_transform::take_completed_transformer_activity();
+    assert_eq!(candidate_score_calls_rec.get(Event::CandidateScore), 8);
+    let warm = crate::probe::take_completed_transformer_activity();
     assert_eq!((warm.builds, warm.hits), (0, 2));
 }
 
@@ -445,10 +449,10 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         TestTensor::<f64>::from_vec_with_fusion_space(initial.clone(), dst_space.clone()).unwrap()
     };
 
-    crate::contract::reset_candidate_score_calls();
+    let candidate_score_calls_rec = probe::record();
     let mut one_shot_dst = fresh_dst();
     fusion_contract_into(&rule, &mut one_shot_dst, &lhs, &rhs, axes(), alpha, beta).unwrap();
-    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    assert_eq!(candidate_score_calls_rec.get(Event::CandidateScore), 4);
     assert_oracle(one_shot_dst.data());
 
     let provider = Arc::new(rule);

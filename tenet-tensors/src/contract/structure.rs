@@ -395,22 +395,6 @@ pub(super) struct TensorContractAxisPlan {
     pub(super) rhs_conjugate: bool,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Every axis-plan compile on this thread, at any call site.
-    static TENSOR_CONTRACT_AXIS_PLAN_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) fn reset_tensor_contract_axis_plan_compiles() {
-    TENSOR_CONTRACT_AXIS_PLAN_COMPILES.set(0);
-}
-
-#[cfg(test)]
-pub(super) fn tensor_contract_axis_plan_compiles() -> usize {
-    TENSOR_CONTRACT_AXIS_PLAN_COMPILES.get()
-}
-
 impl TensorContractAxisPlan {
     pub(super) fn compile(
         lhs_rank: usize,
@@ -419,7 +403,7 @@ impl TensorContractAxisPlan {
         axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         #[cfg(test)]
-        TENSOR_CONTRACT_AXIS_PLAN_COMPILES.set(TENSOR_CONTRACT_AXIS_PLAN_COMPILES.get() + 1);
+        crate::probe::hit(crate::probe::Event::ContractAxisPlanCompile);
         Self::compile_unobserved(lhs_rank, rhs_rank, dst_rank, axes)
     }
 

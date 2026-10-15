@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
@@ -45,7 +46,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
         braiding_style: None,
     };
     let mut first = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     let run = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>| {
         let mut dst = TestTensor::<f64>::from_vec_with_structure(
             vec![1.0, 2.0],
@@ -70,7 +71,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
     // entry owns it), so its keys are lookup-only: every call builds, the
     // same context included, nothing is published, and the result is the
     // same each time (#2014-3 publishability rule).
-    let activity = crate::tree_transform::take_completed_transformer_activity();
+    let activity = crate::probe::take_completed_transformer_activity();
     assert_eq!(
         (activity.hits, activity.builds, activity.publications),
         (0, 3, 0)
@@ -85,7 +86,6 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
 
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
@@ -130,13 +130,19 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     let group_count = src.structure().fusion_tree_groups().len();
     let mut planning = crate::tree_transform::TreeTransformPlanning::default();
 
-    reset_tree_pair_lowering_calls();
+    let tree_pair_lowering_calls_rec = probe::record();
     let direct =
         uncached_tree_pair_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
-    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (group_count, 0)
+    );
 
-    reset_tree_pair_lowering_calls();
-    crate::tree_transform::take_coefficient_group_activity();
+    let tree_pair_lowering_calls_rec = probe::record();
+    crate::probe::take_coefficient_group_activity();
     let miss = planning
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -148,11 +154,17 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
         .unwrap();
     // One lowering per group the composed-coefficient cache missed (a
     // sibling test may already have published some of these groups).
-    let groups = crate::tree_transform::take_coefficient_group_activity();
+    let groups = crate::probe::take_coefficient_group_activity();
     assert_eq!(groups.hits + groups.misses, group_count);
-    assert_eq!(tree_pair_lowering_calls(), (groups.misses, 0));
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (groups.misses, 0)
+    );
 
-    reset_tree_pair_lowering_calls();
+    let tree_pair_lowering_calls_rec = probe::record();
     let rebuilt = planning
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -165,8 +177,14 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     // The packed fixture is an expert layout, so the second resolution
     // rebuilds its transformer (lookup-only key), but every group's
     // coefficients come from the composed-coefficient cache: no lowering.
-    assert_eq!(tree_pair_lowering_calls(), (0, 0));
-    let groups = crate::tree_transform::take_coefficient_group_activity();
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (0, 0)
+    );
+    let groups = crate::probe::take_coefficient_group_activity();
     assert_eq!((groups.hits, groups.misses), (group_count, 0));
     let hit = rebuilt;
     assert!(direct.has_pack_gemm_scatter_blocks());

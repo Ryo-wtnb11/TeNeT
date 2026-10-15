@@ -146,23 +146,6 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericPlanErr
     }
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_multiplicity_free_capability_validations() {
-    MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn multiplicity_free_capability_validations() -> usize {
-    MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS.get()
-}
-
 pub(crate) fn validate_multiplicity_free_tree_transform_capability<R>(
     rule: &R,
     operation: &TreeTransformOperation,
@@ -171,8 +154,7 @@ where
     R: FusionRule,
 {
     #[cfg(test)]
-    MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS
-        .set(MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS.get() + 1);
+    crate::probe::hit(crate::probe::Event::MultiplicityFreeCapabilityValidation);
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
             operation: Box::new(operation.clone()),
@@ -2112,40 +2094,6 @@ where
     })
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static ORDERED_TREE_PAIR_LOWERING_CALLS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-    static LEGACY_TREE_PAIR_ASSEMBLY_CALLS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-    static TREE_PAIR_OPERATION_PREPARATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_tree_pair_lowering_calls() {
-    ORDERED_TREE_PAIR_LOWERING_CALLS.set(0);
-    LEGACY_TREE_PAIR_ASSEMBLY_CALLS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn tree_pair_lowering_calls() -> (usize, usize) {
-    (
-        ORDERED_TREE_PAIR_LOWERING_CALLS.get(),
-        LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get(),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn reset_tree_pair_operation_preparations() {
-    TREE_PAIR_OPERATION_PREPARATIONS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn tree_pair_operation_preparations() -> usize {
-    TREE_PAIR_OPERATION_PREPARATIONS.get()
-}
-
 fn assemble_ordered_tree_pair_group_specs<T>(
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
@@ -2156,7 +2104,7 @@ where
     T: Clone + Zero,
 {
     #[cfg(test)]
-    ORDERED_TREE_PAIR_LOWERING_CALLS.set(ORDERED_TREE_PAIR_LOWERING_CALLS.get() + 1);
+    crate::probe::hit(crate::probe::Event::OrderedTreePairLowering);
 
     let mut src_keys = Vec::with_capacity(group.block_indices().len());
     for &src_block_index in group.block_indices() {
@@ -2622,7 +2570,7 @@ where
     F: FnMut(usize, &FusionTreePairKey) -> Result<Arc<Vec<(FusionTreePairKey, T)>>, E>,
 {
     #[cfg(test)]
-    LEGACY_TREE_PAIR_ASSEMBLY_CALLS.set(LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get() + 1);
+    crate::probe::hit(crate::probe::Event::LegacyTreePairAssembly);
 
     let src_block_indices = group.block_indices();
     let mut src_keys = Vec::<FusionTreePairKey>::with_capacity(src_block_indices.len());
@@ -2848,7 +2796,7 @@ where
     R: FusionRule,
 {
     #[cfg(test)]
-    TREE_PAIR_OPERATION_PREPARATIONS.set(TREE_PAIR_OPERATION_PREPARATIONS.get() + 1);
+    crate::probe::hit(crate::probe::Event::TreePairOperationPreparation);
     let prepared = match operation.kind() {
         TreeTransformOperationKind::Permute => match operation.raw_axis_positions() {
             Some(raw_axis_positions) => {

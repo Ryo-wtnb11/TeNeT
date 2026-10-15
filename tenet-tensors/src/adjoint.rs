@@ -17,8 +17,8 @@ use tenet_core::{
 
 #[cfg(test)]
 use crate::contract::{
-    checked_layout_primer, checked_metadata_dispatcher, encoded_layout_primer,
-    reset_scratch_structure_builds, scratch_structure_builds, MetadataOutput, MetadataRequest,
+    checked_layout_primer, checked_metadata_dispatcher, encoded_layout_primer, MetadataOutput,
+    MetadataRequest,
 };
 use crate::contract::{
     dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
@@ -590,6 +590,7 @@ mod generic_toy_fusion;
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    use crate::probe::{self, Event};
     use num_complex::Complex64;
     use std::cell::Cell;
     use std::ops::{Add, Mul};
@@ -1298,7 +1299,7 @@ mod cache_tests {
         for actual in [expected - 1, expected + 1] {
             LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
             OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-            reset_scratch_structure_builds();
+            let scratch_structure_builds_rec = probe::record();
             let data = vec![OutputObservedValue(1.0); actual];
 
             let error = adjoint_bound_dyn(&source, &data).unwrap_err();
@@ -1309,7 +1310,10 @@ mod cache_tests {
             );
             assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 0);
             assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
-            assert_eq!(scratch_structure_builds(), 0);
+            assert_eq!(
+                scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+                0
+            );
         }
     }
 
@@ -1498,7 +1502,7 @@ mod cache_tests {
         .try_bind_rule(&rule)
         .unwrap();
         let source = layout;
-        reset_scratch_structure_builds();
+        let scratch_structure_builds_rec = probe::record();
 
         let error = adjoint_space_dyn_with_primer(
             &rule,
@@ -1508,6 +1512,9 @@ mod cache_tests {
         .unwrap_err();
 
         assert!(matches!(error, OperationError::MissingBlockKey { .. }));
-        assert_eq!(scratch_structure_builds(), 0);
+        assert_eq!(
+            scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+            0
+        );
     }
 }

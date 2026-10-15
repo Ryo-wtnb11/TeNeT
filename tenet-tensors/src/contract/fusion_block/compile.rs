@@ -394,7 +394,7 @@ impl FusionBlockMatrixLayout {
         source: &FusionOperandLayout<'_>,
     ) -> Result<Self, OperationError> {
         #[cfg(test)]
-        FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
+        crate::probe::hit(crate::probe::Event::FusionLayoutCompile);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
         let storage = source.storage_space();
@@ -443,7 +443,7 @@ impl FusionBlockMatrixLayout {
         nout: usize,
     ) -> Result<Self, OperationError> {
         #[cfg(test)]
-        FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
+        crate::probe::hit(crate::probe::Event::FusionLayoutCompile);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
         for block_index in 0..structure.block_count() {
@@ -516,7 +516,7 @@ impl FusionBlockMatrixLayout {
         coupled: SectorId,
     ) -> Option<FusionBlockMatrixGroupBuilder> {
         #[cfg(test)]
-        record_fusion_group_lookup();
+        crate::probe::hit(crate::probe::Event::FusionLayoutLookup);
         self.group_indices
             .get(&coupled)
             .and_then(|&group_index| self.groups.get_mut(group_index))
@@ -620,19 +620,6 @@ fn adopt_tree_offsets(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static FUSION_LAYOUT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(super) static FUSION_LAYOUT_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn record_fusion_group_lookup() {
-    FUSION_LAYOUT_LOOKUPS.with(|lookups| {
-        lookups.set(lookups.get() + 1);
-    });
 }
 
 #[derive(Clone, Debug)]

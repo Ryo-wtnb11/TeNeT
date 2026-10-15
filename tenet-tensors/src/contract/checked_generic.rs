@@ -1389,7 +1389,7 @@ mod tests {
         let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-        crate::tree_transform::take_completed_transformer_activity();
+        crate::probe::take_completed_transformer_activity();
         let (output, data) = context
             .tensorcontract_checked_generic_in(
                 direct_side(&lhs, &lhs_data),
@@ -1406,7 +1406,7 @@ mod tests {
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.count(Query::F) > 0);
         assert!(left.count(Query::R) > 0);
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!((transformers.builds, transformers.publications), (1, 1));
         assert_eq!(data.len(), output.space().required_len().unwrap());
     }
@@ -1483,7 +1483,7 @@ mod tests {
                 left.reset();
                 right.reset();
                 left.fail.set(Some(query));
-                crate::tree_transform::take_completed_transformer_activity();
+                crate::probe::take_completed_transformer_activity();
                 match contract((&lhs, &lhs_data), (&rhs, &rhs_data), axes(), nout) {
                     Err(error) => {
                         failed += 1;
@@ -1504,7 +1504,7 @@ mod tests {
                 assert_eq!(right.algebra_calls(), 0, "{name} {query:?}");
                 assert_eq!(cache_entries(), (0, 0), "{name} {query:?}");
                 assert_eq!(coefficient_admissions(), 0, "{name} {query:?}");
-                let transformers = crate::tree_transform::take_completed_transformer_activity();
+                let transformers = crate::probe::take_completed_transformer_activity();
                 assert_eq!(transformers.publications, 0, "{name} {query:?}");
             }
             assert!(failed >= 1, "{name}: some query fails");
@@ -1547,7 +1547,7 @@ mod tests {
 
             // Cold failure: nothing resident afterwards.
             tenet_core::clear_structure_caches();
-            crate::tree_transform::take_completed_transformer_activity();
+            crate::probe::take_completed_transformer_activity();
             let mut context = failing_context(Some(0));
             let error = context
                 .tensorcontract_checked_generic_in(
@@ -1567,7 +1567,7 @@ mod tests {
             assert_eq!(last_route(&context), route, "{name}");
             assert_eq!(cache_entries(), (0, 0), "{name}");
             assert_eq!(coefficient_admissions(), 0, "{name}");
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            let transformers = crate::probe::take_completed_transformer_activity();
             assert_eq!(transformers.publications, 0, "{name}");
 
             // Warm failure on the last job, after a success sized the scratch.
@@ -1680,17 +1680,17 @@ mod tests {
         for _attempt in 0..2 {
             left.reset();
             right.reset();
-            crate::tree_transform::take_coefficient_group_activity();
+            crate::probe::take_coefficient_group_activity();
             let error = run(Some(0)).unwrap_err();
             assert!(matches!(
                 error,
                 CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
             ));
-            let groups = crate::tree_transform::take_coefficient_group_activity();
+            let groups = crate::probe::take_coefficient_group_activity();
             assert!(groups.misses > 0);
             assert_eq!((groups.hits, groups.publications), (0, 0));
             assert_eq!(coefficient_admissions(), 0);
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            let transformers = crate::probe::take_completed_transformer_activity();
             assert_eq!((transformers.builds, transformers.publications), (3, 0));
             assert_eq!(cache_entries(), (0, 0));
             assert!(left.count(Query::F) > 0 && left.count(Query::R) > 0);
@@ -1710,17 +1710,17 @@ mod tests {
         left.reset();
         let (first_space, first) = run(None).unwrap();
         assert!(coefficient_admissions() > 0);
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!((transformers.builds, transformers.publications), (3, 3));
         // The destination and the three intermediates span three HomSpaces.
         let committed = cache_entries();
         assert_eq!(committed, (3, 3));
         left.reset();
-        crate::tree_transform::take_coefficient_group_activity();
+        crate::probe::take_coefficient_group_activity();
         let (repeat_space, repeat) = run(None).unwrap();
-        let groups = crate::tree_transform::take_coefficient_group_activity();
+        let groups = crate::probe::take_coefficient_group_activity();
         assert_eq!((groups.hits, groups.misses, groups.publications), (0, 0, 0));
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!(
             (
                 transformers.hits,
@@ -1768,16 +1768,16 @@ mod tests {
             assert_eq!(last_route(&context), Route::DynamicTree);
             result
         };
-        crate::tree_transform::take_completed_transformer_activity();
+        crate::probe::take_completed_transformer_activity();
         let (cold_space, cold) = run();
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!((transformers.hits, transformers.builds), (0, 3));
         let committed = cache_entries();
         // Four committed spaces, three resident structures.
         assert_eq!(committed.0, 3);
         for _ in 0..3 {
             let (space, data) = run();
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            let transformers = crate::probe::take_completed_transformer_activity();
             assert_eq!(
                 (
                     transformers.hits,
@@ -2008,11 +2008,11 @@ mod tests {
                 );
                 let mut context =
                     TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-                crate::tree_transform::take_completed_transformer_activity();
+                crate::probe::take_completed_transformer_activity();
                 let (space, data) = context
                     .tensorcontract_checked_generic_in(lhs_side, rhs_side, entry_axes(axes()), nout)
                     .unwrap();
-                let activity = crate::tree_transform::take_completed_transformer_activity();
+                let activity = crate::probe::take_completed_transformer_activity();
                 transformers.push(activity.builds + activity.hits);
                 assert_eq!(last_route(&context), route, "{what}");
                 if route == Route::DynamicTree {
@@ -2100,7 +2100,7 @@ mod tests {
             };
             let resident = cache_entries();
             let admissions = coefficient_admissions();
-            crate::tree_transform::take_completed_transformer_activity();
+            crate::probe::take_completed_transformer_activity();
             let mut context = failing_context(Some(0));
             let error = run(&mut context).unwrap_err();
             assert!(
@@ -2113,15 +2113,15 @@ mod tests {
             assert_eq!(last_route(&context), route, "{name}");
             assert_eq!(cache_entries(), resident, "{name}");
             assert_eq!(coefficient_admissions(), admissions, "{name}");
-            let transformers = crate::tree_transform::take_completed_transformer_activity();
+            let transformers = crate::probe::take_completed_transformer_activity();
             assert_eq!(transformers.publications, 0, "{name}");
 
             context.contract_backend_mut().fail_at = None;
             let (_, reference) = run(&mut context).unwrap();
             let committed = cache_entries();
-            crate::tree_transform::take_completed_transformer_activity();
+            crate::probe::take_completed_transformer_activity();
             let (_, repeat) = run(&mut context).unwrap();
-            let warm = crate::tree_transform::take_completed_transformer_activity();
+            let warm = crate::probe::take_completed_transformer_activity();
             assert_eq!(warm.builds, 0, "{name}");
             assert_eq!(cache_entries(), committed, "{name}");
             assert_eq!(
@@ -2340,17 +2340,15 @@ mod tests {
         tenet_core::clear_structure_caches();
         let reference = run();
         tenet_core::clear_structure_caches();
-        crate::tree_transform::take_completed_transformer_activity();
-        crate::tree_transform::before_next_completed_publication(Box::new(
-            tenet_core::clear_structure_caches,
-        ));
+        crate::probe::take_completed_transformer_activity();
+        crate::probe::set_before_publish_hook(Box::new(tenet_core::clear_structure_caches));
         let straddled = run();
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!((transformers.builds, transformers.publications), (3, 3));
         assert_eq!(cache_entries().1, 0);
         assert_eq!(straddled, reference);
         let rebuilt = run();
-        let transformers = crate::tree_transform::take_completed_transformer_activity();
+        let transformers = crate::probe::take_completed_transformer_activity();
         assert_eq!((transformers.hits, transformers.builds), (0, 3));
         assert_eq!(rebuilt, reference);
     }

@@ -312,18 +312,6 @@ impl StorageContractResolution<f64> {
     }
 }
 
-#[cfg(test)]
-std::thread_local! {
-    /// This thread's zero-copy candidate walks: the preflight-count probe.
-    static CANDIDATE_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Zero-copy candidate walks on this thread so far.
-#[cfg(test)]
-pub(crate) fn candidate_walks() -> usize {
-    CANDIDATE_WALKS.get()
-}
-
 /// Runs `compile` on the TensorKit `contract!` candidates
 /// (`_contract_candidates`: pairs sorted by lhs or by rhs keys, times A·B or
 /// B·A) that need no source or output materialization, in TensorKit's tie
@@ -373,7 +361,7 @@ pub(crate) fn try_zero_copy_contract_candidates<'a, T, E>(
     ) -> Result<Option<T>, E>,
 ) -> Result<Option<T>, E> {
     #[cfg(test)]
-    CANDIDATE_WALKS.set(CANDIDATE_WALKS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CandidateWalk);
     let (lhs_axes, rhs_axes) = (axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let contracted = lhs_axes.len();
     let (lhs_rank, rhs_rank) = (lhs.storage_space().rank(), rhs.storage_space().rank());
@@ -1027,7 +1015,7 @@ mod tests {
         let lhs = space(single_sector_matrix_space(&*rule, zero, false, false));
         let rhs = space(single_sector_matrix_space(&*rule, zero, false, false));
         let dst = space(single_sector_matrix_space(&*rule, zero, false, false));
-        super::super::fusion_block::reset_core_contract_derivations();
+        let core_rec = crate::probe::record();
 
         let route = crate::try_compile_storage_contract_core_route::<HostEagerExecutor, _>(
             &dst,
@@ -1040,7 +1028,10 @@ mod tests {
         // What: the core rung's one candidate derives each geometry once.
         assert!(route.hit().is_some_and(|core| !core.is_dynamic_tree()));
         assert_eq!(
-            super::super::fusion_block::core_contract_derivations(),
+            (
+                core_rec.get(crate::probe::Event::ContractAxisPlanCompile),
+                core_rec.get(crate::probe::Event::CoreHomspaceDerivation),
+            ),
             (1, 1)
         );
     }
@@ -1053,10 +1044,8 @@ mod tests {
         };
         use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
-        use crate::contract::fusion_block::{
-            contract_compile_counts, reset_core_contract_derivations, ContractCompileCounts,
-        };
         use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
+        use crate::probe::{self, Event};
         use crate::{ContractDestinationInit, RuleIdentity, TensorContractFusionExecutionContext};
 
         type Space = BoundDynamicFusionMapSpace<U1FusionRule>;
@@ -1082,13 +1071,26 @@ mod tests {
             .unwrap()
         }
 
+        /// What one contraction compile did: core preflights, core
+        /// destination checks, and permuted or contracted HomSpaces built.
+        #[derive(Debug, Eq, PartialEq)]
+        struct ContractCompileCounts {
+            preflights: usize,
+            core_destination_checks: usize,
+            derived_homspace_builds: usize,
+        }
+
         /// Counts of the third of three identical calls.
         fn warm_counts(mut call: impl FnMut()) -> ContractCompileCounts {
             call();
             call();
-            reset_core_contract_derivations();
+            let rec = probe::record();
             call();
-            contract_compile_counts()
+            ContractCompileCounts {
+                preflights: rec.get(Event::CoreContractPreflight),
+                core_destination_checks: rec.get(Event::CoreHomspaceDerivation),
+                derived_homspace_builds: rec.get(Event::DerivedHomspaceBuild),
+            }
         }
 
         #[test]

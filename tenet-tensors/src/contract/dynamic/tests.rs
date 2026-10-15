@@ -1,5 +1,6 @@
 use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
+use crate::probe::{self, Event};
 use std::cell::Cell;
 use tenet_core::{
     FusionProductSpace, FusionRule, SU2FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
@@ -457,7 +458,7 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
     let source = layout;
     let source_structure = Arc::clone(source.structure());
 
-    reset_source_layout_homspace_id_comparisons();
+    let source_layout_homspace_id_comparisons_rec = probe::record();
     assert!(!source_is_borrowable_core_layout(
         &source,
         &source_structure,
@@ -465,9 +466,12 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
         &TreeTransformOperation::permute([1], [0]),
         false,
     ));
-    assert_eq!(source_layout_homspace_id_comparisons(), 0);
+    assert_eq!(
+        source_layout_homspace_id_comparisons_rec.get(Event::SourceLayoutHomspaceIdComparison),
+        0
+    );
 
-    reset_source_layout_homspace_id_comparisons();
+    let source_layout_homspace_id_comparisons_rec = probe::record();
     assert!(!source_is_borrowable_core_layout(
         &source,
         &source_structure,
@@ -475,9 +479,12 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
         &TreeTransformOperation::permute([0], [1]),
         true,
     ));
-    assert_eq!(source_layout_homspace_id_comparisons(), 0);
+    assert_eq!(
+        source_layout_homspace_id_comparisons_rec.get(Event::SourceLayoutHomspaceIdComparison),
+        0
+    );
 
-    reset_source_layout_homspace_id_comparisons();
+    let source_layout_homspace_id_comparisons_rec = probe::record();
     assert!(source_is_borrowable_core_layout(
         &source,
         &source_structure,
@@ -485,5 +492,8 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
         &TreeTransformOperation::permute([0], [1]),
         false,
     ));
-    assert_eq!(source_layout_homspace_id_comparisons(), 1);
+    assert_eq!(
+        source_layout_homspace_id_comparisons_rec.get(Event::SourceLayoutHomspaceIdComparison),
+        1
+    );
 }

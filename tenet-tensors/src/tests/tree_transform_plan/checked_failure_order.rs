@@ -306,7 +306,7 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
     assert_eq!(standalone_r, vec![[a, a, v], [a, a, a]]);
     let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     owner_activity();
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
     for _attempt in 0..2 {
         provider.r_calls.borrow_mut().clear();
         provider.f_calls.set(0);
@@ -319,7 +319,7 @@ fn checked_runtime_failure_order_is_stable_and_publishes_nothing() {
         assert_owner_untouched(owner_activity());
         // The failing group was looked up and missed both times: nothing was
         // staged for publication.
-        let groups = crate::tree_transform::take_coefficient_group_activity();
+        let groups = crate::probe::take_coefficient_group_activity();
         assert_eq!((groups.hits, groups.publications), (0, 0));
     }
 }

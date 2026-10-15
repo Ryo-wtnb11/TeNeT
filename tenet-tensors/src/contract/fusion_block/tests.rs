@@ -1,5 +1,5 @@
 use super::*;
-use std::cell::Cell;
+
 use tenet_core::Placement;
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind,
@@ -9,20 +9,8 @@ use tenet_core::{
 use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
 use tenet_operations::ReportsPlacement;
 
+use crate::probe::{self, Event};
 use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
-
-fn reset_layout_lookups() {
-    FUSION_LAYOUT_LOOKUPS.with(|lookups| lookups.set(0));
-    FUSION_LAYOUT_COMPILES.set(0);
-}
-
-fn layout_lookups() -> usize {
-    FUSION_LAYOUT_LOOKUPS.with(Cell::get)
-}
-
-fn layout_compiles() -> usize {
-    FUSION_LAYOUT_COMPILES.get()
-}
 
 /// Storage with no host-slice access: compiling the storage-direct path
 /// against this type proves the seam has no host contract.
@@ -202,7 +190,7 @@ where
     let rhs = make_space(vec![keys[0].clone()]);
     let dst = make_space(full_order);
 
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     let plan = compile_fusion_block_contract_plan(
         rule,
         &dst,
@@ -213,7 +201,7 @@ where
     .unwrap();
     // What: each destination group performs one LHS and one RHS lookup;
     // ordinary joins never build or query a prelowered block locator.
-    assert_eq!(layout_lookups(), 4);
+    assert_eq!(layout_rec.get(Event::FusionLayoutLookup), 4);
 
     let mut output = vec![11.0, 7.0];
     let mut dense = DenseTreeTransformOperations::default();
@@ -289,7 +277,7 @@ fn canonical_region_join_scales_missing_sector_without_layout_compile() {
     let rhs = space(inner(), outer(), vec![vec![1, 1]]);
     let dst = space(outer(), outer(), vec![vec![1, 1], vec![1, 1]]);
 
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     let plan = compile_fusion_block_contract_plan(
         &rule,
         &dst,
@@ -298,7 +286,7 @@ fn canonical_region_join_scales_missing_sector_without_layout_compile() {
         TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
-    assert_eq!(layout_compiles(), 0);
+    assert_eq!(layout_rec.get(Event::FusionLayoutCompile), 0);
 
     let mut output = vec![11.0, 7.0];
     let mut dense = DenseTreeTransformOperations::default();
@@ -442,12 +430,12 @@ fn generic_layout_keeps_interleaved_cartesian_vertex_order() {
     );
     assert!(!multiplicity.needs_clear);
 
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     assert!(layout.take_group(SectorId::new(1)).is_some());
     assert!(layout.take_group(SectorId::new(0)).is_some());
     assert!(layout.take_group(SectorId::new(9)).is_none());
     // What: finalized coupled-sector hits and misses use one indexed probe each.
-    assert_eq!(layout_lookups(), 3);
+    assert_eq!(layout_rec.get(Event::FusionLayoutLookup), 3);
 }
 
 #[test]
@@ -475,7 +463,7 @@ fn generic_multiplicity_grid_uses_canonical_region_gemm() {
     let rhs = space();
     let dst = space();
 
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     // The checked core rung of `lhs[2, 3] . rhs[0, 1]` (core form).
     let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops_generic(
         dst.structure(),
@@ -489,7 +477,7 @@ fn generic_multiplicity_grid_uses_canonical_region_gemm() {
     )
     .unwrap()
     .expect("the multiplicity grid is canonically aligned");
-    assert_eq!(layout_compiles(), 0);
+    assert_eq!(layout_rec.get(Event::FusionLayoutCompile), 0);
 
     let mut output = vec![0.0; 4];
     let mut dense = DenseTreeTransformOperations::default();
@@ -576,7 +564,7 @@ fn storage_direct_replay_matches_host_execute_raw() {
     let len = space.required_len().unwrap();
     let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
     let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     let plan = compile_fusion_block_contract_plan(
         &rule,
         &space.clone(),
@@ -586,7 +574,7 @@ fn storage_direct_replay_matches_host_execute_raw() {
     )
     .unwrap();
     // What: canonical tensor-owned regions bypass the per-tree layout compiler.
-    assert_eq!(layout_compiles(), 0);
+    assert_eq!(layout_rec.get(Event::FusionLayoutCompile), 0);
 
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TensorContractWorkspace::default();
@@ -1080,8 +1068,8 @@ fn adjoint_operand_without_canonical_regions_uses_exact_fallback() {
         std::sync::Arc::new(rule),
     )
     .unwrap();
-    super::super::dynamic_space::reset_fusion_operand_projection_prepares();
-    reset_layout_lookups();
+    let fusion_operand_projection_prepares_rec = probe::record();
+    let layout_rec = probe::record();
     let resolution = crate::plan_compose::<crate::HostEagerExecutor, _>(
         &dst,
         crate::FusionOperand::adjoint(&storage),
@@ -1095,10 +1083,10 @@ fn adjoint_operand_without_canonical_regions_uses_exact_fallback() {
     let (core, swapped) = resolution.direct_core().unwrap();
     assert!(!swapped && !core.is_fully_direct());
     assert_eq!(
-        super::super::dynamic_space::fusion_operand_projection_prepares(),
+        fusion_operand_projection_prepares_rec.get(Event::FusionOperandProjectionPrepare),
         2
     );
-    assert!(layout_compiles() > 0);
+    assert!(layout_rec.get(Event::FusionLayoutCompile) > 0);
 }
 
 #[test]
@@ -1427,10 +1415,10 @@ fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
     for (name, lhs, rhs) in &cases {
         let (lhs_data, rhs_data) = (values(lhs, 0.0), values(rhs, 0.5));
         let init = values(&dst, 2.0);
-        reset_layout_lookups();
+        let layout_rec = probe::record();
         let region = checked_core(dst.structure(), lhs.structure(), rhs.structure());
         // What: canonical staged structures never build per-subblock layouts.
-        assert_eq!(layout_compiles(), 0, "{name}");
+        assert_eq!(layout_rec.get(Event::FusionLayoutCompile), 0, "{name}");
         let general = compile_checked_generic_core_plan_general(
             dst.structure(),
             2,
@@ -1517,9 +1505,9 @@ fn checked_core_plan_uses_coupled_regions_bitwise_equal_to_general_builder() {
     }
     let rhs_data = values(rhs, 0.5);
     let init = values(&dst, 2.0);
-    reset_layout_lookups();
+    let layout_rec = probe::record();
     let fallback = checked_core(dst.structure(), &packed, rhs.structure());
-    assert!(layout_compiles() > 0);
+    assert!(layout_rec.get(Event::FusionLayoutCompile) > 0);
     let got = run_core_plan(
         &fallback,
         dst.structure(),

@@ -17,6 +17,8 @@ mod lowering;
 mod mode;
 mod oriented_elementwise;
 mod physical;
+#[cfg(test)]
+mod probe;
 mod tensortrace;
 #[cfg(test)]
 mod test_support;

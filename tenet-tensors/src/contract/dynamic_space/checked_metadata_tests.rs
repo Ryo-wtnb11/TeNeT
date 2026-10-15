@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 use crate::test_support::CACHE_TEST_LOCK;
 use std::cell::Cell;
 use tenet_core::{
@@ -126,8 +127,8 @@ where
 
     tenet_core::clear_structure_caches();
     tenet_core::clear_structure_caches();
-    reset_legacy_shape_path_builds();
-    reset_scratch_structure_builds();
+    let legacy_shape_path_builds_rec = probe::record();
+    let scratch_structure_builds_rec = probe::record();
     let expected_rule = provider.rule_identity();
     let actual = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::clone(&provider),
@@ -142,8 +143,14 @@ where
     );
     assert_eq!(layout_snapshot(actual.space()), expected_layout);
     assert_eq!(actual.space().required_len().unwrap(), expected_len);
-    assert_eq!(legacy_shape_path_builds(), 0);
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        legacy_shape_path_builds_rec.get(Event::LegacyShapePathBuild),
+        0
+    );
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -324,29 +331,41 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
         FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(vacuum, 3)], true)]),
     );
-    reset_legacy_shape_path_builds();
-    reset_scratch_structure_builds();
+    let legacy_shape_path_builds_rec = probe::record();
+    let scratch_structure_builds_rec = probe::record();
     let root = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::clone(&provider),
         root_homspace.clone(),
     )
     .unwrap();
     assert!(Arc::ptr_eq(root.provider_arc(), &provider));
-    assert_eq!(legacy_shape_path_builds(), 0);
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        legacy_shape_path_builds_rec.get(Event::LegacyShapePathBuild),
+        0
+    );
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 
     let derived_homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(vacuum, 5)], false)]),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    reset_legacy_shape_path_builds();
-    reset_scratch_structure_builds();
+    let legacy_shape_path_builds_rec = probe::record();
+    let scratch_structure_builds_rec = probe::record();
     let derived = root
         .derive_from_final_homspace(derived_homspace.clone())
         .unwrap();
     assert!(Arc::ptr_eq(derived.provider_arc(), &provider));
-    assert_eq!(legacy_shape_path_builds(), 0);
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        legacy_shape_path_builds_rec.get(Event::LegacyShapePathBuild),
+        0
+    );
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
     let encoded =
         DynamicFusionMapSpace::from_final_homspace(provider.as_ref(), derived_homspace).unwrap();
     assert_eq!(derived.space(), &encoded);
@@ -360,14 +379,20 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
 
     tenet_core::clear_structure_caches();
     tenet_core::clear_structure_caches();
-    reset_legacy_shape_path_builds();
-    reset_scratch_structure_builds();
+    let legacy_shape_path_builds_rec = probe::record();
+    let scratch_structure_builds_rec = probe::record();
     let shapes = shapes_from_tree_keys(provider.as_ref(), &root_homspace);
     let _expert =
         BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, root_homspace, shapes)
             .unwrap();
-    assert_eq!(legacy_shape_path_builds(), 1);
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        legacy_shape_path_builds_rec.get(Event::LegacyShapePathBuild),
+        1
+    );
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -382,13 +407,16 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
     tenet_core::clear_structure_caches();
     let rule = rule();
     reset_primer_calls();
-    reset_legacy_shape_path_builds();
+    let legacy_shape_path_builds_rec = probe::record();
 
     let lowered =
         DynamicFusionMapSpace::from_final_homspace_with_primer(&rule, homspace(), counting_primer)
             .unwrap();
     assert_eq!(primer_calls(), 1);
-    assert_eq!(legacy_shape_path_builds(), 0);
+    assert_eq!(
+        legacy_shape_path_builds_rec.get(Event::LegacyShapePathBuild),
+        0
+    );
 
     tenet_core::clear_structure_caches();
     tenet_core::clear_structure_caches();
@@ -402,7 +430,7 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
         FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
     );
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
     let error = DynamicFusionMapSpace::from_final_homspace_with_primer(
         &U1FusionRule,
         overflowing,
@@ -414,7 +442,10 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
     // Why not compare process-global cache totals: coverage runs unit
     // tests in parallel. These counters attribute publication to this
     // failing transaction only.
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -546,7 +577,7 @@ fn assert_lowered_root_failure<R>(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     tenet_core::clear_structure_caches();
     tenet_core::clear_structure_caches();
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         rule,
         homspace,
@@ -554,7 +585,10 @@ fn assert_lowered_root_failure<R>(
     )
     .unwrap_err();
     assert_eq!(error, OperationError::FusionAlgebra(Box::new(expected)));
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -642,7 +676,7 @@ fn lowered_builder_runs_before_homspace_intern() {
         ]),
         FusionProductSpace::new([]),
     );
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
     let error = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
         &U1FusionRule,
         overflow,
@@ -660,7 +694,10 @@ fn lowered_builder_runs_before_homspace_intern() {
             right: 1,
         }))
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -674,7 +711,7 @@ fn lowered_shape_validation_runs_before_homspace_intern() {
     tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
     let error = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
         &U1FusionRule,
         homspace,
@@ -692,7 +729,10 @@ fn lowered_shape_validation_runs_before_homspace_intern() {
             actual: 1,
         })
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -706,7 +746,7 @@ fn lowered_count_failure_builds_and_admits_no_scratch() {
     tenet_core::clear_structure_caches();
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
 
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::new(U1FusionRule),
@@ -722,7 +762,10 @@ fn lowered_count_failure_builds_and_admits_no_scratch() {
             actual: 0,
         })
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -977,7 +1020,7 @@ fn lowered_extent_overflow_precedes_identity_and_scratch_admission() {
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
         FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
     );
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
 
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::new(U1FusionRule),
@@ -990,7 +1033,10 @@ fn lowered_extent_overflow_precedes_identity_and_scratch_admission() {
         error,
         OperationError::Core(tenet_core::CoreError::ElementCountOverflow)
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -1009,7 +1055,7 @@ fn cached_layout_shape_failure_is_observationally_read_only() {
         .unwrap()
         .commit();
     assert!(homspace.existing_id().is_none());
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
 
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::new(U1FusionRule),
@@ -1025,7 +1071,10 @@ fn cached_layout_shape_failure_is_observationally_read_only() {
             actual: 1,
         })
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -1045,7 +1094,7 @@ fn existing_id_failure_builds_and_admits_no_scratch() {
         FusionProductSpace::new([]),
     );
     let _ = overflow.id();
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::new(U1FusionRule),
         overflow,
@@ -1059,7 +1108,10 @@ fn existing_id_failure_builds_and_admits_no_scratch() {
             right: 1,
         }))
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
@@ -1119,7 +1171,7 @@ fn admission_rejects_the_excluded_u1_id_without_publication() {
         FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
         FusionProductSpace::new([]),
     );
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
 
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::new(U1FusionRule),
@@ -1132,7 +1184,10 @@ fn admission_rejects_the_excluded_u1_id_without_publication() {
         error,
         OperationError::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector { sector: min }))
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -1159,7 +1214,7 @@ fn admission_rejects_a_product_containing_the_excluded_u1_id_without_publication
         FusionProductSpace::new([SectorLeg::new([(odd_min, 1)], false)]),
         FusionProductSpace::new([]),
     );
-    reset_scratch_structure_builds();
+    let scratch_structure_builds_rec = probe::record();
 
     let _ = &lhs;
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
@@ -1175,7 +1230,10 @@ fn admission_rejects_a_product_containing_the_excluded_u1_id_without_publication
             sector: excluded_u1,
         }))
     );
-    assert_eq!(scratch_structure_builds(), 0);
+    assert_eq!(
+        scratch_structure_builds_rec.get(Event::ScratchStructureBuild),
+        0
+    );
 }
 
 #[test]
