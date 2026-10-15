@@ -47,7 +47,6 @@ use super::*;
 ///     let _ = tensor.repartition(0);
 /// }
 /// ```
-#[cfg(feature = "cuda")]
 impl<R, D> TransformExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -158,7 +157,6 @@ where
 /// The dense device payload of an owned transform input. Device tensors hold
 /// no compact data — `to_cuda` densifies and every device kernel outputs
 /// dense — and a lazy adjoint is lowered onto its parent before staging.
-#[cfg(feature = "cuda")]
 fn cuda_transform_source<D: CudaPayload>(
     data: Option<&TypedData<D, CudaStorage<D>>>,
 ) -> Result<&CudaStorage<D>, Error> {
@@ -168,7 +166,6 @@ fn cuda_transform_source<D: CudaPayload>(
     }
 }
 
-#[cfg(feature = "cuda")]
 impl<R, D> TwistExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -228,7 +225,6 @@ where
 /// per block with that block's factor as the descriptor scale. A block whose
 /// factor is 1 still has to be moved — the output starts as zeros, where the
 /// Host started from a copy of the source. No provider is queried here.
-#[cfg(feature = "cuda")]
 pub(super) fn cuda_twist_regions<D: CudaPayload>(
     space: &DynamicFusionMapSpace,
     factor_of: &dyn Fn(&BlockKey) -> f64,

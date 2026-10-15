@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(feature = "cuda")]
 impl<R, D: CudaPayload> TensorMap<R, D> {
     /// Uploads host ownership of a device-capable payload to this tensor's
     /// Runtime CUDA context.
@@ -68,7 +67,6 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     }
 }
 
-#[cfg(feature = "cuda")]
 impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
     /// Downloads device ownership into one final dense host buffer.
     ///
@@ -111,7 +109,6 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
     }
 }
 
-#[cfg(feature = "cuda")]
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -163,7 +160,6 @@ where
     }
 }
 
-#[cfg(feature = "cuda")]
 impl<R, D> MaterializeExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -227,7 +223,6 @@ where
 /// blocks that read as zero. `materialize` takes the table for a complex
 /// payload (one gather and one `conj`); the elementwise kernels take the
 /// copies at every dtype and conjugate in the strided read itself (#1874).
-#[cfg(feature = "cuda")]
 pub(super) struct CudaAdjointLowering {
     /// (parent region, output region) per block, without `table`.
     pub(super) copies: Vec<(tenet_dense::CudaRegion, tenet_dense::CudaRegion)>,
@@ -236,7 +231,6 @@ pub(super) struct CudaAdjointLowering {
     pub(super) zeros: Vec<tenet_dense::CudaRegion>,
 }
 
-#[cfg(feature = "cuda")]
 pub(super) fn cuda_adjoint_lowering(
     map: &tenet_tensors::AdjointBlockMap<'_>,
     table: bool,
@@ -322,7 +316,6 @@ pub(super) fn cuda_adjoint_lowering(
     })
 }
 
-#[cfg(feature = "cuda")]
 /// Calls `visit(destination, source)` for every element of one block, first
 /// axis fastest; a `None` source (a block that reads as zero) visits `0`.
 fn for_each_block_element(

@@ -2,7 +2,6 @@ use super::*;
 
 /// The device trace kernel: the terms compiled on the Host, replayed on the
 /// device under one device lease, the placement checked under it first.
-#[cfg(feature = "cuda")]
 impl<R, D> TraceExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -84,7 +83,6 @@ where
 
 /// The dense device payload a trace reads. Device tensors hold no compact
 /// data, so the compact arm never answers on the device.
-#[cfg(feature = "cuda")]
 fn cuda_trace_source<R, D: CudaPayload>(
     source: &TensorMap<R, D, CudaStorage<D>>,
     compact: Option<D>,
@@ -98,13 +96,11 @@ fn cuda_trace_source<R, D: CudaPayload>(
 /// The device lease a prepared stack replay holds from its output upload
 /// through its replay. Nominally public only to name
 /// [`PreparedExec::MembersLease`]; it is not reachable outside the crate.
-#[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub struct CudaMembersLease<'r>(crate::runtime::CudaLease<'r>);
 
 /// The device prepared-batch kernels: the members' plan entries, lease,
 /// upload and replay of the one prepared plan body.
-#[cfg(feature = "cuda")]
 impl<R, D> PreparedExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -182,7 +178,6 @@ where
 /// the device. Every transform structure, core plan, borrow decision and the
 /// destination come from the one planner the Host uses, with the
 /// fully-direct-core capabilities of the device executor.
-#[cfg(feature = "cuda")]
 impl<R, D> ContractExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -289,7 +284,6 @@ where
 /// The dense device payload a contraction operand stores: its own, or a
 /// lazy adjoint's parent's. Device tensors hold no compact data — `to_cuda`
 /// densifies and every device kernel outputs dense.
-#[cfg(feature = "cuda")]
 fn cuda_contract_operand<R, D: CudaPayload>(
     t: &TensorMap<R, D, CudaStorage<D>>,
 ) -> Result<&CudaStorage<D>, Error> {
