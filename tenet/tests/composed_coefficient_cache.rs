@@ -5,8 +5,8 @@
 //! cache (its key holds the exact layout) but must not recompose any source
 //! group's recoupling coefficients, and the result must be bit-identical to
 //! a cold Runtime's. A sector change must still compose the new groups.
-//! Unique fusion is cached too, unlike TensorKit's `NoCache`: a U(1)/Z2
-//! degeneracy-only change must not rebuild its phases either.
+//! Unique fusion is `NoCache`, as in TensorKit: it never enters the cache,
+//! and its degeneracy-only rebuild must still equal a cold Runtime's.
 
 use std::sync::Arc;
 use tenet::cache::{StructureCacheInfo, StructureCacheKind};
@@ -122,7 +122,7 @@ macro_rules! check_rule {
 }
 
 #[test]
-fn u1_degeneracy_change_reuses_the_composed_coefficients() {
+fn u1_degeneracy_change_rebuilds_without_the_coefficient_cache() {
     let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
@@ -133,7 +133,7 @@ fn u1_degeneracy_change_reuses_the_composed_coefficients() {
     };
     check_rule!(
         "U(1)",
-        true,
+        false,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 3), (0, 2), (1, 1)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
@@ -162,7 +162,7 @@ fn su2_degeneracy_change_reuses_the_composed_coefficients() {
 }
 
 #[test]
-fn fermion_u1_degeneracy_change_reuses_the_composed_coefficients() {
+fn fermion_u1_degeneracy_change_rebuilds_without_the_coefficient_cache() {
     let _serial = serial();
     let leg = |sectors: &[(i32, usize)]| {
         let rule = ProductFusionRule::<FermionParityFusionRule, U1FusionRule>::new(
@@ -184,7 +184,7 @@ fn fermion_u1_degeneracy_change_reuses_the_composed_coefficients() {
     };
     check_rule!(
         "fZ2xU(1)",
-        true,
+        false,
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 1), (0, 3), (1, 2)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),

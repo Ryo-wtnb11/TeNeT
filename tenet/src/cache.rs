@@ -15,9 +15,9 @@
 //!   `treetransposer` / `treebraider`);
 //! - composed fusion-tree transformation coefficients per source fusion-tree
 //!   group, [`StructureCacheKind::TreeTransformCoefficients`] (TensorKit
-//!   `fsbraid` / `fstranspose`). Unlike TensorKit's `NoCache`, Unique
-//!   fusion (U(1), Z2, ...) is cached too: a degeneracy-only change then
-//!   rebuilds none of its destination tree keys. A trace keeps its
+//!   `fsbraid` / `fstranspose`). As TensorKit's `NoCache`, Unique fusion
+//!   (U(1), Z2, ...) never enters it: a degeneracy-only change recomputes
+//!   its one phase per block without allocating per block. A trace keeps its
 //!   multiplicity-free Simple or checked Generic group permutations here as
 //!   well (present entries only); Unique trace stays uncached, as in
 //!   TensorKit.

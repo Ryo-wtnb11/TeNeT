@@ -28,12 +28,9 @@
 //! trace stays uncached, as TensorKit's `NoCache`, since a trace hit saves
 //! no work over one phase per source.
 //!
-//! Deliberate deviation: Unique fusion is cached as well. TensorKit leaves it
-//! `NoCache` (one tree, one phase per group), but a Unique rebuild allocates
-//! every destination tree key, so the degeneracy-only churn of U(1)/Z2
-//! workloads would pay O(B) allocations per cache-3 miss where a hit pays
-//! O(1); the removed per-Runtime plan tier gave that reuse, and TeNeT keeps
-//! it. A Unique entry is one `Single` spec, a few hundred bytes.
+//! Unique fusion never enters this cache, as TensorKit's `NoCache`: its
+//! cache-3 miss recomputes one phase per block on a reused scratch and
+//! allocates nothing per block, so a hit would save no allocation.
 //!
 //! Rust deviations, each deliberate:
 //! - entries are byte-weighted under the per-kind budget of `tenet::cache`,

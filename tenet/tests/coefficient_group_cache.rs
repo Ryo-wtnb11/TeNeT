@@ -4,7 +4,7 @@
 //! then recompose only the source fusion-tree groups
 //! whose external sectors are new, as TensorKit's `fsbraid`/`fstranspose`
 //! caches do per `FusionTreeBlock`, and the result must equal a cold
-//! build's. Unique fusion uses the cache too (one tree per group).
+//! build's. Unique fusion never enters it (TensorKit's `NoCache`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -194,10 +194,11 @@ fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
     );
 }
 
-/// Unique fusion is cached per group as well (a deliberate deviation from
-/// TensorKit's `NoCache`): a degeneracy-only change hits every group.
+/// Unique fusion is `NoCache`, as TensorKit's `fsbraid`/`fstranspose`: a
+/// cold build and a degeneracy-only change, direct and adjoint, never look up
+/// or publish a group.
 #[test]
-fn unique_fusion_reuses_its_groups_across_a_degeneracy_change() {
+fn unique_fusion_never_touches_the_group_cache() {
     let _serial = serial();
     tenet::cache::clear();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -211,20 +212,17 @@ fn unique_fusion_reuses_its_groups_across_a_degeneracy_change() {
     let transform = |space: &GradedSpace<U1FusionRule>| {
         let t = tensor!(&runtime, space);
         let _ = t.permute(&[2, 0], &[3, 1]).unwrap();
+        let _ = t.transpose(&[1, 3], &[0, 2]).unwrap();
         let _ = t.adjoint().unwrap().permute(&[2, 0], &[3, 1]).unwrap();
     };
     transform(&leg(&[(-1, 2), (0, 1), (1, 2)]));
-    let cold = groups();
-    assert!(cold.misses() > 0 && cold.entries() > 0);
-    assert_eq!(cold.hits(), 0);
     transform(&leg(&[(-1, 3), (0, 2), (1, 1)]));
-    let warm = groups();
+    let after = groups();
     assert_eq!(
-        (warm.misses(), warm.entries()),
-        (cold.misses(), cold.entries()),
-        "a degeneracy-only change must compose no group"
+        (after.hits(), after.misses(), after.entries()),
+        (0, 0, 0),
+        "Unique fusion must not look up or publish a composed-coefficient group"
     );
-    assert!(warm.hits() > 0);
 }
 
 #[test]

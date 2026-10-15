@@ -55,6 +55,7 @@ use super::operation::TreeTransformOperation;
 use super::plan::{
     build_multiplicity_free_tree_pair_plan_after_capability_with_threads,
     build_oriented_tree_pair_transform_group_plan_capability_validated,
+    compile_unique_oriented_tree_pair_structure, compile_unique_tree_pair_structure,
     validate_multiplicity_free_tree_transform_capability,
     validate_tree_pair_namespace_before_cache,
 };
@@ -127,6 +128,20 @@ where
 {
     #[cfg(test)]
     ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
+    if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+        return compile_unique_oriented_tree_pair_structure(
+            rule,
+            operation,
+            dst_structure,
+            logical_keys,
+            storage_src_structure,
+            orientation,
+            basis_order,
+            logical_rank,
+            projection,
+            logical_to_storage_axis,
+        );
+    }
     // Why the logical keys key a group: the orientation maps each logical
     // tree pair to exactly one storage tree pair, the one the builder reads.
     let reuse = multiplicity_free_reuse(rule, TreeTransformScope::TreePair, operation, orientation);
@@ -711,10 +726,8 @@ where
     true
 }
 
-/// The composed-coefficient reuse of one multiplicity-free plan build. Every
-/// fusion style is cached: TeNeT keeps Unique fusion cached (unlike
-/// TensorKit's `NoCache`), so a degeneracy-only U(1)/Z2 change reuses its
-/// phases.
+/// The composed-coefficient reuse of one Simple multiplicity-free plan
+/// build. Unique fusion never builds one: it is `NoCache`, as in TensorKit.
 fn multiplicity_free_reuse<R, T>(
     rule: &R,
     scope: TreeTransformScope,
@@ -792,6 +805,15 @@ impl TreeTransformPlanning {
             dst_structure,
             src_structure,
             || {
+                if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+                    return compile_unique_tree_pair_structure(
+                        rule,
+                        operation,
+                        dst_structure,
+                        src_structure,
+                        storage_conjugate,
+                    );
+                }
                 let reuse = multiplicity_free_reuse(
                     rule,
                     TreeTransformScope::TreePair,

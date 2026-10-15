@@ -46,6 +46,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn unique_rigid_bend_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -123,6 +124,7 @@ where
     Ok(coefficient)
 }
 
+#[cfg(test)]
 fn unique_rigid_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -156,6 +158,8 @@ where
     ))
 }
 
+/// Key-form oracle of [`unique_rigid_cycle_in_place`].
+#[cfg(test)]
 pub(crate) fn unique_rigid_cycle_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -173,6 +177,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub(crate) fn unique_rigid_repartition_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -188,11 +193,134 @@ where
     Ok((scratch.materialize(), coefficient))
 }
 
+/// One bend of a cycle step, as [`unique_rigid_bend_tree_pair`] applies it:
+/// the projection gate, the bend, then every vertex label one.
+fn unique_rigid_cycle_bend_in_place<R>(
+    rule: &R,
+    scratch: &mut UniqueTreePairScratch,
+    bend: Bend,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    check_multiplicity_free_projection(rule, scratch)?;
+    let coefficient = unique_rigid_bend_in_place(rule, scratch, bend)?;
+    scratch.codomain.reset_multiplicity_free_vertices();
+    scratch.domain.reset_multiplicity_free_vertices();
+    Ok(coefficient)
+}
+
+/// [`unique_rigid_foldright_tree_pair`] on the scratch pair, in place, with
+/// the same steps and coefficient association: `multi_Fmove` of the codomain
+/// into the spare tree, then `multi_Fmove_inv` of the domain into it.
+fn unique_rigid_foldright_in_place<R>(
+    rule: &R,
+    scratch: &mut UniqueTreePairScratch,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let kernel = SimpleK(rule);
+    let UniqueTreePairScratch {
+        codomain,
+        domain,
+        spare,
+    } = scratch;
+    let site = FoldSite::new(codomain.uncoupled(), codomain.is_dual())?;
+    let (fold, dual_first) = kernel.fold_begin(&site)?;
+    let coupled = codomain.coupled();
+    // `UniqueK::tails`: the tail couples to the one channel of `ā ⊗ c`.
+    let recoupled = only_fusion_channel(rule, rule.dual(site.first), coupled)?;
+    spare.rebuild_unique_tree(
+        rule,
+        codomain.uncoupled()[1..].iter().copied(),
+        recoupled,
+        codomain.is_dual()[1..].iter().copied(),
+    )?;
+    let coeff1 = multiplicity_free_multi_associator_from_parts(
+        rule,
+        codomain.uncoupled(),
+        codomain.is_dual(),
+        &*codomain,
+        spare.uncoupled(),
+        spare.is_dual(),
+        &*spare,
+    )?
+    .ok_or(CoreError::MalformedFusionTree {
+        message: "unique multi_Fmove destination does not match the source tail",
+    })?;
+    let tail_coupled = spare.coupled();
+    let factors = kernel.fold_factors(&fold, tail_coupled, coupled)?;
+    std::mem::swap(codomain, spare);
+    // `UniqueK::lifts`: `ā` joins the domain, which couples to `tail_coupled`.
+    spare.rebuild_unique_tree(
+        rule,
+        std::iter::once(dual_first).chain(domain.uncoupled().iter().copied()),
+        tail_coupled,
+        std::iter::once(!site.first_is_dual).chain(domain.is_dual().iter().copied()),
+    )?;
+    let coeff2 = multiplicity_free_multi_associator_from_parts(
+        rule,
+        spare.uncoupled(),
+        spare.is_dual(),
+        &*spare,
+        domain.uncoupled(),
+        domain.is_dual(),
+        &*domain,
+    )?
+    .ok_or(CoreError::MalformedFusionTree {
+        message: "unique inverse multi_Fmove destination does not match the source tail",
+    })?
+    .conj();
+    std::mem::swap(domain, spare);
+    kernel.fold_coefficient(&fold, &factors, &coeff1, &coeff2)
+}
+
+/// One cyclic rotation of the scratch pair, in place: [`cycle`]'s step
+/// order and `first · second` coefficient, `foldleft` as `foldright`
+/// through the swapped pair, conjugated (`duality_manipulations.jl:401, 431`).
+pub(crate) fn unique_rigid_cycle_in_place<R>(
+    rule: &R,
+    scratch: &mut UniqueTreePairScratch,
+    direction: PreparedCycleDirection,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let foldleft = |scratch: &mut UniqueTreePairScratch| {
+        std::mem::swap(&mut scratch.codomain, &mut scratch.domain);
+        let coefficient = unique_rigid_foldright_in_place(rule, scratch);
+        std::mem::swap(&mut scratch.codomain, &mut scratch.domain);
+        coefficient.map(|coefficient| coefficient.conj())
+    };
+    match direction {
+        PreparedCycleDirection::Clockwise => {
+            if scratch.codomain.rank() == 0 {
+                let first = unique_rigid_cycle_bend_in_place(rule, scratch, Bend::Left)?;
+                Ok(first * unique_rigid_foldright_in_place(rule, scratch)?)
+            } else {
+                let first = unique_rigid_foldright_in_place(rule, scratch)?;
+                Ok(first * unique_rigid_cycle_bend_in_place(rule, scratch, Bend::Left)?)
+            }
+        }
+        PreparedCycleDirection::Anticlockwise => {
+            if scratch.domain.rank() == 0 {
+                let first = unique_rigid_cycle_bend_in_place(rule, scratch, Bend::Right)?;
+                Ok(first * foldleft(scratch)?)
+            } else {
+                let first = foldleft(scratch)?;
+                Ok(first * unique_rigid_cycle_bend_in_place(rule, scratch, Bend::Right)?)
+            }
+        }
+    }
+}
+
 /// TensorKit `repartition` (`duality_manipulations.jl:460-505`) of a Unique
 /// tree pair, in place: bend until the codomain has `target_codomain_rank`
 /// legs. The trees end with every vertex label one, as a materialized
 /// multiplicity-free frame writes them.
-pub(super) fn unique_rigid_repartition_in_place<R>(
+pub(crate) fn unique_rigid_repartition_in_place<R>(
     rule: &R,
     scratch: &mut UniqueTreePairScratch,
     target_codomain_rank: usize,

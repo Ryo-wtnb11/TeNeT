@@ -1105,6 +1105,32 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         R: MultiplicityFreeRigidSymbols,
         R::Scalar: Clone + Mul<Output = R::Scalar>,
     {
+        self.admit_unique_rigid_proven(&validated)?;
+        self.execute_unique_rigid_validated(validated, scratch)
+    }
+
+    /// [`Self::execute_unique_rigid_proven`] with the destination left in
+    /// `scratch`, as [`Self::execute_unique_rigid_into`] leaves it.
+    pub(crate) fn execute_unique_rigid_proven_into<R>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+        scratch: &mut UniqueTreePairScratch,
+    ) -> Result<R::Scalar, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+    {
+        self.admit_unique_rigid_proven(&validated)?;
+        self.execute_unique_rigid_validated_into(validated, scratch)
+    }
+
+    fn admit_unique_rigid_proven<R>(
+        &self,
+        validated: &ValidatedFusionTreePair<'_, R>,
+    ) -> Result<(), CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
         self.validate_source(validated.key)?;
         self.validate_rule_capabilities(validated.rule)?;
         if validated.rule.fusion_style() != FusionStyleKind::Unique {
@@ -1113,7 +1139,7 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                 actual: validated.rule.fusion_style(),
             });
         }
-        self.execute_unique_rigid_validated(validated, scratch)
+        Ok(())
     }
 
     /// Braid as TensorKit `braid((f₁, f₂), p, levels)` does
@@ -1168,8 +1194,8 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         Ok(coefficient * repartition_back)
     }
 
-    /// The key form: the identity keeps the source key, a transpose runs its
-    /// cycles on keys, and every other plan materializes the scratch result.
+    /// The key form: the identity keeps the source key, and every other plan
+    /// materializes the scratch result.
     fn execute_unique_rigid_validated<R>(
         &self,
         validated: ValidatedFusionTreePair<'_, R>,
@@ -1181,9 +1207,6 @@ impl<'operation> PreparedTreePairOperation<'operation> {
     {
         match &self.plan {
             PreparedTreePairPlan::Identity => Ok((validated.key.clone(), R::Scalar::one())),
-            PreparedTreePairPlan::Transpose { direction, count } => {
-                self.execute_unique_rigid_transpose(validated, *direction, *count)
-            }
             _ => {
                 let coefficient = self.execute_unique_rigid_validated_into(validated, scratch)?;
                 Ok((scratch.materialize(), coefficient))
@@ -1220,37 +1243,18 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     unique_tree_braid_borrowed_in_place(rule, codomain, spare, braid)
                 })
             }
-            // ponytail: a Unique transpose still replays its cycles on keys
-            // (fold surgery emits keys); no trace reaches it, and its compiled
-            // replay is cached (cache 3). Port the fold to scratch if a
-            // per-tree transpose path appears.
+            // TensorKit `fstranspose` (`duality_manipulations.jl:526-569`):
+            // repartition, then rotate; the running coefficient multiplies
+            // each whole cycle, as `run_cycle_terms` does on keys.
             PreparedTreePairPlan::Transpose { direction, count } => {
-                let (key, coefficient) =
-                    self.execute_unique_rigid_transpose(validated, *direction, *count)?;
-                scratch.load(&key);
+                let mut coefficient =
+                    unique_rigid_repartition_in_place(rule, scratch, self.target_codomain_rank)?;
+                for _ in 0..*count {
+                    coefficient =
+                        coefficient * unique_rigid_cycle_in_place(rule, scratch, *direction)?;
+                }
                 Ok(coefficient)
             }
         }
-    }
-
-    fn execute_unique_rigid_transpose<R>(
-        &self,
-        validated: ValidatedFusionTreePair<'_, R>,
-        direction: PreparedCycleDirection,
-        count: usize,
-    ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
-    where
-        R: MultiplicityFreeRigidSymbols,
-        R::Scalar: Clone + Mul<Output = R::Scalar>,
-    {
-        let rule = validated.rule;
-        let current = unique_rigid_repartition_tree_pair_unchecked(
-            rule,
-            validated.key,
-            self.target_codomain_rank,
-        )?;
-        run_cycle_terms(current, Some((direction, count)), |key, direction| {
-            unique_rigid_cycle_tree_pair(rule, key, direction)
-        })
     }
 }
