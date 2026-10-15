@@ -977,14 +977,8 @@ fn fusion_tree_block_structure_proof_indexes_only_its_bound_structure() {
     assert!(std::ptr::eq(proof.rule(), &U1FusionRule));
     assert!(std::ptr::eq(proof.structure(), &structure));
     let canonical = proof.fusion_tree_pair_key(0);
-    #[allow(deprecated)]
-    let legacy = proof.fusion_tree_block_key(0);
-    assert_eq!(canonical, legacy);
     assert_eq!(canonical.unwrap(), Some(&valid));
     let canonical_missing = proof.fusion_tree_pair_key(1);
-    #[allow(deprecated)]
-    let legacy_missing = proof.fusion_tree_block_key(1);
-    assert_eq!(canonical_missing, legacy_missing);
     assert_eq!(
         canonical_missing.unwrap_err(),
         CoreError::BlockIndexOutOfBounds { index: 1, count: 1 }

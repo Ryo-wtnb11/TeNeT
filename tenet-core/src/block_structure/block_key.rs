@@ -297,37 +297,6 @@ impl BlockKey {
         Self::Opaque(OpaqueBlockKey::from_words(words))
     }
 
-    /// Construct an opaque key from the numeric identities of sector values.
-    ///
-    /// This compatibility helper does not preserve categorical meaning.
-    #[deprecated(
-        since = "0.1.0",
-        note = "use BlockKey::opaque with numeric routing words"
-    )]
-    pub fn sectors<I>(sectors: I) -> Self
-    where
-        I: IntoIterator<Item = SectorId>,
-    {
-        Self::opaque(
-            sectors
-                .into_iter()
-                .map(|sector| supported_usize_to_u64(sector.id())),
-        )
-    }
-
-    /// Construct an opaque key from numeric values formerly interpreted as
-    /// sector identifiers.
-    #[deprecated(
-        since = "0.1.0",
-        note = "use BlockKey::opaque with numeric routing words"
-    )]
-    pub fn sector_ids<I>(sector_ids: I) -> Self
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        Self::opaque(sector_ids.into_iter().map(supported_usize_to_u64))
-    }
-
     /// Construct the conventional one-word opaque key for a block ordinal.
     pub fn ordinal(index: usize) -> Self {
         Self::Opaque(OpaqueBlockKey::ordinal(supported_usize_to_u64(index)))

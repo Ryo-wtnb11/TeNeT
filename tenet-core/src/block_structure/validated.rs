@@ -68,18 +68,6 @@ where
             }
         })
     }
-
-    #[doc(hidden)]
-    #[deprecated(
-        since = "0.1.0",
-        note = "renamed to fusion_tree_pair_key to match FusionTreePairKey"
-    )]
-    pub fn fusion_tree_block_key(
-        &self,
-        index: usize,
-    ) -> Result<Option<&'structure FusionTreePairKey>, CoreError> {
-        self.fusion_tree_pair_key(index)
-    }
 }
 
 #[doc(hidden)]
