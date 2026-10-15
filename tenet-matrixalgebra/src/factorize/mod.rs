@@ -145,8 +145,6 @@ pub use eig::{
 };
 #[cfg(test)]
 pub(crate) use eig::{eig_vals_dyn, eigh_vals_dyn};
-#[cfg(feature = "diagnostics")]
-pub use matricize::sector_matricization_diagnostic;
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
     EndomorphismFamily, EIGH_NOT_HERMITIAN, EIGH_NOT_SQUARE,

@@ -214,39 +214,6 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 }
 
-#[cfg(feature = "diagnostics")]
-#[doc(hidden)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SectorMatricizationDiagnostic {
-    pub sector: SectorId,
-    pub rows: usize,
-    pub cols: usize,
-    pub elements: usize,
-}
-
-#[cfg(feature = "diagnostics")]
-#[doc(hidden)]
-pub fn sector_matricization_diagnostic<R, D>(
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<Vec<SectorMatricizationDiagnostic>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let space = input.space().space();
-    Ok(
-        sector_matricizations(space.structure(), input.data(), space.nout())?
-            .into_iter()
-            .map(|matrix| SectorMatricizationDiagnostic {
-                sector: matrix.sector,
-                rows: matrix.rows,
-                cols: matrix.cols,
-                elements: matrix.data.len(),
-            })
-            .collect(),
-    )
-}
-
 pub(super) fn coupled_of(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
