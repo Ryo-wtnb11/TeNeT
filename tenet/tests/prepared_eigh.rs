@@ -6,6 +6,8 @@
 //! sectors and degeneracies above one. A batch fails as a whole and names
 //! every failing member.
 
+#[path = "../../tests/support/backend.rs"]
+mod backend;
 mod common;
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -132,17 +134,8 @@ where
             );
         }
         // On faer the values-only and full drivers agree bitwise.
-        #[cfg(all(
-            feature = "cpu-faer",
-            not(any(
-                feature = "cpu-blas",
-                feature = "blas-accelerate",
-                feature = "blas-openblas",
-                feature = "blas-mkl"
-            ))
-        ))]
         assert!(
-            output.spectra[member] == eager_spectra,
+            !backend::faer_is_default_backend() || output.spectra[member] == eager_spectra,
             "{what}: spectra bitwise"
         );
         check_member(&what, input, &d, &v, (&eager_d, &eager_v), f64::EPSILON);

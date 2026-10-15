@@ -9,15 +9,8 @@
 // The call budgets are measured on the faer provider; a BLAS provider owns
 // its own scratch allocations (grouped-GEMM metadata, QR/LQ workspaces), which
 // these gates do not model (#2107).
-#![cfg(all(
-    feature = "cpu-faer",
-    not(any(
-        feature = "cpu-blas",
-        feature = "blas-accelerate",
-        feature = "blas-openblas",
-        feature = "blas-mkl"
-    ))
-))]
+#[path = "../../tests/support/backend.rs"]
+mod backend;
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -49,6 +42,9 @@ fn allocations(f: impl FnOnce()) -> (usize, usize, std::time::Duration) {
 
 #[test]
 fn warm_host_calls_allocate_only_the_backend_grouped_validation() {
+    if !backend::faer_is_default_backend() {
+        return;
+    }
     // What: at a fixed B, a second `execute` and a second `execute_into`
     // (whose plan has inactive destination blocks to zero-fill) reuse the
     // workspace's output, job list and fill strides, and the Runtime's pooled

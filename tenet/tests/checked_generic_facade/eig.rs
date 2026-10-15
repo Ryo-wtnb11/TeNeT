@@ -1385,15 +1385,7 @@ fn eig_full_rejects_nonfinite_eigenvectors_of_finite_input_in_both_modes() {
             0.0
         }
     };
-    let faer_only = cfg!(all(
-        feature = "cpu-faer",
-        not(any(
-            feature = "cpu-blas",
-            feature = "blas-accelerate",
-            feature = "blas-openblas",
-            feature = "blas-mkl"
-        ))
-    ));
+    let faer_only = crate::backend::faer_is_default_backend();
     macro_rules! check {
         ($leg:expr, $dtype:ty, $from:expr) => {{
             let from: fn(f64) -> $dtype = $from;
