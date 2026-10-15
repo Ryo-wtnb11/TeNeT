@@ -99,16 +99,16 @@ struct PreparedBlockStructureCandidate {
 
 impl PreparedBlockStructure {
     fn from_blocks_with_rank(rank: usize, blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
-        let keys = blocks
-            .iter()
-            .map(|block| block.key().clone())
-            .collect::<Vec<_>>();
-        let degeneracy_blocks = blocks
-            .into_iter()
-            .map(|block| DegeneracyBlock::new(block.shape, block.strides, block.offset))
-            .collect::<Result<Vec<_>, _>>()?;
-        let sector = SectorStructure::from_keys(rank, keys)?;
-        let degeneracy = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
+        // Error order: each block's own layout, then the keys, then the rank.
+        for block in &blocks {
+            block.storage_end_exclusive()?;
+        }
+        let sector =
+            SectorStructure::from_keys(rank, blocks.iter().map(|block| block.key().clone()))?;
+        let mut degeneracy = DegeneracyStructure::with_block_capacity(rank, blocks.len());
+        for block in &blocks {
+            degeneracy.push_block(block.shape(), block.strides(), block.offset())?;
+        }
         Self::from_parts(sector, degeneracy)
     }
 

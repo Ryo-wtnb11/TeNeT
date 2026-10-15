@@ -110,8 +110,9 @@ impl DegeneracyStructure {
         I: IntoIterator,
         I::Item: Into<Vec<usize>>,
     {
+        let shapes = shapes.into_iter();
+        let mut structure = Self::with_block_capacity(rank, shapes.size_hint().0);
         let mut offset = 0usize;
-        let mut blocks = Vec::new();
         for shape in shapes {
             let shape = shape.into();
             if shape.len() != rank {
@@ -120,36 +121,85 @@ impl DegeneracyStructure {
                     actual: shape.len(),
                 });
             }
-            let block = DegeneracyBlock::column_major(shape, offset)?;
-            offset = block.storage_end_exclusive()?;
-            blocks.push(block);
+            offset = structure.push_block_with(|dims| {
+                dims.extend_from_slice(&shape);
+                extend_column_major_strides(&shape, dims)?;
+                Ok(offset)
+            })?;
         }
-        Self::from_blocks_with_rank(rank, blocks)
+        Ok(structure)
     }
 
     pub fn from_blocks_with_rank(
         rank: usize,
         blocks: Vec<DegeneracyBlock>,
     ) -> Result<Self, CoreError> {
-        let mut dims = Vec::with_capacity(blocks.len().saturating_mul(2 * rank));
-        let mut offsets = Vec::with_capacity(blocks.len());
+        let mut structure = Self::with_block_capacity(rank, blocks.len());
         for block in &blocks {
-            if block.shape().len() != rank {
-                return Err(CoreError::StructureRankMismatch {
-                    expected: rank,
-                    actual: block.shape().len(),
-                });
-            }
-            block.storage_end_exclusive()?;
-            dims.extend_from_slice(block.shape());
-            dims.extend_from_slice(block.strides());
-            offsets.push(block.offset());
+            structure.push_block(block.shape(), block.strides(), block.offset())?;
         }
-        Ok(Self {
+        Ok(structure)
+    }
+
+    /// An empty structure whose arenas hold exactly `blocks` blocks.
+    pub(crate) fn with_block_capacity(rank: usize, blocks: usize) -> Self {
+        Self {
             rank,
-            dims,
-            offsets,
+            dims: Vec::with_capacity(blocks.saturating_mul(2 * rank)),
+            offsets: Vec::with_capacity(blocks),
+        }
+    }
+
+    /// Appends one block, copying its shape and strides into the arena.
+    pub(crate) fn push_block(
+        &mut self,
+        shape: &[usize],
+        strides: &[usize],
+        offset: usize,
+    ) -> Result<usize, CoreError> {
+        if shape.len() != self.rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: self.rank,
+                actual: shape.len(),
+            });
+        }
+        if strides.len() != shape.len() {
+            return Err(CoreError::RankMismatch {
+                shape: shape.len(),
+                strides: strides.len(),
+            });
+        }
+        self.push_block_with(|dims| {
+            dims.extend_from_slice(shape);
+            dims.extend_from_slice(strides);
+            Ok(offset)
         })
+    }
+
+    /// Appends one block that `write` emits in place: it pushes the block's
+    /// shape then its strides onto the arena and returns the block's offset.
+    /// Returns the block's exclusive storage end.
+    ///
+    /// Why the builder writes into the arena rather than handing over a
+    /// [`DegeneracyBlock`]: that block owns two rank-sized `DimVec`s, which
+    /// spill to the heap per block above rank 8 (#2012).
+    pub(crate) fn push_block_with(
+        &mut self,
+        write: impl FnOnce(&mut Vec<usize>) -> Result<usize, CoreError>,
+    ) -> Result<usize, CoreError> {
+        let start = self.dims.len();
+        let offset = write(&mut self.dims)?;
+        let block = &self.dims[start..];
+        if block.len() != 2 * self.rank {
+            return Err(CoreError::RankMismatch {
+                shape: self.rank,
+                strides: block.len().saturating_sub(self.rank),
+            });
+        }
+        let (shape, strides) = block.split_at(self.rank);
+        let end = storage_end_exclusive(shape, strides, offset)?;
+        self.offsets.push(offset);
+        Ok(end)
     }
 
     pub(super) fn empty(rank: usize) -> Self {
