@@ -27,9 +27,9 @@ mod leases;
 mod tests;
 
 #[cfg(feature = "cuda")]
-pub(crate) use self::cuda::*;
-#[cfg(feature = "cuda")]
 pub use self::cuda::CudaTreeTransformStats;
+#[cfg(feature = "cuda")]
+pub(crate) use self::cuda::*;
 pub(crate) use self::lanes::*;
 pub use self::lanes::{Ctx, Ctxs};
 pub(crate) use self::leases::*;
