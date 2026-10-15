@@ -704,6 +704,7 @@ where
 /// (`treetransformers.jl:10-12`): each source block moves on one reused
 /// scratch, its destination is found by view, and the spec stores block
 /// indices, so the compile allocates nothing per block at any rank.
+/// `scratch` is the execution context's, reused across compiles.
 ///
 /// Specs follow the source groups, as the cached builder emitted them.
 pub(crate) fn compile_unique_tree_pair_structure<R>(
@@ -712,6 +713,7 @@ pub(crate) fn compile_unique_tree_pair_structure<R>(
     dst_structure: &Arc<BlockStructure>,
     src_structure: &Arc<BlockStructure>,
     storage_conjugate: bool,
+    scratch: &mut UniqueTreePairScratch,
 ) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -727,7 +729,7 @@ where
     let source_axes = operation_source_axes(operation);
     let mut primary_prepared = None;
     let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
-    let mut scratch = UniqueTreePairScratch::with_rank(src_structure.rank());
+    scratch.reserve_rank(src_structure.rank());
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for group in src_structure.fusion_tree_group_slice() {
         for &index in group.block_indices() {
@@ -745,11 +747,11 @@ where
                 tree_pair_split(src_key),
             )?;
             let coefficient = source_proof
-                .execute_unique_rigid_for_block_index_into(index, prepared, &mut scratch)
+                .execute_unique_rigid_for_block_index_into(index, prepared, scratch)
                 .map_err(OperationError::from_core_preserving_context)?;
             specs.push(
                 TreeTransformBlockSpec::single(
-                    unique_destination_block(dst_structure, &scratch)?,
+                    unique_destination_block(dst_structure, scratch)?,
                     index,
                     coefficient,
                 )
@@ -786,6 +788,7 @@ pub(crate) fn compile_unique_oriented_tree_pair_structure<R, FAxis>(
     logical_rank: usize,
     storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
     logical_to_storage_axis: FAxis,
+    scratch: &mut UniqueTreePairScratch,
 ) -> Result<tenet_operations::TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -801,7 +804,7 @@ where
         .collect::<Result<Arc<[usize]>, _>>()?;
     let mut primary_prepared = None;
     let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
-    let mut scratch = UniqueTreePairScratch::with_rank(logical_rank);
+    scratch.reserve_rank(logical_rank);
     let mut specs = Vec::with_capacity(logical_keys.len());
     let mut push = |storage_index: usize| -> Result<(), OperationError> {
         let BlockKey::FusionTree(storage_key) = storage_structure.block(storage_index)?.key()
@@ -827,11 +830,11 @@ where
             tree_pair_split(&source),
         )?;
         let coefficient = prepared
-            .execute_unique_rigid_into(rule, &source, &mut scratch)
+            .execute_unique_rigid_into(rule, &source, scratch)
             .map_err(OperationError::from_core_preserving_context)?;
         specs.push(
             TreeTransformBlockSpec::single(
-                unique_destination_block(dst_structure, &scratch)?,
+                unique_destination_block(dst_structure, scratch)?,
                 storage_index,
                 coefficient,
             )

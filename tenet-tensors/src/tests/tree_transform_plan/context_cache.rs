@@ -128,7 +128,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(direct_operation, miss_operation);
     assert_eq!(miss_operation, hit_operation);
     let group_count = src.structure().fusion_tree_groups().len();
-    let planning = crate::tree_transform::TreeTransformPlanning::default();
+    let mut planning = crate::tree_transform::TreeTransformPlanning::default();
 
     reset_tree_pair_lowering_calls();
     let direct =

@@ -306,7 +306,7 @@ fn warm_structure_aliases_are_rejected_before_owner_lookup() {
     );
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([valid_structure.as_ref(), invalid_structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     cache
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -345,7 +345,7 @@ fn warm_structure_aliases_are_rejected_before_owner_lookup() {
     assert_invalid_simple_vertex(error);
     assert_owner_untouched(owner_activity());
 
-    let independent = crate::tree_transform::TreeTransformPlanning::default();
+    let mut independent = crate::tree_transform::TreeTransformPlanning::default();
     let error = independent
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -378,7 +378,7 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
 
     let cold = cache
         .resolve_tree_pair(&rule, &operation, &structure, &structure, false)
@@ -421,7 +421,7 @@ fn completed_structure_miss_and_hit_validate_capability_once() {
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     mark_canonical([structure.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
 
     reset_multiplicity_free_capability_validations();
     cache
@@ -625,7 +625,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
             |axis| Ok(storage_axes[axis]),
         )
         .unwrap();
-    let oriented_cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut oriented_cache = crate::tree_transform::TreeTransformPlanning::default();
     let oriented = oriented_cache
         .resolve_tree_pair_oriented(
             &SU2FusionRule,
@@ -1040,7 +1040,7 @@ fn prelowered_compile_does_not_enter_the_completed_transformer_cache() {
     let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let first_a = cache
@@ -1109,7 +1109,7 @@ fn failed_structure_compile_publishes_nothing() {
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
     mark_canonical([structure.as_ref(), wrong_destination.as_ref()]);
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     cache
@@ -1209,7 +1209,7 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
     // retained completed-structure state change under either execution policy.
     for _ in 0..2 {
         let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-        let cache = crate::tree_transform::TreeTransformPlanning::default();
+        let mut cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
         owner_activity();
 
@@ -1242,7 +1242,7 @@ fn malformed_source_precedes_noncategorical_destination_without_cache_mutation()
     let dst_structure = packed_fixture_structure(2, [(BlockKey::opaque([9]), vec![1, 1])]).unwrap();
     let dst =
         TestTensor::<f64>::from_vec_with_structure(vec![0.0], vec![1, 1], dst_structure).unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let error = cache
@@ -1278,7 +1278,7 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
     let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     reset_tree_pair_operation_preparations();
@@ -1321,7 +1321,7 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
             TestTensor::<f64>::from_vec_with_structure(vec![0.0], space.clone(), structure.clone())
                 .unwrap();
         let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
-        let cache = crate::tree_transform::TreeTransformPlanning::default();
+        let mut cache = crate::tree_transform::TreeTransformPlanning::default();
         owner_activity();
 
         let error = cache
@@ -1389,7 +1389,7 @@ fn invalid_unique_source_does_not_count_eager_compile_misses() {
     let dst = TestTensor::<f64>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
         .unwrap();
     let src = TestTensor::<f64>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
     let error = cache
@@ -1634,7 +1634,7 @@ fn every_tree_transform_entry_reports_the_operation_fusion_style_error() {
         operation: Box::new(operation.clone()),
         style,
     };
-    let cache = crate::tree_transform::TreeTransformPlanning::default();
+    let mut cache = crate::tree_transform::TreeTransformPlanning::default();
 
     // What: each tensors-layer tree-transform entry rejects a style it
     // cannot lower with the operation-carrying tensors variant, never the

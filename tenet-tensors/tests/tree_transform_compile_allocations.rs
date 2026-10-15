@@ -752,3 +752,65 @@ impl<T: Copy> GatheredCoefficients<T> for tenet_tensors::TreeTransformStructure<
         coefficients
     }
 }
+
+/// U(1) on six `q ∈ {0, 1}` legs split three and three, every block of
+/// degeneracy one.
+fn rank_six_u1_layout() -> BoundDynamicFusionMapSpace<U1FusionRule> {
+    let leg = || {
+        SectorLeg::new(
+            [0, 1].map(|charge| (U1Irrep::new(charge).sector_id(), 1)),
+            false,
+        )
+    };
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..3).map(|_| leg())),
+        FusionProductSpace::new((0..3).map(|_| leg())),
+    );
+    let count = hom.fusion_tree_keys(&U1FusionRule).len();
+    BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        Arc::new(U1FusionRule),
+        hom,
+        (0..count).map(|_| vec![1usize; 6]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn unique_cache_three_misses_reuse_the_context_tree_pair_scratch() {
+    let _serial = counting_alloc::serial();
+    // What: the Unique compile's tree-pair scratch (three trees of three
+    // buffers) belongs to the execution context, so only a context's first
+    // cache-3 miss allocates it, for the direct and the lazy-adjoint compile.
+    const SCRATCH_BUFFERS: u64 = 9;
+    let parent = rank_six_u1_layout();
+    let adjoint = tenet_tensors::adjoint_bound_space_dyn(&parent).unwrap();
+    let parent_len = parent.space().required_len().unwrap();
+    let operation = TreeTransformOperation::permute([5, 4, 3], [2, 1, 0]);
+    let miss = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>, lazy: bool| {
+        tenet_core::clear_structure_caches();
+        let (logical, adjoint_of) = if lazy {
+            (&adjoint, Some(&parent))
+        } else {
+            (&parent, None)
+        };
+        counting_alloc::start();
+        let staged = context
+            .stage_tree_transform_multiplicity_free_in(logical, adjoint_of, parent_len, &operation)
+            .unwrap();
+        let allocs = counting_alloc::stop();
+        std::hint::black_box(staged);
+        allocs.calls
+    };
+    for lazy in [false, true] {
+        // Why a throwaway context first: the first miss in the process also
+        // grows the cleared caches' tables, which `clear` keeps.
+        miss(&mut TreeTransformExecutionContext::default(), lazy);
+        let mut context = TreeTransformExecutionContext::default();
+        let first = miss(&mut context, lazy);
+        let second = miss(&mut context, lazy);
+        let third = miss(&mut context, lazy);
+        eprintln!("lazy={lazy}: misses {first}, {second}, {third}");
+        assert_eq!(first, second + SCRATCH_BUFFERS, "lazy={lazy}");
+        assert_eq!(second, third, "lazy={lazy}");
+    }
+}

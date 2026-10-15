@@ -75,6 +75,16 @@ impl UniqueTreePairScratch {
         }
     }
 
+    /// Grow every tree to [`Self::with_rank`]'s widths for `rank`, keeping
+    /// wider buffers: a caller-owned scratch reused across compiles allocates
+    /// only when a compile is wider than every earlier one.
+    pub fn reserve_rank(&mut self, rank: usize) {
+        let widths = tree_widths(rank);
+        for tree in [&mut self.codomain, &mut self.domain, &mut self.spare] {
+            tree.reserve_widths(widths);
+        }
+    }
+
     /// The pair the last execution left, as a key holding it would compare.
     pub fn pair_view(&self) -> FusionTreePairRef<'_> {
         FusionTreePairRef::new(self.codomain.view(), self.domain.view())
