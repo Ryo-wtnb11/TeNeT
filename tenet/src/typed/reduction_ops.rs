@@ -262,15 +262,7 @@ where
     pub fn inner<'a>(&self, other: impl Into<TensorRef<'a, R, D, S>>) -> Result<D, FacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch.into());
-        }
-        if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            })
-            .into());
-        }
+        super::linear_ops::require_same_runtime_and_space(self, other)?;
         if let (Some(lhs), Some(rhs)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if let Some(value) = lhs.compact_inner_arms(rhs)? {
                 return Ok(value);

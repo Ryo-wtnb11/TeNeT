@@ -267,8 +267,8 @@ use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
-pub use crate::tensor_core::CheckedGenericTensorProductError;
-use crate::tensor_core::{
+pub use crate::tensor_product::CheckedGenericTensorProductError;
+use crate::tensor_product::{
     internal_layout_error, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free,
 };
@@ -293,7 +293,6 @@ pub use serialization::{
     DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,
 };
 
-// --- split leaf #1587: generated module wiring below ---
 mod scalar;
 #[doc(hidden)]
 pub use linear_ops::ElementwiseExec;
@@ -346,7 +345,7 @@ pub use dispatch::{
     TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorFlipDispatch,
     TypedTensorModeDispatch, TypedTensorProductDispatch, TypedTensorRootDispatch,
     TypedTensorTraceDispatch, TypedTensorTransformDispatch, TypedTensorTwistDispatch,
-    TypedTruncationDispatch,
+    TypedTensorUnitDispatch, TypedTruncationDispatch,
 };
 use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 mod factorize;
@@ -422,11 +421,10 @@ pub use storage::TypedStorage;
 mod cuda_storage;
 mod transform_ops;
 mod twist_flip;
-pub use transform_ops::TypedTensorUnitDispatch;
 use transform_ops::{
-    checked_generic_exec_error, lazy_adjoint_of_transformed_parent, map_spectrum_dtype,
-    scale_by_beta, transform_source_len, with_transform_into_source, CheckedGenericTreeLane,
-    HostTreeLane, MultiplicityFreeTreeLane,
+    checked_generic_exec_error, generic_insert_unit, generic_remove_unit,
+    lazy_adjoint_of_transformed_parent, map_spectrum_dtype, scale_by_beta, transform_source_len,
+    with_transform_into_source, CheckedGenericTreeLane, HostTreeLane, MultiplicityFreeTreeLane,
 };
 #[doc(hidden)]
 pub use transform_ops::{TransformExec, TransformExecError, TransformIntoSource, TreeReplay};

@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(feature = "cuda")]
 /// Device transfer, arithmetic, reductions, and contraction over a
 /// [`CudaStorage`] payload.
 ///

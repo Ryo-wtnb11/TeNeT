@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(feature = "cuda")]
 /// Device compact SVD (`svd_compact`) and Hermitian eigendecomposition
 /// (`eigh_full`) over either device payload (`f64` or `Complex64`).
 ///
@@ -598,7 +597,6 @@ where
     }
 }
 
-#[cfg(feature = "cuda")]
 /// Device compact QR, every device factorization payload (`f64`, `f32`,
 /// `Complex64`, `Complex32`).
 ///
@@ -728,7 +726,6 @@ where
     }
 }
 
-#[cfg(feature = "cuda")]
 impl<R, D> FactorExec<R, D> for CudaStorage<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,

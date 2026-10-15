@@ -9,15 +9,8 @@
 // The call budgets are measured on the faer provider; a BLAS provider owns
 // its own scratch allocations (grouped-GEMM metadata, QR/LQ workspaces), which
 // these gates do not model (#2107).
-#![cfg(all(
-    feature = "cpu-faer",
-    not(any(
-        feature = "cpu-blas",
-        feature = "blas-accelerate",
-        feature = "blas-openblas",
-        feature = "blas-mkl"
-    ))
-))]
+#[path = "../../tests/support/backend.rs"]
+mod backend;
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -160,6 +153,9 @@ macro_rules! assert_excess_is_metadata {
 
 #[test]
 fn multiplicity_free_lazy_adjoint_factorizations_add_no_payload_allocation() {
+    if !backend::faer_is_default_backend() {
+        return;
+    }
     let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SU2FusionRule);
@@ -177,6 +173,9 @@ fn multiplicity_free_lazy_adjoint_factorizations_add_no_payload_allocation() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_lazy_adjoint_factorizations_add_no_payload_allocation() {
+    if !backend::faer_is_default_backend() {
+        return;
+    }
     use tenet::sector::SUNFusionRule;
 
     let _measurement = counting_alloc::serial();

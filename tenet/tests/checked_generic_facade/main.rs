@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/backend.rs"]
+mod backend;
 #[path = "../common/mod.rs"]
 mod common;
 #[path = "../../../tests/support/numerics.rs"]

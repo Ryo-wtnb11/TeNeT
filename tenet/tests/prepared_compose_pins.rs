@@ -20,15 +20,8 @@
 //!
 //! One test, so the process-wide caches warm in one fixed order.
 
-#![cfg(all(
-    feature = "cpu-faer",
-    not(any(
-        feature = "cpu-blas",
-        feature = "blas-accelerate",
-        feature = "blas-openblas",
-        feature = "blas-mkl"
-    ))
-))]
+#[path = "../../tests/support/backend.rs"]
+mod backend;
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -248,6 +241,9 @@ fn error_matrix() -> Vec<(&'static str, String)> {
 
 #[test]
 fn host_compose_plan_values_bytes_allocations_and_errors_are_pinned() {
+    if !backend::faer_is_default_backend() {
+        return;
+    }
     let _ = (Complex32::new(0.0, 0.0), Complex64::new(0.0, 0.0));
     let mut rows = Vec::new();
     record::<_, f64>("U1", u1_legs(), &mut rows);

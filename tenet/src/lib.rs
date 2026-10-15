@@ -79,13 +79,18 @@
 #![doc = include_str!("tutorial.md")]
 
 pub mod cache;
+// Compiles the repository README quickstart as a doctest (never part of the
+// shipped API; the README sits outside the package directory).
+#[cfg(doctest)]
+#[doc = include_str!("../../README.md")]
+struct ReadmeDoctests;
 #[cfg(test)]
 mod cache_concurrency_tests;
 mod error;
 pub mod expert;
 mod runtime;
 pub mod sector;
-mod tensor_core;
+mod tensor_product;
 #[cfg(test)]
 mod test_cache;
 pub mod typed;

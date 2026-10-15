@@ -1,13 +1,11 @@
 use super::*;
 
-#[cfg(feature = "cuda")]
 pub(crate) fn dense_err(err: tenet_dense::DenseError) -> Error {
     Error::from(tenet_tensors::OperationError::Dense(err))
 }
 
 /// Uploads a small host-built selector matrix (`rows x cols`, column-major,
 /// zero except `entries`) used by the assembly GEMMs.
-#[cfg(feature = "cuda")]
 pub(crate) fn upload_selector<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     rows: usize,
@@ -24,7 +22,6 @@ pub(crate) fn upload_selector<D: CudaPayload>(
     Ok(selector)
 }
 
-#[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn cuda_qr_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -39,7 +36,6 @@ pub(crate) fn cuda_qr_region<D: CudaPayload>(
     Ok(factors)
 }
 
-#[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn cuda_svd_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -65,7 +61,6 @@ pub(crate) fn cuda_svd_region<D: CudaPayload>(
     Ok(factors)
 }
 
-#[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn cuda_hermitian_regions<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -79,7 +74,6 @@ pub(crate) fn cuda_hermitian_regions<D: CudaPayload>(
 /// The Host finite-input stage of the eager factorizations (#1986) on a
 /// device payload: one device scan and one scalar D2H, so a nonfinite input
 /// is refused with the Host error before any output or solver call.
-#[cfg(feature = "cuda")]
 pub(crate) fn require_finite_cuda_input<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
@@ -92,7 +86,6 @@ pub(crate) fn require_finite_cuda_input<D: CudaPayload>(
     }
 }
 
-#[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn typed_cuda_eigh_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -104,7 +97,6 @@ pub(crate) fn typed_cuda_eigh_region<D: CudaPayload>(
 }
 
 /// Downloads the device spectra of one factorization call with one transfer.
-#[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn cuda_download_spectra<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -117,7 +109,6 @@ pub(crate) fn cuda_download_spectra<D: CudaPayload>(
 /// sector region of a left factor (`codomain <- bond`), one GEMM per
 /// codomain tree so correctness never relies on tree enumeration order
 /// matching between the source and factor spaces.
-#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_left_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -175,7 +166,6 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
 /// unit entry. Why not Tenferro `gather`: at 0.7.1 it reads owned index
 /// tensors only, so one index upload per call would need a device slice copy
 /// per route to feed it.
-#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_aligned_left_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -216,7 +206,6 @@ pub(crate) fn assemble_aligned_left_factor<D: CudaPayload>(
 /// Writes `kept x factor_cols` slices of `selector * factor` into the target
 /// sector region of a right factor (`bond <- domain`), one GEMM per domain
 /// tree.
-#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_right_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
@@ -269,7 +258,6 @@ pub(crate) fn assemble_right_factor<D: CudaPayload>(
 /// tree sequence equals the source's (same trees, extents and offsets), so the
 /// region is exactly the compact factor and the identity-selector GEMM reduces
 /// to one device copy. The per-tree GEMM stays the general assembly path.
-#[cfg(feature = "cuda")]
 pub(crate) fn copy_whole_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage<D>,
@@ -303,7 +291,6 @@ pub(crate) fn copy_whole_factor<D: CudaPayload>(
 /// Copies every column of a full `source.rows() x cols` device factor into a
 /// left-factor region, one strided copy per codomain tree: the per-tree
 /// assembly of [`assemble_left_factor`] when its selector is the identity.
-#[cfg(feature = "cuda")]
 pub(crate) fn copy_left_factor_treewise<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage<D>,
@@ -346,7 +333,6 @@ pub(crate) fn copy_left_factor_treewise<D: CudaPayload>(
 
 /// Fills the diagonal of a coupled-layout `W <- W` buffer from per-sector
 /// spectra, mirroring the host `diagonal_bond_tensor_dyn`.
-#[cfg(feature = "cuda")]
 pub(crate) fn fill_diagonal_values<D: CudaPayload>(
     structure: &BlockStructure,
     data: &mut [D],
@@ -375,14 +361,12 @@ pub(crate) fn fill_diagonal_values<D: CudaPayload>(
 
 /// The plan's nonzero-rank routes with their `(left, right)` factor regions:
 /// a zero-rank sector has nothing to decompose or publish.
-#[cfg(feature = "cuda")]
 pub(super) fn executed_routes(
     plan: &CompactFactorPlan,
 ) -> impl Iterator<Item = (&CompactFactorRoute, usize, usize)> {
     plan.executed_routes()
 }
 
-#[cfg(feature = "cuda")]
 pub(super) struct TypedCudaQrScratch<D: CudaPayload> {
     pub(super) left: CudaDenseStorage,
     pub(super) right: CudaDenseStorage,
@@ -390,7 +374,6 @@ pub(super) struct TypedCudaQrScratch<D: CudaPayload> {
     pub(super) selector: Option<CudaStorage<D>>,
 }
 
-#[cfg(feature = "cuda")]
 impl<D: CudaPayload> TypedCudaQrScratch<D> {
     pub(super) fn new(
         left: CudaDenseStorage,
@@ -414,7 +397,6 @@ impl<D: CudaPayload> Drop for TypedCudaQrScratch<D> {
     }
 }
 
-#[cfg(feature = "cuda")]
 pub(super) struct TypedCudaSvdScratch<D: CudaPayload> {
     pub(super) left: CudaDenseStorage,
     pub(super) right: CudaDenseStorage,
@@ -424,7 +406,6 @@ pub(super) struct TypedCudaSvdScratch<D: CudaPayload> {
     payload: std::marker::PhantomData<D>,
 }
 
-#[cfg(feature = "cuda")]
 impl<D: CudaPayload> TypedCudaSvdScratch<D> {
     pub(super) fn new(
         left: CudaDenseStorage,
@@ -462,7 +443,6 @@ impl<D: CudaPayload> Drop for TypedCudaSvdScratch<D> {
 /// Validates the compact SVD diagonal factor against its routes and returns
 /// each executed route's diagonal start: the packed `rank x rank` region's
 /// offset, whose diagonal then has element stride `rank + 1`.
-#[cfg(feature = "cuda")]
 pub(super) fn validate_cuda_svd_middle_regions(
     plan: &CompactFactorPlan,
     middle_regions: &[CoupledSectorRegion],
@@ -503,7 +483,6 @@ pub(super) fn validate_cuda_svd_middle_regions(
     Ok(diagonals)
 }
 
-#[cfg(feature = "cuda")]
 pub(super) fn validate_cuda_reduction_placement(
     expected: Placement,
     lhs: Placement,
@@ -515,7 +494,6 @@ pub(super) fn validate_cuda_reduction_placement(
     Ok(())
 }
 
-#[cfg(feature = "cuda")]
 pub(super) fn download_cuda_reduction_partials<D: CudaPayload>(
     partials: &CudaStorage<D>,
     cuda: &CudaDenseContext,

@@ -20,6 +20,9 @@
 //! The `eig_full` exact rows (direct and lazy adjoint) were re-recorded when
 //! eigenvector columns became unit 2-norm (#2073): structure unchanged.
 
+#[path = "../../tests/support/backend.rs"]
+mod backend;
+
 use num_complex::Complex64;
 use std::sync::Arc;
 use tenet::sector::{
@@ -206,17 +209,8 @@ fn check(label: &str, actual: &[(u64, u64)], structure: &[u64; 20], exact: &[u64
     for ((name, actual), expected) in NAMES.iter().zip(actual).zip(structure) {
         assert_eq!(actual.0, *expected, "{label} {name} structure");
     }
-    if cfg!(all(
-        target_os = "macos",
-        target_arch = "aarch64",
-        feature = "cpu-faer",
-        not(any(
-            feature = "cpu-blas",
-            feature = "blas-accelerate",
-            feature = "blas-openblas",
-            feature = "blas-mkl"
-        ))
-    )) {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) && backend::faer_is_default_backend()
+    {
         for ((name, actual), expected) in NAMES.iter().zip(actual).zip(exact) {
             assert_eq!(actual.1, *expected, "{label} {name} exact");
         }

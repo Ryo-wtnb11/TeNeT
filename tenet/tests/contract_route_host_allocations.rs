@@ -8,15 +8,8 @@
 // The call budgets are measured on the faer provider; a BLAS provider owns
 // its own scratch allocations (grouped-GEMM metadata, QR/LQ workspaces), which
 // these gates do not model (#2107).
-#![cfg(all(
-    feature = "cpu-faer",
-    not(any(
-        feature = "cpu-blas",
-        feature = "blas-accelerate",
-        feature = "blas-openblas",
-        feature = "blas-mkl"
-    ))
-))]
+#[path = "../../tests/support/backend.rs"]
+mod backend;
 
 use std::sync::Arc;
 
@@ -123,6 +116,9 @@ const BASE: [(&str, Row); 2] = [
 
 #[test]
 fn core_and_copy_c_route_allocation_calls_are_bounded_by_base() {
+    if !backend::faer_is_default_backend() {
+        return;
+    }
     let _serial = counting_alloc::serial();
     let rows = [("core", row(&[0, 1])), ("copyC", row(&[1, 0]))];
     for ((name, row), (base_name, base)) in rows.iter().zip(BASE) {
