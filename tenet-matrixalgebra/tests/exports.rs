@@ -224,7 +224,6 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              BoundDynamicTensorRef CheckedGenericFactorPlanError CompactFactorPlan CompactFactorRoute EigFullDyn EighFullDyn EighScratch \
              EIGH_EIGENVALUE_CHECK EIGH_NOT_HERMITIAN EIGH_NOT_SQUARE EndomorphismFamily ExecutorLease FactorMode FactorOutput FactorSpaceAuthority FactorSource \
              SvdFactorsDyn \
-             sector_matricization_diagnostic \
              exp_direct_into_dyn inv_direct_into_dyn \
              pinv_adjoint_parent_direct_into_dyn pinv_direct_into_dyn \
              solve_left_direct_into_dyn rescaled_power_norm"

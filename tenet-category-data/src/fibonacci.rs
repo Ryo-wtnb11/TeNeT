@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use smallvec::SmallVec;
 use tenet_sectors::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
@@ -217,7 +216,7 @@ impl CheckedFusionAlgebra for CategoryDataFibonacci {
             .table
             .channels(left.id(), right.id())
             .map(SectorId::new)
-            .collect::<SmallVec<_>>())
+            .collect::<SectorVec>())
     }
 
     fn try_nsymbol(

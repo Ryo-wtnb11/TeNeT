@@ -41,8 +41,6 @@ pub use truncation::{
 /// firewall test (`tests/exports.rs`) pins the exact list.
 #[doc(hidden)]
 pub mod seam {
-    #[cfg(feature = "diagnostics")]
-    pub use crate::factorize::sector_matricization_diagnostic;
     pub use crate::factorize::{
         admit_compact_diagonal, ascending_eigh_order, axpby_axis_by_spectrum_into,
         compact_factor_routes, coupled_sector_block_dimensions_generic_checked,
