@@ -3,7 +3,7 @@
 //! hits and misses, key splits, presence and the per-pair oracle.
 
 use super::*;
-use crate::tree_transform::{take_trace_column_activity, CoefficientGroupActivity};
+use crate::probe::{take_trace_column_activity, CoefficientGroupActivity};
 use tenet_core::{
     clear_structure_caches, structure_cache_info, FermionParityFusionRule, StructureCacheKind,
 };
@@ -472,7 +472,7 @@ fn trace_and_transform_of_one_permutation_do_not_share_entries() {
     }
     clear_structure_caches();
     take_trace_column_activity();
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
     let open = TensorTraceAxisSpec::new(&[1, 3], &[0], &[2]);
     // The trace permutes `[1, 0] ← [3, 2]`; on `V² ← V²` its output space is
     // the source space.
@@ -501,13 +501,13 @@ fn trace_and_transform_of_one_permutation_do_not_share_entries() {
     let su2 = MfTrace::new(Arc::new(SU2FusionRule), su2_hom(), open, 1);
     let groups = su2.groups();
     let before = transform(41);
-    let transform_cold = crate::tree_transform::take_coefficient_group_activity();
+    let transform_cold = crate::probe::take_coefficient_group_activity();
     assert_eq!(transform_cold.misses, groups);
     let cold = su2.compile(open);
     assert_eq!(take_trace_column_activity(), activity(0, groups, groups));
     let after = transform(43);
     assert_eq!(
-        crate::tree_transform::take_coefficient_group_activity(),
+        crate::probe::take_coefficient_group_activity(),
         activity(groups, 0, 0)
     );
     let warm = su2.compile(open);

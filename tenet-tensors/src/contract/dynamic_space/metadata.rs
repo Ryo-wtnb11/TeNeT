@@ -5,7 +5,6 @@ use tenet_core::{
     FusionTreePairKey, MultiplicityFreeFusionRule, PreparedFusionTreeLayout, SectorLeg,
 };
 
-use super::observe_derived_homspace_build;
 use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
@@ -156,7 +155,8 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
-        observe_derived_homspace_build();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::DerivedHomspaceBuild);
         match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Permute {
@@ -179,7 +179,8 @@ where
         output_axes: &[usize],
         dst_codomain_rank: usize,
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
-        observe_derived_homspace_build();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::DerivedHomspaceBuild);
         match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Contract {

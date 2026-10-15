@@ -130,7 +130,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             );
         }
     }
-    let activity = crate::tree_transform::take_completed_transformer_activity();
+    let activity = crate::probe::take_completed_transformer_activity();
     assert!(activity.builds + activity.hits >= 3);
 }
 
@@ -210,7 +210,7 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
             );
         }
     }
-    let activity = crate::tree_transform::take_completed_transformer_activity();
+    let activity = crate::probe::take_completed_transformer_activity();
     assert!(activity.builds + activity.hits > 0);
 }
 

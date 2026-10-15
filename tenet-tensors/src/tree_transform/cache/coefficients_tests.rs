@@ -10,10 +10,9 @@ use tenet_core::{
     FusionTreePairOrientation, RuleIdentity, SU2FusionRule, SU2Irrep, SectorLeg,
 };
 
-use super::super::{
-    take_coefficient_group_activity, TransformerMode, TreeTransformPlanning, TreeTransformScope,
-};
+use super::super::{TransformerMode, TreeTransformPlanning, TreeTransformScope};
 use super::*;
+use crate::probe::take_coefficient_group_activity;
 use crate::{BoundDynamicFusionMapSpace, TreeTransformGroupBlockSpec, TreeTransformOperation};
 
 /// A rule identity no other test publishes under.

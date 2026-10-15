@@ -116,60 +116,6 @@ impl<'a> OrientedTraceSource<'a> {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static TRACE_TRANSFORM_SOURCES: std::cell::RefCell<Vec<usize>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-    static TRACE_COMPILER_GEOMETRY_DERIVATIONS: std::cell::Cell<(usize, usize)> = const {
-        std::cell::Cell::new((0, 0))
-    };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_trace_transform_invocations() {
-    TRACE_TRANSFORM_SOURCES.with_borrow_mut(Vec::clear);
-}
-
-#[cfg(test)]
-pub(crate) fn take_trace_transform_invocations() -> usize {
-    take_trace_transform_sources().len()
-}
-
-#[cfg(test)]
-pub(crate) fn take_trace_transform_sources() -> Vec<usize> {
-    TRACE_TRANSFORM_SOURCES.take()
-}
-
-#[cfg(test)]
-pub(crate) fn take_trace_compiler_geometry_derivations() -> (usize, usize) {
-    TRACE_COMPILER_GEOMETRY_DERIVATIONS.replace((0, 0))
-}
-
-#[inline]
-fn record_trace_transform_invocation(_src_block_index: usize) {
-    #[cfg(test)]
-    TRACE_TRANSFORM_SOURCES.with_borrow_mut(|sources| sources.push(_src_block_index));
-}
-
-#[inline]
-fn record_trace_axis_plan_derivation() {
-    #[cfg(test)]
-    TRACE_COMPILER_GEOMETRY_DERIVATIONS.with(|counts| {
-        let (axis_plans, selected_homspaces) = counts.get();
-        counts.set((axis_plans.saturating_add(1), selected_homspaces));
-    });
-}
-
-#[inline]
-fn record_trace_selected_homspace_derivation() {
-    #[cfg(test)]
-    TRACE_COMPILER_GEOMETRY_DERIVATIONS.with(|counts| {
-        let (axis_plans, selected_homspaces) = counts.get();
-        counts.set((axis_plans, selected_homspaces.saturating_add(1)));
-    });
-}
-
 /// A compiled fusion-aware trace whose valid terms retain global source order.
 ///
 /// Valid terms and their source accumulation follow global source-block order.
@@ -799,7 +745,8 @@ impl TensorTraceAxisPlan {
         dst_rank: usize,
         axes: TensorTraceAxisSpec<'_>,
     ) -> Result<Self, OperationError> {
-        record_trace_axis_plan_derivation();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::TraceAxisPlanDerivation);
         if axes.trace_lhs_axes().len() != axes.trace_rhs_axes().len() {
             return Err(OperationError::TraceAxisCountMismatch {
                 lhs: axes.trace_lhs_axes().len(),
@@ -1700,7 +1647,7 @@ where
         }) => (selected_homspace, Some(trace_pairs_match)),
         #[cfg(test)]
         TraceAdmission::Unchecked => {
-            record_trace_selected_homspace_derivation();
+            crate::probe::hit(crate::probe::Event::TraceSelectedHomspaceDerivation);
             (
                 src.select(
                     rule,
@@ -2092,12 +2039,9 @@ where
     let descriptor = structure.descriptor();
 
     #[cfg(test)]
-    TRACE_RAW_EXECUTION_HOOK.with(|hook| {
-        if let Some(hook) = hook.take() {
-            hook()?;
-        }
-        Ok::<_, OperationError>(())
-    })?;
+    if let Some(hook) = crate::probe::take_trace_raw_execution_hook() {
+        hook()?;
+    }
     if let Some(data) = try_tensortrace_owned_raw(
         dst_structure,
         dst_nout,
@@ -2391,12 +2335,4 @@ fn mark_axes(
 
 fn stride_to_isize(stride: usize) -> Result<isize, OperationError> {
     isize::try_from(stride).map_err(|_| OperationError::StrideOverflow { value: stride })
-}
-
-#[cfg(test)]
-type TraceRawExecutionHook = Box<dyn FnOnce() -> Result<(), OperationError>>;
-
-#[cfg(test)]
-thread_local! {
-    pub(crate) static TRACE_RAW_EXECUTION_HOOK: std::cell::Cell<Option<TraceRawExecutionHook>> = const { std::cell::Cell::new(None) };
 }

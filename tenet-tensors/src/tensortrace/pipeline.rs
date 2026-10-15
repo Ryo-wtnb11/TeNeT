@@ -153,7 +153,8 @@ where
     ) -> Result<FusionTreeHomSpace, Self::Error> {
         // Why not widen the public rule bound: custom encoded rules retain their
         // established infallible contract while lowered built-ins close overflow.
-        record_trace_selected_homspace_derivation();
+        #[cfg(test)]
+        crate::probe::hit(crate::probe::Event::TraceSelectedHomspaceDerivation);
         src.try_select_checked(rule, codomain_axes, domain_axes)
             .map_err(|error| match error {
                 CheckedFusionSpaceError::FusionAlgebra(error) => {
@@ -532,7 +533,8 @@ where
             Some(lowered) => lowered,
             slot @ None => {
                 let group = &groups[group_index];
-                record_trace_transform_invocation(src_block_index);
+                #[cfg(test)]
+                crate::probe::push_trace_source(src_block_index);
                 storage_keys.clear();
                 for &index in group.block_indices() {
                     storage_keys.push(src.storage_key(index).map_err(M::operation)?);
@@ -622,7 +624,8 @@ where
             // At most one term per source tree.
             terms.reserve_exact(src.structure.block_count());
             for src_block_index in 0..src.structure.block_count() {
-                record_trace_transform_invocation(src_block_index);
+                #[cfg(test)]
+                crate::probe::push_trace_source(src_block_index);
                 let coefficient = prepared
                     .execute_unique_rigid_into(
                         rule,

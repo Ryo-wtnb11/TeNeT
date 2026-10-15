@@ -12,37 +12,6 @@ use super::super::dynamic_space::{
 };
 use super::super::structure::TensorContractAxisPlan;
 
-#[cfg(test)]
-std::thread_local! {
-    static CANDIDATE_SCORE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static CONTRACT_PREFLIGHT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static CANDIDATE_LAYOUT_PROBE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_candidate_score_calls() {
-    CANDIDATE_SCORE_CALLS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn candidate_score_calls() -> usize {
-    CANDIDATE_SCORE_CALLS.get()
-}
-
-#[cfg(test)]
-pub(crate) fn reset_candidate_build_calls() {
-    CONTRACT_PREFLIGHT_CALLS.set(0);
-    CANDIDATE_LAYOUT_PROBE_CALLS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn candidate_build_calls() -> (usize, usize) {
-    (
-        CONTRACT_PREFLIGHT_CALLS.get(),
-        CANDIDATE_LAYOUT_PROBE_CALLS.get(),
-    )
-}
-
 /// A paired ordering of the contracted axes.
 ///
 /// The two vectors are a single permutation: entries at the same position
@@ -1493,7 +1462,7 @@ where
     E: From<OperationError>,
 {
     #[cfg(test)]
-    CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CandidateScore);
     // Why not probe the transformed layouts: Complete admission proves the
     // full basis, so permutation preserves reduced element count. An identity
     // side is read in place exactly when the executor reads it so: a direct
@@ -1573,8 +1542,10 @@ where
 {
     #[cfg(test)]
     {
-        CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
-        CANDIDATE_LAYOUT_PROBE_CALLS.set(CANDIDATE_LAYOUT_PROBE_CALLS.get() + 2);
+        crate::probe::hit(crate::probe::Event::CandidateScore);
+        // One layout probe per operand side.
+        crate::probe::hit(crate::probe::Event::CandidateLayoutProbe);
+        crate::probe::hit(crate::probe::Event::CandidateLayoutProbe);
     }
     let lhs_core = probe(rule, lhs, plan.lhs_transform(), primer)?;
     let rhs_core = probe(rule, rhs, plan.rhs_transform(), primer)?;
@@ -1635,7 +1606,7 @@ where
     S: ContractPlanSource,
 {
     #[cfg(test)]
-    CONTRACT_PREFLIGHT_CALLS.set(CONTRACT_PREFLIGHT_CALLS.get() + 1);
+    crate::probe::hit(crate::probe::Event::ContractPreflight);
     let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
     let primer = primer.unwrap_or(encoded_layout_primer::<R>);
     let matches = match primer(
@@ -1705,16 +1676,16 @@ pub(crate) fn compile_tensorcontract_fusion_plan_from_ranks(
 #[cfg(test)]
 mod tests {
     use super::{
-        candidate_build_calls, contracted_axis_order_candidates,
-        prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+        contracted_axis_order_candidates, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-        reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
+        FusionContractOrientation,
     };
     use crate::contract::dynamic_space::{encoded_layout_primer, MetadataOutput, MetadataRequest};
     use crate::contract::{DynamicFusionMapSpace, FusionOperand};
+    use crate::probe::{self, Event};
     use crate::{TreeTransformOperation, TreeTransformOperationKind};
     use tenet_core::{
         BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
@@ -1967,18 +1938,24 @@ mod tests {
         let dst = dst_complete.clone();
         let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]);
 
-        reset_candidate_score_calls();
-        reset_candidate_build_calls();
+        let candidate_score_calls_rec = probe::record();
+        let candidate_build_calls_rec = probe::record();
         let complete =
             prepare_tensorcontract_fusion_plan_dyn_raw_canonical(&rule, &dst, &lhs, &rhs, axes)
                 .unwrap();
         // What: Complete cold selection performs one semantic HomSpace preflight
         // and scores all stable candidates without constructing their layouts.
-        assert_eq!(super::candidate_score_calls(), 4);
-        assert_eq!(candidate_build_calls(), (1, 0));
+        assert_eq!(candidate_score_calls_rec.get(Event::CandidateScore), 4);
+        assert_eq!(
+            (
+                candidate_build_calls_rec.get(Event::ContractPreflight),
+                candidate_build_calls_rec.get(Event::CandidateLayoutProbe)
+            ),
+            (1, 0)
+        );
 
-        reset_candidate_score_calls();
-        reset_candidate_build_calls();
+        let candidate_score_calls_rec = probe::record();
+        let candidate_build_calls_rec = probe::record();
         let exact = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
             &rule,
             &subset_copy(&rule, &dst_complete),
@@ -1989,8 +1966,14 @@ mod tests {
         .unwrap();
         // What: the conservative expert fallback probes both operands for each
         // candidate and selects the same mathematical winner.
-        assert_eq!(super::candidate_score_calls(), 4);
-        assert_eq!(candidate_build_calls(), (1, 8));
+        assert_eq!(candidate_score_calls_rec.get(Event::CandidateScore), 4);
+        assert_eq!(
+            (
+                candidate_build_calls_rec.get(Event::ContractPreflight),
+                candidate_build_calls_rec.get(Event::CandidateLayoutProbe)
+            ),
+            (1, 8)
+        );
         assert_eq!(complete, exact);
     }
 

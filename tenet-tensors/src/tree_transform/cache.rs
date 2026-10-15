@@ -63,10 +63,6 @@ use super::plan::{
 mod coefficients;
 #[cfg(test)]
 mod owner_tests;
-#[cfg(test)]
-pub(crate) use coefficients::{
-    take_coefficient_group_activity, take_trace_column_activity, CoefficientGroupActivity,
-};
 pub(crate) use coefficients::{
     CheckedPendingCoefficients, CoefficientGroupReuse, GroupSlot, PendingCoefficientGroups,
     SourceGroup, TraceTermReuse,
@@ -128,7 +124,7 @@ where
     FAxis: Fn(usize) -> Result<usize, OperationError>,
 {
     #[cfg(test)]
-    ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
+    crate::probe::hit(crate::probe::Event::OrientedTreePairCompile);
     if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
         return compile_unique_oriented_tree_pair_structure(
             rule,
@@ -176,17 +172,6 @@ where
         logical_to_storage_axis,
         orientation == FusionTreePairOrientation::Adjoint,
     )
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static ORIENTED_TREE_PAIR_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Oriented tree-pair plans compiled on this thread since the last reset.
-#[cfg(test)]
-pub(crate) fn take_oriented_tree_pair_compiles() -> usize {
-    ORIENTED_TREE_PAIR_COMPILES.replace(0)
 }
 
 /// The admission and builder family of a completed transformer; mirrors the
@@ -508,44 +493,6 @@ pub(crate) fn publishable<'a>(structures: impl IntoIterator<Item = &'a BlockStru
     structures.into_iter().all(BlockStructure::is_canonical)
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static COMPLETED_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static COMPLETED_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static COMPLETED_PUBLICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static BEFORE_PUBLISH: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// This thread's completed-transformer activity since the last take.
-/// Thread-local, so concurrent tests do not move it.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CompletedActivity {
-    /// Lookups answered by a resident entry.
-    pub(crate) hits: usize,
-    /// Misses that ran a build.
-    pub(crate) builds: usize,
-    /// Builds offered for publication (publishable keys only).
-    pub(crate) publications: usize,
-}
-
-#[cfg(test)]
-pub(crate) fn take_completed_transformer_activity() -> CompletedActivity {
-    CompletedActivity {
-        hits: COMPLETED_HITS.replace(0),
-        builds: COMPLETED_BUILDS.replace(0),
-        publications: COMPLETED_PUBLICATIONS.replace(0),
-    }
-}
-
-/// Runs `hook` on this thread right before its next publication, after the
-/// build: a test reaches the straddling-clear window there.
-#[cfg(test)]
-pub(crate) fn before_next_completed_publication(hook: Box<dyn FnOnce()>) {
-    BEFORE_PUBLISH.set(Some(hook));
-}
-
 fn lookup<T, Q>(key: &Q) -> Option<Arc<CompletedTransformerEntry<T>>>
 where
     T: 'static + Send + Sync,
@@ -553,7 +500,7 @@ where
 {
     let entry = completed_transformers().get(key)?;
     #[cfg(test)]
-    COMPLETED_HITS.set(COMPLETED_HITS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CompletedHit);
     // The key's coefficient `TypeId` fixes the value type.
     Some(
         entry
@@ -574,8 +521,8 @@ where
 {
     #[cfg(test)]
     {
-        COMPLETED_PUBLICATIONS.set(COMPLETED_PUBLICATIONS.get() + 1);
-        if let Some(hook) = BEFORE_PUBLISH.take() {
+        crate::probe::hit(crate::probe::Event::CompletedPublication);
+        if let Some(hook) = crate::probe::take_before_publish_hook() {
             hook();
         }
     }
@@ -620,7 +567,7 @@ where
         return Ok(entry.bind(dst, src));
     }
     #[cfg(test)]
-    COMPLETED_BUILDS.set(COMPLETED_BUILDS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CompletedBuild);
     let built = build()?;
     if !may_publish {
         return Ok(built);
@@ -646,7 +593,7 @@ where
     let found = lookup::<T, _>(key).map(|entry| entry.bind(dst, src));
     #[cfg(test)]
     if found.is_none() {
-        COMPLETED_BUILDS.set(COMPLETED_BUILDS.get() + 1);
+        crate::probe::hit(crate::probe::Event::CompletedBuild);
     }
     found
 }

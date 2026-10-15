@@ -82,7 +82,7 @@ impl<'a, R> CoreContractPreflight<'a, R> {
         axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         #[cfg(test)]
-        CORE_CONTRACT_PREFLIGHTS.set(CORE_CONTRACT_PREFLIGHTS.get() + 1);
+        crate::probe::hit(crate::probe::Event::CoreContractPreflight);
         let axis_plan = TensorContractAxisPlan::compile(
             lhs_homspace.rank(),
             rhs_homspace.rank(),
@@ -269,7 +269,7 @@ where
     R: FusionRule,
 {
     #[cfg(test)]
-    EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(EXPECTED_CORE_HOMSPACE_DERIVATIONS.get() + 1);
+    crate::probe::hit(crate::probe::Event::CoreHomspaceDerivation);
     contracted_homspace_matches(
         rule,
         lhs,
@@ -307,20 +307,6 @@ where
     .map_err(OperationError::from_core_preserving_context)
 }
 
-#[cfg(test)]
-thread_local! {
-    static EXPECTED_CORE_HOMSPACE_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static CORE_CONTRACT_PREFLIGHTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_core_contract_derivations() {
-    super::structure::reset_tensor_contract_axis_plan_compiles();
-    EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(0);
-    CORE_CONTRACT_PREFLIGHTS.set(0);
-    super::dynamic_space::reset_derived_homspace_builds();
-}
-
 /// Asserts what [`super::resolution::compile_derived_core_plan`] relies on:
 /// the full core preflight and destination check accept the plan-derived
 /// operands. Runs the uncounted compile and check, so tests count the
@@ -351,33 +337,6 @@ pub(crate) fn debug_assert_core_geometry<R>(
         checked.is_ok(),
         "plan-derived core operands failed the core preflight: {checked:?}"
     );
-}
-
-/// What one contraction compile did: core preflights, core destination
-/// checks, and permuted or contracted HomSpaces built.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ContractCompileCounts {
-    pub(crate) preflights: usize,
-    pub(crate) core_destination_checks: usize,
-    pub(crate) derived_homspace_builds: usize,
-}
-
-#[cfg(test)]
-pub(crate) fn contract_compile_counts() -> ContractCompileCounts {
-    ContractCompileCounts {
-        preflights: CORE_CONTRACT_PREFLIGHTS.get(),
-        core_destination_checks: EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
-        derived_homspace_builds: super::dynamic_space::derived_homspace_builds(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn core_contract_derivations() -> (usize, usize) {
-    (
-        super::structure::tensor_contract_axis_plan_compiles(),
-        EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
-    )
 }
 
 /// Adapts a [`TensorContractBackend`] + workspace pair onto the replay

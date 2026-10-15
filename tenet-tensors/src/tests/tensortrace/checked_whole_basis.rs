@@ -473,7 +473,7 @@ fn group_admission_validates_each_member_once_in_block_order() {
     let admission = per_member.concat();
 
     provider.reset(Vec::new());
-    crate::tensortrace::reset_trace_transform_invocations();
+    probe::reset_trace_sources();
     compile(&fixture).unwrap();
     // One whole-group permute per fusion group, at its first member.
     let mut openers = structure
@@ -482,7 +482,7 @@ fn group_admission_validates_each_member_once_in_block_order() {
         .map(|group| group.block_indices()[0])
         .collect::<Vec<_>>();
     openers.sort_unstable();
-    assert_eq!(crate::tensortrace::take_trace_transform_sources(), openers);
+    assert_eq!(probe::take_trace_sources(), openers);
     let calls = provider.calls.borrow();
     let after = preflight + admission.len();
     assert_eq!(calls[preflight..after], admission[..]);
@@ -575,7 +575,7 @@ fn publishing_compile(
 }
 
 fn trace_activity() -> (usize, usize, usize) {
-    let activity = crate::tree_transform::take_trace_column_activity();
+    let activity = crate::probe::take_trace_column_activity();
     (activity.hits, activity.misses, activity.publications)
 }
 

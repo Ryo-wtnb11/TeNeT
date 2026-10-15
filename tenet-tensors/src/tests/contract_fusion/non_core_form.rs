@@ -252,7 +252,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     )
     .unwrap();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     context_contract_into(
         &mut context,
         &rule,
@@ -271,7 +271,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         );
     }
     let expects_dynamic_replay = !(lhs_conjugate && rhs_conjugate);
-    let first = crate::tree_transform::take_completed_transformer_activity();
+    let first = crate::probe::take_completed_transformer_activity();
     if expects_dynamic_replay {
         assert!(first.builds + first.hits > 0);
     } else {
@@ -299,7 +299,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     }
     // What: the repeat builds nothing: conjugated sources are keyed on their
     // canonical parent, so every transformer was published.
-    let second = crate::tree_transform::take_completed_transformer_activity();
+    let second = crate::probe::take_completed_transformer_activity();
     if expects_dynamic_replay {
         assert_eq!(second.builds, 0);
         assert!(second.hits > 0);

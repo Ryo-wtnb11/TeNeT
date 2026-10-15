@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 #[test]
 fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
@@ -429,8 +430,6 @@ fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() 
 
 #[test]
 fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
-    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
-
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let group_count = src_space.structure().fusion_tree_groups().len();
@@ -445,7 +444,7 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
     )
     .unwrap();
 
-    reset_tree_pair_lowering_calls();
+    let tree_pair_lowering_calls_rec = probe::record();
     let direct =
         build_tree_pair_transform_group_plan(&rule, operation, src_space.structure()).unwrap();
 
@@ -453,7 +452,13 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
     // consuming one core ordered map per whole group instead of rebuilding
     // full-key rows per source column.
     assert_eq!(direct, legacy);
-    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (group_count, 0)
+    );
     direct
         .compile_structures(dst_space.structure(), src_space.structure())
         .unwrap();
@@ -463,7 +468,6 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
 fn eager_simple_plan_prepares_once_per_distinct_source_split() {
     use crate::tree_transform::{
         build_tree_pair_transform_group_plan_validated_with_threads,
-        reset_tree_pair_operation_preparations, tree_pair_operation_preparations,
         validate_multiplicity_free_tree_pair_preflight,
     };
 
@@ -536,7 +540,7 @@ fn eager_simple_plan_prepares_once_per_distinct_source_split() {
             .unwrap();
 
     for threads in [1, 4] {
-        reset_tree_pair_operation_preparations();
+        let tree_pair_operation_preparations_rec = probe::record();
         let prepared = build_tree_pair_transform_group_plan_validated_with_threads(
             &proof,
             operation.clone(),
@@ -547,7 +551,10 @@ fn eager_simple_plan_prepares_once_per_distinct_source_split() {
         // What: serial and threaded lowering each prepare two source splits
         // across three interleaved groups while preserving the independent
         // per-source oracle's grouping, order, and coefficients.
-        assert_eq!(tree_pair_operation_preparations(), 2);
+        assert_eq!(
+            tree_pair_operation_preparations_rec.get(Event::TreePairOperationPreparation),
+            2
+        );
         assert_eq!(prepared.specs().len(), oracle.specs().len());
         for (actual, expected) in prepared.specs().iter().zip(oracle.specs()) {
             assert_eq!(actual.group_key(), expected.group_key());
@@ -575,8 +582,6 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
     // coefficient, compiled-layout, and replay oracle above the old boundary.
     use crate::tree_transform::{
         build_tree_pair_transform_group_plan_validated_with_threads,
-        reset_tree_pair_lowering_calls, reset_tree_pair_operation_preparations,
-        tree_pair_lowering_calls, tree_pair_operation_preparations,
         validate_multiplicity_free_tree_pair_preflight,
     };
 
@@ -618,14 +623,23 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
         validate_multiplicity_free_tree_pair_preflight(&SU2FusionRule, &operation, &structure)
             .unwrap();
 
-    reset_tree_pair_operation_preparations();
-    reset_tree_pair_lowering_calls();
+    let tree_pair_operation_preparations_rec = probe::record();
+    let tree_pair_lowering_calls_rec = probe::record();
     let plan =
         build_tree_pair_transform_group_plan_validated_with_threads(&proof, operation, 1).unwrap();
 
     assert_eq!(structure.fusion_tree_groups().len(), 3);
-    assert_eq!(tree_pair_operation_preparations(), 1);
-    assert_eq!(tree_pair_lowering_calls(), (3, 0));
+    assert_eq!(
+        tree_pair_operation_preparations_rec.get(Event::TreePairOperationPreparation),
+        1
+    );
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (3, 0)
+    );
     assert_eq!(plan.specs().len(), 3);
     assert_eq!(plan.specs().len(), oracle.specs().len());
     for (actual, expected) in plan.specs().iter().zip(oracle.specs()) {
@@ -714,8 +728,6 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
 
 #[test]
 fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
-    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
-
     let source0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
@@ -752,7 +764,7 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
         })
         .unwrap();
 
-    reset_tree_pair_lowering_calls();
+    let tree_pair_lowering_calls_rec = probe::record();
     let direct =
         build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
     // The per-source core oracle and the prepared lowering compute the F-move
@@ -785,7 +797,13 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
             4,
         );
     }
-    assert_eq!(tree_pair_lowering_calls(), (1, 0));
+    assert_eq!(
+        (
+            tree_pair_lowering_calls_rec.get(Event::OrderedTreePairLowering),
+            tree_pair_lowering_calls_rec.get(Event::LegacyTreePairAssembly)
+        ),
+        (1, 0)
+    );
 
     let space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
@@ -1468,7 +1486,7 @@ fn tree_transform_execution_context_separates_tree_pair_operations() {
         )
         .unwrap();
     }
-    crate::tree_transform::take_completed_transformer_activity();
+    crate::probe::take_completed_transformer_activity();
     for operation in [&permute, &braid] {
         dst.data_mut().copy_from_slice(&[1.0, 2.0]);
         context_tree_transform_into(
@@ -1485,7 +1503,7 @@ fn tree_transform_execution_context_separates_tree_pair_operations() {
 
     // What: the operation is a key determinant: each operation has its own
     // published transformer, and the warm round hits both.
-    let warm = crate::tree_transform::take_completed_transformer_activity();
+    let warm = crate::probe::take_completed_transformer_activity();
     assert_eq!((warm.builds, warm.hits), (0, 2));
     let resolve = |operation| {
         resolve_tree_pair(&rule, operation, dst.structure(), src.structure(), false).unwrap()

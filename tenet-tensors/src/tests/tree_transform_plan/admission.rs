@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 
 fn malformed_simple_su2_tree_pair_tensors() -> (TestTensor<f64>, TestTensor<f64>) {
     let valid = all_codomain_fusion_tree_test_key_for_rule(
@@ -140,13 +141,13 @@ impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
 }
 
 /// This thread's completed-transformer activity since the last call.
-pub(super) fn owner_activity() -> crate::tree_transform::CompletedActivity {
-    crate::tree_transform::take_completed_transformer_activity()
+pub(super) fn owner_activity() -> crate::probe::CompletedActivity {
+    crate::probe::take_completed_transformer_activity()
 }
 
 /// A rejected request observed no published transformer and published none.
 /// (A failure inside the build itself still counts that build.)
-pub(super) fn assert_owner_untouched(activity: crate::tree_transform::CompletedActivity) {
+pub(super) fn assert_owner_untouched(activity: crate::probe::CompletedActivity) {
     assert_eq!(
         (activity.hits, activity.publications),
         (0, 0),
@@ -411,10 +412,6 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
 
 #[test]
 fn completed_structure_miss_and_hit_validate_capability_once() {
-    use crate::tree_transform::{
-        multiplicity_free_capability_validations, reset_multiplicity_free_capability_validations,
-    };
-
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -423,20 +420,28 @@ fn completed_structure_miss_and_hit_validate_capability_once() {
     mark_canonical([structure.as_ref()]);
     let mut cache = crate::tree_transform::TreeTransformPlanning::default();
 
-    reset_multiplicity_free_capability_validations();
+    let multiplicity_free_capability_validations_rec = probe::record();
     cache
         .resolve_tree_pair(&SU2FusionRule, &operation, &structure, &structure, false)
         .unwrap();
-    assert_eq!(multiplicity_free_capability_validations(), 1);
+    assert_eq!(
+        multiplicity_free_capability_validations_rec
+            .get(Event::MultiplicityFreeCapabilityValidation),
+        1
+    );
 
-    reset_multiplicity_free_capability_validations();
+    let multiplicity_free_capability_validations_rec = probe::record();
     cache
         .resolve_tree_pair(&SU2FusionRule, &operation, &structure, &structure, false)
         .unwrap();
 
     // What: misses hand the prior capability proof to the whole-HomSpace
     // compiler, while hits still perform their one admission check.
-    assert_eq!(multiplicity_free_capability_validations(), 1);
+    assert_eq!(
+        multiplicity_free_capability_validations_rec
+            .get(Event::MultiplicityFreeCapabilityValidation),
+        1
+    );
 }
 
 #[test]
@@ -755,9 +760,9 @@ fn adjoint_oriented_transformer_is_reused_and_keyed_by_orientation() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     mark_canonical([storage.as_ref(), destination.as_ref()]);
     let mut cache = crate::tree_transform::TreeTransformPlanning::default();
-    crate::tree_transform::take_oriented_tree_pair_compiles();
+    crate::probe::take(crate::probe::Event::OrientedTreePairCompile);
     owner_activity();
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
 
     let first = oriented(&mut cache, &operation, adjoint);
     let second = oriented(&mut cache, &operation, adjoint);
@@ -765,11 +770,14 @@ fn adjoint_oriented_transformer_is_reused_and_keyed_by_orientation() {
     // What: the second call hits the published adjoint transformer, keyed by
     // the parent content, orientation and basis order; only the first looks
     // up its one source group's coefficients.
-    assert_eq!(crate::tree_transform::take_oriented_tree_pair_compiles(), 1);
+    assert_eq!(
+        crate::probe::take(crate::probe::Event::OrientedTreePairCompile),
+        1
+    );
     assert!(same_core(&first, &second));
     let activity = owner_activity();
     assert_eq!((activity.hits, activity.builds), (1, 1));
-    let groups = crate::tree_transform::take_coefficient_group_activity();
+    let groups = crate::probe::take_coefficient_group_activity();
     assert_eq!(groups.hits + groups.misses, 1);
     assert_eq!(groups.publications, groups.misses);
     // What: the retained transformer equals a fresh compile of equal
@@ -819,7 +827,10 @@ fn adjoint_oriented_transformer_is_reused_and_keyed_by_orientation() {
 
     // What: a direct oriented transformer is neither served from nor
     // published under the ordinary tree-pair key it would share.
-    assert_eq!(crate::tree_transform::take_oriented_tree_pair_compiles(), 4);
+    assert_eq!(
+        crate::probe::take(crate::probe::Event::OrientedTreePairCompile),
+        4
+    );
     assert!(!same_core(&direct_first, &plain));
     assert!(!same_core(&direct_first, &direct_second));
     let activity = owner_activity();
@@ -918,11 +929,11 @@ fn adjoint_oriented_degeneracy_change_reuses_the_composed_coefficients() {
     owner_activity();
 
     oriented(&mut cache, &narrow);
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
     let warm = oriented(&mut cache, &wider);
 
     assert_eq!(owner_activity().builds, 2);
-    let groups = crate::tree_transform::take_coefficient_group_activity();
+    let groups = crate::probe::take_coefficient_group_activity();
     assert_eq!((groups.hits, groups.misses, groups.publications), (1, 0, 0));
     let mut uncached = crate::tree_transform::TreeTransformPlanning::default();
     let expert = (expert_copy(&wider.0), expert_copy(&wider.1));
@@ -986,7 +997,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
     let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
     let duplicate = [keys[0].clone(), keys[0].clone()];
     owner_activity();
-    crate::tree_transform::take_coefficient_group_activity();
+    crate::probe::take_coefficient_group_activity();
     let mut bound = crate::tree_transform::TreeTransformPlanning::default();
     bound.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     let mut local = crate::tree_transform::TreeTransformPlanning::default();
@@ -1025,7 +1036,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
     let activity = owner_activity();
     assert_eq!((activity.builds, activity.publications), (8, 0));
     assert_eq!(
-        crate::tree_transform::take_coefficient_group_activity(),
+        crate::probe::take_coefficient_group_activity(),
         Default::default()
     );
 }
@@ -1271,9 +1282,6 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    use crate::tree_transform::{
-        reset_tree_pair_operation_preparations, tree_pair_operation_preparations,
-    };
 
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
@@ -1281,7 +1289,7 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     let mut cache = crate::tree_transform::TreeTransformPlanning::default();
     owner_activity();
 
-    reset_tree_pair_operation_preparations();
+    let tree_pair_operation_preparations_rec = probe::record();
     let error = cache
         .resolve_tree_pair(
             &SU2FusionRule,
@@ -1299,7 +1307,10 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
             rank: 2
         }
     );
-    assert_eq!(tree_pair_operation_preparations(), 0);
+    assert_eq!(
+        tree_pair_operation_preparations_rec.get(Event::TreePairOperationPreparation),
+        0
+    );
     assert_owner_untouched(owner_activity());
 }
 
@@ -1601,10 +1612,11 @@ fn oriented_cold_and_warm_admission_rejects_equal_key_capability_changes() {
                 }
             );
             rule.braiding_style = None;
-            crate::tree_transform::reset_multiplicity_free_capability_validations();
+            let multiplicity_free_capability_validations_rec = probe::record();
             compile(&mut cache, &rule).unwrap();
             assert_eq!(
-                crate::tree_transform::multiplicity_free_capability_validations(),
+                multiplicity_free_capability_validations_rec
+                    .get(Event::MultiplicityFreeCapabilityValidation),
                 1
             );
             // What: capability checks run before the owner on cold and warm

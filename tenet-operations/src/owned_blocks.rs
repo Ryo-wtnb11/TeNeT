@@ -23,22 +23,6 @@ use tenet_core::{BlockRef, BlockStructure};
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::{CheckedBlockLayout, ConjugateValue, OperationError};
 
-#[cfg(any(test, feature = "testing"))]
-thread_local! {
-    static PREFILLED_ELEMENTS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-/// Returns and resets the number of output elements this thread zero-filled
-/// before an owned block overwrite because the layout was not proved to tile
-/// its storage.
-///
-/// Why test builds only: as `take_checked_block_passes`, a probe for tests.
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-pub fn take_owned_block_prefills() -> usize {
-    PREFILLED_ELEMENTS.with(core::cell::Cell::take)
-}
-
 enum Storage<'a, D> {
     Uninit(&'a mut [MaybeUninit<D>]),
     Zeroed(&'a mut [D]),
@@ -649,7 +633,7 @@ where
         return initialize_owned(len, |dst| write_all(Storage::Uninit(dst)));
     }
     #[cfg(any(test, feature = "testing"))]
-    PREFILLED_ELEMENTS.with(|count| count.set(count.get() + len));
+    crate::probe::add(crate::probe::Event::OwnedPrefillElement, len);
     let mut data = vec![D::zero(); len];
     write_all(Storage::Zeroed(&mut data))?;
     Ok(data)
@@ -658,6 +642,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::take_owned_block_prefills;
     use num_complex::Complex64;
     use tenet_core::{BlockKey, BlockSpec};
 

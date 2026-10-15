@@ -1,5 +1,6 @@
 use super::*;
-use crate::tensortrace::{tensortrace_checked_generic_in, TRACE_RAW_EXECUTION_HOOK};
+use crate::probe;
+use crate::tensortrace::tensortrace_checked_generic_in;
 use std::cell::Cell;
 use std::rc::Rc;
 use tenet_core::{clear_structure_caches, structure_cache_info, StructureCacheKind};
@@ -70,14 +71,14 @@ fn raw_execution_failure_does_not_publish() {
     let seen_payloads = Rc::clone(&payloads);
     let seen_executions = Rc::clone(&executions);
     TRACE_TEST_TWIST_CALLS.set(0);
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(move || {
+    probe::set_trace_raw_execution_hook(Box::new(move || {
         assert_eq!(seen_payloads.get(), 1);
         assert!(TRACE_TEST_TWIST_CALLS.get() > 0);
         seen_executions.set(seen_executions.get() + 1);
         Err(OperationError::StridedKernel {
             message: "injected shared raw failure".into(),
         })
-    })));
+    }));
     let error = tensortrace_checked_generic_in(
         dst,
         &src,
@@ -97,10 +98,7 @@ fn raw_execution_failure_does_not_publish() {
     assert_eq!(executions.get(), 1);
     assert_unpublished();
     // Nor are its trace permutation groups (#2072).
-    assert_eq!(
-        crate::tree_transform::take_trace_column_activity().publications,
-        0
-    );
+    assert_eq!(crate::probe::take_trace_column_activity().publications, 0);
 }
 
 #[test]
@@ -112,9 +110,7 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
     clear_structure_caches();
     let dst = stage(&src);
     TRACE_TEST_FAIL_TWIST.set(true);
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| {
-        panic!("raw execution after pivotal failure")
-    })));
+    probe::set_trace_raw_execution_hook(Box::new(|| panic!("raw execution after pivotal failure")));
     let error = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
         &src,
@@ -127,13 +123,10 @@ fn pivotal_failure_precedes_payload_and_raw_execution() {
     assert!(
         matches!(error, crate::CheckedGenericPlanError::Provider(error) if error.to_string() == "trace pivotal failure")
     );
-    TRACE_RAW_EXECUTION_HOOK.take();
+    probe::take_trace_raw_execution_hook();
     TRACE_TEST_FAIL_TWIST.set(false);
     assert_unpublished();
-    assert_eq!(
-        crate::tree_transform::take_trace_column_activity().publications,
-        0
-    );
+    assert_eq!(crate::probe::take_trace_column_activity().publications, 0);
 }
 
 #[test]
@@ -199,11 +192,11 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
         .collect::<Vec<_>>();
     let executions = Rc::new(Cell::new(0));
     let seen = Rc::clone(&executions);
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(move || {
+    probe::set_trace_raw_execution_hook(Box::new(move || {
         assert_unpublished();
         seen.set(seen.get() + 1);
         Ok(())
-    })));
+    }));
     let calls = Cell::new(0);
     let (out, data) = tensortrace_checked_generic_in(
         dst,
@@ -225,7 +218,7 @@ fn success_uses_independent_partial_trace_and_commits_after_execution() {
     assert_eq!((admissions, entries), (1, 1));
     assert!(bytes > 0);
     // Its trace permutation groups are published after the commit (#2072).
-    let activity = crate::tree_transform::take_trace_column_activity();
+    let activity = crate::probe::take_trace_column_activity();
     assert!(activity.publications > 0);
     assert_eq!(activity.publications, activity.misses);
 }
@@ -253,10 +246,10 @@ fn admission_runs_before_payload_and_again_after_execution() {
     let dst = stage(&src);
     let executions = Rc::new(Cell::new(0));
     let seen = Rc::clone(&executions);
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(move || {
+    probe::set_trace_raw_execution_hook(Box::new(move || {
         seen.set(1);
         Ok(())
-    })));
+    }));
     let late = tensortrace_checked_generic_in(
         dst,
         &src,
@@ -299,11 +292,11 @@ fn warm_failure_preserves_winner_and_reset_stale_success_stays_uncached() {
     .unwrap();
     let before = owner();
     assert_eq!(before.1, 1);
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| {
+    probe::set_trace_raw_execution_hook(Box::new(|| {
         Err(OperationError::StridedKernel {
             message: "warm failure".into(),
         })
-    })));
+    }));
     let failed = tensortrace_checked_generic_in(
         stage(&src),
         &src,
@@ -388,7 +381,7 @@ fn read_answers_a_scalar_destination_in_the_same_transaction() {
     clear_structure_caches();
     let axes = TensorTraceAxisSpec::new(&[], &[0], &[1]);
     let dst = crate::tensortrace_stage_checked_generic(&src, axes, 0).unwrap();
-    TRACE_RAW_EXECUTION_HOOK.set(Some(Box::new(|| panic!("executed after a read"))));
+    probe::set_trace_raw_execution_hook(Box::new(|| panic!("executed after a read")));
     let terms = Cell::new(0);
     let (out, data) = tensortrace_checked_generic_in::<_, f64, Vec<f64>>(
         dst,
@@ -402,7 +395,7 @@ fn read_answers_a_scalar_destination_in_the_same_transaction() {
         2.0,
     )
     .unwrap();
-    assert!(TRACE_RAW_EXECUTION_HOOK.take().is_some());
+    assert!(probe::take_trace_raw_execution_hook().is_some());
     assert_eq!(terms.get(), 1);
     assert_eq!(data, vec![6.0]);
     assert_eq!(out.space().nout() + out.space().nin(), 0);

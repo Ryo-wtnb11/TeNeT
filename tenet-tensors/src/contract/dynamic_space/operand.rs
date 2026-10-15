@@ -50,21 +50,6 @@ enum FusionOperandProjection {
     },
 }
 
-#[cfg(test)]
-thread_local! {
-    static FUSION_OPERAND_PROJECTION_PREPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_fusion_operand_projection_prepares() {
-    FUSION_OPERAND_PROJECTION_PREPARES.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn fusion_operand_projection_prepares() -> usize {
-    FUSION_OPERAND_PROJECTION_PREPARES.get()
-}
-
 impl<'a> FusionOperandLayout<'a> {
     #[inline]
     pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
@@ -320,7 +305,7 @@ impl<'a> FusionOperand<'a> {
         }
 
         #[cfg(test)]
-        FUSION_OPERAND_PROJECTION_PREPARES.set(FUSION_OPERAND_PROJECTION_PREPARES.get() + 1);
+        crate::probe::hit(crate::probe::Event::FusionOperandProjectionPrepare);
 
         // The parent's memoized adjoint HomSpace equals
         // `oriented_homspace().materialize()` without a per-call build.

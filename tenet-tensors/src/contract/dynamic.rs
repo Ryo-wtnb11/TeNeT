@@ -146,28 +146,12 @@ where
     true
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_source_layout_homspace_id_comparisons() {
-    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn source_layout_homspace_id_comparisons() -> usize {
-    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.get()
-}
-
 fn source_layout_homspaces_match_by_id(
     source_space: &DynamicFusionMapSpace,
     core_space: &DynamicFusionMapSpace,
 ) -> bool {
     #[cfg(test)]
-    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.set(SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.get() + 1);
+    crate::probe::hit(crate::probe::Event::SourceLayoutHomspaceIdComparison);
     core_space.homspace().id() == source_space.homspace().id()
 }
 

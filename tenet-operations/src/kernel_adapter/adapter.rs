@@ -275,7 +275,11 @@ impl StridedHostKernelAdapter {
     {
         validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
         validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
-        crate::checked_block_layout::record_checked_block_passes(1, 1);
+        #[cfg(any(test, feature = "testing"))]
+        {
+            crate::probe::add(crate::probe::Event::LayoutPass, 1);
+            crate::probe::add(crate::probe::Event::SpanWalk, 1);
+        }
         let action = raw_strided_action(alpha, beta);
         if raw_rank_within_strided_limit_routed(
             dst_data,

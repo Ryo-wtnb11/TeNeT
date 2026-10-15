@@ -21,7 +21,6 @@ pub(crate) use dynamic::{
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,
     execute_prelowered_dynamic_tree_execution_artifact_for_test,
-    reset_source_layout_homspace_id_comparisons, source_layout_homspace_id_comparisons,
     tensorcontract_fusion_dynamic_plan_into_with,
 };
 #[cfg(feature = "cuda")]
@@ -40,10 +39,10 @@ pub(crate) use fusion::contracted_axis_order_candidates;
 pub(crate) use fusion::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use fusion::{
-    candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+    prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
     prepare_tensorcontract_fusion_plan_dyn_raw,
     prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-    reset_candidate_score_calls, FusionContractCandidateFacts,
+    FusionContractCandidateFacts,
 };
 mod fusion_block;
 pub(crate) use fusion_block::{
@@ -81,9 +80,7 @@ pub use context::{
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{
-    checked_layout_primer, checked_metadata_dispatcher, fusion_operand_projection_prepares,
-    reset_fusion_operand_projection_prepares, reset_scratch_structure_builds,
-    scratch_structure_builds, MetadataOutput, MetadataRequest,
+    checked_layout_primer, checked_metadata_dispatcher, MetadataOutput, MetadataRequest,
 };
 pub(crate) use dynamic_space::{
     dispatch_prepare, tree_transform_operation_axes, FusionOperandLayout, LayoutKeyBuilder,

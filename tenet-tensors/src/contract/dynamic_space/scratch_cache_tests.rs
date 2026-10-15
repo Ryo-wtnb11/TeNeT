@@ -1,4 +1,5 @@
 use super::*;
+use crate::probe::{self, Event};
 use crate::test_support::CACHE_TEST_LOCK;
 use crate::tests::GenericMultiplicityRule;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,9 +144,9 @@ fn u1_space(charge: i32, deg: usize) -> DynamicFusionMapSpace {
     DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count]).unwrap()
 }
 
-fn reset_final_result_layout_test_state() {
+fn reset_final_result_layout_test_state() -> probe::Recording {
     tenet_core::clear_structure_caches();
-    reset_final_result_layout_builds();
+    probe::record()
 }
 
 #[test]
@@ -158,13 +159,19 @@ fn transformed_space_is_derived_eagerly_per_call() {
     let rule = U1FusionRule;
     let source = u1_space(301, 3);
     let operation = TreeTransformOperation::permute([1], [0]);
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
 
     let first = source.transformed(&rule, &operation).unwrap();
-    assert_eq!(final_result_layout_builds(), 1);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        1
+    );
 
     let second = source.transformed(&rule, &operation).unwrap();
-    assert_eq!(final_result_layout_builds(), 2);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        2
+    );
     assert_eq!(first, second);
 }
 
@@ -177,13 +184,19 @@ fn contracted_space_is_derived_eagerly_per_call() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = U1FusionRule;
     let source = u1_space(901, 4);
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
 
     let first = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
-    assert_eq!(final_result_layout_builds(), 1);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        1
+    );
 
     let second = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
-    assert_eq!(final_result_layout_builds(), 2);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        2
+    );
     assert_eq!(first, second);
 }
 
@@ -207,15 +220,21 @@ fn ordered_contraction_eagerly_builds_only_the_final_layout() {
         1,
     )
     .unwrap();
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
 
     let first = DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
-    assert_eq!(final_result_layout_builds(), 1);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        1
+    );
     assert_eq!(first.homspace(), &expected_homspace);
 
     let second =
         DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
-    assert_eq!(final_result_layout_builds(), 2);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        2
+    );
     assert_eq!(first, second);
 }
 
@@ -224,7 +243,7 @@ fn validation_only_contraction_never_builds_a_default_layout() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
     let rule = U1FusionRule;
     let compatible = u1_space(903, 4);
 
@@ -236,7 +255,10 @@ fn validation_only_contraction_never_builds_a_default_layout() {
         &[0],
     )
     .unwrap();
-    assert_eq!(final_result_layout_builds(), 0);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        0
+    );
 
     let incompatible = u1_space(903, 5);
     assert!(DynamicFusionMapSpace::validate_contracted_homspace(
@@ -247,7 +269,10 @@ fn validation_only_contraction_never_builds_a_default_layout() {
         &[0],
     )
     .is_err());
-    assert_eq!(final_result_layout_builds(), 0);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        0
+    );
 }
 
 #[test]
@@ -255,7 +280,7 @@ fn generic_transform_builds_only_the_final_layout() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
     let rule = GenericMultiplicityRule;
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
     let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
@@ -269,7 +294,10 @@ fn generic_transform_builds_only_the_final_layout() {
     let transformed = source
         .transformed_generic(&rule, &TreeTransformOperation::permute([1], [0]))
         .unwrap();
-    assert_eq!(final_result_layout_builds(), 1);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        1
+    );
     assert_eq!(transformed.structure().block_count(), key_count);
 }
 
@@ -278,7 +306,7 @@ fn generic_contraction_builds_only_the_final_layout() {
     let _guard = CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_final_result_layout_test_state();
+    let final_result_layout_builds_rec = reset_final_result_layout_test_state();
     let rule = GenericMultiplicityRule;
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 2)]);
     let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
@@ -291,7 +319,10 @@ fn generic_contraction_builds_only_the_final_layout() {
 
     let contracted =
         DynamicFusionMapSpace::contracted_generic(&rule, &source, &source, &[1], &[0]).unwrap();
-    assert_eq!(final_result_layout_builds(), 1);
+    assert_eq!(
+        final_result_layout_builds_rec.get(Event::FinalResultLayoutBuild),
+        1
+    );
     assert_eq!(contracted.structure().block_count(), key_count);
 }
 
