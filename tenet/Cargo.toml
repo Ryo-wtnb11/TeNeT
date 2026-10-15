@@ -24,7 +24,6 @@ racah-generated = ["tenet-core/racah-generated", "tenet-tensors/racah-generated"
 
 [dependencies]
 num-complex = "0.4"
-rayon = "1.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 tenet-core = { version = "0.1.1", path = "../tenet-core" }
 tenet-dense = { version = "0.1.1", path = "../tenet-dense", default-features = false }
@@ -33,6 +32,7 @@ tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-fe
 tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }
 
 [dev-dependencies]
+rayon = "1.10"
 # Reference-oracle replay driver (#1767).
 tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-features = false, features = ["testing"] }
 # The CUDA member workspace's failure seam (#1859).
