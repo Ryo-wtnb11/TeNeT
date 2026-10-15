@@ -582,7 +582,6 @@ fn typed_sector_homspace_builds_u1_tree_key() {
 #[test]
 fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
     let rule = Z2FusionRule;
-    let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new(
             [(SectorId::new(0), 1), (SectorId::new(1), 3)],
@@ -594,18 +593,14 @@ fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
         )]),
     );
 
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        hom,
-        &rule,
-        [vec![1, 2], vec![3, 1]],
-    )
-    .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 1, [vec![1, 2], vec![3, 1]])
+        .unwrap();
 
-    assert_eq!(fusion_space.subblock_structure().block_count(), 2);
-    assert_eq!(fusion_space.required_len().unwrap(), 5);
+    assert_eq!(structure.block_count(), 2);
+    assert_eq!(structure.required_len().unwrap(), 5);
     assert_eq!(
-        fusion_space.subblock_structure().block(0).unwrap().key(),
+        structure.block(0).unwrap().key(),
         &BlockKey::from(
             FusionTreePairKey::try_pair_from_sector_ids(
                 [0],
@@ -621,10 +616,7 @@ fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
             .unwrap()
         )
     );
-    assert_eq!(
-        fusion_space.subblock_structure().block(1).unwrap().shape(),
-        &[3, 1]
-    );
+    assert_eq!(structure.block(1).unwrap().shape(), &[3, 1]);
 }
 
 #[test]

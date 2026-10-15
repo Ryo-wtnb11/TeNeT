@@ -13,14 +13,10 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         FusionProductSpace::new([leg()]),
         FusionProductSpace::new([leg()]),
     );
-    let canonical_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        homspace.clone(),
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
-    let canonical = crate::DynamicFusionMapSpace::from_typed(&canonical_typed);
+    let canonical_typed =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), [vec![2, 2]])
+            .unwrap();
+    let canonical = canonical_typed.clone();
     let canonical_block = canonical.structure().block(0).unwrap();
     let padded_structure = BlockStructure::from_blocks_with_rank(
         2,
@@ -29,15 +25,10 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         ],
     )
     .unwrap();
-    let padded_typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        homspace,
-        padded_structure,
-    )
-    .unwrap()
-    .try_bind_rule(&rule)
-    .unwrap();
-    let padded = crate::DynamicFusionMapSpace::from_typed(&padded_typed);
+    let padded = DynamicFusionMapSpace::try_from_layout(homspace, padded_structure)
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
     assert_ne!(
         canonical.structure().content_id(),
         padded.structure().content_id()
@@ -278,7 +269,10 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
 
     let ordinary_tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         eager_lhs_data,
-        crate::lowering::adjoint_fusion_space_view(&rule, &canonical_typed).unwrap(),
+        canonical_typed
+            .validate_rule(&rule)
+            .and_then(|()| canonical_typed.adjoint_view())
+            .unwrap(),
     )
     .unwrap();
     // What: the ordinary tensor constructor aliases its physical structure to
@@ -734,12 +728,10 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let dense = || TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap();
     let keys = homspace().fusion_tree_keys(&rule);
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense(),
-        homspace(),
+    let canonical = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        homspace(),
         vec![vec![1; 4]; keys.len()],
     )
     .unwrap();
@@ -752,8 +744,7 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
             .cmp(b.codomain_tree())
             .then(b.domain_tree().cmp(a.domain_tree()))
     });
-    let mis_stacked = FusionTensorMapSpace::new_unbound(
-        dense(),
+    let mis_stacked = DynamicFusionMapSpace::try_from_layout(
         homspace(),
         BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, blocks).unwrap(),
     )
@@ -761,12 +752,9 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
     .try_bind_rule(&rule)
     .unwrap();
     let provider = Arc::new(rule);
-    let bind = |space: &FusionTensorMapSpace<2, 2>| {
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(space),
-            Arc::clone(&provider),
-        )
-        .unwrap()
+    let bind = |space: &DynamicFusionMapSpace| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free((*space).clone(), Arc::clone(&provider))
+            .unwrap()
     };
     let (canonical, mis_stacked) = (bind(&canonical), bind(&mis_stacked));
     let len = canonical.space().required_len().unwrap();

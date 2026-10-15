@@ -7,8 +7,8 @@ use tenet_core::{
     FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, FusionTreePairKey,
     Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
     ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
-    StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep, U1SectorLayout,
-    Z2FusionRule, Z2Irrep,
+    StructureCacheKind, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
+    Z2Irrep,
 };
 
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -30,15 +30,14 @@ fn matrix_space() -> DynamicFusionMapSpace {
     DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![1, 1]]).unwrap()
 }
 
-fn typed_z2_matrix_space() -> FusionTensorMapSpace<1, 1> {
+fn z2_matrix_space() -> DynamicFusionMapSpace {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
-    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::from_dims([2], [2]).unwrap(),
+    DynamicFusionMapSpace::from_degeneracy_shapes(
+        &Z2FusionRule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &Z2FusionRule,
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap()
@@ -673,16 +672,60 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
 }
 
 #[test]
+fn layout_constructor_checks_rank_and_storage_but_not_admission() {
+    // What: the rank-free expert layout constructor rejects a structure of
+    // the wrong rank and aliased storage footprints, and returns an unbound
+    // space over an accepted layout.
+    let complete = z2_matrix_space();
+    let homspace = complete.homspace().clone();
+    let rank_one = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+    assert_eq!(
+        DynamicFusionMapSpace::try_from_layout(homspace.clone(), rank_one),
+        Err(CoreError::StructureRankMismatch {
+            expected: 2,
+            actual: 1,
+        })
+    );
+
+    let keys = homspace.fusion_tree_keys(&Z2FusionRule);
+    let aliased = BlockStructure::from_blocks_with_rank(
+        2,
+        keys.iter()
+            .map(|key| BlockSpec::with_key(key.clone().into(), vec![1, 1], vec![1, 1], 0))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        DynamicFusionMapSpace::try_from_layout(homspace.clone(), aliased),
+        Err(CoreError::OverlappingBlockStorage {
+            first_block: 0,
+            second_block: 1,
+            offset: 0,
+        })
+    );
+
+    let raw = DynamicFusionMapSpace::try_from_layout(
+        homspace,
+        BlockStructure::clone(complete.structure()),
+    )
+    .unwrap();
+    assert_eq!(raw.admission(), &FusionSpaceAdmission::Unbound);
+    assert_eq!(raw.structure(), complete.structure());
+    assert_eq!((raw.nout(), raw.nin()), (1, 1));
+}
+
+#[test]
 fn expert_sparse_layout_is_a_subset_with_structural_zeros() {
     // What: filtering an expert layout drops completeness, while an omitted
     // valid tree remains an accepted structural zero.
-    let complete = typed_z2_matrix_space();
+    let complete = z2_matrix_space();
     let keys = complete.homspace().fusion_tree_keys(&Z2FusionRule);
     assert!(matches!(
         complete.admission(),
         FusionSpaceAdmission::Complete(_)
     ));
-    let first = complete.subblock_structure().block(0).unwrap();
+    let first = complete.structure().block(0).unwrap();
     let structure = BlockStructure::from_blocks_with_rank(
         2,
         vec![BlockSpec::with_key(
@@ -694,16 +737,12 @@ fn expert_sparse_layout_is_a_subset_with_structural_zeros() {
         .unwrap()],
     )
     .unwrap();
-    let raw = FusionTensorMapSpace::new_unbound(
-        complete.dense_space().clone(),
-        complete.homspace().clone(),
-        structure,
-    )
-    .unwrap();
+    let raw =
+        DynamicFusionMapSpace::try_from_layout(complete.homspace().clone(), structure).unwrap();
     assert_eq!(raw.admission(), &FusionSpaceAdmission::Unbound);
     assert!(matches!(
         raw.validate_rule(&Z2FusionRule),
-        Err(CoreError::MissingFusionRuleIdentity)
+        Err(OperationError::Core(CoreError::MissingFusionRuleIdentity))
     ));
 
     let subset = raw.try_bind_rule(&Z2FusionRule).unwrap();
@@ -711,22 +750,24 @@ fn expert_sparse_layout_is_a_subset_with_structural_zeros() {
         subset.admission(),
         FusionSpaceAdmission::Subset(_)
     ));
-    assert!(subset.find_subblock_index(&keys[0]).is_some());
-    assert!(subset.find_subblock_index(&keys[1]).is_none());
+    assert!(subset
+        .structure()
+        .find_block_index_by_fusion_tree_pair(&keys[0])
+        .is_some());
+    assert!(subset
+        .structure()
+        .find_block_index_by_fusion_tree_pair(&keys[1])
+        .is_none());
     assert_eq!(
         subset.adjoint_view().unwrap().admission(),
-        subset.admission()
-    );
-    assert_eq!(
-        DynamicFusionMapSpace::from_typed(&subset).admission(),
         subset.admission()
     );
 }
 
 #[test]
 fn sparse_subset_operands_keep_only_present_canonical_keys() {
-    let complete = typed_z2_matrix_space();
-    let first = complete.subblock_structure().block(0).unwrap();
+    let complete = z2_matrix_space();
+    let first = complete.structure().block(0).unwrap();
     let structure = BlockStructure::from_blocks_with_rank(
         2,
         vec![BlockSpec::with_key(
@@ -738,15 +779,11 @@ fn sparse_subset_operands_keep_only_present_canonical_keys() {
         .unwrap()],
     )
     .unwrap();
-    let subset = FusionTensorMapSpace::new_unbound(
-        complete.dense_space().clone(),
-        complete.homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(&Z2FusionRule)
-    .unwrap();
-    let storage = DynamicFusionMapSpace::from_typed(&subset);
+    let subset = DynamicFusionMapSpace::try_from_layout(complete.homspace().clone(), structure)
+        .unwrap()
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+    let storage = subset;
     let direct = FusionOperand::direct(&storage)
         .prepare(&Z2FusionRule, encoded_layout_primer::<Z2FusionRule>)
         .unwrap();
@@ -766,21 +803,16 @@ fn sparse_subset_operands_keep_only_present_canonical_keys() {
 
 #[test]
 fn complete_and_subset_spaces_are_mathematically_equal() {
-    // What: proof strength survives typed erasure and adjoint views without
-    // changing mathematical equality.
-    let complete = typed_z2_matrix_space();
-    let subset = FusionTensorMapSpace::from_shared_subblock_structure(
-        complete.dense_space().clone(),
+    // What: proof strength survives adjoint views without changing
+    // mathematical equality.
+    let complete = z2_matrix_space();
+    let subset = DynamicFusionMapSpace::try_from_layout(
         complete.homspace().clone(),
-        Arc::clone(complete.subblock_structure()),
+        BlockStructure::clone(complete.structure()),
     )
     .unwrap()
     .try_bind_rule(&Z2FusionRule)
     .unwrap();
-    assert_eq!(complete, subset);
-
-    let complete = DynamicFusionMapSpace::from_typed(&complete);
-    let subset = DynamicFusionMapSpace::from_typed(&subset);
     assert_eq!(complete, subset);
     assert!(matches!(
         complete.admission(),
@@ -816,7 +848,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_structure_caches();
     reset_scratch_structure_builds();
-    let raw = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
+    let raw = z2_matrix_space();
     let structure = Arc::clone(raw.structure());
 
     let bound =
@@ -833,14 +865,13 @@ fn bind_revalidates_complete_without_replacing_layout() {
     let rule = lowered_product_rule();
     let pair = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(2).sector_id());
     let sector = TripleCodec::encode(pair, SU2Irrep::from_twice_spin(1).sector_id());
-    let typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
+    let layout = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
         [vec![1, 1]],
     )
     .unwrap();
-    let raw = DynamicFusionMapSpace::from_typed(&typed);
+    let raw = layout;
     let structure = Arc::clone(raw.structure());
     reset_scratch_structure_builds();
 
@@ -995,8 +1026,8 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_structure_caches();
-    let complete = typed_z2_matrix_space();
-    let first = complete.subblock_structure().block(0).unwrap();
+    let complete = z2_matrix_space();
+    let first = complete.structure().block(0).unwrap();
     let structure = BlockStructure::from_blocks_with_rank(
         2,
         vec![BlockSpec::with_key(
@@ -1008,15 +1039,11 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
         .unwrap()],
     )
     .unwrap();
-    let subset = FusionTensorMapSpace::new_unbound(
-        complete.dense_space().clone(),
-        complete.homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule_checked(&Z2FusionRule)
-    .unwrap();
-    let raw = DynamicFusionMapSpace::from_typed(&subset);
+    let subset = DynamicFusionMapSpace::try_from_layout(complete.homspace().clone(), structure)
+        .unwrap()
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+    let raw = subset;
     let original = raw.clone();
     reset_scratch_structure_builds();
 
@@ -1035,17 +1062,14 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
 fn derived_and_validated_paths_reject_subset_proofs() {
     // What: internal derived construction and validated-layout rebinding
     // require an executable Complete proof in release builds.
-    let complete = typed_z2_matrix_space();
-    let subset = FusionTensorMapSpace::from_shared_subblock_structure(
-        complete.dense_space().clone(),
+    let complete = z2_matrix_space();
+    let subset = DynamicFusionMapSpace::try_from_layout(
         complete.homspace().clone(),
-        Arc::clone(complete.subblock_structure()),
+        BlockStructure::clone(complete.structure()),
     )
     .unwrap()
     .try_bind_rule(&Z2FusionRule)
     .unwrap();
-    let complete = DynamicFusionMapSpace::from_typed(&complete);
-    let subset = DynamicFusionMapSpace::from_typed(&subset);
     let provider = Arc::new(Z2FusionRule);
     let expected = OperationError::StructureMismatch {
         tensor: "complete fusion layout",
@@ -1269,7 +1293,7 @@ fn memoized_adjoint_view_reads_the_current_admission() {
     // What: admission is reassigned after construction when a layout is
     // promoted, so the adjoint view reads it at call time; only the
     // admission-independent hom space and structure are memoized.
-    let complete = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
+    let complete = z2_matrix_space();
     let first = complete.adjoint_view().unwrap();
     let mut unbound = complete.clone();
     unbound.admission = FusionSpaceAdmission::Unbound;

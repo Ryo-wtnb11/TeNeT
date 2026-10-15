@@ -1,18 +1,11 @@
 use super::*;
 
-fn unbound_expert_space<const NOUT: usize, const NIN: usize>(
-    blocks: Vec<BlockSpec>,
-) -> Result<FusionTensorMapSpace<NOUT, NIN>, CoreError> {
+/// The storage half of expert-layout admission (the rank-free
+/// `DynamicFusionMapSpace::try_from_layout` runs it for non-canonical layouts).
+fn expert_layout_storage(rank: usize, blocks: Vec<BlockSpec>) -> Result<(), CoreError> {
     // Storage-only fixtures use opaque ordinals deliberately: categorical
-    // key and shape admission is covered independently by try_bind_rule.
-    let dense = TensorMapSpace::<NOUT, NIN>::from_dims([1; NOUT], [1; NIN]).unwrap();
-    let homspace =
-        FusionTreeHomSpace::from_sector_ids((0..NOUT).map(|_| (0, 1)), (0..NIN).map(|_| (0, 1)));
-    FusionTensorMapSpace::new_unbound(
-        dense,
-        homspace,
-        BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap(),
-    )
+    // key and shape admission is covered independently by subset validation.
+    validate_block_storage_injective(&BlockStructure::from_blocks_with_rank(rank, blocks).unwrap())
 }
 
 #[test]
@@ -30,7 +23,7 @@ fn expert_fusion_space_rejects_self_overlapping_storage() {
         ),
     ] {
         assert_eq!(
-            unbound_expert_space::<1, 1>(vec![block]),
+            expert_layout_storage(2, vec![block]),
             Err(CoreError::OverlappingBlockStorage {
                 first_block: 0,
                 second_block: 0,
@@ -49,7 +42,7 @@ fn expert_fusion_space_rejects_cross_block_storage_aliases() {
         BlockSpec::with_key(BlockKey::ordinal(1), vec![2], vec![1], 1).unwrap(),
     ];
     assert_eq!(
-        unbound_expert_space::<1, 0>(blocks),
+        expert_layout_storage(1, blocks),
         Err(CoreError::OverlappingBlockStorage {
             first_block: 0,
             second_block: 1,
@@ -69,7 +62,7 @@ fn expert_fusion_space_accepts_exact_non_overlapping_strided_storage() {
     ];
     reset_exact_storage_fallback_count();
     for blocks in rank_two_cases {
-        unbound_expert_space::<1, 1>(blocks).unwrap();
+        expert_layout_storage(2, blocks).unwrap();
     }
     assert!(exact_storage_fallback_count() > 0);
 
@@ -88,30 +81,24 @@ fn expert_fusion_space_accepts_exact_non_overlapping_strided_storage() {
         ],
     ];
     for blocks in rank_one_cases {
-        unbound_expert_space::<1, 0>(blocks).unwrap();
+        expert_layout_storage(1, blocks).unwrap();
     }
 
-    unbound_expert_space::<0, 0>(vec![BlockSpec::with_key(
-        BlockKey::ordinal(0),
-        vec![],
-        vec![],
+    expert_layout_storage(
         0,
+        vec![BlockSpec::with_key(BlockKey::ordinal(0), vec![], vec![], 0).unwrap()],
     )
-    .unwrap()])
     .unwrap();
-    unbound_expert_space::<1, 0>(vec![BlockSpec::with_key(
-        BlockKey::ordinal(0),
-        vec![0],
-        vec![1],
-        0,
+    expert_layout_storage(
+        1,
+        vec![BlockSpec::with_key(BlockKey::ordinal(0), vec![0], vec![1], 0).unwrap()],
     )
-    .unwrap()])
     .unwrap();
 }
 
 #[test]
 fn general_block_structure_retains_aliasing_read_view_contract() {
-    // What: storage ownership admission belongs to FusionTensorMapSpace;
+    // What: storage ownership admission belongs to the expert fusion space;
     // general block metadata remains usable for intentionally aliased views.
     let structure = BlockStructure::from_blocks(vec![
         BlockSpec::with_key(BlockKey::ordinal(0), vec![2], vec![1], 0).unwrap(),
@@ -135,14 +122,10 @@ where
     )
     .unwrap()])
     .unwrap();
-    FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-        homspace,
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(rule)
-    .unwrap();
+    validate_block_storage_injective(&structure).unwrap();
+    homspace
+        .validate_subblock_structure_subset(rule, &structure)
+        .unwrap();
 }
 
 #[test]

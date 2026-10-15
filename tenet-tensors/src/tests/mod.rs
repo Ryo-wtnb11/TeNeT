@@ -610,12 +610,11 @@ use std::ops::{Add, Mul};
 use tenet_core::{
     multiplicity_free_permute_tree_pair, multiplicity_free_repartition_tree_pair, BlockKey,
     BlockSpec, BlockStructure, BraidingStyleKind, CoreError, DegeneracyStructure,
-    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray,
-    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
-    ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
-    TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTreeGroupKey,
+    FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray, GenericFusionSymbols,
+    GenericRMatrix, GenericRigidSymbols, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement, ProductFusionRule, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
 
@@ -787,8 +786,8 @@ type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
 
 fn fz2_u1_su2_tree_pair_fixture() -> (
     FpU1Su2Rule,
-    FusionTensorMapSpace<2, 1>,
-    FusionTensorMapSpace<2, 1>,
+    DynamicFusionMapSpace,
+    DynamicFusionMapSpace,
     [SectorId; 2],
 ) {
     let left_rule = FpU1Rule::default();
@@ -822,17 +821,15 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
-        src_hom,
+    let src_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        src_hom,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
-        dst_hom,
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        dst_hom,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
@@ -1403,7 +1400,7 @@ fn assert_tree_single_dtype<T>(
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let space = vec![2, 2];
     let src = TestTensor::<T>::from_vec(values, space.clone()).unwrap();
     let mut dst = TestTensor::<T>::filled(fill, space).unwrap();
     let structure = TreeTransformStructure::compile_structures(
@@ -1433,7 +1430,7 @@ where
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
-    let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let space = vec![4, 2];
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src = TestTensor::<T>::from_vec_with_structure(
@@ -1483,7 +1480,7 @@ fn assert_tree_single_mixed_dtype<D, C>(
     D: TreeTransformScalar + RecouplingCoefficientAction<C> + Clone + Debug,
     C: Copy,
 {
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let space = vec![2, 2];
     let src = TestTensor::<D>::from_vec(values, space.clone()).unwrap();
     let mut dst = TestTensor::<D>::filled(fill, space).unwrap();
     let structure = TreeTransformStructure::compile_structures(
@@ -1510,7 +1507,7 @@ fn assert_tree_multi_mixed_dtype<D, C>(
     D: TreeTransformScalar + RecouplingCoefficientAction<C> + Clone + Debug,
     C: Copy,
 {
-    let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let space = vec![4, 2];
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src =
@@ -1556,8 +1553,8 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![6, 1];
+    let dst_space = vec![4, 1];
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
@@ -1594,8 +1591,8 @@ fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
 ) where
     T: DenseRecouplingScalar + Clone + Debug,
 {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![6, 1];
+    let dst_space = vec![4, 1];
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
@@ -1654,8 +1651,8 @@ fn assert_tree_multi_keyed_dtype<T>(
     let key100 = BlockKey::opaque([100]);
     let key200 = BlockKey::opaque([200]);
     let key300 = BlockKey::opaque([300]);
-    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![6, 1];
+    let dst_space = vec![4, 1];
     let src_structure = packed_fixture_structure(
         2,
         [
@@ -1708,9 +1705,9 @@ fn assert_tensorcontract_scalar_dtype<D>(lhs_value: D, rhs_value: D, fill: D, ex
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64> + Clone + Debug,
 {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let lhs_space = vec![1, 1];
+    let rhs_space = vec![1, 1];
+    let dst_space = vec![1, 1];
     let lhs = TestTensor::<D>::from_vec(vec![lhs_value], lhs_space).unwrap();
     let rhs = TestTensor::<D>::from_vec(vec![rhs_value], rhs_space).unwrap();
     let mut dst = TestTensor::<D>::filled(fill, dst_space).unwrap();
@@ -1732,9 +1729,9 @@ fn assert_weighted_tensorcontract_scalar_dtype<D>(lhs_value: D, rhs_value: D, fi
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64> + Clone + Debug,
 {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let lhs_space = vec![1, 1];
+    let rhs_space = vec![1, 1];
+    let dst_space = vec![1, 1];
     let lhs = TestTensor::<D>::from_vec(vec![lhs_value], lhs_space).unwrap();
     let rhs = TestTensor::<D>::from_vec(vec![rhs_value], rhs_space).unwrap();
     let mut dst = TestTensor::<D>::from_vec(vec![fill], dst_space).unwrap();

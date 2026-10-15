@@ -2,8 +2,7 @@ use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
 use std::cell::Cell;
 use tenet_core::{
-    FusionProductSpace, FusionRule, FusionTensorMapSpace, SU2FusionRule, SectorLeg, TensorMapSpace,
-    U1FusionRule, U1Irrep, Z2FusionRule,
+    FusionProductSpace, FusionRule, SU2FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_operations::TensorContractSpec;
 
@@ -196,26 +195,14 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
         FusionProductSpace::new([codomain]),
         FusionProductSpace::new([domain]),
     );
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
-        homspace.clone(),
-        &rule,
-        vec![vec![1, 1]; 3],
-    )
-    .unwrap();
-    let reversed_keys = (0..canonical.subblock_structure().block_count())
+    let canonical =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), vec![vec![1, 1]; 3])
+            .unwrap();
+    let reversed_keys = (0..canonical.structure().block_count())
         .rev()
-        .map(|index| {
-            canonical
-                .subblock_structure()
-                .block(index)
-                .unwrap()
-                .key()
-                .clone()
-        })
+        .map(|index| canonical.structure().block(index).unwrap().key().clone())
         .collect::<Vec<_>>();
-    let reordered = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+    let reordered = DynamicFusionMapSpace::try_from_layout(
         homspace,
         crate::tests::packed_fixture_structure(
             2,
@@ -226,7 +213,7 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let source = DynamicFusionMapSpace::from_typed(&reordered);
+    let source = reordered;
     let layout = super::super::dynamic_space::FusionOperand::direct(&source)
         .prepare(
             &rule,
@@ -427,21 +414,20 @@ fn borrowable_core_layout_accepts_equal_structure_across_intern_reset() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let build = || {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-            FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
             [vec![1, 1]],
         )
         .unwrap()
         .try_bind_rule(&rule)
         .unwrap()
     };
-    let source = DynamicFusionMapSpace::from_typed(&build());
+    let source = build();
     let source_structure = Arc::clone(source.structure());
 
     tenet_core::clear_structure_caches();
-    let core = DynamicFusionMapSpace::from_typed(&build());
+    let core = build();
 
     // What: equal live layouts created on opposite sides of an intern reset
     // remain borrowable even though their process-local content ids differ.
@@ -460,16 +446,15 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
     // What: nonidentity and conjugating sources skip HomSpace identity,
     // while an otherwise borrowable identity layout performs one comparison.
     let rule = Z2FusionRule;
-    let typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
+    let layout = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
         [vec![1, 1]],
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let source = DynamicFusionMapSpace::from_typed(&typed);
+    let source = layout;
     let source_structure = Arc::clone(source.structure());
 
     reset_source_layout_homspace_id_comparisons();

@@ -1183,7 +1183,7 @@ fn typed_cuda_twist_lowering_is_the_host_theta_authority() {
 /// pair (a structure cannot mix key kinds): same geometry, no adjoint
 /// partner.
 #[cfg(feature = "cuda")]
-fn with_opaque_keys<const NOUT: usize, const NIN: usize>(
+fn with_opaque_keys(
     space: &tenet_tensors::DynamicFusionMapSpace,
 ) -> tenet_tensors::DynamicFusionMapSpace {
     let structure = space.structure();
@@ -1199,14 +1199,11 @@ fn with_opaque_keys<const NOUT: usize, const NIN: usize>(
             .unwrap()
         })
         .collect();
-    tenet_tensors::DynamicFusionMapSpace::from_typed(
-        &tenet_core::FusionTensorMapSpace::new_unbound(
-            tenet_core::TensorMapSpace::<NOUT, NIN>::from_dims([1; NOUT], [1; NIN]).unwrap(),
-            space.homspace().clone(),
-            BlockStructure::from_blocks_with_rank(NOUT + NIN, specs).unwrap(),
-        )
-        .unwrap(),
+    DynamicFusionMapSpace::try_from_layout(
+        space.homspace().clone(),
+        BlockStructure::from_blocks_with_rank(space.rank(), specs).unwrap(),
     )
+    .unwrap()
 }
 
 /// The device lowering of the one [`tenet_tensors::AdjointBlockMap`]
@@ -1230,7 +1227,7 @@ where
     let parent_space = view.parent.space.space();
     let logical = view.logical_space.space();
     let adjoint_space = if zero_blocks {
-        with_opaque_keys::<1, 2>(logical)
+        with_opaque_keys(logical)
     } else {
         logical.clone()
     };
@@ -1424,7 +1421,7 @@ fn typed_cuda_materialize_lowers_the_host_adjoint_block_map() {
     let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
         panic!("dense adjoint is lazy");
     };
-    let parent = with_opaque_keys::<2, 1>(view.parent.space.space());
+    let parent = with_opaque_keys(view.parent.space.space());
     let logical = view.logical_space.space();
     let host = tenet_tensors::materialize_adjoint_data_dyn(
         &parent,

@@ -32,15 +32,10 @@ fn coupled_sector_regions_describe_canonical_matrix_spans() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let keys = homspace.fusion_tree_keys(&rule);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap(),
-        homspace,
-        &rule,
-        vec![vec![2; 4]; keys.len()],
-    )
-    .unwrap();
+    let structure = homspace
+        .coupled_subblock_structure(&rule, 2, vec![vec![2; 4]; keys.len()])
+        .unwrap();
 
-    let structure = space.subblock_structure();
     let cloned_before_query = structure.as_ref().clone();
     assert!(!structure.coupled_region_cache_is_initialized());
     let cold_charge = structure.charged_retained_bytes();
@@ -60,7 +55,7 @@ fn coupled_sector_regions_describe_canonical_matrix_spans() {
         regions[0].rows() * regions[0].cols()
     );
     assert_eq!(regions[1].range().start, regions[0].range().end);
-    assert_eq!(regions[1].range().end, space.required_len().unwrap());
+    assert_eq!(regions[1].range().end, structure.required_len().unwrap());
     assert!(regions.iter().all(|region| {
         !region.row_trees().is_empty()
             && !region.col_trees().is_empty()

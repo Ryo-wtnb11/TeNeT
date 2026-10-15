@@ -995,7 +995,7 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     let compiled = plan.compile_structures(&structure, &structure).unwrap();
     assert!(!compiled.has_pack_gemm_scatter_blocks());
 
-    let space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+    let space = vec![1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![5.0, 7.0],
         space.clone(),

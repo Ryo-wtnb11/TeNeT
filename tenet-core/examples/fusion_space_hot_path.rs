@@ -1,9 +1,9 @@
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tenet_core::{
-    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMapSpace,
-    U1FusionRule, U1Irrep,
+    BlockStructure, FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep,
 };
 
 const CHARGE_COUNTS: &[usize] = &[1, 8, 64, 512, 4096];
@@ -34,14 +34,13 @@ fn run_u1_case(charge_count: usize) {
 
     let compile_iters = iterations(charge_count, 200_000);
     let build_elapsed = elapsed_per_iter(compile_iters, || {
-        let fusion_space = fusion_space(&rule, &charges);
-        black_box(fusion_space.subblock_structure().block_count());
+        let (_, structure) = fusion_space(&rule, &charges);
+        black_box(structure.block_count());
     });
 
-    let fusion_space = fusion_space(&rule, &charges);
-    let block_count = fusion_space.subblock_structure().block_count();
-    let keys = fusion_space.homspace().fusion_tree_keys(&rule);
-    let structure = fusion_space.subblock_structure();
+    let (homspace, structure) = fusion_space(&rule, &charges);
+    let block_count = structure.block_count();
+    let keys = homspace.fusion_tree_keys(&rule);
 
     let lookup_iters = iterations(charge_count, 100_000);
     let tree_elapsed = elapsed_per_op(lookup_iters, charge_count, || {
@@ -56,8 +55,7 @@ fn run_u1_case(charge_count: usize) {
         for charge in &charges {
             let sector = U1Irrep::new(*charge).sector_id();
             let external_domain = U1Irrep::new(-*charge).sector_id();
-            let keys = fusion_space
-                .homspace()
+            let keys = homspace
                 .fusion_tree_keys_from_external_sectors(&rule, &[sector, external_domain])
                 .unwrap();
             let [key] = keys.as_slice() else {
@@ -87,15 +85,13 @@ fn charges(charge_count: usize) -> Vec<i32> {
         .collect()
 }
 
-fn fusion_space(rule: &U1FusionRule, charges: &[i32]) -> FusionTensorMapSpace<1, 1> {
-    let dense = TensorMapSpace::<1, 1>::from_dims([charges.len()], [charges.len()]).unwrap();
-    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        homspace(charges),
-        rule,
-        (0..charges.len()).map(|_| vec![1, 1]),
-    )
-    .unwrap()
+/// The hom space and its coupled-sector layout.
+fn fusion_space(rule: &U1FusionRule, charges: &[i32]) -> (FusionTreeHomSpace, Arc<BlockStructure>) {
+    let homspace = homspace(charges);
+    let structure = homspace
+        .coupled_subblock_structure(rule, 1, (0..charges.len()).map(|_| vec![1, 1]))
+        .unwrap();
+    (homspace, structure)
 }
 
 fn homspace(charges: &[i32]) -> FusionTreeHomSpace {

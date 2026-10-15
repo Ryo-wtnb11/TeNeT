@@ -11,7 +11,7 @@
 
 use super::*;
 use num_complex::{Complex32, Complex64};
-use tenet_core::{FusionTensorMapSpace, SUNFusionRule, TensorMapSpace};
+use tenet_core::SUNFusionRule;
 use tenet_matrixalgebra::FactorScalar;
 use tenet_tensors::DynamicFusionMapSpace;
 
@@ -156,7 +156,7 @@ where
     };
     let space = body.space.space();
     let structure = space.structure();
-    let (mut offset, mut dimension, mut blocks) = (1, 0, Vec::new());
+    let (mut offset, mut blocks) = (1, Vec::new());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         blocks.push(
@@ -164,21 +164,15 @@ where
                 .unwrap(),
         );
         offset += block.shape().iter().product::<usize>() + 1;
-        dimension += block.shape()[0];
     }
-    let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([dimension], [dimension]).unwrap(),
+    let layout = DynamicFusionMapSpace::try_from_layout(
         space.homspace().clone(),
         BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
     )
     .unwrap()
     .try_bind_rule(body.space.provider())
     .unwrap();
-    let expert = bind(
-        DynamicFusionMapSpace::from_typed(&typed),
-        Arc::clone(body.space.provider_arc()),
-    )
-    .unwrap();
+    let expert = bind(layout, Arc::clone(body.space.provider_arc())).unwrap();
     assert!(!matches!(
         expert.space().structure().coupled_sector_regions(1),
         Ok(Some(regions)) if regions.iter().all(|region| region.has_aligned_diagonal())

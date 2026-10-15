@@ -75,24 +75,19 @@ fn canonical_and_factor_bridge_storage_skip_exact_enumeration() {
     let rule = SU2FusionRule;
     let homspace = FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
     reset_exact_storage_fallback_count();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-        homspace.clone(),
-        &rule,
-        [vec![2, 3]],
-    )
-    .unwrap();
+    let canonical = homspace
+        .clone()
+        .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
+        .unwrap();
     assert_eq!(exact_storage_fallback_count(), 0);
 
+    // The expert layout constructor skips the exact check exactly when the
+    // structure compiles to coupled-sector regions.
     reset_exact_storage_fallback_count();
-    FusionTensorMapSpace::from_shared_subblock_structure(
-        TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-        homspace,
-        Arc::clone(canonical.subblock_structure()),
-    )
-    .unwrap()
-    .try_bind_rule(&rule)
-    .unwrap();
+    assert!(canonical.coupled_sector_regions(1).unwrap().is_some());
+    homspace
+        .validate_subblock_structure_subset(&rule, &canonical)
+        .unwrap();
     assert_eq!(exact_storage_fallback_count(), 0);
 }
 

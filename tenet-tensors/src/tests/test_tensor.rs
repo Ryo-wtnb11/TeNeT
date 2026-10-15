@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use tenet_core::{
-    BlockStructure, CoreError, FusionTensorMapSpace, MultiplicityFreeRigidSymbols, TensorMapSpace,
-};
+use tenet_core::{checked_product, BlockStructure, CoreError, MultiplicityFreeRigidSymbols};
 
 use crate::{DynamicFusionMapSpace, OperationError};
 
@@ -25,49 +23,55 @@ pub(crate) struct TestTensor<T> {
 
 impl<T> TestTensor<T> {
     /// A dense operand over one trivial block.
-    pub(crate) fn from_vec<const NOUT: usize, const NIN: usize>(
-        data: Vec<T>,
-        space: TensorMapSpace<NOUT, NIN>,
-    ) -> Result<Self, CoreError> {
-        let structure = BlockStructure::trivial(space.dims())?;
-        Self::from_vec_with_structure(data, space, structure)
+    pub(crate) fn from_vec(data: Vec<T>, dims: Vec<usize>) -> Result<Self, CoreError> {
+        let structure = BlockStructure::trivial(&dims)?;
+        Self::from_vec_with_structure(data, dims, structure)
     }
 
     /// A dense operand over one trivial block, every element `value`.
-    pub(crate) fn filled<const NOUT: usize, const NIN: usize>(
-        value: T,
-        space: TensorMapSpace<NOUT, NIN>,
-    ) -> Result<Self, CoreError>
+    pub(crate) fn filled(value: T, dims: Vec<usize>) -> Result<Self, CoreError>
     where
         T: Clone,
     {
-        Self::from_vec(vec![value; space.dense_dim()], space)
+        let len = checked_product(&dims)?;
+        Self::from_vec(vec![value; len], dims)
     }
 
     /// An operand over an explicit block layout without a fusion space.
-    pub(crate) fn from_vec_with_structure<const NOUT: usize, const NIN: usize>(
+    pub(crate) fn from_vec_with_structure(
         data: Vec<T>,
-        space: TensorMapSpace<NOUT, NIN>,
+        dims: Vec<usize>,
         structure: BlockStructure,
     ) -> Result<Self, CoreError> {
         Self::from_parts(
             data,
-            space.dims().to_vec(),
+            dims,
             BlockStructure::canonicalize_shared(structure.into_shared()),
             None,
         )
     }
 
-    /// A symmetric operand; its fusion space owns the block layout.
-    pub(crate) fn from_vec_with_fusion_space<const NOUT: usize, const NIN: usize>(
+    /// A symmetric operand; its fusion space owns the block layout, and each
+    /// axis extent is the total degeneracy of its leg.
+    pub(crate) fn from_vec_with_fusion_space(
         data: Vec<T>,
-        fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+        fusion_space: DynamicFusionMapSpace,
     ) -> Result<Self, CoreError> {
-        Self::from_vec_with_dynamic_space(
-            data,
-            fusion_space.dense_space().dims().to_vec(),
-            DynamicFusionMapSpace::from_typed(&fusion_space),
-        )
+        let homspace = fusion_space.homspace();
+        let dims = homspace
+            .codomain()
+            .legs()
+            .iter()
+            .chain(homspace.domain().legs())
+            .map(|leg| {
+                leg.degeneracies().iter().try_fold(0usize, |total, &dim| {
+                    total
+                        .checked_add(dim)
+                        .ok_or(CoreError::ElementCountOverflow)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_vec_with_dynamic_space(data, dims, fusion_space)
     }
 
     /// A symmetric operand over an already rank-erased fusion space.

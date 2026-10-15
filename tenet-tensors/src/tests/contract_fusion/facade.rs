@@ -24,13 +24,7 @@ fn fibonacci_complex_provider_replays_crossing_free_prepared_contraction() {
         FusionProductSpace::new([leg()]),
         FusionProductSpace::new([leg()]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        hom,
-        &rule,
-        [vec![1, 1]],
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, [vec![1, 1]]).unwrap();
     let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(2.0, 1.0)],
         space.clone(),
@@ -319,33 +313,30 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &rule,
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &rule,
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &rule,
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
@@ -438,13 +429,12 @@ fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
                 FusionProductSpace::new([leg()]),
             ),
-            &rule,
             [vec![1, 1], vec![1, 1]],
         )
         .unwrap()
@@ -476,13 +466,12 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
                 FusionProductSpace::new([leg()]),
             ),
-            &rule,
             [vec![1, 1], vec![1, 1]],
         )
         .unwrap()
@@ -519,26 +508,22 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     ];
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.map(|sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
-    let dense =
-        || TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
     let space = |hom: &FusionTreeHomSpace| {
         let count = hom.fusion_tree_keys(&rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            dense(),
-            hom.clone(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            hom.clone(),
             vec![vec![degeneracy; 4]; count],
         )
         .unwrap()
     };
     let tensor_space = space(&homspace);
     let fill = |seed: f64| move |index: usize| 0.25 * seed + ((index * 7 + 3) % 11) as f64 - 5.0;
-    let len = tensor_space.subblock_structure().required_len().unwrap();
+    let len = tensor_space.structure().required_len().unwrap();
     let lhs_data = (0..len).map(fill(1.0)).collect::<Vec<_>>();
     let rhs_data = (0..len).map(fill(2.0)).collect::<Vec<_>>();
     let lhs =

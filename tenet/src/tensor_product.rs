@@ -1405,14 +1405,11 @@ mod tests {
             .collect::<Vec<_>>();
         let expert_blocks = tenet_core::BlockStructure::from_blocks_with_rank(2, blocks).unwrap();
         assert!(!super::offsets_never_decrease(&expert_blocks));
-        let expert = tenet_tensors::DynamicFusionMapSpace::from_typed(
-            &tenet_core::FusionTensorMapSpace::<1, 1>::new_unbound(
-                tenet_core::TensorMapSpace::from_dims([4], [4]).unwrap(),
-                canonical.space().homspace().clone(),
-                expert_blocks,
-            )
-            .unwrap(),
-        );
+        let expert = tenet_tensors::DynamicFusionMapSpace::try_from_layout(
+            canonical.space().homspace().clone(),
+            expert_blocks,
+        )
+        .unwrap();
         let sources = source.space().structure();
         let destinations = expert.structure();
         let targets = (0..2)

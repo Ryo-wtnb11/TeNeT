@@ -206,8 +206,7 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
             .collect(),
     )
     .unwrap();
-    let reordered_typed = FusionTensorMapSpace::<2, 1>::new_unbound(
-        TensorMapSpace::from_dims([2, 3], [5]).unwrap(),
+    let reordered_typed = DynamicFusionMapSpace::try_from_layout(
         canonical_logical.space().homspace().clone(),
         reordered_structure,
     )
@@ -215,7 +214,7 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
     .try_bind_rule(provider.as_ref())
     .unwrap();
     let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
-        crate::DynamicFusionMapSpace::from_typed(&reordered_typed),
+        reordered_typed.clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -290,8 +289,7 @@ fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
             .collect(),
     )
     .unwrap();
-    let padded_typed = FusionTensorMapSpace::<1, 2>::new_unbound(
-        TensorMapSpace::from_dims([5], [2, 3]).unwrap(),
+    let padded_typed = DynamicFusionMapSpace::try_from_layout(
         canonical_parent.space().homspace().clone(),
         padded_structure,
     )
@@ -299,7 +297,7 @@ fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
     .try_bind_rule(provider.as_ref())
     .unwrap();
     let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
-        crate::DynamicFusionMapSpace::from_typed(&padded_typed),
+        padded_typed.clone(),
         Arc::clone(&provider),
     )
     .unwrap();

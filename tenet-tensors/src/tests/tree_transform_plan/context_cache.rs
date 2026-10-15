@@ -29,7 +29,7 @@ fn expert_layout_transformers_are_rebuilt_per_call_and_never_published() {
         ],
     )
     .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![3.0, -4.0],
         space.clone(),
@@ -111,8 +111,8 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
         ],
     )
     .unwrap();
-    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src_space = vec![1, 1, 1, 1];
+    let dst_space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
@@ -247,8 +247,8 @@ fn all_codomain_plan_compiles_distinct_degeneracy_shapes() {
         [(src_key0, vec![2, 1, 1, 1]), (src_key1, vec![2, 1, 1, 1])],
     )
     .unwrap();
-    let small_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let large_space = TensorMapSpace::<4, 0>::from_dims([2, 1, 1, 1], []).unwrap();
+    let small_space = vec![1, 1, 1, 1];
+    let large_space = vec![2, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         small_space.clone(),
@@ -325,7 +325,7 @@ fn all_codomain_plan_replays_su2_recoupling() {
         ],
     )
     .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let space = vec![1, 1, 1, 1];
     let mut src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),
@@ -397,7 +397,7 @@ fn tree_pair_and_all_codomain_transforms_agree_on_an_all_codomain_source() {
         ],
     )
     .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         space.clone(),

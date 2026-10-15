@@ -1,9 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols,
-    PreparedBlockStructure, RuleIdentity,
+    validate_block_storage_injective, BlockKey, BlockStructure, CoreError, FusionRule,
+    FusionSpaceAdmission, FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey,
+    MultiplicityFreeRigidSymbols, PreparedBlockStructure, RuleIdentity,
 };
 
 use crate::{OperationError, TreeTransformOperation};
@@ -154,8 +154,7 @@ pub(crate) struct TransformedLayoutProbe {
 /// Dynamic-rank fusion space: the expert-layer space handle whose
 /// codomain/domain split is a runtime property.
 ///
-/// Typed [`FusionTensorMapSpace`] facades lower to this type internally; the
-/// dynamic expert entry points (`*_dyn_into`) take it directly together with
+/// The dynamic expert entry points (`*_dyn_into`) take it directly together with
 /// raw `f64` slices in the coupled-sector matrix layout.
 #[derive(Clone, Debug)]
 pub struct DynamicFusionMapSpace {
@@ -458,26 +457,74 @@ impl DynamicFusionMapSpace {
         Ok(())
     }
 
-    /// Current typed-to-dynamic bridge (shares the hom space and selected
-    /// subblock layout handles; no data copies).
-    pub fn from_typed<const NOUT: usize, const NIN: usize>(
-        space: &FusionTensorMapSpace<NOUT, NIN>,
-    ) -> Self {
-        Self {
-            nout: NOUT,
-            nin: NIN,
-            homspace: Arc::clone(space.homspace_arc()),
-            subblock_structure: Arc::clone(space.subblock_structure()),
-            admission: space.admission().clone(),
-            adjoint: OnceLock::new(),
+    /// Expert constructor for a caller-selected block layout over `homspace`.
+    ///
+    /// Use this at an import or custom-layout boundary where the
+    /// [`BlockStructure`] (gapped, reordered, or a tree subset) has already
+    /// been prepared; ordinary operation outputs derive their layout from the
+    /// final hom space instead. This checks only that the structure rank is
+    /// the hom-space rank and that logical block footprints do not overlap.
+    /// The result is unbound: key, sector, duality, and logical-shape
+    /// admission is [`Self::try_bind_rule`] or a `BoundDynamicFusionMapSpace`
+    /// `bind_*` constructor.
+    #[doc(hidden)]
+    pub fn try_from_layout(
+        homspace: FusionTreeHomSpace,
+        structure: BlockStructure,
+    ) -> Result<Self, CoreError> {
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        if structure.rank() != nout + nin {
+            return Err(CoreError::StructureRankMismatch {
+                expected: nout + nin,
+                actual: structure.rank(),
+            });
         }
+        // Why not always run the pairwise footprint check: canonical
+        // coupled-sector regions already cover storage exactly once.
+        if structure.coupled_sector_regions(nout)?.is_none() {
+            validate_block_storage_injective(&structure)?;
+        }
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure: BlockStructure::canonicalize_shared(structure.into_shared()),
+            admission: FusionSpaceAdmission::Unbound,
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    /// Expert subset admission of a [`Self::try_from_layout`] layout.
+    ///
+    /// This certifies every present block against the rule and hom-space split,
+    /// sector membership, duality, and logical degeneracy shape. Missing valid
+    /// pairs remain structural zeros. It does not rebuild, repack, or otherwise
+    /// select the caller's storage order, strides, or offsets. A space already
+    /// admitted under the same rule is returned unchanged.
+    #[doc(hidden)]
+    pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
+        let actual = rule.rule_identity();
+        if let Some(expected) = self.admission.rule_identity() {
+            if expected != &actual {
+                return Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+            return Ok(self);
+        }
+        self.homspace
+            .validate_subblock_structure_subset(rule, &self.subblock_structure)?;
+        self.admission = FusionSpaceAdmission::Subset(actual);
+        Ok(self)
     }
 
     /// Expert compatibility constructor from an untyped description: a hom
     /// space plus one caller-supplied degeneracy shape per fusion-tree key (in
     /// [`FusionTreeHomSpace::fusion_tree_keys`] order). The storage layout is
     /// the TensorKit-equivalent coupled-sector matrix layout, identical to
-    /// [`FusionTensorMapSpace::from_degeneracy_shapes_coupled`]. Ordinary operation
+    /// [`FusionTreeHomSpace::coupled_subblock_structure`]. Ordinary operation
     /// outputs derive the layout from their final hom space instead.
     pub fn from_degeneracy_shapes<R, Shapes>(
         rule: &R,

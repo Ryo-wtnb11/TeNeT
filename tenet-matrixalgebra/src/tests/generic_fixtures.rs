@@ -236,14 +236,11 @@ pub(super) fn expert_generic_factorization_input(
         offset += block.shape().iter().product::<usize>() + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(source.space().rank(), blocks).unwrap();
-    let typed_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([2, 1], [1, 1]).unwrap(),
-        source.space().homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(source.provider())
-    .unwrap();
+    let typed_space =
+        DynamicFusionMapSpace::try_from_layout(source.space().homspace().clone(), structure)
+            .unwrap()
+            .try_bind_rule(source.provider())
+            .unwrap();
     let tensor =
         TestTensor::<f64>::from_block_fn_with_fusion_space(typed_space, 0.0, |key, indices| {
             let block = source_structure
@@ -463,14 +460,11 @@ where
         offset += block.shape().iter().product::<usize>() + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(source.space().rank(), blocks).unwrap();
-    let typed_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        source.space().homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(source.provider())
-    .unwrap();
+    let typed_space =
+        DynamicFusionMapSpace::try_from_layout(source.space().homspace().clone(), structure)
+            .unwrap()
+            .try_bind_rule(source.provider())
+            .unwrap();
     let tensor =
         TestTensor::<D>::from_block_fn_with_fusion_space(typed_space, D::zero(), |key, indices| {
             let block = source_structure
@@ -749,14 +743,11 @@ fn expert_generic_endomorphism_input(
         offset += block.shape().iter().product::<usize>() + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
-    let typed_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
-        source.space().homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(source.provider())
-    .unwrap();
+    let typed_space =
+        DynamicFusionMapSpace::try_from_layout(source.space().homspace().clone(), structure)
+            .unwrap()
+            .try_bind_rule(source.provider())
+            .unwrap();
     let tensor = TestTensor::<Complex64>::from_block_fn_with_fusion_space(
         typed_space,
         Complex64::zero(),

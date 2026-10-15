@@ -5,7 +5,7 @@ const ALPHA: f64 = 2.0;
 const BETA: f64 = 3.0;
 const SOURCE_VALUE: f64 = 7.0;
 
-fn scalar_matrix_space<R>(rule: &R, sectors: [SectorId; 2]) -> FusionTensorMapSpace<1, 1>
+fn scalar_matrix_space<R>(rule: &R, sectors: [SectorId; 2]) -> DynamicFusionMapSpace
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -15,13 +15,8 @@ where
         FusionProductSpace::new([leg()]),
     );
     let block_count = homspace.fusion_tree_keys(rule).len();
-    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        homspace,
-        rule,
-        vec![vec![1, 1]; block_count],
-    )
-    .unwrap()
+    DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, vec![vec![1, 1]; block_count])
+        .unwrap()
 }
 
 fn source_bytes(source: &TestTensor<f64>) -> Vec<u8> {
@@ -32,7 +27,7 @@ fn source_bytes(source: &TestTensor<f64>) -> Vec<u8> {
         .collect()
 }
 
-fn sentinel_data(space: &FusionTensorMapSpace<1, 1>) -> Vec<f64> {
+fn sentinel_data(space: &DynamicFusionMapSpace) -> Vec<f64> {
     (0..space.required_len().unwrap())
         .map(|index| 11.0 + index as f64)
         .collect()
@@ -71,10 +66,9 @@ where
         complete_space.admission(),
         FusionSpaceAdmission::Complete(_)
     ));
-    let retained_block = complete_space.subblock_structure().block(0).unwrap();
+    let retained_block = complete_space.structure().block(0).unwrap();
     let retained_key = expect_tree_key(retained_block.key());
-    let subset_space = FusionTensorMapSpace::new_unbound(
-        complete_space.dense_space().clone(),
+    let subset_space = DynamicFusionMapSpace::try_from_layout(
         complete_space.homspace().clone(),
         packed_fixture_structure(2, [(retained_key.clone(), vec![1, 1])]).unwrap(),
     )

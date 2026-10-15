@@ -6,10 +6,10 @@
 //! `multiplicity_free_*_block`, `unique_permute_tree`, ...) are crate-private;
 //! the few that tests outside the crate use are forwarded only through the
 //! `testing` feature's `tenet_core::testing`, pinned separately below.
-//! `merge_fusion_trees_generic` and the `from_degeneracy_shapes` alias of
-//! `FusionTensorMapSpace::from_degeneracy_shapes_coupled` were deleted, and so
-//! were the static-rank `TensorMap` / `Tensor` and their `Trivial` marker
-//! (#2222).
+//! `merge_fusion_trees_generic` was deleted, and so were the static-rank
+//! `TensorMap` / `Tensor` and their `Trivial` marker (#2222) and the
+//! static-rank `TensorMapSpace` / `ProductSpace` / `FusionTensorMapSpace`
+//! (#2253).
 //!
 //! Why a source scan and not an import list: an import list only proves
 //! presence, not absence. The crate root re-exports its private modules with
@@ -243,7 +243,6 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "FusionRule",
         "FusionSpaceAdmission",
         "FusionStyleKind",
-        "FusionTensorMapSpace",
         "FusionTreeBlockGroup",
         "FusionTreeGroupKey",
         "FusionTreeGroupRef",
@@ -289,7 +288,6 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "ProductSectorCodecError",
         "ProductSectorComponent",
         "ProductSectorLayout",
-        "ProductSpace",
         "PromoteCoefficientScalar",
         "RuleIdentity",
         "SU2CoefficientError",
@@ -312,7 +310,6 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "Su2SectorLayout",
         "SymbolShapeError",
         "TensorKitProductCodec",
-        "TensorMapSpace",
         "TensorStorage",
         "TreeRehomer",
         "TypedSectorAdmission",

@@ -484,8 +484,8 @@ mod owned_overwrite_tests {
     use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
     use num_complex::Complex64;
     use tenet_core::{
-        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-        FusionTreePairKey, SectorLeg, TensorMapSpace, Z2FusionRule, Z2Irrep,
+        BlockKey, BlockSpec, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey, SectorLeg,
+        Z2FusionRule, Z2Irrep,
     };
     use tenet_dense::{
         DenseBackend, DenseDotConfig, DenseError, DenseRead, DenseScalar, DenseTensor, DenseWrite,
@@ -584,23 +584,19 @@ mod owned_overwrite_tests {
     fn owned_writer_multi_matches_direct_matrix_oracle() {
         // What: the uninitialized Multi writer applies every destination-by-source
         // recoupling coefficient and writes the final owned payload exactly once.
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([SectorLeg::new(
-                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-                    false,
-                )]),
-                FusionProductSpace::new([SectorLeg::new(
-                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-                    false,
-                )]),
-            ),
-            &Z2FusionRule,
-            [vec![1, 1], vec![1, 1]],
+        let space = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                false,
+            )]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                false,
+            )]),
         )
+        .coupled_subblock_structure(&Z2FusionRule, 1, [vec![1, 1], vec![1, 1]])
         .unwrap();
-        let structure = Arc::clone(space.subblock_structure());
+        let structure = Arc::clone(&space);
         let transform = TreeTransformStructure::compile_structures(
             &structure,
             &structure,
@@ -670,17 +666,13 @@ mod owned_overwrite_tests {
             );
         }
 
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([z2_leg(1, 1)]),
-                FusionProductSpace::new([z2_leg(1, 1)]),
-            ),
-            &Z2FusionRule,
-            [vec![1, 1], vec![1, 1]],
+        let space = FusionTreeHomSpace::new(
+            FusionProductSpace::new([z2_leg(1, 1)]),
+            FusionProductSpace::new([z2_leg(1, 1)]),
         )
+        .coupled_subblock_structure(&Z2FusionRule, 1, [vec![1, 1], vec![1, 1]])
         .unwrap();
-        let structure = Arc::clone(space.subblock_structure());
+        let structure = Arc::clone(&space);
         let transform = TreeTransformStructure::compile_structures(
             &structure,
             &structure,
@@ -723,17 +715,13 @@ mod owned_overwrite_tests {
     /// Singles and Multi groups interleave in destination order: three
     /// runnable singles and five pack columns.
     fn mixed_fixture() -> (Arc<BlockStructure>, TreeTransformStructure<f64>, Vec<f64>) {
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 3>::from_dims([6], [4, 4, 4]).unwrap(),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([z2_leg(3, 3)]),
-                FusionProductSpace::new([z2_leg(2, 2), z2_leg(2, 2), z2_leg(2, 2)]),
-            ),
-            &Z2FusionRule,
-            vec![vec![3, 2, 2, 2]; 8],
+        let space = FusionTreeHomSpace::new(
+            FusionProductSpace::new([z2_leg(3, 3)]),
+            FusionProductSpace::new([z2_leg(2, 2), z2_leg(2, 2), z2_leg(2, 2)]),
         )
+        .coupled_subblock_structure(&Z2FusionRule, 1, vec![vec![3, 2, 2, 2]; 8])
         .unwrap();
-        let structure = Arc::clone(space.subblock_structure());
+        let structure = Arc::clone(&space);
         assert_eq!(structure.block_count(), 8);
         let specs = vec![
             TreeTransformBlockSpec::single(0, 0, -2.0),

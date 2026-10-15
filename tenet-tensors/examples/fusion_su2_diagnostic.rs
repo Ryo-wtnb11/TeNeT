@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use tenet_core::{
-    BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMapSpace,
-};
+use tenet_core::{BlockKey, FusionTreeHomSpace, SU2FusionRule};
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, BoundDynamicFusionMapSpace, DynamicFusionMapSpace,
     OutputAxisOrder, RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
@@ -54,46 +52,37 @@ fn main() {
         println!("{i}: {key:?}");
     }
 
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         lhs_hom,
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         rhs_hom,
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+    let lhs_core_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         lhs_core_hom,
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+    let rhs_core_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         rhs_core_hom,
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        dst_hom,
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
-    print_structure("lhs_structure", lhs_space.subblock_structure());
-    print_structure("rhs_structure", rhs_space.subblock_structure());
-    print_structure("lhs_core_structure", lhs_core_space.subblock_structure());
-    print_structure("rhs_core_structure", rhs_core_space.subblock_structure());
-    print_structure("dst_structure", dst_space.subblock_structure());
+    let dst_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, dst_hom, [vec![2, 2]]).unwrap();
+    print_structure("lhs_structure", lhs_space.structure());
+    print_structure("rhs_structure", rhs_space.structure());
+    print_structure("lhs_core_structure", lhs_core_space.structure());
+    print_structure("rhs_core_structure", rhs_core_space.structure());
+    print_structure("dst_structure", dst_space.structure());
 
     let lhs_data = (0..32)
         .map(|index| 1.0 + 0.125 * index as f64)
@@ -104,9 +93,9 @@ fn main() {
     let mut lhs_core_data = vec![0.0; lhs_core_space.required_len().unwrap()];
     let mut rhs_core_data = vec![0.0; rhs_core_space.required_len().unwrap()];
     let mut dst_data = vec![2.0, -1.0, 4.0, -3.0];
-    let lhs_bound = bind(DynamicFusionMapSpace::from_typed(&lhs_space));
-    let rhs_bound = bind(DynamicFusionMapSpace::from_typed(&rhs_space));
-    let dst_bound = bind(DynamicFusionMapSpace::from_typed(&dst_space));
+    let lhs_bound = bind(lhs_space.clone());
+    let rhs_bound = bind(rhs_space.clone());
+    let dst_bound = bind(dst_space);
     let plan =
         prepare_tensorcontract_fusion_plan_dyn(&dst_bound, &lhs_bound, &rhs_bound, axes).unwrap();
     let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
@@ -114,8 +103,8 @@ fn main() {
         .tree_transform_dyn_into(
             &rule,
             plan.lhs_transform().clone(),
-            lhs_core_space.subblock_structure(),
-            lhs_space.subblock_structure(),
+            lhs_core_space.structure(),
+            lhs_space.structure(),
             &mut lhs_core_data,
             &lhs_data,
             1.0,
@@ -126,8 +115,8 @@ fn main() {
         .tree_transform_dyn_into(
             &rule,
             plan.rhs_transform().clone(),
-            rhs_core_space.subblock_structure(),
-            rhs_space.subblock_structure(),
+            rhs_core_space.structure(),
+            rhs_space.structure(),
             &mut rhs_core_data,
             &rhs_data,
             1.0,
@@ -162,21 +151,17 @@ fn main() {
         1,
     )
     .unwrap();
-    let tensorkit_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        tensorkit_dst_hom,
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
+    let tensorkit_dst_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, tensorkit_dst_hom, [vec![2, 2]])
+            .unwrap();
     print_structure(
         "tensorkit_order_dst_structure",
-        tensorkit_dst_space.subblock_structure(),
+        tensorkit_dst_space.structure(),
     );
     let mut tensorkit_order_dst = vec![2.0, -1.0, 4.0, -3.0];
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
         .tensorcontract_fusion_dyn_into(
-            &bind(DynamicFusionMapSpace::from_typed(&tensorkit_dst_space)),
+            &bind(tensorkit_dst_space.clone()),
             &mut tensorkit_order_dst,
             &lhs_bound,
             &lhs_data,

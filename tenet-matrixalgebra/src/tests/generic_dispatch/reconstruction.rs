@@ -41,16 +41,13 @@ where
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let dense = TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
     let shapes = vec![vec![degeneracy; 4]; key_count];
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, homspace, rule, shapes)
-        .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, shapes).unwrap();
     let len = space.required_len().unwrap();
     let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len)
@@ -160,13 +157,8 @@ fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TestTensor<f64> {
         FusionProductSpace::new([SectorLeg::new([(minimum, rows)], false)]),
         FusionProductSpace::new([SectorLeg::new([(minimum, cols)], false)]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
-        homspace,
-        &rule,
-        [vec![rows, cols]],
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![rows, cols]]).unwrap();
     TestTensor::from_vec_with_fusion_space(
         (0..rows * cols)
             .map(|index| ((index * 7 + 3) % 17) as f64 - 5.0)
@@ -242,13 +234,9 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
             FusionProductSpace::new([SectorLeg::new([(minimum, rows)], false)]),
             FusionProductSpace::new([SectorLeg::new([(minimum, cols)], false)]),
         );
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
-            homspace,
-            &rule,
-            [vec![rows, cols]],
-        )
-        .unwrap();
+        let space =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![rows, cols]])
+                .unwrap();
         TestTensor::from_vec_with_fusion_space(data, space).unwrap()
     };
     let rectangular = matrix(3, 2, vec![-2.0, 5.0, 1.0, 4.0, -3.0, 2.0]);
@@ -469,13 +457,8 @@ fn full_factorizations_agree_with_compact_on_matching_square_support() {
         FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        homspace,
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![2, 2]]).unwrap();
     let tensor = TestTensor::from_vec_with_fusion_space(vec![-1.0, 3.0, 2.0, 4.0], space).unwrap();
     let input = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -524,13 +507,9 @@ fn full_factorizations_skip_dense_backend_for_disjoint_support() {
         FusionProductSpace::new([SectorLeg::new([(positive, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(neutral, 3)], false)]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-        homspace,
-        &rule,
-        Vec::<Vec<usize>>::new(),
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, Vec::<Vec<usize>>::new())
+            .unwrap();
     let tensor = TestTensor::from_vec_with_fusion_space(Vec::<f64>::new(), space).unwrap();
     let input = bound_tensor(Arc::new(rule), &tensor);
 

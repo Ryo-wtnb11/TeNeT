@@ -14,23 +14,16 @@ fn coupled_layout_embeds_subblocks_into_sector_matrices() {
         .iter()
         .map(|_| vec![2usize, 3, 2, 3])
         .collect::<Vec<_>>();
-    let packed = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([10, 10], [10, 10]).unwrap(),
-        homspace.clone(),
-        &rule,
-        shapes.clone(),
-    )
-    .unwrap();
-    let coupled = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([10, 10], [10, 10]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let packed = homspace
+        .clone()
+        .coupled_subblock_structure(&rule, 2, shapes.clone())
+        .unwrap();
+    let coupled = homspace
+        .coupled_subblock_structure(&rule, 2, shapes)
+        .unwrap();
 
-    let packed_structure = packed.subblock_structure();
-    let coupled_structure = coupled.subblock_structure();
+    let packed_structure = &packed;
+    let coupled_structure = &coupled;
     assert_eq!(
         packed_structure.block_count(),
         coupled_structure.block_count()
@@ -570,20 +563,12 @@ fn checked_layout_and_space_admission_reject_finite_nonclosure_transactionally()
         ]),
         FusionProductSpace::new([]),
     );
-    let legacy = FusionTensorMapSpace::<2, 0>::new_unbound(
-        TensorMapSpace::from_dims([1, 1], []).unwrap(),
-        homspace,
-        packed_fixture_structure(2, [(failing_pair, vec![1, 1])]).unwrap(),
-    )
-    .unwrap()
-    .try_bind_rule(&probe)
-    .unwrap();
-    assert!(matches!(
-        legacy.admission(),
-        FusionSpaceAdmission::Subset(_)
-    ));
+    let legacy = packed_fixture_structure(2, [(failing_pair, vec![1, 1])]).unwrap();
+    homspace
+        .validate_subblock_structure_subset(&probe, &legacy)
+        .unwrap();
     assert_eq!(
-        legacy.try_bind_rule_checked(&probe),
+        homspace.validate_subblock_structure_subset_checked(&probe, &legacy),
         Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
             FusionAlgebraError::FusionNotRepresentable {
                 left: SectorId::new(9),

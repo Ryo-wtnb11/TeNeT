@@ -21,8 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use tenet_core::{
     BraidingStyleKind, CheckedGenericFusion, FusionProductSpace, FusionRule, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec, U1FusionRule, U1Irrep,
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
 use tenet_matrixalgebra::seam::{
@@ -83,16 +82,14 @@ fn u1_tensor_with(charges: &[i32], rows: usize, cols: usize) -> BoundTensorMap {
             false,
         )
     };
-    let (row_dim, col_dim) = (charges.len() * rows, charges.len() * cols);
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(rows), leg(rows)]),
         FusionProductSpace::new([leg(cols), leg(cols)]),
     );
     let keys = homspace.fusion_tree_keys(&rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([row_dim, row_dim], [col_dim, col_dim]).unwrap(),
-        homspace,
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        homspace,
         vec![vec![rows, rows, cols, cols]; keys],
     )
     .unwrap();
@@ -100,12 +97,7 @@ fn u1_tensor_with(charges: &[i32], rows: usize, cols: usize) -> BoundTensorMap {
     let data = (0..len)
         .map(|i| ((i * 11 + 5) % 29) as f64 * 0.25 - 3.0)
         .collect();
-    BoundTensorMap::try_new(
-        Arc::new(rule),
-        DynamicFusionMapSpace::from_typed(&space),
-        data,
-    )
-    .unwrap()
+    BoundTensorMap::try_new(Arc::new(rule), space, data).unwrap()
 }
 
 /// A Generic toy rule with one self-dual sector `x` whose `x ⊗ x` channel has

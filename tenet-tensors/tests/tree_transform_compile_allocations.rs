@@ -5,10 +5,10 @@ use std::sync::{
 
 use tenet_core::{
     BlockKey, BlockStructure, BraidingStyleKind, DegeneracyStructure, FusionProductSpace,
-    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorStructure, SectorVec, TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    MultiplicityIndex, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
+    U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
@@ -26,19 +26,11 @@ fn bound_source<R: MultiplicityFreeFusionRule, const N: usize>(
 ) -> BoundDynamicFusionMapSpace<R> {
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new(legs), FusionProductSpace::new([]));
-    let space = FusionTensorMapSpace::<N, 0>::new_unbound(
-        TensorMapSpace::<N, 0>::from_dims([1; N], []).unwrap(),
-        homspace,
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(rule.as_ref())
-    .unwrap();
-    BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(&space),
-        rule,
-    )
-    .unwrap()
+    let space = DynamicFusionMapSpace::try_from_layout(homspace, structure)
+        .unwrap()
+        .try_bind_rule(rule.as_ref())
+        .unwrap();
+    BoundDynamicFusionMapSpace::bind_multiplicity_free(space, rule).unwrap()
 }
 
 /// The eager staging of `operation` on `source`: destination derivation plus

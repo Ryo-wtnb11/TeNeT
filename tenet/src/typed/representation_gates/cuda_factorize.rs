@@ -455,19 +455,12 @@ fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
     assert!(regions
         .iter()
         .all(|region| region.row_trees() != region.col_trees()));
-    let space = tenet_core::FusionTensorMapSpace::new_unbound(
-        tenet_core::TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
-        homspace,
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(&rule)
-    .unwrap();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
-        Arc::new(rule),
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::try_from_layout(homspace, structure)
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+    let space =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::new(rule)).unwrap();
     let mut fill = |key: &BlockKey, _: &[usize]| -> f64 {
         let BlockKey::FusionTree(tree) = key else {
             unreachable!("fusion-tree blocks")

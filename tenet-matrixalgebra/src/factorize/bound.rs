@@ -16,26 +16,6 @@ pub(crate) struct TestTensor<D> {
 }
 
 #[cfg(test)]
-/// A fixture space: a typed construction or an already rank-erased one.
-pub(crate) trait IntoTestSpace {
-    fn into_test_space(self) -> DynamicFusionMapSpace;
-}
-
-#[cfg(test)]
-impl<const NOUT: usize, const NIN: usize> IntoTestSpace for FusionTensorMapSpace<NOUT, NIN> {
-    fn into_test_space(self) -> DynamicFusionMapSpace {
-        DynamicFusionMapSpace::from_typed(&self)
-    }
-}
-
-#[cfg(test)]
-impl IntoTestSpace for DynamicFusionMapSpace {
-    fn into_test_space(self) -> DynamicFusionMapSpace {
-        self
-    }
-}
-
-#[cfg(test)]
 impl<D> TestTensor<D> {
     pub(crate) fn from_dyn(data: Vec<D>, space: DynamicFusionMapSpace) -> Result<Self, CoreError> {
         let required = space.structure().required_len()?;
@@ -70,13 +50,13 @@ impl<D> TestTensor<D> {
 
     pub(crate) fn from_vec_with_fusion_space(
         data: Vec<D>,
-        space: impl IntoTestSpace,
+        space: DynamicFusionMapSpace,
     ) -> Result<Self, CoreError> {
-        Self::from_dyn(data, space.into_test_space())
+        Self::from_dyn(data, space)
     }
 
     pub(crate) fn from_block_fn_with_fusion_space<F>(
-        space: impl IntoTestSpace,
+        space: DynamicFusionMapSpace,
         background: D,
         fill: F,
     ) -> Result<Self, CoreError>
@@ -84,7 +64,6 @@ impl<D> TestTensor<D> {
         D: Clone,
         F: FnMut(&BlockKey, &[usize]) -> D,
     {
-        let space = space.into_test_space();
         let len = space.required_len()?;
         let mut tensor = Self::from_dyn(vec![background; len], space)?;
         tensor.fill_block_elements(fill)?;

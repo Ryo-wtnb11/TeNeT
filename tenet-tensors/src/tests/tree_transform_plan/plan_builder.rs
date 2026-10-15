@@ -85,7 +85,7 @@ fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numer
 
 #[test]
 fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
-    let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let space = vec![4, 2];
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src =
         TestTensor::<f64>::from_vec_with_structure(vec![1.0; 8], space.clone(), structure.clone())
@@ -127,8 +127,8 @@ fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
 
 #[test]
 fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let src_space = vec![2, 2];
+    let dst_space = vec![2, 2];
     let key1 = BlockKey::opaque([1]);
     let key2 = BlockKey::opaque([2]);
     let src_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
@@ -511,7 +511,7 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
         .iter()
         .all(|spec| spec.source_axes() == Some([1, 0, 2, 3].as_slice())));
 
-    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![5.0, 7.0],
         space.clone(),
@@ -658,7 +658,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
         ],
     )
     .unwrap();
-    let space = TensorMapSpace::<4, 0>::from_dims([2, 2, 1, 1], []).unwrap();
+    let space = vec![2, 2, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![99.0, 1.0, 2.0, 3.0, 4.0, 98.0, 97.0, 9.0, 10.0, 11.0, 12.0],
         space.clone(),
@@ -817,8 +817,8 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
         );
     }
 
-    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src_space = vec![1, 1, 1, 1];
+    let dst_space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
@@ -879,8 +879,8 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
         ],
     )
     .unwrap();
-    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src_space = vec![1, 1, 1, 1];
+    let dst_space = vec![1, 1, 1, 1];
     let src =
         TestTensor::<f64>::from_vec_with_structure(vec![10.0, 20.0], src_space, structure.clone())
             .unwrap();
@@ -930,8 +930,8 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
         ],
     )
     .unwrap();
-    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src_space = vec![1, 1, 1, 1];
+    let dst_space = vec![1, 1, 1, 1];
     let src = TestTensor::<Complex64>::from_vec_with_structure(
         vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
         src_space,
@@ -1056,8 +1056,8 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
         ],
     )
     .unwrap();
-    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src_space = vec![1, 1, 1, 1];
+    let dst_space = vec![1, 1, 1, 1];
     let mut src = TestTensor::<f64>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space,
@@ -1340,7 +1340,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
             .unwrap();
     assert_eq!(all_codomain, serial);
 
-    let tensor_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let tensor_space = vec![1, 1, 1, 1];
     let src = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         tensor_space.clone(),

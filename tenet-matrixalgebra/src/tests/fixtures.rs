@@ -270,13 +270,7 @@ pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TestTensor<f64
         .iter()
         .map(|_| vec![rows, cols])
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     TestTensor::from_vec_with_fusion_space(
         (0..rows * cols)
             .map(|index| ((index * 11 + 2) % 19) as f64 - 7.0)
@@ -312,17 +306,7 @@ pub(super) fn mixed_rectangular_tensor(
             sector => panic!("unexpected Z2 sector {sector:?}"),
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims(
-            [even_shape.0 + odd_shape.0],
-            [even_shape.1 + odd_shape.1],
-        )
-        .unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     TestTensor::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
@@ -367,13 +351,7 @@ pub(super) fn mixed_rectangular_c32_tensor() -> TestTensor<Complex32> {
             sector => panic!("unexpected Z2 sector {sector:?}"),
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([7], [7]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     TestTensor::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| {
@@ -394,16 +372,14 @@ where
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-        homspace,
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         rule,
+        homspace,
         vec![vec![degeneracy; 4]; key_count],
     )
     .unwrap();
@@ -418,7 +394,7 @@ where
 }
 
 /// The eager fusion contraction `dst = alpha * contract(lhs, rhs) + beta *
-/// dst` of typed fixtures through the context's bound dynamic entry.
+/// dst` of fixtures through the context's bound dynamic entry.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn context_contract_into<R, D>(
     context: &mut TensorContractFusionExecutionContext<D, R::Key>,
@@ -496,16 +472,14 @@ where
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-        homspace,
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         rule,
+        homspace,
         vec![vec![degeneracy; 4]; key_count],
     )
     .unwrap();
@@ -764,13 +738,9 @@ pub(super) fn one_sector_rectangular_matrix<D: Clone>(
         FusionProductSpace::new([codomain]),
         FusionProductSpace::new([domain]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
-        homspace,
-        &rule,
-        vec![vec![rows, cols]],
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, vec![vec![rows, cols]])
+            .unwrap();
     TestTensor::from_vec_with_fusion_space(data, space).unwrap()
 }
 
@@ -796,9 +766,6 @@ pub(super) fn assert_real_spectra_close(lhs: &[SectorSpectrum], rhs: &[SectorSpe
 }
 
 /// `source`'s space over the caller-chosen block layout `structure`.
-///
-/// Why a rank match: `FusionTensorMapSpace::new_unbound` is the only public
-/// installer of a gapped or reordered fixture layout, and it is typed by rank.
 pub(super) fn relayout<R, D>(
     rule: &R,
     source: &TestTensor<D>,
@@ -807,45 +774,10 @@ pub(super) fn relayout<R, D>(
 where
     R: FusionRule,
 {
-    let space = source.fusion_space();
-    let (dims, homspace) = (source.dims(), space.homspace().clone());
-    macro_rules! typed {
-        ($(($nout:literal, $nin:literal)),*) => {
-            match (space.nout(), space.nin()) {
-                $(($nout, $nin) => DynamicFusionMapSpace::from_typed(
-                    &FusionTensorMapSpace::new_unbound(
-                        TensorMapSpace::<$nout, $nin>::from_dims(
-                            dims[..$nout].try_into().unwrap(),
-                            dims[$nout..].try_into().unwrap(),
-                        )
-                        .unwrap(),
-                        homspace,
-                        structure,
-                    )
-                    .unwrap()
-                    .try_bind_rule(rule)
-                    .unwrap(),
-                ),)*
-                ranks => unimplemented!("fixture rank {ranks:?}"),
-            }
-        };
-    }
-    typed!(
-        (0, 0),
-        (0, 1),
-        (0, 2),
-        (1, 0),
-        (1, 1),
-        (1, 2),
-        (1, 3),
-        (2, 0),
-        (2, 1),
-        (2, 2),
-        (2, 3),
-        (3, 1),
-        (3, 2),
-        (3, 3)
-    )
+    DynamicFusionMapSpace::try_from_layout(source.fusion_space().homspace().clone(), structure)
+        .unwrap()
+        .try_bind_rule(rule)
+        .unwrap()
 }
 
 pub(super) fn padded_copy<R, D>(rule: &R, source: &TestTensor<D>) -> TestTensor<D>
@@ -1001,17 +933,8 @@ pub(super) fn u1_cross_space_map<D: FactorScalar>(
             ]
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims(
-            [codomain.iter().map(|(_, degeneracy)| degeneracy).sum()],
-            [domain.iter().map(|(_, degeneracy)| degeneracy).sum()],
-        )
-        .unwrap(),
-        homspace,
-        &U1FusionRule,
-        shapes,
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&U1FusionRule, homspace, shapes).unwrap();
     TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |_, indices| {
         if indices[0] == indices[1] {
             D::one()
@@ -1049,7 +972,6 @@ where
         .map(|(sector, dimension, _)| (*sector, *dimension))
         .collect::<Vec<_>>();
     let leg = SectorLeg::new(sectors.iter().copied(), false);
-    let total_dimension = sectors.iter().map(|(_, dimension)| dimension).sum();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg.clone()]),
         FusionProductSpace::new([leg]),
@@ -1067,13 +989,7 @@ where
             vec![*dimension, *dimension]
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([total_dimension], [total_dimension]).unwrap(),
-        homspace,
-        rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, shapes).unwrap();
     TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
         let BlockKey::FusionTree(tree) = key else {
             return D::zero();

@@ -25,10 +25,7 @@ use tenet::sector::{
 };
 use tenet::typed::FactorScalar;
 use tenet::typed::FusionTreeKey;
-use tenet_core::{
-    BlockSpec, BlockStructure, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-    TensorMapSpace,
-};
+use tenet_core::{BlockSpec, BlockStructure, FusionProductSpace, FusionTreeHomSpace};
 use tenet_dense::strided_batch_runs;
 use tenet_matrixalgebra::seam::{
     eig_full_from_source, lq_compact_from_source, lq_full_from_source, qr_compact_from_source,
@@ -932,14 +929,9 @@ fn layout_generic_qr_fixture(
             offset += block.element_count()? + 1;
         }
         let structure = BlockStructure::from_blocks_with_rank(2, blocks)?;
-        let dense_dim = 3 * degeneracy;
-        let typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([dense_dim], [dense_dim])?,
-            homspace.clone(),
-            structure,
-        )?
-        .try_bind_rule(provider.as_ref())?;
-        let dynamic = DynamicFusionMapSpace::from_typed(&typed);
+        let layout = DynamicFusionMapSpace::try_from_layout(homspace.clone(), structure)?
+            .try_bind_rule(provider.as_ref())?;
+        let dynamic = layout;
         let bound = BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(&provider))?;
         let data = fill_layout_generic_data(&bound);
         Ok::<_, Box<dyn std::error::Error>>(LayoutGenericInput { space: bound, data })
@@ -1171,8 +1163,6 @@ fn checked_layout_fixture_with_aspect<D: HarnessScalar>(
             )
         })
         .collect::<Vec<_>>();
-    let codomain_dim = codomain.iter().map(|(_, dim)| dim).sum();
-    let domain_dim = domain.iter().map(|(_, dim)| dim).sum();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new(codomain, false)]),
         FusionProductSpace::new([SectorLeg::new(domain, false)]),
@@ -1196,16 +1186,9 @@ fn checked_layout_fixture_with_aspect<D: HarnessScalar>(
         offset += block.element_count()? + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(2, blocks)?;
-    let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim])?,
-        homspace,
-        structure,
-    )?
-    .try_bind_rule(provider.as_ref())?;
-    let fallback = BoundDynamicFusionMapSpace::bind_generic(
-        DynamicFusionMapSpace::from_typed(&typed),
-        provider,
-    )?;
+    let layout = DynamicFusionMapSpace::try_from_layout(homspace, structure)?
+        .try_bind_rule(provider.as_ref())?;
+    let fallback = BoundDynamicFusionMapSpace::bind_generic(layout, provider)?;
     let fallback_data = fill_checked_layout_data(&fallback);
     Ok((
         CheckedLayoutInput {
@@ -1715,20 +1698,9 @@ fn multitree_eig_fixture<D: HarnessScalar>(
         offset += block.element_count()? + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(4, blocks)?;
-    let dense_first = sector_count * degeneracy;
-    let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims(
-            [dense_first, sector_count],
-            [dense_first, sector_count],
-        )?,
-        homspace,
-        structure,
-    )?
-    .try_bind_rule(provider.as_ref())?;
-    let fallback = BoundDynamicFusionMapSpace::bind_generic(
-        DynamicFusionMapSpace::from_typed(&typed),
-        provider,
-    )?;
+    let layout = DynamicFusionMapSpace::try_from_layout(homspace, structure)?
+        .try_bind_rule(provider.as_ref())?;
+    let fallback = BoundDynamicFusionMapSpace::bind_generic(layout, provider)?;
     let fallback_data = fill_multitree_eig_data(&fallback, degeneracy, sector_count);
     Ok((
         CheckedLayoutInput {

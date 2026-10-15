@@ -21,9 +21,9 @@ fn host_tensor_contract_workspace_is_explicit_host_workspace() {
 
 #[test]
 fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
     let rhs = TestTensor::from_vec(vec![7.0_f64, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
     let mut dst = TestTensor::from_vec(vec![1.0_f64; 4], dst_space).unwrap();
@@ -54,9 +54,9 @@ fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
 
 #[test]
 fn tensorcontract_default_host_api_accepts_custom_host_storage() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
     let rhs = TestTensor::from_vec(vec![7.0_f64, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
     let mut dst = TestTensor::from_vec(vec![1.0_f64; 4], dst_space).unwrap();
@@ -76,9 +76,9 @@ fn tensorcontract_default_host_api_accepts_custom_host_storage() {
 
 #[test]
 fn tensorcontract_structure_precomputes_core_dense_descriptor() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::<f64>::from_vec(vec![1.0; 6], lhs_space).unwrap();
     let rhs = TestTensor::<f64>::from_vec(vec![1.0; 6], rhs_space).unwrap();
     let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
@@ -106,9 +106,9 @@ fn tensorcontract_structure_precomputes_core_dense_descriptor() {
 
 #[test]
 fn dense_contract_uses_dense_backend_for_matmul_and_alpha_beta() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
     let rhs =
         TestTensor::<f64>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
@@ -129,11 +129,13 @@ fn dense_contract_uses_dense_backend_for_matmul_and_alpha_beta() {
 
 #[test]
 fn tensorcontract_dense_route_uses_tensorkit_forward_tie_order() {
-    let lhs_space = TensorMapSpace::<4, 0>::from_dims([5, 7, 3, 11], []).unwrap();
-    let rhs_space = TensorMapSpace::<4, 0>::from_dims([13, 3, 17, 5], []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims([7, 11, 13, 17], []).unwrap();
-    let lhs = TestTensor::<f64>::from_vec(vec![1.0; lhs_space.dense_dim()], lhs_space).unwrap();
-    let rhs = TestTensor::<f64>::from_vec(vec![1.0; rhs_space.dense_dim()], rhs_space).unwrap();
+    let lhs_space = vec![5, 7, 3, 11];
+    let rhs_space = vec![13, 3, 17, 5];
+    let dst_space = vec![7, 11, 13, 17];
+    let lhs =
+        TestTensor::<f64>::from_vec(vec![1.0; lhs_space.iter().product()], lhs_space).unwrap();
+    let rhs =
+        TestTensor::<f64>::from_vec(vec![1.0; rhs_space.iter().product()], rhs_space).unwrap();
     let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
 
     let structure = TensorContractStructure::compile_structures(
@@ -165,9 +167,9 @@ fn tensorcontract_dense_route_sorted_by_rhs_matches_independent_oracle() {
     let lhs_structure = dense_block_structure(&lhs_shape, &lhs_strides);
     let rhs_structure = dense_block_structure(&rhs_shape, &rhs_strides);
     let dst_structure = BlockStructure::trivial(&dst_shape).unwrap();
-    let lhs_space = TensorMapSpace::<4, 0>::from_dims(lhs_shape, []).unwrap();
-    let rhs_space = TensorMapSpace::<4, 0>::from_dims(rhs_shape, []).unwrap();
-    let dst_space = TensorMapSpace::<4, 0>::from_dims(dst_shape, []).unwrap();
+    let lhs_space = [&lhs_shape[..], &[][..]].concat();
+    let rhs_space = [&rhs_shape[..], &[][..]].concat();
+    let dst_space = [&dst_shape[..], &[][..]].concat();
     let lhs_data = (0..strided_storage_len(&lhs_shape, &lhs_strides))
         .map(|index| 1.0 + index as f64)
         .collect::<Vec<_>>();
@@ -238,9 +240,9 @@ fn tensorcontract_dense_route_reverse_ba_matches_independent_oracle() {
     let lhs_structure = dense_block_structure(&lhs_shape, &lhs_strides);
     let rhs_structure = dense_block_structure(&rhs_shape, &rhs_strides);
     let dst_structure = dense_block_structure(&dst_shape, &dst_strides);
-    let lhs_space = TensorMapSpace::<3, 0>::from_dims(lhs_shape, []).unwrap();
-    let rhs_space = TensorMapSpace::<4, 0>::from_dims(rhs_shape, []).unwrap();
-    let dst_space = TensorMapSpace::<3, 0>::from_dims(dst_shape, []).unwrap();
+    let lhs_space = [&lhs_shape[..], &[][..]].concat();
+    let rhs_space = [&rhs_shape[..], &[][..]].concat();
+    let dst_space = [&dst_shape[..], &[][..]].concat();
     let lhs_data = (0..strided_storage_len(&lhs_shape, &lhs_strides))
         .map(|index| 0.25 + index as f64)
         .collect::<Vec<_>>();
@@ -497,9 +499,9 @@ fn tensorcontract_backend_rank2_matmul_uses_matmul_boundary_not_descriptor_repla
 
 #[test]
 fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![4, 3];
+    let dst_space = vec![4, 2];
     let lhs = TestTensor::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
     let rhs = TestTensor::<f64>::from_vec((7..=18).map(|value| value as f64).collect(), rhs_space)
         .unwrap();
@@ -537,9 +539,9 @@ fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
 
 #[test]
 fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutation() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 2];
+    let rhs_space = vec![2, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::<Complex64>::from_vec(
         vec![
             Complex64::new(1.0, 1.0),
@@ -617,9 +619,9 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
 
 #[test]
 fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 2];
+    let rhs_space = vec![2, 2];
+    let dst_space = vec![2, 2];
     let lhs_a = TestTensor::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], lhs_space.clone()).unwrap();
     let rhs_a = TestTensor::<f64>::from_vec(vec![5.0, 6.0, 7.0, 8.0], rhs_space.clone()).unwrap();
     let lhs_b = TestTensor::<f64>::from_vec(vec![2.0, 0.0, 0.0, 3.0], lhs_space).unwrap();
@@ -664,9 +666,9 @@ fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
 
 #[test]
 fn tensorcontract_workspace_reuse_clears_conjugating_route_output() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 2];
+    let rhs_space = vec![2, 2];
+    let dst_space = vec![2, 2];
     let lhs_a = TestTensor::<f64>::from_vec(vec![1.0, 2.0, 3.0, 4.0], lhs_space.clone()).unwrap();
     let rhs_a = TestTensor::<f64>::from_vec(vec![5.0, 6.0, 7.0, 8.0], rhs_space.clone()).unwrap();
     let lhs_b = TestTensor::<f64>::from_vec(vec![2.0, 0.0, 0.0, 3.0], lhs_space).unwrap();
@@ -729,9 +731,9 @@ fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
 
 #[test]
 fn tensorcontract_with_no_contracted_axes_is_the_outer_product() {
-    let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let rhs_space = TensorMapSpace::<1, 0>::from_dims([3], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let lhs_space = vec![2];
+    let rhs_space = vec![3];
+    let dst_space = vec![2, 3];
     let lhs = TestTensor::<f64>::from_vec(vec![2.0, 3.0], lhs_space).unwrap();
     let rhs = TestTensor::<f64>::from_vec(vec![5.0, 7.0, 11.0], rhs_space).unwrap();
     let mut dst = TestTensor::<f64>::filled(1.0, dst_space).unwrap();
@@ -751,9 +753,9 @@ fn tensorcontract_with_no_contracted_axes_is_the_outer_product() {
 
 #[test]
 fn tensorcontract_outer_product_conjugates_lhs() {
-    let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let rhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2];
+    let rhs_space = vec![2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::<Complex64>::from_vec(
         vec![Complex64::new(1.0, 1.0), Complex64::new(2.0, -3.0)],
         lhs_space,
@@ -813,9 +815,9 @@ fn tensorcontract_weighted_terms_support_all_gemm_dtypes() {
 
 #[test]
 fn tensorcontract_structure_rejects_invalid_axes_at_compile_time() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![2, 2];
     let lhs = TestTensor::<f64>::filled(1.0, lhs_space).unwrap();
     let rhs = TestTensor::<f64>::filled(1.0, rhs_space).unwrap();
     let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
@@ -851,9 +853,9 @@ fn tensorcontract_structure_rejects_invalid_axes_at_compile_time() {
 
 #[test]
 fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_time() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 4], []).unwrap();
+    let lhs_space = vec![2, 3];
+    let rhs_space = vec![4, 2];
+    let dst_space = vec![2, 4];
     let lhs = TestTensor::<f64>::filled(1.0, lhs_space).unwrap();
     let rhs = TestTensor::<f64>::filled(1.0, rhs_space).unwrap();
     let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
@@ -873,9 +875,9 @@ fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_tim
         }
     );
 
-    let wrong_dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let wrong_dst_space = vec![4, 2];
     let wrong_dst = TestTensor::<f64>::filled(0.0, wrong_dst_space).unwrap();
-    let valid_rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let valid_rhs_space = vec![3, 2];
     let valid_rhs = TestTensor::<f64>::filled(1.0, valid_rhs_space).unwrap();
     let output = TensorContractStructure::compile_structures(
         wrong_dst.structure(),
@@ -895,9 +897,9 @@ fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_tim
 
 #[test]
 fn tensorcontract_structure_rejects_incompatible_replay_structure_before_dense_execution() {
-    let compile_lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
-    let compile_rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let compile_dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let compile_lhs_space = vec![2, 3];
+    let compile_rhs_space = vec![3, 2];
+    let compile_dst_space = vec![2, 2];
     let compile_lhs = TestTensor::<f64>::filled(1.0, compile_lhs_space).unwrap();
     let compile_rhs = TestTensor::<f64>::filled(1.0, compile_rhs_space).unwrap();
     let compile_dst = TestTensor::<f64>::filled(0.0, compile_dst_space).unwrap();
@@ -909,9 +911,9 @@ fn tensorcontract_structure_rejects_incompatible_replay_structure_before_dense_e
     )
     .unwrap();
 
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let lhs_space = vec![4, 3];
+    let rhs_space = vec![3, 2];
+    let dst_space = vec![4, 2];
     let lhs = TestTensor::<f64>::filled(1.0, lhs_space).unwrap();
     let rhs = TestTensor::<f64>::filled(1.0, rhs_space).unwrap();
     let mut dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
@@ -956,9 +958,9 @@ fn tensorcontract_structure_rejects_multiblock_until_block_sparse_enumeration_ex
 
 #[test]
 fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once() {
-    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let lhs_space = vec![2, 2];
+    let rhs_space = vec![2, 2];
+    let dst_space = vec![1, 1];
     let lhs_structure = packed_fixture_structure(
         2,
         [

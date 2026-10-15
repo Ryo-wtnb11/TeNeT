@@ -72,20 +72,16 @@ fn block_view_rejects_out_of_bounds_layout() {
 
 /// The storage offset of the unique fusion-tree block that `sectors` (every
 /// codomain then every domain external sector) select.
-fn sector_block_offset<R: MultiplicityFreeFusionRule, const NOUT: usize, const NIN: usize>(
-    space: &FusionTensorMapSpace<NOUT, NIN>,
+fn sector_block_offset<R: MultiplicityFreeFusionRule>(
+    homspace: &FusionTreeHomSpace,
+    structure: &BlockStructure,
     rule: &R,
     sectors: &[SectorId],
 ) -> usize {
-    let key = space
-        .homspace()
+    let key = homspace
         .unique_fusion_tree_key_from_external_sectors(rule, sectors)
         .unwrap();
-    space
-        .subblock_structure()
-        .fusion_tree_pair_block(&key)
-        .unwrap()
-        .offset()
+    structure.fusion_tree_pair_block(&key).unwrap().offset()
 }
 
 #[test]
@@ -146,7 +142,6 @@ fn product_sector_lookup_handles_simple_fusion_channels_without_manual_tree_keys
     let b = sector(z2_odd(), -1, 1);
     let c0 = sector(z2_even(), 0, 0);
     let c1 = sector(z2_even(), 0, 2);
-    let dense = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([
             SectorLeg::new([(a, 1)], false),
@@ -154,18 +149,13 @@ fn product_sector_lookup_handles_simple_fusion_channels_without_manual_tree_keys
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        hom,
-        &rule,
-        [vec![1, 1, 1], vec![1, 1, 1]],
-    )
-    .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 2, [vec![1, 1, 1], vec![1, 1, 1]])
+        .unwrap();
 
-    assert_eq!(sector_block_offset(&fusion_space, &rule, &[a, b, c0]), 0);
-    assert_eq!(sector_block_offset(&fusion_space, &rule, &[a, b, c1]), 1);
-    let all_c0_keys = fusion_space
-        .homspace()
+    assert_eq!(sector_block_offset(&hom, &structure, &rule, &[a, b, c0]), 0);
+    assert_eq!(sector_block_offset(&hom, &structure, &rule, &[a, b, c1]), 1);
+    let all_c0_keys = hom
         .fusion_tree_keys_from_external_sectors(&rule, &[a, b, c0])
         .unwrap();
     assert_eq!(all_c0_keys.len(), 1);
@@ -174,7 +164,6 @@ fn product_sector_lookup_handles_simple_fusion_channels_without_manual_tree_keys
 #[test]
 fn sector_lookup_matches_z2_unique() {
     let rule = Z2FusionRule;
-    let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new(
             [(SectorId::new(0), 1), (SectorId::new(1), 1)],
@@ -185,16 +174,17 @@ fn sector_lookup_matches_z2_unique() {
             false,
         )]),
     );
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        hom,
-        &rule,
-        [vec![1, 1], vec![1, 1]],
-    )
-    .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 1, [vec![1, 1], vec![1, 1]])
+        .unwrap();
 
     assert_eq!(
-        sector_block_offset(&fusion_space, &rule, &[SectorId::new(1), SectorId::new(1)]),
+        sector_block_offset(
+            &hom,
+            &structure,
+            &rule,
+            &[SectorId::new(1), SectorId::new(1)]
+        ),
         1
     );
 }
@@ -202,17 +192,21 @@ fn sector_lookup_matches_z2_unique() {
 #[test]
 fn sector_lookup_dualizes_z4_domain_sector() {
     let rule = Z4PointedRule;
-    let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
     );
-    let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
-            .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 1, [vec![1, 1]])
+        .unwrap();
 
     assert_eq!(
-        sector_block_offset(&fusion_space, &rule, &[SectorId::new(1), SectorId::new(3)]),
+        sector_block_offset(
+            &hom,
+            &structure,
+            &rule,
+            &[SectorId::new(1), SectorId::new(3)]
+        ),
         0
     );
 }
@@ -220,14 +214,18 @@ fn sector_lookup_dualizes_z4_domain_sector() {
 #[test]
 fn sector_lookup_handles_fermionic_z2_key() {
     let rule = FermionParityFusionRule;
-    let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let hom = FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]);
-    let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
-            .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 1, [vec![1, 1]])
+        .unwrap();
 
     assert_eq!(
-        sector_block_offset(&fusion_space, &rule, &[SectorId::new(1), SectorId::new(1)]),
+        sector_block_offset(
+            &hom,
+            &structure,
+            &rule,
+            &[SectorId::new(1), SectorId::new(1)]
+        ),
         0
     );
 }
@@ -237,18 +235,18 @@ fn sector_lookup_handles_product_pointed_rule() {
     let rule = Z2xZ3PointedRule;
     let codomain_sector = Z2xZ3PointedRule::encode(1, 2);
     let domain_tree_sector = rule.dual(Z2xZ3PointedRule::encode(1, 1));
-    let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(codomain_sector, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(domain_tree_sector, 1)], false)]),
     );
-    let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
-            .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 1, [vec![1, 1]])
+        .unwrap();
 
     assert_eq!(
         sector_block_offset(
-            &fusion_space,
+            &hom,
+            &structure,
             &rule,
             &[codomain_sector, Z2xZ3PointedRule::encode(1, 1)]
         ),

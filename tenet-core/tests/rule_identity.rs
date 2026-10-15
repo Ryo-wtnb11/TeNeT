@@ -2,9 +2,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityIndex, RuleIdentity,
-    SectorId, SectorLeg, SectorVec, TensorMapSpace, Z2FusionRule,
+    FusionProductSpace, FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityIndex, RuleIdentity, SectorId,
+    SectorLeg, SectorVec, Z2FusionRule,
 };
 
 #[derive(Clone, Debug)]
@@ -129,33 +129,14 @@ fn canonical_identity_keeps_prehash_and_provider_type_as_determinants() {
     assert_ne!(baseline, other_type);
 }
 
-fn raw_scalar_space() -> FusionTensorMapSpace<0, 0> {
-    let key =
-        FusionTreePairKey::try_pair_from_sector_ids([], [], 0, [], [], [], [], [], []).unwrap();
-    FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::from_dims([], []).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([], []),
-        BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
-            key.into(),
-            vec![],
-            0,
-        )
-        .unwrap()])
-        .unwrap(),
-    )
-    .unwrap()
-}
-
-fn raw_scalar_space_with_key(key: BlockKey) -> FusionTensorMapSpace<0, 0> {
-    FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::from_dims([], []).unwrap(),
+fn raw_scalar_layout_with_key(key: BlockKey) -> (FusionTreeHomSpace, BlockStructure) {
+    (
         FusionTreeHomSpace::from_sector_ids([], []),
         BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(key, vec![], 0).unwrap()
         ])
         .unwrap(),
     )
-    .unwrap()
 }
 
 fn z2_rank_one_pair(sector: SectorId, is_dual: bool) -> FusionTreePairKey {
@@ -164,15 +145,14 @@ fn z2_rank_one_pair(sector: SectorId, is_dual: bool) -> FusionTreePairKey {
     FusionTreePairKey::pair(tree.clone(), tree)
 }
 
-fn raw_z2_matrix_space(
+fn raw_z2_matrix_layout(
     leg_sector: SectorId,
     degeneracy: usize,
     key: FusionTreePairKey,
     shape: Vec<usize>,
-) -> FusionTensorMapSpace<1, 1> {
+) -> (FusionTreeHomSpace, BlockStructure) {
     let leg = || FusionProductSpace::new([SectorLeg::new([(leg_sector, degeneracy)], false)]);
-    FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::from_dims([degeneracy], [degeneracy]).unwrap(),
+    (
         FusionTreeHomSpace::new(leg(), leg()),
         BlockStructure::from_blocks_with_rank(
             2,
@@ -180,7 +160,6 @@ fn raw_z2_matrix_space(
         )
         .unwrap(),
     )
-    .unwrap()
 }
 
 #[test]
@@ -188,8 +167,9 @@ fn binding_a_rule_rejects_non_categorical_block_namespaces() {
     // What: neither the anonymous dense key nor application routing metadata
     // can acquire a categorical rule identity.
     for key in [BlockKey::Dense, BlockKey::opaque([0])] {
-        let error = raw_scalar_space_with_key(key)
-            .try_bind_rule(&Z2FusionRule)
+        let (homspace, structure) = raw_scalar_layout_with_key(key);
+        let error = homspace
+            .validate_subblock_structure_subset(&Z2FusionRule, &structure)
             .unwrap_err();
         assert!(matches!(error, CoreError::ExpectedFusionTreePairKey { .. }));
     }
@@ -213,7 +193,7 @@ fn rule_binding_requires_every_present_block_to_be_a_homspace_subset() {
     let cases = [
         (
             "codomain/domain split",
-            raw_z2_matrix_space(
+            raw_z2_matrix_layout(
                 even,
                 1,
                 FusionTreePairKey::pair(split_codomain, split_domain),
@@ -228,21 +208,21 @@ fn rule_binding_requires_every_present_block_to_be_a_homspace_subset() {
         ),
         (
             "leg membership",
-            raw_z2_matrix_space(even, 1, z2_rank_one_pair(odd, false), vec![1, 1]),
+            raw_z2_matrix_layout(even, 1, z2_rank_one_pair(odd, false), vec![1, 1]),
             CoreError::MalformedFusionTree {
                 message: "fusion tree uses a sector absent from its HomSpace leg",
             },
         ),
         (
             "leg duality",
-            raw_z2_matrix_space(even, 1, z2_rank_one_pair(even, true), vec![1, 1]),
+            raw_z2_matrix_layout(even, 1, z2_rank_one_pair(even, true), vec![1, 1]),
             CoreError::MalformedFusionTree {
                 message: "fusion tree duality disagrees with its HomSpace leg",
             },
         ),
         (
             "leg degeneracy",
-            raw_z2_matrix_space(even, 2, z2_rank_one_pair(even, false), vec![1, 2]),
+            raw_z2_matrix_layout(even, 2, z2_rank_one_pair(even, false), vec![1, 2]),
             CoreError::LegDegeneracyMismatch {
                 sector: even,
                 expected: 2,
@@ -251,25 +231,16 @@ fn rule_binding_requires_every_present_block_to_be_a_homspace_subset() {
         ),
     ];
 
-    for (name, space, expected) in cases {
+    for (name, (homspace, structure), expected) in cases {
         // What: a locally admissible tree cannot acquire a rule identity when
         // its external sectors, orientations, or logical shape disagree with
         // the declared HomSpace.
-        assert_eq!(space.rule_identity(), None, "{name}");
-        assert_eq!(space.try_bind_rule(&Z2FusionRule), Err(expected), "{name}");
+        assert_eq!(
+            homspace.validate_subblock_structure_subset(&Z2FusionRule, &structure),
+            Err(expected),
+            "{name}"
+        );
     }
-}
-
-#[test]
-fn bound_space_rejects_rebinding_to_same_type_with_different_semantics() {
-    let first = StatefulPointedRule::new(0);
-    let second = StatefulPointedRule::new(1);
-    let space = raw_scalar_space().try_bind_rule(&first).unwrap();
-
-    assert!(matches!(
-        space.try_bind_rule(&second),
-        Err(CoreError::FusionRuleMismatch { .. })
-    ));
 }
 
 #[test]

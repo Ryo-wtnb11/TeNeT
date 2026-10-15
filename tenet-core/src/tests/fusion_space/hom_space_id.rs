@@ -201,33 +201,3 @@ fn fusion_tree_key_collision_falls_back_to_field_comparison() {
         assert_eq!(map[&right], 1);
     }
 }
-
-#[test]
-fn fusion_space_adjoint_view_preserves_custom_storage_footprint() {
-    // What: adjoint swaps categorical sides and block axes while retaining
-    // the already-admitted physical footprint; applying it twice is exact.
-    let dense = TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap();
-    let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
-    let structure = BlockStructure::from_blocks(vec![BlockSpec::with_key(
-        BlockKey::ordinal(0),
-        vec![2, 3],
-        vec![1, 4],
-        2,
-    )
-    .unwrap()])
-    .unwrap();
-    let source = FusionTensorMapSpace::new_unbound(dense, homspace, structure).unwrap();
-
-    reset_exact_storage_fallback_count();
-    let adjoint = source.adjoint_view().unwrap();
-    assert_eq!(exact_storage_fallback_count(), 0);
-    assert_eq!(adjoint.dense_space().codomain().dims(), &[3]);
-    assert_eq!(adjoint.dense_space().domain().dims(), &[2]);
-    assert_eq!(adjoint.homspace().codomain(), source.homspace().domain());
-    assert_eq!(adjoint.homspace().domain(), source.homspace().codomain());
-    let block = adjoint.subblock_structure().block(0).unwrap();
-    assert_eq!(block.shape(), &[3, 2]);
-    assert_eq!(block.strides(), &[4, 1]);
-    assert_eq!(block.offset(), 2);
-    assert_eq!(adjoint.adjoint_view().unwrap(), source);
-}

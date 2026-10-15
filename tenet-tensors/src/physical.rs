@@ -990,10 +990,10 @@ mod tests {
     use num_complex::Complex64;
     use tenet_core::{
         BlockSpec, BlockStructure, BraidingStyleKind, FusionProductSpace, FusionRule,
-        FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeFusionRule,
+        FusionStyleKind, FusionTreeHomSpace, MultiplicityFreeFusionRule,
         MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, PhysicalFusionBasis,
-        RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMapSpace,
-        U1FusionRule, U1Irrep,
+        RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec, U1FusionRule,
+        U1Irrep,
     };
 
     use super::*;
@@ -1426,15 +1426,11 @@ mod tests {
         )
         .unwrap()])
         .unwrap();
-        let typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::from_dims([1], [1]).unwrap(),
-            homspace,
-            structure,
-        )
-        .unwrap()
-        .try_bind_rule(&rule)
-        .unwrap();
-        let raw = DynamicFusionMapSpace::from_typed(&typed);
+        let layout = DynamicFusionMapSpace::try_from_layout(homspace, structure)
+            .unwrap()
+            .try_bind_rule(&rule)
+            .unwrap();
+        let raw = layout;
         let bound =
             BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::new(rule)).unwrap();
 

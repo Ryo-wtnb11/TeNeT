@@ -10,7 +10,7 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
         )
         .unwrap()])
         .unwrap();
-        let space = TensorMapSpace::<1, 0>::from_dims([1], []).unwrap();
+        let space = vec![1];
         let src =
             TestTensor::<f64>::from_vec_with_structure(vec![3.0], space.clone(), structure.clone())
                 .unwrap();
@@ -50,8 +50,8 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let key100 = grouped_su2_test_pair(0);
     let key200 = grouped_su2_test_pair(2);
     let key300 = grouped_su2_test_pair(4);
-    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![6, 1];
+    let dst_space = vec![4, 1];
     let src_structure = packed_fixture_structure(
         2,
         [
@@ -289,8 +289,8 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
     assert_eq!(grouped, direct);
     assert_eq!(grouped.gathered_coefficients(), coefficients.as_slice());
 
-    let src_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let src_space = vec![3, 2];
+    let dst_space = vec![3, 2];
     let src = TestTensor::<Complex64>::from_vec_with_structure(
         vec![
             Complex64::new(1.0, 2.0),
@@ -347,8 +347,8 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
 
 #[test]
 fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let src_space = vec![2, 2];
+    let dst_space = vec![2, 2];
     let present_key = grouped_su2_test_pair(0);
     let missing_key = grouped_su2_test_pair(2);
     let src_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
@@ -573,8 +573,8 @@ fn tree_transform_group_block_spec_rejects_group_structure_mismatch() {
 
 #[test]
 fn tree_transform_rejects_incompatible_single_tree_shapes() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![2, 2];
+    let dst_space = vec![4, 1];
     let src = TestTensor::<f64>::from_vec(vec![1.0; 4], src_space).unwrap();
     let dst = TestTensor::<f64>::filled(0.0, dst_space).unwrap();
 
@@ -596,8 +596,8 @@ fn tree_transform_rejects_incompatible_single_tree_shapes() {
 
 #[test]
 fn tree_transform_rejects_mismatched_multi_tree_element_count() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let src_space = vec![4, 2];
+    let dst_space = vec![3, 2];
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![3, 1], vec![3, 1]]).unwrap();
     let src =
@@ -632,7 +632,7 @@ fn compile_multi_pair_shapes(
     dst_shapes: [Vec<usize>; 2],
     src_shapes: [Vec<usize>; 2],
 ) -> Result<TreeTransformStructure<f64>, OperationError> {
-    let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let space = vec![4, 2];
     let src_structure = BlockStructure::packed_column_major(2, src_shapes).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, dst_shapes).unwrap();
     let src =

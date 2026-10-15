@@ -454,7 +454,7 @@ impl BlockStructure {
     /// Every key is first validated against `rule` in caller order. Blocks are
     /// then stable-sorted by coupled sector, and each coupled sector is laid out
     /// as one contiguous column-major matrix with the fusion-tree subblocks as strided views (see
-    /// [`FusionTensorMapSpace::from_degeneracy_shapes_coupled`]). Fails when a
+    /// [`FusionTreeHomSpace::coupled_subblock_structure`]). Fails when a
     /// coupled sector does not cover its full codomain-tree x domain-tree
     /// grid, because the sector matrix would contain uninitialized holes.
     ///

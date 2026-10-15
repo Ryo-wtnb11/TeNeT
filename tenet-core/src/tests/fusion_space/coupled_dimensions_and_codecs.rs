@@ -143,31 +143,20 @@ pub(super) fn fusion_tree_pair_order(
 }
 
 #[test]
-fn checked_revalidation_preserves_complete_admission() {
-    // What: adding finite-algebra proof to canonical built-in Complete
-    // spaces preserves both their layouts and complete-grid admission.
+fn canonical_coupled_layouts_pass_checked_subset_proof() {
+    // What: canonical built-in coupled layouts pass the finite-algebra
+    // subset proof.
     fn assert_rule<R>(rule: &R, sector: SectorId)
     where
         R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-            FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
-            rule,
-            [vec![1, 1]],
-        )
-        .unwrap();
-        let structure = Arc::clone(space.subblock_structure());
-        assert!(matches!(
-            space.admission(),
-            FusionSpaceAdmission::Complete(_)
-        ));
-        let checked = space.try_bind_rule_checked(rule).unwrap();
-        assert!(matches!(
-            checked.admission(),
-            FusionSpaceAdmission::Complete(_)
-        ));
-        assert!(Arc::ptr_eq(&structure, checked.subblock_structure()));
+        let homspace = FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]);
+        let structure = homspace
+            .coupled_subblock_structure(rule, 1, [vec![1, 1]])
+            .unwrap();
+        homspace
+            .validate_subblock_structure_subset_checked(rule, &structure)
+            .unwrap();
     }
 
     assert_rule(&Z2FusionRule, z2_even());
@@ -442,29 +431,6 @@ fn product_external_domain_sector_is_dualized_componentwise() {
         err,
         CoreError::InvalidSector {
             sector: external_domain
-        }
-    );
-}
-
-#[test]
-fn fusion_tensor_space_rejects_homspace_rank_mismatch() {
-    let rule = Z2FusionRule;
-    let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-    let hom = FusionTreeHomSpace::from_sector_ids([(0, 1), (1, 1)], [(0, 1)]);
-
-    let err = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        hom,
-        &rule,
-        [vec![1, 1], vec![1, 1]],
-    )
-    .unwrap_err();
-
-    assert_eq!(
-        err,
-        CoreError::StructureRankMismatch {
-            expected: 1,
-            actual: 2,
         }
     );
 }

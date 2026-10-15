@@ -883,19 +883,13 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         offset += block.shape().iter().product::<usize>() + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(2, blocks).unwrap();
-    let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
-        canonical.space().homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(provider.as_ref())
-    .unwrap();
-    let expert = BoundDynamicFusionMapSpace::bind_generic(
-        DynamicFusionMapSpace::from_typed(&typed),
-        Arc::clone(&provider),
-    )
-    .unwrap();
+    let layout =
+        DynamicFusionMapSpace::try_from_layout(canonical.space().homspace().clone(), structure)
+            .unwrap()
+            .try_bind_rule(provider.as_ref())
+            .unwrap();
+    let expert =
+        BoundDynamicFusionMapSpace::bind_generic(layout.clone(), Arc::clone(&provider)).unwrap();
     assert!(!matches!(
         expert.space().structure().coupled_sector_regions(1),
         Ok(Some(regions)) if regions.iter().all(|region| region.has_aligned_diagonal())
@@ -962,9 +956,9 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
 
 /// `space` re-laid with one padding element before every block: an expert
 /// layout of the same hom space whose regions are not aligned diagonals.
-fn padded_layout(space: &DynamicFusionMapSpace) -> FusionTensorMapSpace<1, 1> {
+fn padded_layout(space: &DynamicFusionMapSpace) -> DynamicFusionMapSpace {
     let structure = space.structure();
-    let (mut offset, mut dimension, mut blocks) = (1usize, 0usize, Vec::new());
+    let (mut offset, mut blocks) = (1usize, Vec::new());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         blocks.push(
@@ -972,10 +966,8 @@ fn padded_layout(space: &DynamicFusionMapSpace) -> FusionTensorMapSpace<1, 1> {
                 .unwrap(),
         );
         offset += block.shape().iter().product::<usize>() + 1;
-        dimension += block.shape()[0];
     }
-    FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([dimension], [dimension]).unwrap(),
+    DynamicFusionMapSpace::try_from_layout(
         space.homspace().clone(),
         BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
     )
@@ -1019,11 +1011,9 @@ fn elementwise_compact_admission_allocates_nothing_and_queries_no_provider() {
     )
     .unwrap();
     let mf_expert = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
-        DynamicFusionMapSpace::from_typed(
-            &padded_layout(mf_canonical.space())
-                .try_bind_rule(mf.as_ref())
-                .unwrap(),
-        ),
+        padded_layout(mf_canonical.space())
+            .try_bind_rule(mf.as_ref())
+            .unwrap(),
         Arc::clone(&mf),
     )
     .unwrap();
@@ -1041,11 +1031,9 @@ fn elementwise_compact_admission_allocates_nothing_and_queries_no_provider() {
     });
     let checked_canonical = bind_to_spy(&source, &provider);
     let checked_expert = BoundDynamicFusionMapSpace::bind_generic(
-        DynamicFusionMapSpace::from_typed(
-            &padded_layout(checked_canonical.space())
-                .try_bind_rule(provider.as_ref())
-                .unwrap(),
-        ),
+        padded_layout(checked_canonical.space())
+            .try_bind_rule(provider.as_ref())
+            .unwrap(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -1121,16 +1109,13 @@ fn elementwise_compact_admission_takes_unsorted_spectra_through_the_region_admis
         offset += block.shape().iter().product::<usize>();
     }
     let reversed = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
-        DynamicFusionMapSpace::from_typed(
-            &FusionTensorMapSpace::new_unbound(
-                TensorMapSpace::<1, 1>::from_dims([5], [5]).unwrap(),
-                homspace,
-                BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
-            )
-            .unwrap()
-            .try_bind_rule(mf.as_ref())
-            .unwrap(),
-        ),
+        DynamicFusionMapSpace::try_from_layout(
+            homspace,
+            BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(mf.as_ref())
+        .unwrap(),
         Arc::clone(&mf),
     )
     .unwrap();
