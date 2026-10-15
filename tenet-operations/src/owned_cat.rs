@@ -9,12 +9,6 @@ use strided_kernel::{CopyPlan, MaybeSendSync, RawStridedMut, RawStridedRef, Stri
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::ConjugateValue;
 
-#[cfg(test)]
-thread_local! {
-    static TEST_WRITE_BITMAP: std::cell::RefCell<Option<Vec<usize>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnedCatSide {
@@ -432,11 +426,7 @@ fn write_widened(destination: &mut [MaybeUninit<Complex64>], source: &[f64], cop
 
 #[cfg(test)]
 fn observe_write(index: usize) {
-    TEST_WRITE_BITMAP.with(|bitmap| {
-        if let Some(bitmap) = bitmap.borrow_mut().as_mut() {
-            bitmap[index] += 1;
-        }
-    });
+    crate::probe::observe_write(crate::probe::Writer::Cat, index);
 }
 
 #[cfg(test)]
@@ -459,7 +449,7 @@ mod tests {
         let dense = [1.0, 2.0, 3.0, 4.0];
         let nan = f64::from_bits(0x7ff8_0000_0000_1617);
         let diagonal = [-0.0, nan];
-        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 8]));
+        crate::probe::arm_writes(crate::probe::Writer::Cat, 8);
         let output = try_cat_owned_mixed_raw(
             8,
             OwnedCatSide::Domain,
@@ -469,7 +459,7 @@ mod tests {
             &[Some(&diagonal), None],
         )
         .unwrap();
-        let writes = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        let writes = crate::probe::take_writes(crate::probe::Writer::Cat);
         assert_eq!(writes, [1; 8]);
         assert_eq!(
             output
@@ -504,9 +494,9 @@ mod tests {
     }
 
     fn with_bitmap<D>(len: usize, operation: impl FnOnce() -> D) -> (D, Vec<usize>) {
-        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; len]));
+        crate::probe::arm_writes(crate::probe::Writer::Cat, len);
         let output = operation();
-        let bitmap = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        let bitmap = crate::probe::take_writes(crate::probe::Writer::Cat);
         (output, bitmap)
     }
 
@@ -738,7 +728,7 @@ mod tests {
                 try_cat_owned_raw(required_len, OwnedCatSide::Domain, &copies, valid_sources)
                     .is_none()
             );
-            assert!(TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow().is_none()));
+            assert!(!crate::probe::writes_armed(crate::probe::Writer::Cat));
         }
     }
 
@@ -750,7 +740,7 @@ mod tests {
             copy(0, 0, 0, [2, 2], [1, 2], 3, 0..6, false),
             copy(1, 0, 1, [1, 2], [1, 1], 3, 0..6, false),
         ];
-        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 6]));
+        crate::probe::arm_writes(crate::probe::Writer::Cat, 6);
 
         let output = try_cat_owned_raw(
             6,
@@ -760,7 +750,7 @@ mod tests {
         );
 
         assert!(output.is_none());
-        let bitmap = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        let bitmap = crate::probe::take_writes(crate::probe::Writer::Cat);
         assert_eq!(bitmap, [0; 6]);
     }
 

@@ -9,12 +9,6 @@ use crate::{ConjugateValue, OperationError, RecouplingCoefficientAction, Transfo
 
 const OWNED_TRACE_TILE_ELEMENTS: usize = 256;
 
-#[cfg(test)]
-thread_local! {
-    static TEST_WRITE_BITMAP: std::cell::RefCell<Option<Vec<usize>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// Borrowed producer geometry for the internal owned trace writer.
 ///
 /// Destination addresses and physical coverage are derived from the supplied
@@ -279,11 +273,7 @@ where
                         block.offset(),
                     );
                     #[cfg(test)]
-                    TEST_WRITE_BITMAP.with(|bitmap| {
-                        if let Some(bitmap) = bitmap.borrow_mut().as_mut() {
-                            bitmap[dst_index] += 1;
-                        }
-                    });
+                    crate::probe::observe_write(crate::probe::Writer::Trace, dst_index);
                     dst[dst_index].write(value);
                 }
             }
@@ -517,7 +507,7 @@ mod tests {
         let source = (0..800).map(|value| value as f64).collect::<Vec<_>>();
         let producer_indices = [0usize];
         let producer_offsets = [0, 1, 1];
-        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 800]));
+        crate::probe::arm_writes(crate::probe::Writer::Trace, 800);
 
         let output = try_tensortrace_owned_raw(
             &structure,
@@ -533,7 +523,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let bitmap = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        let bitmap = crate::probe::take_writes(crate::probe::Writer::Trace);
 
         assert_eq!(&output[..400], &source[..400]);
         assert_eq!(&output[400..], &[0.0; 400]);

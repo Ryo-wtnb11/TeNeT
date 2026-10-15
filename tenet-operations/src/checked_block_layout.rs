@@ -27,38 +27,6 @@ use crate::{ConjugateValue, OperationError};
 /// Why test builds only (`cfg(test)` or the `testing` feature): the probe
 /// would sit once per block on the eager path whose per-block fixed cost it
 /// exists to bound.
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CheckedBlockPasses {
-    pub layout_passes: usize,
-    pub span_walks: usize,
-}
-
-#[cfg(any(test, feature = "testing"))]
-thread_local! {
-    static PASSES: core::cell::Cell<CheckedBlockPasses> =
-        const { core::cell::Cell::new(CheckedBlockPasses { layout_passes: 0, span_walks: 0 }) };
-}
-
-/// Returns and resets this thread's [`CheckedBlockPasses`].
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-pub fn take_checked_block_passes() -> CheckedBlockPasses {
-    PASSES.with(|passes| passes.take())
-}
-
-#[inline]
-pub(crate) fn record_checked_block_passes(_layout_passes: usize, _span_walks: usize) {
-    #[cfg(any(test, feature = "testing"))]
-    PASSES.with(|passes| {
-        let mut value = passes.get();
-        value.layout_passes += _layout_passes;
-        value.span_walks += _span_walks;
-        passes.set(value);
-    });
-}
-
 fn convert(stride: usize) -> Result<isize, OperationError> {
     isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)
 }
@@ -146,7 +114,8 @@ impl CheckedBlockLayout {
                 self.rhs_strides.insert(position, rhs);
             }
         }
-        record_checked_block_passes(1, 0);
+        #[cfg(any(test, feature = "testing"))]
+        crate::probe::add(crate::probe::Event::LayoutPass, 1);
         if empty || self.dims.is_empty() {
             self.dims.clear();
             self.dst_strides.clear();
@@ -285,7 +254,8 @@ impl CheckedBlockLayout {
             );
             return Ok(());
         }
-        record_checked_block_passes(0, 1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::probe::add(crate::probe::Event::SpanWalk, 1);
         let op_l = move |value: T| value.maybe_conj(lhs_conjugate);
         let op_r = move |value: T| value.maybe_conj(rhs_conjugate);
         let Self {
@@ -343,7 +313,8 @@ impl CheckedBlockLayout {
     {
         validate_raw_strided_bounds(dst_data.len(), &self.dims, &self.dst_strides, dst_offset)?;
         validate_raw_strided_bounds(src_data.len(), &self.dims, &self.lhs_strides, src_offset)?;
-        record_checked_block_passes(0, 1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::probe::add(crate::probe::Event::SpanWalk, 1);
         let op = move |value: T| value.maybe_conj(source_conjugate);
         let Self {
             dims,
@@ -411,7 +382,8 @@ impl CheckedBlockLayout {
         validate_raw_strided_bounds(dst_data.len(), &self.dims, &self.dst_strides, dst_offset)?;
         validate_raw_strided_bounds(lhs_data.len(), &self.dims, &self.lhs_strides, lhs_offset)?;
         validate_raw_strided_bounds(rhs_data.len(), &self.dims, &self.rhs_strides, rhs_offset)?;
-        record_checked_block_passes(0, 1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::probe::add(crate::probe::Event::SpanWalk, 1);
         let op_l = move |value: T| value.maybe_conj(lhs_conjugate);
         let op_r = move |value: T| value.maybe_conj(rhs_conjugate);
         let Self {
@@ -462,7 +434,8 @@ impl CheckedBlockLayout {
     ) where
         T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
     {
-        record_checked_block_passes(0, 1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::probe::add(crate::probe::Event::SpanWalk, 1);
         let op = move |value: T| value.maybe_conj(source_conjugate);
         let Self {
             dims,
@@ -589,6 +562,7 @@ fn apply_fused_triple_slices<Dst, T, Combine>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::{take_checked_block_passes, CheckedBlockPasses};
     use crate::tensoradd_raw_strided_kernel;
     use num_complex::Complex64;
 

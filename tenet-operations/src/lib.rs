@@ -61,9 +61,6 @@ mod tree_profile;
 pub use axis::*;
 #[doc(hidden)]
 pub use checked_block_layout::CheckedBlockLayout;
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-pub use checked_block_layout::{take_checked_block_passes, CheckedBlockPasses};
 #[cfg(feature = "cuda")]
 pub use cuda_transform::{
     CudaTreeTransformDestination, CudaTreeTransformExecutor, DEFAULT_COEFFICIENT_BUDGET_BYTES,
@@ -87,6 +84,9 @@ pub use host_scalar_kernels::{
 };
 pub use kernel_adapter::{BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub use probe::{take_checked_block_passes, take_owned_block_prefills, CheckedBlockPasses};
 pub use replay_backend::*;
 pub use scalar::{
     scale_value, ConjugateValue, DenseBlockScalar, DenseRecouplingScalar,
@@ -110,9 +110,6 @@ mod owned_blocks;
 mod owned_cat;
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-pub use owned_blocks::take_owned_block_prefills;
 #[doc(hidden)]
 pub use owned_blocks::{
     check_axis_runs, for_each_run_piece, overwrite_owned_blocks, overwrite_owned_member_blocks,
@@ -121,6 +118,8 @@ pub use owned_blocks::{
 #[doc(hidden)]
 pub use owned_overwrite_buffer::{zeroed_payload, ZeroBytes};
 mod owned_trace;
+#[cfg(any(test, feature = "testing"))]
+mod probe;
 #[doc(hidden)]
 pub use owned_cat::{
     try_cat_owned_c64_raw, try_cat_owned_mixed_raw, try_cat_owned_raw, OwnedCatC64Source,
