@@ -78,8 +78,6 @@ mod tests;
 type ErasedEntry = dyn Any + Send + Sync;
 
 const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
-/// One shard, as caches 1-3: the largest group must fit it.
-const COEFFICIENT_GROUP_SHARDS: usize = 1;
 
 /// Everything one source group's specs read besides the group's own trees.
 #[derive(Debug, Eq, Hash, PartialEq)]
@@ -184,11 +182,7 @@ fn coefficient_groups() -> &'static StructureCache<CoefficientGroupKey, ErasedEn
             &CoefficientGroupsControl,
         )
         .unwrap_or(0);
-        StructureCache::new(
-            StructureCacheKind::TreeTransformCoefficients,
-            budget,
-            COEFFICIENT_GROUP_SHARDS,
-        )
+        StructureCache::new(StructureCacheKind::TreeTransformCoefficients, budget)
     })
 }
 

@@ -405,14 +405,6 @@ impl SectorStructure {
         self.find_tree_rows(logical_key.domain_tree(), logical_key.codomain_tree())
     }
 
-    #[deprecated(
-        since = "0.1.0",
-        note = "renamed to find_fusion_tree_pair_index to match FusionTreePairKey"
-    )]
-    pub fn find_fusion_tree_index(&self, key: &FusionTreePairKey) -> Option<usize> {
-        self.find_fusion_tree_pair_index(key)
-    }
-
     #[inline]
     pub fn has_compact_lookup(&self) -> bool {
         self.compact_lookup.is_some()

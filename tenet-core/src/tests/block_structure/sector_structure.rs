@@ -947,20 +947,6 @@ fn opaque_block_key_words_are_rank_independent_application_identity() {
     assert_eq!(OpaqueBlockKey::ordinal(34).words(), &[34]);
 }
 
-#[allow(deprecated)]
-#[test]
-fn deprecated_sector_key_constructors_are_opaque_compatibility_helpers() {
-    let from_sectors = BlockKey::sectors([SectorId::new(3), SectorId::new(5)]);
-    let from_ids = BlockKey::sector_ids([3, 5]);
-
-    // What: legacy numeric block labels preserve routing identity without
-    // being promoted to categorical fusion-tree pairs.
-    assert_eq!(from_sectors, BlockKey::opaque([3, 5]));
-    assert_eq!(from_ids, BlockKey::opaque([3, 5]));
-    assert!(matches!(from_sectors, BlockKey::Opaque(_)));
-    assert!(matches!(from_ids, BlockKey::Opaque(_)));
-}
-
 #[test]
 fn empty_sector_structure_has_one_canonical_namespace_free_form() {
     let constructed = SectorStructure::from_keys(3, std::iter::empty::<BlockKey>()).unwrap();
@@ -1054,52 +1040,6 @@ fn lookup_never_aliases_different_key_namespaces() {
             expected: BlockKeyKind::Opaque,
             actual: BlockKeyKind::FusionTree,
         })
-    );
-}
-
-#[allow(deprecated)]
-#[test]
-fn deprecated_fusion_tree_lookup_forwarders_match_canonical_results() {
-    let present =
-        FusionTreePairKey::try_pair_from_sector_ids([1], [], 1, [false], [], [], [], [], [])
-            .unwrap();
-    let missing =
-        FusionTreePairKey::try_pair_from_sector_ids([2], [], 2, [false], [], [], [], [], [])
-            .unwrap();
-    let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
-        present.clone().into(),
-        vec![1],
-        0,
-    )
-    .unwrap()])
-    .unwrap();
-    let sectors = structure.sector_structure();
-
-    // What: all three renamed lookup/block APIs retain exact success and
-    // missing behavior through their deprecated forwarding layer.
-    assert_eq!(
-        sectors.find_fusion_tree_index(&present),
-        sectors.find_fusion_tree_pair_index(&present)
-    );
-    assert_eq!(
-        sectors.find_fusion_tree_index(&missing),
-        sectors.find_fusion_tree_pair_index(&missing)
-    );
-    assert_eq!(
-        structure.find_block_index_by_fusion_tree_key(&present),
-        structure.find_block_index_by_fusion_tree_pair(&present)
-    );
-    assert_eq!(
-        structure.find_block_index_by_fusion_tree_key(&missing),
-        structure.find_block_index_by_fusion_tree_pair(&missing)
-    );
-    assert_eq!(
-        structure.fusion_tree_block(&present).unwrap().key(),
-        structure.fusion_tree_pair_block(&present).unwrap().key()
-    );
-    assert_eq!(
-        structure.fusion_tree_block(&missing).unwrap_err(),
-        structure.fusion_tree_pair_block(&missing).unwrap_err()
     );
 }
 

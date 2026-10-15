@@ -456,10 +456,6 @@ impl<T> CompletedTransformerEntry<T> {
 
 type ErasedEntry = dyn Any + Send + Sync;
 
-/// One shard: the largest entry must fit it (#2052: the rank-6 U(1) CopyC
-/// payload charges 29.8 MB, its DynamicTree transform 12.1 MB, under the
-/// 65,095,598 B admission limit of a 64 MiB budget).
-const COMPLETED_TRANSFORMER_SHARDS: usize = 1;
 /// quick_cache node and the entry's `Arc` control, per entry.
 const ENTRY_OVERHEAD_BYTES: usize = 10 * core::mem::size_of::<usize>();
 
@@ -492,11 +488,7 @@ fn completed_transformers() -> &'static StructureCache<CompletedTransformerKey, 
             &CompletedTransformerControl,
         )
         .unwrap_or(0);
-        StructureCache::new(
-            StructureCacheKind::CompletedTreeTransformer,
-            budget,
-            COMPLETED_TRANSFORMER_SHARDS,
-        )
+        StructureCache::new(StructureCacheKind::CompletedTreeTransformer, budget)
     })
 }
 

@@ -591,14 +591,6 @@ impl BlockStructure {
         self.content.sector.find_fusion_tree_pair_index(key)
     }
 
-    #[deprecated(
-        since = "0.1.0",
-        note = "renamed to find_block_index_by_fusion_tree_pair to match FusionTreePairKey"
-    )]
-    pub fn find_block_index_by_fusion_tree_key(&self, key: &FusionTreePairKey) -> Option<usize> {
-        self.find_block_index_by_fusion_tree_pair(key)
-    }
-
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
         self.content.sector.pair_indices_from(&src.content.sector)
     }
@@ -650,14 +642,6 @@ impl BlockStructure {
         self.content
             .sector
             .find_adjoint_fusion_tree_pair_index(logical_key)
-    }
-
-    #[deprecated(
-        since = "0.1.0",
-        note = "renamed to fusion_tree_pair_block to match FusionTreePairKey"
-    )]
-    pub fn fusion_tree_block(&self, key: &FusionTreePairKey) -> Result<BlockRef<'_>, CoreError> {
-        self.fusion_tree_pair_block(key)
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
