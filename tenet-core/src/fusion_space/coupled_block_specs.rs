@@ -30,24 +30,25 @@ impl<'a> CoupledSectorMatrix<'a> {
         }
     }
 
-    /// Pushes the strides of block `(row, col)` with degeneracy `shape`
-    /// (codomain axes `..nout`) and returns its storage offset.
+    /// Pushes the strides of block `(row, col)` with codomain degeneracies
+    /// `row_shape` and domain degeneracies `col_shape`, and returns its
+    /// storage offset.
     fn place(
         &self,
         row: usize,
         col: usize,
-        shape: &[usize],
-        nout: usize,
+        row_shape: &[usize],
+        col_shape: &[usize],
         strides: &mut impl Extend<usize>,
     ) -> Result<usize, CoreError> {
         let mut push = |stride| {
             strides.extend(Some(stride));
             Ok(())
         };
-        try_for_each_column_major_stride(1, &shape[..nout], &mut push, || {
+        try_for_each_column_major_stride(1, row_shape, &mut push, || {
             CoreError::ElementCountOverflow
         })?;
-        try_for_each_column_major_stride(self.rows, &shape[nout..], push, || {
+        try_for_each_column_major_stride(self.rows, col_shape, push, || {
             CoreError::ElementCountOverflow
         })?;
         self.base
@@ -69,10 +70,13 @@ impl<'a> CoupledSectorMatrix<'a> {
     }
 }
 
+/// Writes the degeneracy of each leg of `space` in `tree`'s sector to
+/// `shape` and returns their product.
 fn degeneracy_shape_for_tree_side(
     space: &FusionProductSpace,
     tree: &FusionTreeKey,
-) -> Result<DimVec, CoreError> {
+    shape: &mut [usize],
+) -> Result<usize, CoreError> {
     #[cfg(test)]
     observe_coupled_grid_side_derivation();
     if tree.uncoupled().len() != space.len() {
@@ -81,17 +85,14 @@ fn degeneracy_shape_for_tree_side(
             actual: tree.uncoupled().len(),
         });
     }
-    space
-        .legs()
-        .iter()
-        .zip(tree.uncoupled())
-        .map(|(leg, &sector)| {
-            leg.degeneracy(sector)
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "fusion tree uses a sector absent from its leg",
-                })
-        })
-        .collect()
+    for ((leg, &sector), axis) in space.legs().iter().zip(tree.uncoupled()).zip(&mut *shape) {
+        *axis = leg
+            .degeneracy(sector)
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "fusion tree uses a sector absent from its leg",
+            })?;
+    }
+    checked_product(shape)
 }
 
 /// Why its structures carry the storage-tiling proof: `visit_coupled_leg_blocks`
@@ -106,35 +107,91 @@ pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
     homspace: &FusionTreeHomSpace,
     layout: &FusionTreeHomSpaceLayoutData,
 ) -> Result<(Arc<SectorStructure>, DegeneracyStructure), CoreError> {
-    let rank = homspace.rank();
-    let mut degeneracy_blocks = Vec::with_capacity(layout.keys.len());
-    visit_coupled_leg_blocks(homspace, layout, |block| {
-        degeneracy_blocks.push(block);
-        Ok(())
-    })?;
-
+    let mut degeneracy =
+        DegeneracyStructure::with_block_capacity(homspace.rank(), layout.keys.len());
+    visit_coupled_leg_blocks(homspace, layout, &mut degeneracy)?;
     let sector_structure = layout.sector.clone()?;
-    let degeneracy_structure = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
-    Ok((sector_structure, degeneracy_structure))
+    Ok((sector_structure, degeneracy))
 }
 
-fn visit_coupled_leg_blocks<F>(
+/// One side's row (or column) blocks of the current coupled sector: the
+/// degeneracy shapes back to back, each block's dimension, and its offset.
+/// Each region is sized for the largest sector of the structure.
+struct CoupledSide<'a> {
+    legs: usize,
+    shapes: &'a mut [usize],
+    dims: &'a mut [usize],
+    offsets: &'a mut [usize],
+}
+
+impl<'a> CoupledSide<'a> {
+    /// Splits `trees` blocks of `legs` legs off the front of `scratch`.
+    fn split(scratch: &'a mut [usize], trees: usize, legs: usize) -> (Self, &'a mut [usize]) {
+        let (shapes, rest) = scratch.split_at_mut(trees * legs);
+        let (dims, rest) = rest.split_at_mut(trees);
+        let (offsets, rest) = rest.split_at_mut(trees);
+        let side = Self {
+            legs,
+            shapes,
+            dims,
+            offsets,
+        };
+        (side, rest)
+    }
+
+    /// Derives the shape, dimension and offset of every tree `tree(index)`
+    /// for `index < count` on `space`, and returns the side's extent.
+    fn derive<'k>(
+        &mut self,
+        space: &FusionProductSpace,
+        count: usize,
+        tree: impl Fn(usize) -> Result<&'k FusionTreeKey, CoreError>,
+    ) -> Result<usize, CoreError> {
+        for index in 0..count {
+            self.dims[index] =
+                degeneracy_shape_for_tree_side(space, tree(index)?, self.shape_mut(index))?;
+        }
+        let mut extent = 0usize;
+        for index in 0..count {
+            self.offsets[index] = extent;
+            extent = extent
+                .checked_add(self.dims[index])
+                .ok_or(CoreError::ElementCountOverflow)?;
+        }
+        Ok(extent)
+    }
+
+    fn shape(&self, index: usize) -> &[usize] {
+        &self.shapes[index * self.legs..(index + 1) * self.legs]
+    }
+
+    fn shape_mut(&mut self, index: usize) -> &mut [usize] {
+        &mut self.shapes[index * self.legs..(index + 1) * self.legs]
+    }
+}
+
+fn visit_coupled_leg_blocks(
     homspace: &FusionTreeHomSpace,
     layout: &FusionTreeHomSpaceLayoutData,
-    mut visit: F,
-) -> Result<(), CoreError>
-where
-    F: FnMut(DegeneracyBlock) -> Result<(), CoreError>,
-{
-    let rank = homspace.rank();
+    degeneracy: &mut DegeneracyStructure,
+) -> Result<(), CoreError> {
     let nout = homspace.codomain().len();
+    let nin = homspace.domain().len();
+    // Why one scratch buffer sized for the largest sector rather than
+    // per-tree `DimVec`s or inline buffers: every structure then costs this
+    // one allocation at any rank and block count (#2012). A well-formed
+    // sector has at most one row or column per block; the clamp leaves a
+    // malformed one to the block-count error below.
+    let (max_rows, max_cols) = layout.sectors.iter().fold((0, 0), |(rows, cols), sector| {
+        (
+            rows.max(sector.row_count.min(layout.keys.len())),
+            cols.max(sector.col_count.min(layout.keys.len())),
+        )
+    });
+    let mut scratch = vec![0usize; max_rows * (nout + 2) + max_cols * (nin + 2)];
+    let (mut rows, rest) = CoupledSide::split(&mut scratch, max_rows, nout);
+    let (mut cols, _) = CoupledSide::split(rest, max_cols, nin);
     let mut sector_offset = 0usize;
-    let mut row_shapes = SmallVec::<[DimVec; 8]>::new();
-    let mut row_dims = DimVec::new();
-    let mut col_shapes = SmallVec::<[DimVec; 8]>::new();
-    let mut col_dims = DimVec::new();
-    let mut row_offsets = DimVec::new();
-    let mut col_offsets = DimVec::new();
 
     for sector in &layout.sectors {
         let block_count = sector
@@ -152,51 +209,31 @@ where
             });
         }
 
-        row_shapes.clear();
-        row_dims.clear();
-        for row in 0..sector.row_count {
-            let key = &layout.keys[sector.start + row];
-            let shape = degeneracy_shape_for_tree_side(homspace.codomain(), key.codomain_tree())?;
-            let dim = shape.iter().try_fold(1usize, |product, &axis| {
-                product
-                    .checked_mul(axis)
-                    .ok_or(CoreError::ElementCountOverflow)
-            })?;
-            row_shapes.push(shape);
-            row_dims.push(dim);
-        }
-
-        col_shapes.clear();
-        col_dims.clear();
-        for col in 0..sector.col_count {
+        let row_extent = rows.derive(homspace.codomain(), sector.row_count, |row| {
+            Ok(layout.keys[sector.start + row].codomain_tree())
+        })?;
+        let col_extent = cols.derive(homspace.domain(), sector.col_count, |col| {
             let local_offset = col
                 .checked_mul(sector.row_count)
                 .ok_or(CoreError::ElementCountOverflow)?;
-            let key = &layout.keys[sector.start + local_offset];
-            let shape = degeneracy_shape_for_tree_side(homspace.domain(), key.domain_tree())?;
-            let dim = shape.iter().try_fold(1usize, |product, &axis| {
-                product
-                    .checked_mul(axis)
-                    .ok_or(CoreError::ElementCountOverflow)
-            })?;
-            col_shapes.push(shape);
-            col_dims.push(dim);
-        }
-
-        let rows = prefix_offsets_into(&row_dims, &mut row_offsets)?;
-        let cols = prefix_offsets_into(&col_dims, &mut col_offsets)?;
-        let matrix =
-            CoupledSectorMatrix::new(sector_offset, &row_offsets, rows, &col_offsets, cols);
+            Ok(layout.keys[sector.start + local_offset].domain_tree())
+        })?;
+        let matrix = CoupledSectorMatrix::new(
+            sector_offset,
+            rows.offsets,
+            row_extent,
+            cols.offsets,
+            col_extent,
+        );
 
         for col in 0..sector.col_count {
             for row in 0..sector.row_count {
-                let mut shape = DimVec::with_capacity(rank);
-                shape.extend_from_slice(&row_shapes[row]);
-                shape.extend_from_slice(&col_shapes[col]);
-
-                let mut strides = DimVec::new();
-                let offset = matrix.place(row, col, &shape, nout, &mut strides)?;
-                visit(DegeneracyBlock::new(shape, strides, offset)?)?;
+                let (row_shape, col_shape) = (rows.shape(row), cols.shape(col));
+                degeneracy.push_block_with(|dims| {
+                    dims.extend_from_slice(row_shape);
+                    dims.extend_from_slice(col_shape);
+                    matrix.place(row, col, row_shape, col_shape, dims)
+                })?;
             }
         }
 
@@ -340,7 +377,8 @@ where
                 .get(key.domain_tree())
                 .expect("column tree placed above");
             let mut strides = Vec::with_capacity(rank);
-            let offset = matrix.place(row, col, shape, nout, &mut strides)?;
+            let (row_shape, col_shape) = shape.split_at(nout);
+            let offset = matrix.place(row, col, row_shape, col_shape, &mut strides)?;
             specs.push(BlockSpec::with_key(
                 BlockKey::FusionTree(key.clone()),
                 shape.to_vec(),
@@ -383,18 +421,4 @@ fn register_first_seen_block<'k>(
         });
     }
     Ok(())
-}
-
-/// Fills `offsets` with the running sums of `dims` and returns their total.
-fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<usize, CoreError> {
-    offsets.clear();
-    offsets.reserve(dims.len());
-    let mut offset = 0usize;
-    for &dim in dims {
-        offsets.push(offset);
-        offset = offset
-            .checked_add(dim)
-            .ok_or(CoreError::ElementCountOverflow)?;
-    }
-    Ok(offset)
 }

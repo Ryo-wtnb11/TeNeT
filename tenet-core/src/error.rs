@@ -462,6 +462,15 @@ pub fn try_for_each_column_major_stride<E>(
 #[doc(hidden)]
 pub fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
     let mut strides = Vec::with_capacity(shape.len());
+    extend_column_major_strides(shape, &mut strides)?;
+    Ok(strides)
+}
+
+/// [`column_major_strides`], appended to `strides`.
+pub(crate) fn extend_column_major_strides(
+    shape: &[usize],
+    strides: &mut Vec<usize>,
+) -> Result<(), CoreError> {
     if let Some((_, leading)) = shape.split_last() {
         let last = try_for_each_column_major_stride(
             1,
@@ -474,7 +483,7 @@ pub fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
         )?;
         strides.push(last);
     }
-    Ok(strides)
+    Ok(())
 }
 
 #[cfg(test)]
