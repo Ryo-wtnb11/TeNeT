@@ -517,6 +517,24 @@ impl TreeArenaBuilder {
         self.rows.len()
     }
 
+    /// Row `row` as pushed, with its stored hash.
+    #[inline]
+    pub(crate) fn view(&self, row: usize) -> FusionTreeRef<'_> {
+        row_view(&self.rows[row], &self.sectors, &self.duals, &self.vertices)
+    }
+
+    /// Drop every row and keep the buffers, so a reused builder stops
+    /// allocating once it has held its widest batch.
+    pub(crate) fn clear(&mut self) {
+        self.sectors.clear();
+        self.vertices.clear();
+        self.duals.clear();
+        self.rows.clear();
+        if let Some(index) = self.shared.as_mut() {
+            index.clear();
+        }
+    }
+
     /// Append one tree from raw parts and hash it over the stored typed
     /// slices, exactly as [`fusion_tree_key_hash`] does for any key.
     pub(crate) fn push_parts<U, D, I, V>(

@@ -1,10 +1,13 @@
 use super::*;
 
-/// Braid state that is mutated step by step without a cached hash.
+/// A fusion tree edited in place, without a stored hash: the working state
+/// of one-tree-at-a-time Unique moves (#2192).
 ///
-/// `FusionTreeKey` stores its hash in an immutable arena, so the working
-/// state lives in the very buffers `freeze` moves into a one-row arena: one
-/// hash and one arena per braid instead of one per Artin step.
+/// The buffers are in arena layout, so [`Self::freeze`] moves them into a
+/// one-row arena (allocating only the `Arc`), and a scratch that
+/// [`Self::load`]s tree after tree reuses them: once it has held its widest
+/// tree it no longer allocates.
+#[derive(Default)]
 pub(crate) struct UnhashedFusionTree {
     /// `uncoupled ‖ coupled ‖ innerlines`, the arena's sector layout.
     sectors: Vec<SectorId>,
@@ -15,27 +18,189 @@ pub(crate) struct UnhashedFusionTree {
 
 impl From<FusionTreeKey> for UnhashedFusionTree {
     fn from(key: FusionTreeKey) -> Self {
-        let mut sectors = Vec::with_capacity(key.uncoupled().len() + 1 + key.innerlines().len());
-        sectors.extend_from_slice(key.uncoupled());
-        sectors.push(key.coupled());
-        sectors.extend_from_slice(key.innerlines());
-        Self {
-            sectors,
-            len_uncoupled: key.uncoupled().len(),
-            is_dual: key.is_dual().to_vec(),
-            vertices: key.vertices().to_vec(),
-        }
+        let mut tree = Self::default();
+        tree.load(key.as_view());
+        tree
     }
 }
 
 impl UnhashedFusionTree {
+    pub(crate) fn with_widths((sectors, vertices, duals): (usize, usize, usize)) -> Self {
+        Self {
+            sectors: Vec::with_capacity(sectors),
+            len_uncoupled: 0,
+            is_dual: Vec::with_capacity(duals),
+            vertices: Vec::with_capacity(vertices),
+        }
+    }
+
+    /// Overwrite this tree with `tree`, keeping the buffers.
+    pub(crate) fn load(&mut self, tree: FusionTreeRef<'_>) {
+        self.sectors.clear();
+        self.sectors
+            .reserve(tree.uncoupled().len() + 1 + tree.innerlines().len());
+        self.sectors.extend_from_slice(tree.uncoupled());
+        self.sectors.push(tree.coupled());
+        self.sectors.extend_from_slice(tree.innerlines());
+        self.len_uncoupled = tree.uncoupled().len();
+        self.is_dual.clear();
+        self.is_dual.extend_from_slice(tree.is_dual());
+        self.vertices.clear();
+        self.vertices.extend_from_slice(tree.vertices());
+    }
+
     pub(crate) fn vertex_at(&self, position: usize) -> Option<MultiplicityIndex> {
         self.vertices.get(position).copied()
     }
 
     #[inline]
-    fn uncoupled(&self) -> &[SectorId] {
+    pub(crate) fn uncoupled(&self) -> &[SectorId] {
         &self.sectors[..self.len_uncoupled]
+    }
+
+    #[inline]
+    pub(crate) fn is_dual(&self) -> &[bool] {
+        &self.is_dual
+    }
+
+    #[inline]
+    pub(crate) fn rank(&self) -> usize {
+        self.len_uncoupled
+    }
+
+    /// This tree as a key would compare and hash it.
+    pub(crate) fn view(&self) -> FusionTreeRef<'_> {
+        FusionTreeRef::new(
+            self.uncoupled(),
+            self.coupled(),
+            &self.is_dual,
+            self.innerlines(),
+            &self.vertices,
+        )
+    }
+
+    /// The multiplicity-free projection's vertex gate
+    /// (`project_multiplicity_free_tree_pair`).
+    pub(crate) fn check_multiplicity_free_vertices(&self) -> Result<(), CoreError> {
+        if self
+            .vertices
+            .iter()
+            .any(|&vertex| vertex != MultiplicityIndex::ONE)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multiplicity-free projection requires vertex label one",
+            });
+        }
+        Ok(())
+    }
+
+    /// Every vertex label one, as a multiplicity-free frame materializes it.
+    pub(crate) fn reset_multiplicity_free_vertices(&mut self) {
+        self.vertices.clear();
+        self.vertices
+            .resize(self.len_uncoupled.saturating_sub(1), MultiplicityIndex::ONE);
+    }
+
+    /// The codomain side of a `bendright`: drop the bent last leg and, above
+    /// rank two, the last inner line; the tree now couples to `coupled`
+    /// (`duality_manipulations.jl:40-51`, as `MultiplicityFreeBend::local`
+    /// and `output_frame` write it for a frame).
+    pub(crate) fn shrink_after_bend(&mut self, coupled: SectorId) {
+        let rank = self.len_uncoupled;
+        let kept_innerlines = if rank > 2 {
+            self.innerlines().len() - 1
+        } else {
+            0
+        };
+        self.sectors.remove(rank - 1);
+        self.len_uncoupled = rank - 1;
+        self.sectors[rank - 1] = coupled;
+        self.sectors.truncate(rank + kept_innerlines);
+        self.is_dual.truncate(rank - 1);
+    }
+
+    /// The domain side of a `bendright`: append the bent leg's dual and
+    /// `innerline` (the old coupled sector, when the domain had more than one
+    /// leg); the tree now couples to `coupled`.
+    pub(crate) fn grow_after_bend(
+        &mut self,
+        leg: SectorId,
+        leg_is_dual: bool,
+        coupled: SectorId,
+        innerline: Option<SectorId>,
+    ) {
+        let rank = self.len_uncoupled;
+        self.sectors.insert(rank, leg);
+        self.len_uncoupled = rank + 1;
+        self.sectors[rank + 1] = coupled;
+        self.sectors.extend(innerline);
+        self.is_dual.push(leg_is_dual);
+    }
+
+    /// Overwrite this tree with the canonical Unique tree of `uncoupled`
+    /// (every inner line the one channel of its left fusion), which must
+    /// couple to `coupled`.
+    pub(crate) fn rebuild_unique_standard<R>(
+        &mut self,
+        rule: &R,
+        uncoupled: impl IntoIterator<Item = SectorId>,
+        coupled: SectorId,
+        is_dual: impl IntoIterator<Item = bool>,
+    ) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
+        self.sectors.clear();
+        self.sectors.extend(uncoupled);
+        self.len_uncoupled = self.sectors.len();
+        self.is_dual.clear();
+        self.is_dual.extend(is_dual);
+        if self.len_uncoupled != self.is_dual.len() {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion tree sectors and duality flags must have matching length",
+            });
+        }
+        if self.len_uncoupled < 2 {
+            return Err(CoreError::MalformedFusionTree {
+                message: "direct unique braid rebuild requires at least two sectors",
+            });
+        }
+        self.sectors.push(coupled);
+        let rank = self.len_uncoupled;
+        let mut running = self.sectors[0];
+        for offset in 0..rank - 1 {
+            let next = only_fusion_channel(rule, running, self.sectors[offset + 1])?;
+            if offset + 2 == rank {
+                if next != coupled {
+                    return Err(CoreError::FusionChannelCount {
+                        left: coupled,
+                        right: coupled,
+                        count: 0,
+                    });
+                }
+            } else {
+                self.sectors.push(next);
+            }
+            running = next;
+        }
+        self.reset_multiplicity_free_vertices();
+        Ok(())
+    }
+
+    /// Append this tree to `builder`; returns its row.
+    pub(crate) fn push_into(&self, builder: &mut TreeArenaBuilder) -> usize {
+        builder.push_parts(
+            self.uncoupled().iter().copied(),
+            self.coupled(),
+            self.is_dual.iter().copied(),
+            self.innerlines().iter().copied(),
+            self.vertices.iter().copied(),
+        )
+    }
+
+    /// The arena widths of this tree: sectors, vertices, duality flags.
+    pub(crate) fn widths(&self) -> (usize, usize, usize) {
+        (self.sectors.len(), self.vertices.len(), self.is_dual.len())
     }
 
     pub(crate) fn freeze(self) -> FusionTreeKey {

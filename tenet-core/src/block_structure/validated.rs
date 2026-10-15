@@ -80,6 +80,7 @@ where
         &self,
         index: usize,
         operation: &PreparedTreePairOperation<'_>,
+        scratch: &mut UniqueTreePairScratch,
     ) -> Result<(FusionTreePairKey, R::Scalar), CoreError> {
         if self.rule.fusion_style() != FusionStyleKind::Unique {
             return Err(CoreError::UnsupportedFusionStyle {
@@ -88,10 +89,13 @@ where
             });
         }
         let key = self.required_fusion_tree_pair_key(index)?;
-        operation.execute_unique_rigid_proven(ValidatedFusionTreePair {
-            rule: self.rule,
-            key,
-        })
+        operation.execute_unique_rigid_proven(
+            ValidatedFusionTreePair {
+                rule: self.rule,
+                key,
+            },
+            scratch,
+        )
     }
 
     /// Why this seam keeps a release check although the `tenet-tensors`

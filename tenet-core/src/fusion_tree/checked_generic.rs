@@ -390,8 +390,8 @@ pub fn validate_generic_fusion_tree_pair_checked<C>(
 where
     C: CheckedGenericFusion,
 {
-    validate_generic_fusion_tree_checked(rule, tree_pair.codomain_tree())?;
-    validate_generic_fusion_tree_trusted_style(rule, tree_pair.domain_tree())?;
+    validate_generic_fusion_tree_checked(rule, tree_pair.codomain_tree().as_view())?;
+    validate_generic_fusion_tree_trusted_style(rule, tree_pair.domain_tree().as_view())?;
     validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
     Ok(())
 }
@@ -400,7 +400,7 @@ where
 /// of [`validate_generic_fusion_tree_pair_checked`].
 pub(super) fn validate_generic_fusion_tree_checked<C>(
     rule: &C,
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
 ) -> Result<(), CheckedGenericStructureError<C::Error>>
 where
     C: CheckedGenericFusion,
@@ -417,7 +417,7 @@ where
 
 fn validate_generic_fusion_tree_trusted_style<C>(
     rule: &C,
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
 ) -> Result<(), CheckedGenericStructureError<C::Error>>
 where
     C: CheckedGenericFusion,

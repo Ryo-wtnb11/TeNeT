@@ -172,6 +172,16 @@ impl<'a> FusionTreePairRef<'a> {
         self.domain_tree
     }
 
+    /// An owned key of this pair, both trees in one exactly sized arena.
+    pub fn to_key(&self) -> FusionTreePairKey {
+        let trees = [self.codomain_tree, self.domain_tree];
+        let mut builder = TreeArenaBuilder::for_views(trees.into_iter());
+        let codomain = builder.push_view(self.codomain_tree);
+        let domain = builder.push_view(self.domain_tree);
+        let arena = builder.freeze();
+        FusionTreePairKey::pair(arena.key(codomain), arena.key(domain))
+    }
+
     /// The pair's group identity, borrowed like [`FusionTreePairKey::group_key`].
     #[inline]
     pub fn group(&self) -> FusionTreeGroupRef<'a> {

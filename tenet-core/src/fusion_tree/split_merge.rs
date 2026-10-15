@@ -19,6 +19,24 @@ pub fn split_fusion_tree<R>(
 where
     R: FusionRule,
 {
+    let mut rows = TreeScratch::default();
+    let (front, back) = split_fusion_tree_into(rule, tree.as_view(), front_rank, &mut rows)?;
+    Ok(rows.into_keys(front, back))
+}
+
+/// [`split_fusion_tree`] of a borrowed tree, with both halves appended to
+/// `rows`; returns their rows. Nothing is allocated once `rows` has held a
+/// split this wide.
+#[doc(hidden)]
+pub fn split_fusion_tree_into<R>(
+    rule: &R,
+    tree: FusionTreeRef<'_>,
+    front_rank: usize,
+    rows: &mut TreeScratch,
+) -> Result<(usize, usize), CoreError>
+where
+    R: FusionRule,
+{
     let rank = tree.uncoupled().len();
     if front_rank > rank {
         return Err(CoreError::DimensionMismatch {
@@ -26,8 +44,8 @@ where
             actual: front_rank,
         });
     }
-    validate_fusion_tree_for_rule(rule, tree)?;
-    split_tree_structural(rule.vacuum(), tree, front_rank)
+    validate_fusion_tree_view_for_rule(rule, tree)?;
+    push_split_rows(rule.vacuum(), tree, front_rank, rows.builder())
 }
 
 /// Split a Generic fusion tree without requiring the infallible `FusionRule`
@@ -48,6 +66,24 @@ pub fn split_fusion_tree_generic_checked<C>(
 where
     C: CheckedGenericFusion,
 {
+    let mut rows = TreeScratch::default();
+    let (front, back) =
+        split_fusion_tree_generic_checked_into(rule, tree.as_view(), front_rank, &mut rows)?;
+    Ok(rows.into_keys(front, back))
+}
+
+/// [`split_fusion_tree_generic_checked`] into `rows`, as
+/// [`split_fusion_tree_into`].
+#[doc(hidden)]
+pub fn split_fusion_tree_generic_checked_into<C>(
+    rule: &C,
+    tree: FusionTreeRef<'_>,
+    front_rank: usize,
+    rows: &mut TreeScratch,
+) -> Result<(usize, usize), CheckedGenericStructureError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
     validate_generic_fusion_tree_checked(rule, tree)?;
     let rank = tree.uncoupled().len();
     if front_rank > rank {
@@ -57,7 +93,12 @@ where
         }
         .into());
     }
-    Ok(split_tree_structural(rule.vacuum(), tree, front_rank)?)
+    Ok(push_split_rows(
+        rule.vacuum(),
+        tree,
+        front_rank,
+        rows.builder(),
+    )?)
 }
 
 /// Merge two standard fusion trees without exchanging their external legs.
@@ -257,38 +298,38 @@ where
 }
 
 /// TensorKit `split(f, M)` tree surgery (`basic_manipulations.jl:30`), shared by
-/// the multiplicity-free and Generic entry points; each caller owns its own
-/// validation order. `front_rank <= rank` is checked by the caller.
-fn split_tree_structural(
+/// the multiplicity-free and Generic entry points, appending both halves to
+/// `rows`; each caller owns its own validation order. `front_rank <= rank` is
+/// checked by the caller.
+fn push_split_rows(
     unit: SectorId,
-    tree: &FusionTreeKey,
+    tree: FusionTreeRef<'_>,
     front_rank: usize,
-) -> Result<(FusionTreeKey, FusionTreeKey), CoreError> {
+    builder: &mut TreeArenaBuilder,
+) -> Result<(usize, usize), CoreError> {
     let rank = tree.uncoupled().len();
     if front_rank == rank {
         let coupled = tree.coupled();
-        let trace_tree = FusionTreeKey::new([coupled], coupled, [false], [], []);
-        return Ok((tree.clone(), trace_tree));
+        let front = builder.push_view(tree);
+        return Ok((
+            front,
+            builder.push_parts([coupled], coupled, [false], [], []),
+        ));
     }
     let (uncoupled, is_dual) = (tree.uncoupled(), tree.is_dual());
     let (innerlines, vertices) = (tree.innerlines(), tree.vertices());
-    // Both halves share one exactly sized arena of two rows.
-    let duals = is_dual.len() + 1;
 
     if front_rank == 1 {
-        let mut builder =
-            TreeArenaBuilder::exact(2, rank + innerlines.len() + 3, vertices.len(), duals);
         let first = uncoupled[0];
-        builder.push_parts([first], first, [is_dual[0]], [], []);
-        builder.push_parts(
+        let front = builder.push_parts([first], first, [is_dual[0]], [], []);
+        let back = builder.push_parts(
             uncoupled.iter().copied(),
             tree.coupled(),
             std::iter::once(false).chain(is_dual.iter().copied().skip(1)),
             innerlines.iter().copied(),
             vertices.iter().copied(),
         );
-        let arena = builder.freeze();
-        return Ok((arena.key(0), arena.key(1)));
+        return Ok((front, back));
     }
 
     if front_rank == 0 {
@@ -298,10 +339,8 @@ fn split_tree_structural(
             });
         }
         let tail_innerlines = if rank >= 2 { innerlines.len() + 1 } else { 0 };
-        let mut builder =
-            TreeArenaBuilder::exact(2, rank + tail_innerlines + 3, vertices.len() + 1, duals);
-        builder.push_parts([], unit, [], [], []);
-        builder.push_parts(
+        let front = builder.push_parts([], unit, [], [], []);
+        let back = builder.push_parts(
             std::iter::once(unit).chain(uncoupled.iter().copied()),
             tree.coupled(),
             std::iter::once(false).chain(is_dual.iter().copied()),
@@ -312,8 +351,7 @@ fn split_tree_structural(
                 .take(tail_innerlines),
             std::iter::once(MultiplicityIndex::ONE).chain(vertices.iter().copied()),
         );
-        let arena = builder.freeze();
-        return Ok((arena.key(0), arena.key(1)));
+        return Ok((front, back));
     }
 
     let intermediate = *innerlines
@@ -321,29 +359,26 @@ fn split_tree_structural(
         .ok_or(CoreError::MalformedFusionTree {
             message: "split requires the intermediate innerline",
         })?;
-    let mut builder =
-        TreeArenaBuilder::exact(2, rank + innerlines.len() + 2, vertices.len(), duals);
-    builder.push_parts(
+    let front = builder.push_parts(
         uncoupled[..front_rank].iter().copied(),
         intermediate,
         is_dual[..front_rank].iter().copied(),
         innerlines[..front_rank.saturating_sub(2)].iter().copied(),
         vertices[..front_rank - 1].iter().copied(),
     );
-    builder.push_parts(
+    let back = builder.push_parts(
         std::iter::once(intermediate).chain(uncoupled[front_rank..].iter().copied()),
         tree.coupled(),
         std::iter::once(false).chain(is_dual[front_rank..].iter().copied()),
         innerlines[front_rank - 1..].iter().copied(),
         vertices[front_rank - 1..].iter().copied(),
     );
-    let arena = builder.freeze();
-    Ok((arena.key(0), arena.key(1)))
+    Ok((front, back))
 }
 
 /// Replace the first leaf of `tail` by `front` (TensorKit `join(f₁, f₂)`,
 /// `basic_manipulations.jl:78`): the inverse tree surgery of
-/// [`split_tree_structural`], shared by the multiplicity-free and Generic
+/// [`push_split_rows`], shared by the multiplicity-free and Generic
 /// merges. The caller has checked the boundary leaf.
 fn join_tree_structural(front: &FusionTreeKey, tail: &FusionTreeKey) -> FusionTreeKey {
     match (front.uncoupled().len(), tail.uncoupled().len()) {

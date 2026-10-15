@@ -237,7 +237,10 @@ fn trace_pair_axes(
     if pairs.is_empty() {
         return Ok(None);
     }
-    let output_axes: Vec<usize> = seen.complement().collect();
+    // The pairs are validated distinct, so exactly `rank - 2·pairs` axes stay
+    // open; the complement iterator carries no size hint.
+    let mut output_axes = Vec::with_capacity(rank - 2 * pairs.len());
+    output_axes.extend(seen.complement());
     let destination_codomain_rank = output_axes
         .iter()
         .filter(|&&axis| axis < codomain_rank)

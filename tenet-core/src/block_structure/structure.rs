@@ -591,6 +591,15 @@ impl BlockStructure {
         self.content.sector.find_fusion_tree_pair_index(key)
     }
 
+    /// [`Self::find_block_index_by_fusion_tree_pair`] of a borrowed pair.
+    #[doc(hidden)]
+    pub fn find_block_index_by_fusion_tree_pair_view(
+        &self,
+        pair: FusionTreePairRef<'_>,
+    ) -> Option<usize> {
+        self.content.sector.find_fusion_tree_pair_view_index(pair)
+    }
+
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
         self.content.sector.pair_indices_from(&src.content.sector)
     }
