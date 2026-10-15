@@ -453,3 +453,68 @@ where
         <M as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(space).map_err(Into::into)
     }
 }
+
+/// Canonical-unit leg execution selected by the admitted provider mode.
+#[doc(hidden)]
+pub trait TypedTensorUnitDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+impl<R, D> TypedTensorUnitDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.insert_unit_multiplicity_free(insertion)
+    }
+
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.remove_unit_multiplicity_free(axis)
+    }
+}
+
+impl<R, D> TypedTensorUnitDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        generic_insert_unit(tensor, insertion)
+    }
+
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        generic_remove_unit(tensor, axis)
+    }
+}

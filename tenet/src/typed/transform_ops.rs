@@ -1477,7 +1477,10 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn insert_unit_multiplicity_free(&self, insertion: UnitLegInsertion) -> Result<Self, Error>
+    pub(super) fn insert_unit_multiplicity_free(
+        &self,
+        insertion: UnitLegInsertion,
+    ) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
     {
@@ -1517,7 +1520,7 @@ where
         })
     }
 
-    fn remove_unit_multiplicity_free(&self, axis: usize) -> Result<Self, Error>
+    pub(super) fn remove_unit_multiplicity_free(&self, axis: usize) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
     {
@@ -1571,71 +1574,6 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
         })
-    }
-}
-
-/// Canonical-unit leg execution selected by the admitted provider mode.
-#[doc(hidden)]
-pub trait TypedTensorUnitDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: TensorScalar,
-{
-    fn insert_unit(
-        tensor: &TensorMap<R, D>,
-        insertion: UnitLegInsertion,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
-
-    fn remove_unit(
-        tensor: &TensorMap<R, D>,
-        axis: usize,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
-}
-
-impl<R, D> TypedTensorUnitDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + CanonicalUnitFusionRule,
-    D: TensorScalar,
-{
-    fn insert_unit(
-        tensor: &TensorMap<R, D>,
-        insertion: UnitLegInsertion,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.insert_unit_multiplicity_free(insertion)
-    }
-
-    fn remove_unit(
-        tensor: &TensorMap<R, D>,
-        axis: usize,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.remove_unit_multiplicity_free(axis)
-    }
-}
-
-impl<R, D> TypedTensorUnitDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedCanonicalUnitFusionRule,
-    D: TensorScalar,
-{
-    fn insert_unit(
-        tensor: &TensorMap<R, D>,
-        insertion: UnitLegInsertion,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        generic_insert_unit(tensor, insertion)
-    }
-
-    fn remove_unit(
-        tensor: &TensorMap<R, D>,
-        axis: usize,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        generic_remove_unit(tensor, axis)
     }
 }
 
