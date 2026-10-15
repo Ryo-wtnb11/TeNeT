@@ -9,12 +9,12 @@ fn eigh_canonical_layout_skips_input_pack_and_vector_scatter() {
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_eigh_copy_probe();
+    let eigh_copy_rec = crate::probe::record();
     eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
     assert_eq!(
-        crate::factorize::eigh_copy_probe(),
-        crate::factorize::EighCopyProbe::default()
+        eigh_copy_rec.eigh_copy(),
+        crate::probe::EighCopyProbe::default()
     );
 }
 
@@ -33,7 +33,7 @@ fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
     let before = hermitian.clone();
     let provider_calls = provider.calls.get();
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
 
     let error = eigh_vals_dyn_checked_generic(
         &mut dense,
@@ -48,7 +48,10 @@ fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
         })
     ));
     assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        0
+    );
     assert_eq!(provider.calls.get(), provider_calls);
     assert_eq!(hermitian, before);
 }
@@ -138,7 +141,7 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
         outputs: Some(f64_eigh_outputs(1)),
         ..Default::default()
     });
-    crate::factorize::reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
 
     let result = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT);
 
@@ -152,8 +155,8 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
     assert_eq!(provider.calls.get(), 0);
     assert_eq!(input.data(), data);
     assert_eq!(
-        crate::factorize::one_sided_publication_probe(),
-        crate::factorize::OneSidedPublicationProbe::default()
+        one_sided_rec.one_sided_publication(),
+        crate::probe::OneSidedPublicationProbe::default()
     );
 }
 
@@ -219,10 +222,10 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
     let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
-    crate::factorize::reset_checked_eigh_pair_pointers();
+    let eigh_pairs_rec = crate::probe::record();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
-    let before_publication = crate::factorize::checked_eigh_pair_pointers();
+    let before_publication = eigh_pairs_rec.checked_eigh_pairs();
 
     assert_eq!(dense.counts().eigh_into, 0);
     assert_eq!(dense.vector_ptrs, before_publication);
@@ -256,15 +259,12 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
     let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
-    crate::factorize::reset_checked_eigh_pair_pointers();
+    let eigh_pairs_rec = crate::probe::record();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
 
     assert_eq!(dense.counts().eigh_into, 0);
-    assert_eq!(
-        dense.vector_ptrs,
-        crate::factorize::checked_eigh_pair_pointers()
-    );
+    assert_eq!(dense.vector_ptrs, eigh_pairs_rec.checked_eigh_pairs());
     assert_eq!(dense.vector_ptrs.len(), 2);
     assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
@@ -501,9 +501,9 @@ fn eigh_noncanonical_layout_uses_copy_fallback() {
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_eigh_copy_probe();
+    let eigh_copy_rec = crate::probe::record();
     eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
-    let probe = crate::factorize::eigh_copy_probe();
+    let probe = eigh_copy_rec.eigh_copy();
 
     assert!(probe.input_pack_bytes > 0);
     assert!(probe.output_scatter_bytes > 0);
@@ -526,7 +526,7 @@ fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
         TestTensor::<f64>::from_vec_with_fusion_space(data, tensor.fusion_space().clone()).unwrap();
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
-    crate::factorize::reset_eigh_copy_probe();
+    let eigh_copy_rec = crate::probe::record();
     let error = eigh_full(
         &mut dense,
         &bound_tensor_ref!(Arc::new(rule), &nonhermitian),
@@ -541,8 +541,8 @@ fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     );
     assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     assert_eq!(
-        crate::factorize::eigh_copy_probe(),
-        crate::factorize::EighCopyProbe::default()
+        eigh_copy_rec.eigh_copy(),
+        crate::probe::EighCopyProbe::default()
     );
 }
 
@@ -567,7 +567,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
-    crate::factorize::reset_eigh_copy_probe();
+    let eigh_copy_rec = crate::probe::record();
     let error = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap_err();
 
     assert_eq!(
@@ -577,7 +577,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
         }
     );
     assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
-    assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
+    assert!(eigh_copy_rec.eigh_copy().input_pack_bytes > 0);
 }
 
 #[test]
@@ -830,14 +830,14 @@ fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
         let before = tensor.data().to_vec();
         let mut dense = ScriptedExecutor::<FailAfterObservingEighInput>::default();
 
-        crate::factorize::reset_eigh_copy_probe();
+        let eigh_copy_rec = crate::probe::record();
         let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), tensor));
 
         assert!(matches!(result, Err(OperationError::Dense(_))));
         assert_eq!(tensor.data(), before);
         assert!(!dense.observed.is_empty());
         if is_fallback {
-            assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
+            assert!(eigh_copy_rec.eigh_copy().input_pack_bytes > 0);
         } else {
             assert!(dense
                 .observed
@@ -1112,10 +1112,10 @@ fn eigh_fallback_keeps_owned_vectors_until_the_final_scatter_for_every_dtype() {
             .is_none());
         let input = BoundDynamicTensorRef::try_new(&adjoint, bound.data()).unwrap();
         let mut dense = ScriptedExecutor::<RejectEighInto>::default();
-        crate::factorize::reset_eigh_owned_vector_pointers();
+        let eigh_vectors_rec = crate::probe::record();
 
         let eigh = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
-        let before_scatter = crate::factorize::eigh_owned_vector_pointers();
+        let before_scatter = eigh_vectors_rec.eigh_owned_vectors();
 
         assert!(!before_scatter.is_empty());
         assert_eq!(dense.counts().eigh_into, 0);
@@ -1353,11 +1353,11 @@ fn eigh_reconstructs_u1_fermion_parity_and_product_rules() {
         nested.encode_component_ids(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
         nested.encode_component_ids(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
     ];
-    crate::factorize::reset_eigh_copy_probe();
+    let eigh_copy_rec = crate::probe::record();
     assert_eigh_reconstructs_rule(&nested, &nested_sectors);
     assert_eq!(
-        crate::factorize::eigh_copy_probe(),
-        crate::factorize::EighCopyProbe::default()
+        eigh_copy_rec.eigh_copy(),
+        crate::probe::EighCopyProbe::default()
     );
 }
 
@@ -1771,10 +1771,13 @@ fn ascending_provider_eigh_order_is_published_without_a_permutation() {
     let rule = Z2FusionRule;
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    let permutations = crate::probe::record();
     let full = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     let values = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
-    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    assert_eq!(
+        permutations.get(crate::probe::Event::EigOrderPermutation),
+        0
+    );
     // Full and values-only EIGH may use different LAPACK drivers (Accelerate
     // does), which agree to rounding, not bitwise.
     assert_eq!(full.eigenvalues.len(), values.len());
@@ -1802,10 +1805,13 @@ fn eigenvalue_order_authority_is_stable_and_skips_sorted_input() {
     // `false` with the identity for already-ordered input (#1985).
     use crate::factorize::{ascending_eigh_order, lexicographic_eig_order};
     let mut order = [9; 4];
-    crate::factorize::EIG_ORDER_PERMUTATIONS.set(0);
+    let permutations = crate::probe::record();
     assert!(!ascending_eigh_order(&[-3.0, -1.0, -1.0, 2.0], &mut order));
     assert_eq!(order, [0, 1, 2, 3]);
-    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 0);
+    assert_eq!(
+        permutations.get(crate::probe::Event::EigOrderPermutation),
+        0
+    );
     // Ties keep stored order.
     assert!(ascending_eigh_order(&[2.0, -1.0, 0.5, -1.0], &mut order));
     assert_eq!(order, [1, 3, 2, 0]);
@@ -1815,7 +1821,10 @@ fn eigenvalue_order_authority_is_stable_and_skips_sorted_input() {
     let values = [c(1.0, 2.0), c(1.0, -2.0), c(-3.0, 0.0), c(1.0, 2.0)];
     assert!(lexicographic_eig_order(&values, &mut order));
     assert_eq!(order, [2, 1, 0, 3]);
-    assert_eq!(crate::factorize::EIG_ORDER_PERMUTATIONS.get(), 2);
+    assert_eq!(
+        permutations.get(crate::probe::Event::EigOrderPermutation),
+        2
+    );
     let mut order = [9; 3];
     assert!(!lexicographic_eig_order(
         &[c(-1.0, 5.0), c(0.0, -1.0), c(0.0, 1.0)],

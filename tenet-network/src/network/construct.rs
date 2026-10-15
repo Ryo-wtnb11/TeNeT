@@ -463,7 +463,7 @@ impl Network {
                 .execute_with_workspace_meter(&refs, &mut workspace, Some(&mut meter))
                 .map_err(map_metered_network_error)?;
             #[cfg(test)]
-            SYMMETRIC_SLICE_COMPLETED_JOBS.fetch_add(1, Ordering::SeqCst);
+            crate::probe::hit(crate::probe::Event::SliceJobCompleted);
 
             let compact_inputs = owned
                 .iter()

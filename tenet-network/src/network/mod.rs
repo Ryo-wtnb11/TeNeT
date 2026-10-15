@@ -8,8 +8,6 @@
 //! plan cache.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "cuda")]
@@ -147,23 +145,6 @@ pub struct Network {
 }
 
 static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
-
-#[cfg(test)]
-static SYMMETRIC_SLICE_COMPLETED_JOBS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-thread_local! {
-    static INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-// Steps of every storage, counted per thread like
-// `tenet_dense::cuda_transfer_stats`: steps run on the caller's thread, so a
-// concurrent test cannot perturb the count (#1568). The device rejection tests
-// read it around a single device `execute`.
-#[cfg(all(test, feature = "cuda"))]
-thread_local! {
-    static NETWORK_CONTRACT_STEP_CALLS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
 
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())

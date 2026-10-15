@@ -34,8 +34,8 @@ fn checked_one_sided_many_tree_publication_reuses_one_index_per_sector() {
                 .map(|m| (m.sector, source_extent(m, side)))
                 .collect::<BTreeMap<_, _>>();
             let build = |matrices: &[SectorMatricization<D>], pairs: &mut [FactorPair<D>]| {
-                reset_one_sided_publication_probe();
-                reset_placement_index_probe();
+                let one_sided_rec = crate::probe::record();
+                let placement_index_rec = crate::probe::record();
                 let factor = build_bound_factor_generic_checked(
                     &provider,
                     &homspace,
@@ -47,8 +47,8 @@ fn checked_one_sided_many_tree_publication_reuses_one_index_per_sector() {
                 .unwrap();
                 (
                     factor.data().to_vec(),
-                    one_sided_publication_probe(),
-                    placement_index_probe(),
+                    one_sided_rec.one_sided_publication(),
+                    placement_index_rec.placement_index(),
                 )
             };
             let staged = |matrices: &[SectorMatricization<D>]| {
@@ -226,7 +226,7 @@ fn checked_one_sided_reports_missing_pairs_and_full_trees() {
     let (homspace, matrix, _) = vertex_tree_factor_fixture(false);
     let dimensions = BTreeMap::from([(SectorId::new(1), 2)]);
     for side in [FactorSide::Left, FactorSide::Right] {
-        reset_placement_index_probe();
+        let placement_index_rec = crate::probe::record();
         let error = build_bound_factor_generic_checked::<_, Complex64, _>(
             &provider,
             &homspace,
@@ -245,7 +245,7 @@ fn checked_one_sided_reports_missing_pairs_and_full_trees() {
         // Prevalidation indexed the sole sector and looked up both keys;
         // the fallback rejected the missing pair before its own lookup.
         assert_eq!(
-            placement_index_probe(),
+            placement_index_rec.placement_index(),
             PlacementIndexProbe {
                 index_builds: 1,
                 indexed_sides: 1,
@@ -323,7 +323,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             .iter()
             .map(|pair| opposite_of(pair, side).clone())
             .collect::<Vec<_>>();
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let factor = build_bound_factor_generic_checked(
             &provider,
             &homspace,
@@ -333,7 +333,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             side,
         )
         .unwrap();
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (1, 0)
@@ -370,7 +370,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             right: vec![Complex64::new(1.0, 1.0)],
             right_leading: 1,
         });
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let error = build_bound_factor_generic_checked(
             &provider,
             &homspace,
@@ -386,7 +386,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
                 message: "factor sector absent from the source tensor"
             })
         ));
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 0)
@@ -405,7 +405,7 @@ fn checked_one_sided_vertex_trees_transfer_sole_owner_or_fall_back() {
             let (homspace, matrix, mut pair) = vertex_tree_factor_fixture(reverse);
             let (_, _, reference) = vertex_tree_factor_fixture(reverse);
             let selected_ptr = selected_of(&pair, side).as_ptr();
-            reset_one_sided_publication_probe();
+            let one_sided_rec = crate::probe::record();
             let factor = build_bound_factor_generic_checked(
                 &provider,
                 &homspace,
@@ -415,7 +415,7 @@ fn checked_one_sided_vertex_trees_transfer_sole_owner_or_fall_back() {
                 side,
             )
             .unwrap();
-            let probe = one_sided_publication_probe();
+            let probe = one_sided_rec.one_sided_publication();
             assert_eq!(opposite_of(&pair, side), opposite_of(&reference, side));
             if reverse {
                 assert_eq!(
@@ -579,8 +579,8 @@ fn checked_one_sided_placement_error_precedes_bound_space() {
             FactorSide::Right => matrix.col_trees.truncate(1),
         }
         let recorder = Arc::new(RecordingGeneric::new());
-        reset_one_sided_publication_probe();
-        reset_placement_index_probe();
+        let one_sided_rec = crate::probe::record();
+        let placement_index_rec = crate::probe::record();
         let error = build_bound_factor_generic_checked(
             &recorder,
             &homspace,
@@ -601,12 +601,12 @@ fn checked_one_sided_placement_error_precedes_bound_space() {
             ) if message == expected_message
         ));
         assert_eq!(recorder.log().len(), 3);
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 0)
         );
-        let index = placement_index_probe();
+        let index = placement_index_rec.placement_index();
         assert_eq!(
             (index.index_builds, index.indexed_sides, index.indexed_trees),
             (1, 1, 1)

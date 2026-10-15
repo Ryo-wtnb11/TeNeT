@@ -416,12 +416,17 @@ where
     let space = input.space().space();
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
-    record_compact_qr_input_pack(&matricizations);
+    crate::probe::input_pack(
+        crate::probe::CopyOp::Qr,
+        matricizations
+            .iter()
+            .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+    );
     let mut pairs = compact_qr_pairs(dense, matricizations.as_slice(), |_| {})?;
     #[cfg(test)]
     for pair in &pairs {
-        record_compact_qr_output_scatter::<D>(pair.left.len());
-        record_compact_qr_output_scatter::<D>(pair.right.len());
+        crate::probe::output_scatter::<D>(crate::probe::CopyOp::Qr, 1, pair.left.len());
+        crate::probe::output_scatter::<D>(crate::probe::CopyOp::Qr, 1, pair.right.len());
     }
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
         .map(|(q, r)| Qr { q, r })
@@ -1089,7 +1094,12 @@ where
     let space = input.space().space();
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
-    record_compact_lq_input_pack(&matricizations);
+    crate::probe::input_pack(
+        crate::probe::CopyOp::Lq,
+        matricizations
+            .iter()
+            .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+    );
     let mut pairs = compact_lq_pairs(
         dense,
         matricizations.as_slice(),
@@ -1098,8 +1108,8 @@ where
     )?;
     #[cfg(test)]
     for pair in &pairs {
-        record_compact_lq_output_scatter::<D>(pair.left.len());
-        record_compact_lq_output_scatter::<D>(pair.right.len());
+        crate::probe::output_scatter::<D>(crate::probe::CopyOp::Lq, 1, pair.left.len());
+        crate::probe::output_scatter::<D>(crate::probe::CopyOp::Lq, 1, pair.right.len());
     }
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
         .map(|(l, q)| Lq { l, q })
@@ -1137,7 +1147,7 @@ where
     // zeroed buffer region by region.
     let append = lq_routes_append_in_storage_order(plan, left_len, right_len);
     #[cfg(test)]
-    let append = append && !FORCE_LQ_ZEROED_PUBLICATION.with(Cell::get);
+    let append = append && !crate::probe::lq_zeroed_publication_forced();
     let (mut left_data, mut right_data) = if append {
         (Vec::with_capacity(left_len), Vec::with_capacity(right_len))
     } else {
@@ -1155,7 +1165,7 @@ where
     };
     let mut adjoint_scratch = Vec::with_capacity(max_adjoint_len);
     #[cfg(test)]
-    record_compact_lq_scratch::<D>(max_adjoint_len);
+    crate::probe::lq_scratch::<D>(max_adjoint_len);
 
     in_linalg_scope(dense, |dense| {
         for route in plan.routes.iter().copied() {
@@ -1178,7 +1188,7 @@ where
                         source.cols(),
                     );
                     #[cfg(test)]
-                    record_compact_lq_adjoint_fill::<D>(source_data.len());
+                    crate::probe::lq_adjoint_fill::<D>(source_data.len());
                     adjoint_scratch.as_slice()
                 }
                 LqRegionSource::Parent(parent) => parent.get(route.source_region)?.data,
@@ -1213,30 +1223,18 @@ where
                 );
             }
             #[cfg(test)]
-            record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
+            crate::probe::lq_final_adjoint_copy::<D>(r_prime.len());
             #[cfg(test)]
-            record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
+            crate::probe::lq_final_adjoint_copy::<D>(q_prime.len());
         }
         Ok(())
     })?;
     #[cfg(test)]
-    record_compact_lq_output_prefill::<D>(if append { 0 } else { left_len + right_len });
+    crate::probe::lq_output_prefill::<D>(if append { 0 } else { left_len + right_len });
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
     Ok((left, right))
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static FORCE_LQ_ZEROED_PUBLICATION: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Routes compact LQ through its zero-and-overwrite publication on this
-/// thread even when the append proof holds.
-#[cfg(test)]
-pub(crate) fn force_lq_zeroed_publication_for_test(force: bool) {
-    FORCE_LQ_ZEROED_PUBLICATION.with(|cell| cell.set(force));
 }
 
 /// [`lq_routes_append_in_storage_order`] after replacing the plan's routes.
@@ -1484,13 +1482,23 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     #[cfg(test)]
     if let InputMatricizations::Packed(matrices) = &matrices {
-        record_compact_qr_input_pack(matrices);
+        crate::probe::input_pack(
+            crate::probe::CopyOp::Qr,
+            matrices
+                .iter()
+                .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+        );
     }
     #[cfg(test)]
     let data = input.data();
     let pairs = compact_qr_pairs(dense, &matrices, |_matrix| {
         #[cfg(test)]
-        record_checked_compact_input(CheckedCompactOperation::Qr, data, _matrix.data, None);
+        crate::probe::checked_compact_input(
+            crate::probe::CheckedCompactOperation::Qr,
+            data,
+            _matrix.data,
+            None,
+        );
     })?;
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
         .map(|(q, r)| Qr { q, r })
@@ -1514,7 +1522,12 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     #[cfg(test)]
     if let InputMatricizations::Packed(matrices) = &matrices {
-        record_compact_lq_input_pack(matrices);
+        crate::probe::input_pack(
+            crate::probe::CopyOp::Lq,
+            matrices
+                .iter()
+                .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+        );
     }
     #[cfg(test)]
     let data = input.data();
@@ -1525,9 +1538,9 @@ where
         |_matrix, _adjoint| {
             #[cfg(test)]
             {
-                record_compact_lq_adjoint_fill::<D>(_matrix.data.len());
-                record_checked_compact_input(
-                    CheckedCompactOperation::Lq,
+                crate::probe::lq_adjoint_fill::<D>(_matrix.data.len());
+                crate::probe::checked_compact_input(
+                    crate::probe::CheckedCompactOperation::Lq,
                     data,
                     _matrix.data,
                     Some(_adjoint),

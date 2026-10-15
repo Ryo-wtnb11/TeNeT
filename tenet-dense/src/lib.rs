@@ -32,6 +32,8 @@ mod cuda_region;
 #[cfg(any(feature = "cuda", test))]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 mod plan_ledger;
+#[cfg(test)]
+mod probe;
 #[cfg(feature = "tenferro")]
 mod tenferro_adapter;
 #[cfg(test)]
@@ -53,14 +55,6 @@ pub use view::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 pub use tenferro_adapter::{
     cpu_session_stats, reset_cpu_session_stats, CpuSessionStats, DefaultDenseExecutor,
     SharedCpuContext,
-};
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
-pub(crate) use tenferro_adapter::{
-    owned_full_svd_input_pointers, reset_owned_full_svd_input_pointers,
 };
 
 /// CPU linear-algebra provider selector (faer vs system BLAS/LAPACK), re-exported

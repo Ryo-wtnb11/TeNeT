@@ -126,7 +126,7 @@ struct CompactInputObservation {
 }
 
 struct CompactInputSpy {
-    operation: crate::factorize::CheckedCompactOperation,
+    operation: crate::probe::CheckedCompactOperation,
     observations: Vec<CompactInputObservation>,
 }
 
@@ -148,7 +148,7 @@ impl Observer for CompactInputSpy {
     }
 
     fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
-        use crate::factorize::CheckedCompactOperation;
+        use crate::probe::CheckedCompactOperation;
         let Call::Read(op @ (Op::Svd | Op::Qr), input) = call else {
             return None;
         };
@@ -173,7 +173,7 @@ impl Observer for CompactInputSpy {
 }
 
 impl CompactInputSpy {
-    fn new(operation: crate::factorize::CheckedCompactOperation) -> ScriptedExecutor<Self> {
+    fn new(operation: crate::probe::CheckedCompactOperation) -> ScriptedExecutor<Self> {
         ScriptedExecutor::new(Self {
             operation,
             observations: Vec::new(),
@@ -206,12 +206,13 @@ fn assert_borrowed_values_inputs<D: FactorScalar>(
 }
 
 fn assert_compact_input_observations<D: FactorScalar>(
-    operation: crate::factorize::CheckedCompactOperation,
+    recording: &crate::probe::Recording,
+    operation: crate::probe::CheckedCompactOperation,
     dense: &[CompactInputObservation],
     data: &[D],
     regions: &[tenet_core::CoupledSectorRegion],
 ) {
-    let lowering = crate::factorize::checked_compact_input_observations();
+    let lowering = recording.checked_compact_inputs();
     assert_eq!(lowering.len(), regions.len());
     assert_eq!(dense.len(), regions.len());
     for ((lowering, dense), region) in lowering.iter().zip(dense).zip(regions) {
@@ -223,8 +224,8 @@ fn assert_compact_input_observations<D: FactorScalar>(
         assert_eq!(lowering.elements, region.range().len());
         assert_eq!(dense.offset, 0);
         match operation {
-            crate::factorize::CheckedCompactOperation::Qr
-            | crate::factorize::CheckedCompactOperation::Svd => {
+            crate::probe::CheckedCompactOperation::Qr
+            | crate::probe::CheckedCompactOperation::Svd => {
                 assert_eq!(lowering.adjoint_pointer, None);
                 assert_eq!(dense.pointer, source_pointer);
                 assert_eq!(dense.shape, [region.rows(), region.cols()]);
@@ -237,7 +238,7 @@ fn assert_compact_input_observations<D: FactorScalar>(
                         .collect::<Vec<_>>()
                 );
             }
-            crate::factorize::CheckedCompactOperation::Lq => {
+            crate::probe::CheckedCompactOperation::Lq => {
                 assert_eq!(lowering.adjoint_pointer, Some(dense.pointer));
                 assert_ne!(dense.pointer, source_pointer);
                 assert_eq!(dense.shape, [region.cols(), region.rows()]);
@@ -269,50 +270,47 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let before = data.clone();
 
-    crate::factorize::reset_compact_qr_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let compact_qr_copy_rec = crate::probe::record();
+    let checked_inputs_rec = crate::probe::record();
+    let mut qr = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Qr);
     let factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &factors.q, None, &factors.r);
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Qr,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Qr,
         &qr.observations,
         &data,
         &regions,
     );
-    assert_eq!(
-        crate::factorize::compact_qr_copy_probe().input_pack_calls,
-        0
-    );
+    assert_eq!(compact_qr_copy_rec.compact_qr_copy().input_pack_calls, 0);
 
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let compact_svd_copy_rec = crate::probe::record();
+    let checked_inputs_rec = crate::probe::record();
+    let mut svd = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Svd);
     let factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &factors.u, Some(&factors.s), &factors.vh);
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Svd,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Svd,
         &svd.observations,
         &data,
         &regions,
     );
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe().input_pack_calls,
-        0
-    );
+    assert_eq!(compact_svd_copy_rec.compact_svd_copy().input_pack_calls, 0);
 
-    crate::factorize::reset_compact_lq_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let compact_lq_copy_rec = crate::probe::record();
+    let checked_inputs_rec = crate::probe::record();
+    let mut lq = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Lq);
     let factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &factors.l, None, &factors.q);
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Lq,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Lq,
         &lq.observations,
         &data,
         &regions,
     );
-    let probe = crate::factorize::compact_lq_copy_probe();
+    let probe = compact_lq_copy_rec.compact_lq_copy();
     assert_eq!(probe.input_pack_calls, 0);
     assert_eq!(probe.adjoint_scratch_fill_calls, regions.len());
     assert_eq!(
@@ -355,22 +353,24 @@ fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
     assert_eq!(first.innerlines(), second.innerlines());
     assert_ne!(first.vertices(), second.vertices());
 
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let checked_inputs_rec = crate::probe::record();
+    let mut qr = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Qr);
     let qr_factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Qr,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Qr,
         &qr.observations,
         &data,
         &regions,
     );
     assert_compact_factors_reconstruct_input(&input, &qr_factors.q, None, &qr_factors.r);
 
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let checked_inputs_rec = crate::probe::record();
+    let mut svd = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Svd);
     let svd_factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Svd,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Svd,
         &svd.observations,
         &data,
         &regions,
@@ -382,11 +382,12 @@ fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
         &svd_factors.vh,
     );
 
-    crate::factorize::reset_checked_compact_input_observations();
-    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let checked_inputs_rec = crate::probe::record();
+    let mut lq = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Lq);
     let lq_factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
     assert_compact_input_observations(
-        crate::factorize::CheckedCompactOperation::Lq,
+        &checked_inputs_rec,
+        crate::probe::CheckedCompactOperation::Lq,
         &lq.observations,
         &data,
         &regions,
@@ -419,14 +420,12 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
     let expert_before = expert_data.clone();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_compact_qr_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
+    let compact_qr_copy_rec = crate::probe::record();
     let actual_qr = qr_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_compact_factors_reconstruct_input(&expert, &actual_qr.q, None, &actual_qr.r);
-    assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
+    assert!(compact_qr_copy_rec.compact_qr_copy().input_pack_calls > 0);
 
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
+    let compact_svd_copy_rec = crate::probe::record();
     let actual_svd = svd_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_compact_factors_reconstruct_input(
         &expert,
@@ -434,19 +433,19 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
         Some(&actual_svd.s),
         &actual_svd.vh,
     );
-    assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
+    assert!(compact_svd_copy_rec.compact_svd_copy().input_pack_calls > 0);
 
-    crate::factorize::reset_compact_lq_copy_probe();
-    crate::factorize::reset_checked_compact_input_observations();
+    let compact_lq_copy_rec = crate::probe::record();
+    let checked_inputs_rec = crate::probe::record();
     let actual_lq = lq_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_compact_factors_reconstruct_input(&expert, &actual_lq.l, None, &actual_lq.q);
-    let lq_probe = crate::factorize::compact_lq_copy_probe();
+    let lq_probe = compact_lq_copy_rec.compact_lq_copy();
     assert!(lq_probe.input_pack_calls > 0);
     assert!(lq_probe.adjoint_scratch_fill_calls > 0);
 
     let start = expert_data.as_ptr() as usize;
     let end = start + expert_data.len() * std::mem::size_of::<f64>();
-    for observation in crate::factorize::checked_compact_input_observations() {
+    for observation in checked_inputs_rec.checked_compact_inputs() {
         assert_eq!(observation.input_pointer, start);
         assert!(observation.matrix_pointer < start || observation.matrix_pointer >= end);
     }
@@ -498,8 +497,8 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
         vec![Complex64::new(2.0, 1.0)],
     ];
 
-    crate::factorize::reset_compact_qr_copy_probe();
-    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let compact_qr_copy_rec = crate::probe::record();
+    let mut qr = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Qr);
     let factors = qr_compact_dyn_checked_generic(&mut qr, &expert).unwrap();
     assert_eq!(
         qr.observations
@@ -509,10 +508,10 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
         direct
     );
     assert_compact_factors_reconstruct_input(&expert, &factors.q, None, &factors.r);
-    assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
+    assert!(compact_qr_copy_rec.compact_qr_copy().input_pack_calls > 0);
 
-    crate::factorize::reset_compact_svd_copy_probe();
-    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let compact_svd_copy_rec = crate::probe::record();
+    let mut svd = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Svd);
     let factors = svd_compact_dyn_checked_generic(&mut svd, &expert).unwrap();
     assert_eq!(
         svd.observations
@@ -522,10 +521,10 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
         direct
     );
     assert_compact_factors_reconstruct_input(&expert, &factors.u, Some(&factors.s), &factors.vh);
-    assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
+    assert!(compact_svd_copy_rec.compact_svd_copy().input_pack_calls > 0);
 
-    crate::factorize::reset_compact_lq_copy_probe();
-    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let compact_lq_copy_rec = crate::probe::record();
+    let mut lq = CompactInputSpy::new(crate::probe::CheckedCompactOperation::Lq);
     let factors = lq_compact_dyn_checked_generic(&mut lq, &expert).unwrap();
     assert_eq!(
         lq.observations
@@ -535,7 +534,7 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
         adjoint
     );
     assert_compact_factors_reconstruct_input(&expert, &factors.l, None, &factors.q);
-    let probe = crate::factorize::compact_lq_copy_probe();
+    let probe = compact_lq_copy_rec.compact_lq_copy();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.adjoint_scratch_fill_calls > 0);
     assert_eq!(expert_data, before);
@@ -585,7 +584,7 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
         .unwrap()
         .unwrap();
     let mut spy = ScriptedExecutor::<ValuesInputSpy>::default();
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
     let spectra = svd_vals_dyn_checked_generic(
         &mut spy,
         &BoundDynamicTensorRef::try_new(&rectangular_space, &rectangular_data).unwrap(),
@@ -675,7 +674,10 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
             },
         ],
     );
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        0
+    );
     assert_eq!(endomorphism_provider.calls.get(), provider_calls);
     assert_eq!(hermitian, hermitian_before);
     assert_eq!(general, general_before);
@@ -729,11 +731,14 @@ fn checked_generic_values_keep_padded_reordered_fallback() {
     let general_before = padded_general.clone();
     let hermitian_before = padded_hermitian.clone();
     let mut spy = ScriptedExecutor::<ValuesInputSpy>::default();
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
     let actual_svd = svd_vals_dyn_checked_generic(&mut spy, &padded_general_input).unwrap();
     let actual_eigh = eigh_vals_dyn_checked_generic(&mut spy, &padded_hermitian_input).unwrap();
     let actual_eig = eig_vals_dyn_checked_generic(&mut spy, &padded_general_input).unwrap();
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 3);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        3
+    );
     assert_real_spectra_by_sector_close(&actual_svd, &expected_svd);
     assert_real_spectra_by_sector_close(&actual_eigh, &expected_eigh);
     assert_complex_spectra_by_sector_close(&actual_eig, &expected_eig);
@@ -891,7 +896,7 @@ fn values_only_public_boundaries_distinguish_empty_sectors_from_a_scalar() {
     assert_eq!(empty.structure().block_count(), 0);
     assert!(empty.data().is_empty());
     let mut reject = ScriptedExecutor::new(RejectExecutorCalls);
-    crate::factorize::reset_values_matricization_fallbacks();
+    let values_fallbacks_rec = crate::probe::record();
     assert!(svd_vals(
         &mut reject,
         &bound_tensor_ref!(Arc::new(Z2FusionRule), &empty)
@@ -910,7 +915,10 @@ fn values_only_public_boundaries_distinguish_empty_sectors_from_a_scalar() {
     )
     .unwrap()
     .is_empty());
-    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(
+        values_fallbacks_rec.get(crate::probe::Event::ValuesMatricizationFallback),
+        0
+    );
 
     let rule = Z2FusionRule;
     let homspace =

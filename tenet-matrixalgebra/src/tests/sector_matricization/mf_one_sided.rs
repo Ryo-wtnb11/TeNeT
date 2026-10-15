@@ -97,10 +97,10 @@ fn left_factor_publication_borrows_real_geometry_for_complex_output() {
     }];
 
     let selected_ptr = pairs[0].left.as_ptr();
-    reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
     let factor = build_left_bound_factor(&authority, &homspace, &geometry, &mut pairs).unwrap();
 
-    let probe = one_sided_publication_probe();
+    let probe = one_sided_rec.one_sided_publication();
     assert_eq!(
         (
             probe.canonical_publications,
@@ -272,7 +272,7 @@ fn mf_one_sided_pair_errors_precede_tree_traversal() {
         right_leading: 1,
     };
 
-    reset_placement_index_probe();
+    let placement_index_rec = crate::probe::record();
     let error = build_bound_factor_with_placement(
         &authority,
         &homspace,
@@ -289,7 +289,10 @@ fn mf_one_sided_pair_errors_precede_tree_traversal() {
             message: "factor sector absent from the source tensor"
         }
     ));
-    assert_eq!(placement_index_probe(), PlacementIndexProbe::default());
+    assert_eq!(
+        placement_index_rec.placement_index(),
+        PlacementIndexProbe::default()
+    );
 
     let error = build_bound_factor_with_placement::<_, f64, _>(
         &authority,
@@ -464,8 +467,8 @@ fn mf_one_sided_duplicate_source_trees_publish_the_first_entry() {
                     right_leading: leading,
                 },
             };
-            reset_one_sided_publication_probe();
-            reset_placement_index_probe();
+            let one_sided_rec = crate::probe::record();
+            let placement_index_rec = crate::probe::record();
             let factor = build_bound_factor_with_placement(
                 &authority,
                 &homspace,
@@ -479,9 +482,12 @@ fn mf_one_sided_duplicate_source_trees_publish_the_first_entry() {
             let pick = |indices: &[usize]| indices.iter().map(|&i| source[i]).collect::<Vec<_>>();
             assert_eq!(factor.data(), pick(&first));
             assert_ne!(pick(&first), pick(&second));
-            assert_eq!(one_sided_publication_probe().fallback_publications, 1);
             assert_eq!(
-                placement_index_probe(),
+                one_sided_rec.one_sided_publication().fallback_publications,
+                1
+            );
+            assert_eq!(
+                placement_index_rec.placement_index(),
                 PlacementIndexProbe {
                     index_builds: 1,
                     indexed_sides: 1,
@@ -526,8 +532,8 @@ fn mf_one_sided_many_tree_fallback_indexes_each_populated_sector_once() {
                 .map(|m| (m.sector, source_extent(m, source_trees)))
                 .collect::<BTreeMap<_, _>>();
             let build = |matrices: &[SectorMatricization<D>], pairs: &mut [FactorPair<D>]| {
-                reset_one_sided_publication_probe();
-                reset_placement_index_probe();
+                let one_sided_rec = crate::probe::record();
+                let placement_index_rec = crate::probe::record();
                 let factor = build_bound_factor_with_placement(
                     &authority,
                     authority.space().homspace(),
@@ -540,8 +546,8 @@ fn mf_one_sided_many_tree_fallback_indexes_each_populated_sector_once() {
                 .unwrap();
                 (
                     factor.data().to_vec(),
-                    one_sided_publication_probe(),
-                    placement_index_probe(),
+                    one_sided_rec.one_sided_publication(),
+                    placement_index_rec.placement_index(),
                 )
             };
             let staged = |matrices: &[SectorMatricization<D>]| {
@@ -713,7 +719,7 @@ where
             .map(|pair| opposite_of(pair, side).clone())
             .collect::<Vec<_>>();
 
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let factor = build_bound_factor_with_placement(
             space,
             space.space().homspace(),
@@ -725,7 +731,7 @@ where
         )
         .unwrap();
 
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (1, 0)
@@ -778,11 +784,11 @@ fn mf_one_sided_fallbacks_match_canonical_output_and_keep_buffers() {
     let build = |matrices: &[SectorMatricization<f64>],
                  pairs: &mut [FactorPair<f64>],
                  dimensions: &BTreeMap<SectorId, usize>| {
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let result = build_bound_factor_with_placement(
             &authority, homspace, matrices, pairs, dimensions, side, placement,
         );
-        (result, one_sided_publication_probe())
+        (result, one_sided_rec.one_sided_publication())
     };
     let canonical = |scale: f64| {
         let mut pairs = staged(scale);
@@ -958,7 +964,7 @@ fn mf_one_sided_identity_sector_between_populated_sectors_publishes_canonically(
         .map(|matrix| (matrix.sector, matrix.cols))
         .collect::<BTreeMap<_, _>>();
     let build = |matrices: &[SectorMatricization<f64>], pairs: &mut [FactorPair<f64>]| {
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let factor = build_bound_factor_with_placement(
             &authority,
             authority.space().homspace(),
@@ -969,7 +975,10 @@ fn mf_one_sided_identity_sector_between_populated_sectors_publishes_canonically(
             FactorPlacement::Direct,
         )
         .unwrap();
-        (factor.data().to_vec(), one_sided_publication_probe())
+        (
+            factor.data().to_vec(),
+            one_sided_rec.one_sided_publication(),
+        )
     };
     let mut pairs =
         staged_one_sided_pairs(&matrices, &col_dimensions, side, side, &|k| k as f64 + 0.25);
@@ -996,7 +1005,7 @@ fn mf_one_sided_identity_sector_between_populated_sectors_publishes_canonically(
         .iter()
         .map(|pair| pair.right.clone())
         .collect::<Vec<_>>();
-    reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
     let factor = build_bound_factor_with_placement(
         &authority,
         authority.space().homspace(),
@@ -1007,7 +1016,7 @@ fn mf_one_sided_identity_sector_between_populated_sectors_publishes_canonically(
         FactorPlacement::Direct,
     )
     .unwrap();
-    let probe = one_sided_publication_probe();
+    let probe = one_sided_rec.one_sided_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (1, 0)
@@ -1113,9 +1122,10 @@ where
             side,
         );
     };
+    let one_sided_rec = std::cell::RefCell::new(crate::probe::record());
     let publication = |expected_written: usize| {
-        let probe = one_sided_publication_probe();
-        reset_one_sided_publication_probe();
+        let probe = one_sided_rec.borrow().one_sided_publication();
+        *one_sided_rec.borrow_mut() = crate::probe::record();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (1, 0)
@@ -1127,7 +1137,6 @@ where
 
     // Left null: charge 1 null basis 6 x 2 owns the buffer, charge 2 adds
     // a 3 x 3 identity, charge 0 is absent (P = 12 + 9, fallback 21 + 12 + 3).
-    reset_one_sided_publication_probe();
     let null = left_null_dyn(&mut dense, &input).unwrap();
     publication(9);
     assert_eq!(null.data().len(), 21);
@@ -1144,7 +1153,7 @@ where
     check(&null, &BTreeMap::from([(q(3), 2)]), FactorSide::Right);
 
     let Qr { q: left, r: right } = qr_full_dyn(&mut dense, &input).unwrap();
-    let _ = one_sided_publication_probe();
+    let _ = one_sided_rec.borrow().one_sided_publication();
     check(&left, &codomain, FactorSide::Left);
     check(&right, &codomain, FactorSide::Right);
     let Lq { l: left, q: right } = lq_full_dyn(&mut dense, &input).unwrap();
@@ -1153,7 +1162,7 @@ where
     let svd = svd_full_dyn(&mut dense, &input).unwrap();
     check(svd.u(), &codomain, FactorSide::Left);
     check(svd.vh(), &domain, FactorSide::Right);
-    let probe = one_sided_publication_probe();
+    let probe = one_sided_rec.borrow().one_sided_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (6, 0)
@@ -1220,7 +1229,7 @@ fn mf_one_sided_zero_bond_sector_between_populated_sectors() {
         .map(|pair| pair.left.clone())
         .collect::<Vec<_>>();
 
-    reset_one_sided_publication_probe();
+    let one_sided_rec = crate::probe::record();
     let factor = build_bound_factor_with_placement(
         &authority,
         authority.space().homspace(),
@@ -1232,7 +1241,7 @@ fn mf_one_sided_zero_bond_sector_between_populated_sectors() {
     )
     .unwrap();
 
-    let probe = one_sided_publication_probe();
+    let probe = one_sided_rec.one_sided_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (1, 0)
@@ -1309,7 +1318,7 @@ where
         )
         .unwrap();
         let mut pairs = [pair(side)];
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let mf = build_bound_factor_with_placement(
             &authority,
             &homspace,
@@ -1320,7 +1329,7 @@ where
             FactorPlacement::Direct,
         )
         .unwrap();
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 1)
@@ -1332,7 +1341,7 @@ where
 
         let provider = Arc::new(InfallibleGeneric::new(&TestGenericRule));
         let mut pairs = [pair(side)];
-        reset_one_sided_publication_probe();
+        let one_sided_rec = crate::probe::record();
         let checked = build_bound_factor_generic_checked(
             &provider,
             &homspace,
@@ -1342,7 +1351,7 @@ where
             side,
         )
         .unwrap();
-        let probe = one_sided_publication_probe();
+        let probe = one_sided_rec.one_sided_publication();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 1)

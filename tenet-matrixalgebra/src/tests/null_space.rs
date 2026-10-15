@@ -434,32 +434,26 @@ fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
     let tensor = u1_cross_space_map::<D>(&[(1, 2)], &[(0, 3)]);
     let input = bound_tensor(Arc::clone(&provider), &tensor);
 
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let left = left_null(
         &mut ScriptedExecutor::new(RejectExecutorCalls),
         &input.as_ref(),
     )
     .unwrap();
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (1, 0)
-    );
+    assert_eq!(buffer_builds_rec.factor_buffer_builds(), (1, 0));
     assert_eq!(left.structure().block_count(), 1);
     assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
     assert_eq!(left.data().len(), 4);
     assert_identity(left.data(), 2);
     assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
 
-    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let buffer_builds_rec = crate::probe::record();
     let right = right_null(
         &mut ScriptedExecutor::new(RejectExecutorCalls),
         &input.as_ref(),
     )
     .unwrap();
-    assert_eq!(
-        crate::factorize::factor_buffer_build_counts_for_test(),
-        (0, 1)
-    );
+    assert_eq!(buffer_builds_rec.factor_buffer_builds(), (0, 1));
     assert_eq!(right.structure().block_count(), 1);
     assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
     assert_eq!(right.data().len(), 9);
@@ -518,7 +512,7 @@ fn null_space_second_sector_failure_builds_no_factor() {
     for (left, tensor) in [(true, &tall), (false, &wide)] {
         let before = tensor.data().to_vec();
         let input = bound_tensor(Arc::clone(&provider), tensor);
-        crate::factorize::reset_factor_buffer_build_counts_for_test();
+        let buffer_builds_rec = crate::probe::record();
         let mut dense = ScriptedExecutor::<FailSecondNullQr>::default();
         let result = if left {
             left_null(&mut dense, &input.as_ref())
@@ -527,10 +521,7 @@ fn null_space_second_sector_failure_builds_no_factor() {
         };
         assert!(matches!(result, Err(OperationError::Dense(_))));
         assert_eq!(dense.counts().qr_into, 2);
-        assert_eq!(
-            crate::factorize::factor_buffer_build_counts_for_test(),
-            (0, 0)
-        );
+        assert_eq!(buffer_builds_rec.factor_buffer_builds(), (0, 0));
         assert_eq!(tensor.data(), before);
     }
 }
@@ -709,13 +700,13 @@ where
             .map(|input| crate::factorize::compact_factor_plan_for_test(input.space()).unwrap());
         // Warm both paths so one-time caches do not enter the comparison.
         family();
-        crate::factorize::with_forced_input_pack(family);
-        crate::factorize::reset_input_pack_bytes();
+        crate::probe::with_forced_input_pack(family);
+        let input_pack_bytes_rec = crate::probe::record();
         let (borrowed, borrowed_allocated) = family();
-        let borrowed_bytes = crate::factorize::input_pack_bytes();
-        crate::factorize::reset_input_pack_bytes();
-        let (packed, packed_allocated) = crate::factorize::with_forced_input_pack(family);
-        let packed_bytes = crate::factorize::input_pack_bytes();
+        let borrowed_bytes = input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes);
+        let input_pack_bytes_rec = crate::probe::record();
+        let (packed, packed_allocated) = crate::probe::with_forced_input_pack(family);
+        let packed_bytes = input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes);
         assert_eq!(borrowed, packed);
         let (general_bytes, tall_bytes) = (element_bytes(&general), element_bytes(&tall_input));
         // The canonical eigh already publishes through its direct region
@@ -782,7 +773,7 @@ where
         .map(scalar_bits)
     };
     let borrowed = factor_bits(&mut dense);
-    let packed = crate::factorize::with_forced_input_pack(|| factor_bits(&mut dense));
+    let packed = crate::probe::with_forced_input_pack(|| factor_bits(&mut dense));
     assert_eq!(borrowed, packed);
 }
 
@@ -963,12 +954,12 @@ fn assert_checked_full_family_borrows_input<R, D>(
     let family = || checked_full_family_bits(general, tall, hermitian);
     // Warm both paths so one-time caches do not enter the comparison.
     family();
-    crate::factorize::with_forced_input_pack(family);
-    crate::factorize::reset_input_pack_bytes();
+    crate::probe::with_forced_input_pack(family);
+    let input_pack_bytes_rec = crate::probe::record();
     let (borrowed, borrowed_allocated) = family();
-    let borrowed_bytes = crate::factorize::input_pack_bytes();
-    crate::factorize::reset_input_pack_bytes();
-    let (packed, packed_allocated) = crate::factorize::with_forced_input_pack(family);
+    let borrowed_bytes = input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes);
+    let input_pack_bytes_rec = crate::probe::record();
+    let (packed, packed_allocated) = crate::probe::with_forced_input_pack(family);
     let (general_bytes, tall_bytes) = (element_bytes(general), element_bytes(tall));
     let payloads = [
         [general_bytes; 4].as_slice(),
@@ -977,7 +968,7 @@ fn assert_checked_full_family_borrows_input<R, D>(
     ]
     .concat();
     assert_eq!(
-        crate::factorize::input_pack_bytes(),
+        input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes),
         payloads.iter().sum::<usize>()
     );
     assert_pack_drop_covers_payload(&borrowed_allocated, &packed_allocated, &payloads);
@@ -1050,12 +1041,15 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
     let expert = BoundDynamicTensorRef::try_new(&expert_space, &expert_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let packed_len = canonical_data.len() * std::mem::size_of::<f64>();
-    crate::factorize::reset_input_pack_bytes();
+    let input_pack_bytes_rec = crate::probe::record();
     qr_full_dyn_checked_generic(&mut dense, &expert).unwrap();
     lq_full_dyn_checked_generic(&mut dense, &expert).unwrap();
     left_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     right_null_dyn_checked_generic(&mut dense, &expert).unwrap();
-    assert_eq!(crate::factorize::input_pack_bytes(), 4 * packed_len);
+    assert_eq!(
+        input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes),
+        4 * packed_len
+    );
 }
 
 #[test]
@@ -1068,7 +1062,8 @@ fn mf_null_factor_space_is_staged_once_per_side_and_cached() {
     let layout = bound.as_ref();
     let input = layout.dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
+    let stage_rec = crate::probe::record();
+    let stages = || stage_rec.get(crate::probe::Event::MfFactorSpaceStage);
     for left in [true, false] {
         let null = |dense: &mut tenet_dense::DefaultDenseExecutor| {
             if left {

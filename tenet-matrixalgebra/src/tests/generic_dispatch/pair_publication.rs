@@ -99,11 +99,11 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let reordered = BoundDynamicTensorRef::try_new(&reordered_space, &reordered_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    crate::factorize::reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let actual_qr = qr_compact_dyn_checked_generic(&mut dense, &reordered).unwrap();
     assert!(!actual_qr.q.data().is_empty());
     assert!(!actual_qr.r.data().is_empty());
-    let probe = crate::factorize::generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (0, 1)
@@ -115,11 +115,11 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
         actual_qr.q.data().len() + actual_qr.r.data().len()
     );
 
-    crate::factorize::reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
     let actual_lq = lq_compact_dyn_checked_generic(&mut dense, &reordered).unwrap();
     assert!(!actual_lq.l.data().is_empty());
     assert!(!actual_lq.q.data().is_empty());
-    let probe = crate::factorize::generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
         (0, 1)
@@ -138,11 +138,11 @@ fn checked_generic_pair_publication_reuses_one_sector_owners() {
     let (provider, checked) = bind_checked_only(&source);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_generic_pair_publication_probe();
+    let generic_pair_rec = crate::probe::record();
 
     let Qr { q: left, r: right } = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    let probe = crate::factorize::generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     let blocks = left.space().space().structure().block_count()
         + right.space().space().structure().block_count();
     assert_eq!(probe.canonical_publications, 1);
@@ -237,8 +237,8 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     let checked = bind_to_spy(&source, &provider);
     let checked_input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_generic_pair_publication_probe();
-    crate::factorize::reset_one_sided_publication_probe();
+    let generic_pair_rec = crate::probe::record();
+    let one_sided_rec = crate::probe::record();
 
     qr_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
     lq_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
@@ -249,7 +249,7 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     lq_full_dyn_checked_generic(&mut dense, &checked_input).unwrap();
 
     // Full QR/LQ publish each side through the side-aware builder (#1524).
-    let one_sided = crate::factorize::one_sided_publication_probe();
+    let one_sided = one_sided_rec.one_sided_publication();
     assert_eq!(
         (
             one_sided.canonical_publications,
@@ -257,7 +257,7 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
         ),
         (4, 0)
     );
-    let probe = crate::factorize::generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(probe.canonical_publications, 5);
     assert_eq!(probe.fallback_publications, 0);
     assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (5, 5));
@@ -281,12 +281,12 @@ where
     let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_generic_pair_publication_probe();
-    crate::factorize::reset_one_sided_publication_probe();
+    let generic_pair_rec = crate::probe::record();
+    let one_sided_rec = crate::probe::record();
 
     let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_pair_reconstructs_checked_literal(&qr.q, &qr.r, complex);
-    let qr_probe = crate::factorize::generic_pair_publication_probe();
+    let qr_probe = generic_pair_rec.generic_pair_publication();
     let qr_blocks = qr.q.space().space().structure().block_count()
         + qr.r.space().space().structure().block_count();
     // Formerly `qr_blocks` visits and `2 * qr_blocks` events: the checked
@@ -305,7 +305,7 @@ where
     assert_pair_reconstructs_checked_literal(&full_lq.l, &full_lq.q, complex);
 
     // Full QR/LQ publish each side through the side-aware builder (#1524).
-    let one_sided = crate::factorize::one_sided_publication_probe();
+    let one_sided = one_sided_rec.one_sided_publication();
     assert_eq!(
         (
             one_sided.canonical_publications,
@@ -313,7 +313,7 @@ where
         ),
         (4, 0)
     );
-    let probe = crate::factorize::generic_pair_publication_probe();
+    let probe = generic_pair_rec.generic_pair_publication();
     assert_eq!(probe.canonical_publications, 3);
     assert_eq!(probe.fallback_publications, 0);
     assert!(probe.left_appended_elements > 0);

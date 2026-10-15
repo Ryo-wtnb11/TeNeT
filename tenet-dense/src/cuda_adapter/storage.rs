@@ -101,7 +101,7 @@ impl CudaDenseStorage {
         // allocation; only the active prefix is the value.
         data.truncate(self.len);
         #[cfg(test)]
-        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(cell.get() + bytes));
+        crate::probe::add(crate::probe::Event::CudaFullDownloadBytes, bytes);
         record_d2h(bytes);
         Ok(data)
     }

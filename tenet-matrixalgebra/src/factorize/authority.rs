@@ -650,7 +650,7 @@ where
 
     fn stage(&self, homspace: FusionTreeHomSpace) -> Result<Self::Staged, Self::Error> {
         #[cfg(test)]
-        MF_FACTOR_SPACE_STAGES.set(MF_FACTOR_SPACE_STAGES.get() + 1);
+        crate::probe::hit(crate::probe::Event::MfFactorSpaceStage);
         self.0.derive_from_final_homspace(homspace)
     }
 
@@ -751,14 +751,6 @@ where
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
         Ok(space.clone())
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Calls of [`MfAuthority::stage`], one per factor space built. It counts
-    /// calls only; cache hits are shown by structure identity
-    /// (`Arc::ptr_eq`) across repeated calls.
-    pub(crate) static MF_FACTOR_SPACE_STAGES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]

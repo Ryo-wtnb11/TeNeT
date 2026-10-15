@@ -1006,7 +1006,7 @@ fn default_executor_runs_native_owned_full_svd() {
 #[test]
 fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
     let mut executor = DefaultDenseExecutor::new();
-    reset_owned_full_svd_input_pointers();
+    let inputs = crate::probe::record();
 
     assert!(matches!(
         executor.svd_full_owned(DenseOwned::F64(Vec::new()), usize::MAX, 2),
@@ -1047,7 +1047,7 @@ fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
             ..
         })
     ));
-    assert!(owned_full_svd_input_pointers().is_empty());
+    assert!(inputs.owned_full_svd_inputs().is_empty());
 }
 #[cfg(all(
     any(feature = "cpu-faer", feature = "cpu-blas-core"),
@@ -1056,7 +1056,7 @@ fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
 #[test]
 fn native_owned_full_svd_moves_each_dtype_input_buffer() {
     let mut executor = DefaultDenseExecutor::new();
-    reset_owned_full_svd_input_pointers();
+    let inputs = crate::probe::record();
     let mut expected = Vec::new();
 
     let f32 = vec![1.0_f32, 3.0, 2.0, 4.0];
@@ -1096,7 +1096,7 @@ fn native_owned_full_svd_moves_each_dtype_input_buffer() {
         3
     );
 
-    assert_eq!(owned_full_svd_input_pointers(), expected);
+    assert_eq!(inputs.owned_full_svd_inputs(), expected);
 }
 #[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {

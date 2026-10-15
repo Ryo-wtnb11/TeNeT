@@ -391,8 +391,8 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
             "svd_into",
             "injected second-sector failure",
         );
-        crate::factorize::reset_compact_svd_copy_probe();
-        crate::factorize::reset_input_pack_bytes();
+        let compact_svd_copy_rec = crate::probe::record();
+        let input_pack_bytes_rec = crate::probe::record();
         let result = if left {
             left_polar(&mut dense, &input.as_ref()).map(drop)
         } else {
@@ -402,11 +402,8 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
         assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
         assert_eq!(tensor.data(), before);
         // The padded input is packed once; no SVD factor is laid out.
-        assert!(crate::factorize::input_pack_bytes() > 0);
-        assert_eq!(
-            crate::factorize::compact_svd_copy_probe(),
-            Default::default()
-        );
+        assert!(input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes) > 0);
+        assert_eq!(compact_svd_copy_rec.compact_svd_copy(), Default::default());
     }
 }
 
@@ -434,8 +431,8 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
         );
         let mut direct_dense = tenet_dense::DefaultDenseExecutor::new();
         let mut fallback_dense = tenet_dense::DefaultDenseExecutor::new();
-        crate::factorize::reset_compact_svd_copy_probe();
-        crate::factorize::reset_input_pack_bytes();
+        let compact_svd_copy_rec = crate::probe::record();
+        let input_pack_bytes_rec = crate::probe::record();
 
         let (direct_first, direct_second, fallback_first, fallback_second) =
             if operation == "left_polar" {
@@ -479,10 +476,7 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
             assert!((direct - fallback).abs() < 1e-10);
         }
         // The padded input is packed once; no SVD factor is laid out.
-        assert!(crate::factorize::input_pack_bytes() > 0);
-        assert_eq!(
-            crate::factorize::compact_svd_copy_probe(),
-            Default::default()
-        );
+        assert!(input_pack_bytes_rec.get(crate::probe::Event::InputPackBytes) > 0);
+        assert_eq!(compact_svd_copy_rec.compact_svd_copy(), Default::default());
     }
 }

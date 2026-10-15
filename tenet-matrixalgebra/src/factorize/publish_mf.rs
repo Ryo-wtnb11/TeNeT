@@ -222,12 +222,9 @@ where
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     #[cfg(test)]
-    FACTOR_BUFFER_BUILD_COUNTS.set({
-        let (left, right) = FACTOR_BUFFER_BUILD_COUNTS.get();
-        match side {
-            FactorSide::Left => (left + 1, right),
-            FactorSide::Right => (left, right + 1),
-        }
+    crate::probe::hit(match side {
+        FactorSide::Left => crate::probe::Event::LeftFactorBufferBuilds,
+        FactorSide::Right => crate::probe::Event::RightFactorBufferBuilds,
     });
     for pair in pairs.iter() {
         let route = routes
@@ -253,7 +250,8 @@ where
         let data = take_one_sided_factors(pairs, &identities, required_len, side);
         return Ok(BoundDynFactor::from_bound(space, data, nout, nin)?);
     }
-    record_one_sided_fallback_publication();
+    #[cfg(test)]
+    crate::probe::hit(crate::probe::Event::OneSidedFallbackPublications);
     let mut data = vec![D::zero(); required_len];
     let mut missing_offsets = FxHashMap::<SectorId, usize>::default();
     let placements = validated_placements
@@ -350,7 +348,7 @@ where
     let left_structure = Arc::clone(left_space.structure());
     for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
-        record_scatter_visit(FactorSide::Left);
+        crate::probe::hit(crate::probe::Event::LeftVisits);
         let block = left_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -391,7 +389,7 @@ where
     let right_structure = Arc::clone(right_space.structure());
     for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
-        record_scatter_visit(FactorSide::Right);
+        crate::probe::hit(crate::probe::Event::RightVisits);
         let block = right_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -507,20 +505,14 @@ impl<'a> PlacementIndex<'a> {
                     }
                 }
                 #[cfg(test)]
-                PLACEMENT_INDEX_PROBE.with(|probe| {
-                    let mut value = probe.get();
-                    value.indexed_sides += 1;
-                    value.indexed_trees += count;
-                    probe.set(value);
-                });
+                {
+                    crate::probe::hit(crate::probe::Event::PlacementIndexedSides);
+                    crate::probe::add(crate::probe::Event::PlacementIndexedTrees, count);
+                }
             }
         }
         #[cfg(test)]
-        PLACEMENT_INDEX_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.index_builds += 1;
-            probe.set(value);
-        });
+        crate::probe::hit(crate::probe::Event::PlacementIndexBuilds);
         Self { by_tree }
     }
 
@@ -531,11 +523,7 @@ impl<'a> PlacementIndex<'a> {
         tree: &FusionTreeKey,
     ) -> Result<(usize, &'a [usize]), OperationError> {
         #[cfg(test)]
-        PLACEMENT_INDEX_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.lookups += 1;
-            probe.set(value);
-        });
+        crate::probe::hit(crate::probe::Event::PlacementLookups);
         self.by_tree
             .get(&(sector, side, tree))
             .copied()
@@ -591,20 +579,15 @@ impl SectorBlockGroups {
         }
         entries.sort_by_key(|&(sector, _)| sector);
         #[cfg(test)]
-        SCATTER_VISIT_PROBE.with(|probe| {
-            let mut value = probe.get();
-            match side {
-                FactorSide::Left => {
-                    value.left_grouped += structure.block_count();
-                    value.left_groups_built += 1;
-                }
-                FactorSide::Right => {
-                    value.right_grouped += structure.block_count();
-                    value.right_groups_built += 1;
-                }
-            }
-            probe.set(value);
-        });
+        {
+            use crate::probe::Event;
+            let (grouped, built) = match side {
+                FactorSide::Left => (Event::LeftGrouped, Event::LeftGroupsBuilt),
+                FactorSide::Right => (Event::RightGrouped, Event::RightGroupsBuilt),
+            };
+            crate::probe::add(grouped, structure.block_count());
+            crate::probe::hit(built);
+        }
         Ok(Self { entries })
     }
 

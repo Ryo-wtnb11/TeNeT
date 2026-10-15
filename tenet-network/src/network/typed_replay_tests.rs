@@ -207,16 +207,12 @@ fn assert_rank_four_orientation_replay<D>(
 }
 
 fn intermediate_payload_snapshot_calls<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-    INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
-        assert!(calls.replace(Some(0)).is_none());
-    });
+    let recording = crate::probe::record();
     let result = operation();
-    let calls = INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
-        calls
-            .replace(None)
-            .expect("snapshot observation must remain armed")
-    });
-    (result, calls)
+    (
+        result,
+        recording.get(crate::probe::Event::IntermediatePayloadSnapshot),
+    )
 }
 
 #[test]
@@ -247,11 +243,15 @@ fn ordinary_workspace_replay_skips_payload_meter_snapshots() {
     assert!(planned.schedule.steps.len() > 1);
     let mut workspace = NetworkExecutionWorkspace::default();
 
+    let steps = crate::probe::record();
     let (cold, cold_calls) =
         intermediate_payload_snapshot_calls(|| planned.execute(&refs, &mut workspace).unwrap());
     let (warm, warm_calls) =
         intermediate_payload_snapshot_calls(|| planned.execute(&refs, &mut workspace).unwrap());
 
+    // The step probe fires on the CPU path too, so the device rejection
+    // tests' zero-step assertions are not vacuous.
+    assert!(steps.get(crate::probe::Event::ContractStep) > 0);
     assert_eq!(cold_calls, 0);
     assert_eq!(warm_calls, 0);
     assert_eq!(cold.dense_data().unwrap(), &[109.0, 160.0, 169.0, 248.0]);
@@ -441,11 +441,11 @@ fn internal_symmetric_slices_match_unsliced_multisector_and_meter_cold_warm() {
 
     let mut saw_late_limit = false;
     for ceiling in 0..cold_stats.peak_total_bytes() {
-        SYMMETRIC_SLICE_COMPLETED_JOBS.store(0, Ordering::SeqCst);
+        let jobs = crate::probe::record();
         if matches!(
             network.execute_symmetric_sliced(&tensors, sliced.clone(), ceiling),
             Err(SymmetricSliceExecutionError::WorkspaceLimitExceeded { .. })
-        ) && SYMMETRIC_SLICE_COMPLETED_JOBS.load(Ordering::SeqCst) > 0
+        ) && jobs.get(crate::probe::Event::SliceJobCompleted) > 0
         {
             saw_late_limit = true;
             break;
@@ -1531,14 +1531,14 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     let planned = pair
         .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
         .unwrap();
-    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
+    let steps = crate::probe::record();
     assert!(planned
         .execute(
             &[&tensors[0], &bad_rhs],
             &mut NetworkExecutionWorkspace::default()
         )
         .is_err());
-    assert_eq!(NETWORK_CONTRACT_STEP_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(steps.get(crate::probe::Event::ContractStep), 0);
 
     let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let other_space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
@@ -1551,14 +1551,14 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     .unwrap()
     .to_cuda()
     .unwrap();
-    NETWORK_CONTRACT_STEP_CALLS.with(|calls| calls.set(0));
+    let steps = crate::probe::record();
     assert!(planned
         .execute(
             &[&tensors[0], &foreign],
             &mut NetworkExecutionWorkspace::default()
         )
         .is_err());
-    assert_eq!(NETWORK_CONTRACT_STEP_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(steps.get(crate::probe::Event::ContractStep), 0);
 }
 
 #[test]

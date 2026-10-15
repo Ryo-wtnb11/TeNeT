@@ -318,7 +318,7 @@ pub(super) fn input_regions(
     nout: usize,
 ) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
     #[cfg(test)]
-    if FORCE_INPUT_PACK.with(Cell::get) {
+    if crate::probe::input_pack_forced() {
         return Ok(None);
     }
     checked_sector_regions(structure, nout)
@@ -335,7 +335,7 @@ where
     let matricizations = multiplicity_free_input_matricizations(structure, data, nout)?;
     #[cfg(test)]
     if matricizations.is_packed() {
-        record_values_matricization_fallback();
+        crate::probe::hit(crate::probe::Event::ValuesMatricizationFallback);
     }
     Ok(matricizations)
 }
@@ -430,7 +430,11 @@ where
         );
     }
     #[cfg(test)]
-    record_input_pack_bytes(&matricizations);
+    crate::probe::input_pack_bytes(
+        matricizations
+            .iter()
+            .map(|matrix| std::mem::size_of_val(&matrix.data[..])),
+    );
     Ok(matricizations)
 }
 

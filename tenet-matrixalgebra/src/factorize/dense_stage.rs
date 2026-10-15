@@ -16,7 +16,7 @@ where
     let mut body = Some(body);
     let mut outcome = None;
     #[cfg(test)]
-    let mut probes = Some(TestProbes::take());
+    let mut probes = Some(crate::probe::Carried::take());
     let scoped = dense.with_linalg_scope(&mut |dense| {
         tenet_tensors::host_pool::observe_dense_site();
         if let Some(body) = body.take() {
@@ -27,7 +27,7 @@ where
             outcome = Some(body(dense));
             #[cfg(test)]
             {
-                probes = Some(TestProbes::take());
+                probes = Some(crate::probe::Carried::take());
             }
         }
         Ok(())
@@ -115,13 +115,10 @@ pub(super) fn concat_compact_factor_regions<D>(
         .find_map(|region| region.as_ref().map(Vec::as_ptr));
     let output = concat_owned_factor_regions(regions, required_len);
     #[cfg(test)]
-    COMPACT_QR_COPY_PROBE.with(|probe| {
-        let mut current = probe.get();
-        current.owned_output_publications += 1;
-        current.owned_output_owner_reused +=
-            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())));
-        probe.set(current);
-    });
+    crate::probe::owned_output(
+        crate::probe::CopyOp::Qr,
+        first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())),
+    );
     output
 }
 
