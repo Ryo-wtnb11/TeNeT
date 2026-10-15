@@ -247,10 +247,9 @@ fn fusion_tree_key_generic_distinguishes_vertices() {
 }
 
 #[test]
-fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
-    // What: Generic fanout shares one arena; retained-byte accounting
-    // deduplicates one arena but charges an independently allocated
-    // equal-content arena separately.
+fn frozen_generic_enumeration_shares_one_arena() {
+    // What: Generic fanout puts every tree into one arena, which a holder
+    // charges once; an equal-content key built on its own has its own.
     let rule = ToyOmRule;
     let a = SectorId::new(ToyOmRule::A);
     let c = SectorId::new(ToyOmRule::C);
@@ -259,7 +258,7 @@ fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
     assert!(trees.len() > 1);
     assert!(trees
         .windows(2)
-        .all(|trees| Arc::ptr_eq(&trees[0].arena, &trees[1].arena)));
+        .all(|trees| trees[0].shares_arena(&trees[1])));
 
     let independent = FusionTreeKey::new(
         trees[0].uncoupled().iter().copied(),
@@ -268,19 +267,9 @@ fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
         trees[0].innerlines().iter().copied(),
         trees[0].vertices().iter().copied(),
     );
-    let mut shared_seen = rustc_hash::FxHashSet::default();
-    let shared_charge = charge_fusion_tree_key_backings(&mut shared_seen, &trees[0])
-        .saturating_add(charge_fusion_tree_key_backings(&mut shared_seen, &trees[0]));
-    let mut independent_seen = rustc_hash::FxHashSet::default();
-    let independent_charge =
-        charge_fusion_tree_key_backings(&mut independent_seen, &trees[0]).saturating_add(
-            charge_fusion_tree_key_backings(&mut independent_seen, &independent),
-        );
-    assert_eq!(
-        shared_charge,
-        charge_fusion_tree_key_backings(&mut rustc_hash::FxHashSet::default(), &trees[0])
-    );
-    assert!(independent_charge > shared_charge);
+    assert_eq!(independent, trees[0]);
+    assert!(!independent.shares_arena(&trees[0]));
+    assert!(independent.arena_retained_bytes() > 0);
 }
 
 #[test]

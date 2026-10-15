@@ -446,9 +446,6 @@ impl ReuseContext {
 pub(crate) struct CoefficientGroupReuse<T> {
     context: ReuseContext,
     built: RefCell<PendingCoefficientGroups>,
-    /// Charge scratch reused across this build's staged groups: a fresh set
-    /// per group would allocate once per Unique group.
-    backings: RefCell<rustc_hash::FxHashSet<usize>>,
     /// Entry-arena scratch reused across this build's staged groups.
     arena: RefCell<DedupTreeArenaBuilder>,
     coefficient: PhantomData<fn() -> T>,
@@ -468,7 +465,6 @@ where
         Self {
             context: ReuseContext::new::<T>(rule, mode, scope, operation.clone(), orientation),
             built: RefCell::new(PendingCoefficientGroups::default()),
-            backings: RefCell::default(),
             arena: RefCell::default(),
             coefficient: PhantomData,
         }
@@ -517,13 +513,15 @@ where
         arena.recycle(rehomer);
         drop(arena);
         let entry = Arc::new(CoefficientGroupEntry::new(specs));
-        let bytes = {
-            let mut backings = self.backings.borrow_mut();
-            backings.clear();
-            charged_key_bytes(&key, &mut backings)
-                .saturating_add(charged_entry_bytes(entry.specs(), &mut backings))
-                as u64
-        };
+        debug_assert!(owns_one_arena(
+            &key,
+            entry
+                .specs()
+                .iter()
+                .flat_map(|spec| spec.dst_keys().iter().chain(spec.src_keys()))
+        ));
+        let bytes =
+            charged_key_bytes(&key).saturating_add(charged_entry_bytes(entry.specs())) as u64;
         self.built
             .borrow_mut()
             .groups
@@ -550,7 +548,6 @@ pub(crate) type TraceTerms<T> = BlockSourceColumns<FusionTreePairKey, T>;
 pub(crate) struct TraceTermReuse<T> {
     context: ReuseContext,
     built: PendingCoefficientGroups,
-    backings: rustc_hash::FxHashSet<usize>,
     arena: DedupTreeArenaBuilder,
     coefficient: PhantomData<fn() -> T>,
 }
@@ -577,7 +574,6 @@ where
                 orientation,
             ),
             built: PendingCoefficientGroups::default(),
-            backings: rustc_hash::FxHashSet::default(),
             arena: DedupTreeArenaBuilder::default(),
             coefficient: PhantomData,
         }
@@ -615,10 +611,8 @@ where
         columns.rehome_destinations(|_| rehomer.pair());
         self.arena.recycle(rehomer);
         let columns = Arc::new(columns);
-        self.backings.clear();
-        let bytes = charged_key_bytes(&key, &mut self.backings)
-            .saturating_add(charged_trace_bytes(&columns, &mut self.backings))
-            as u64;
+        debug_assert!(owns_one_arena(&key, columns.destinations().iter()));
+        let bytes = charged_key_bytes(&key).saturating_add(charged_trace_bytes(&columns)) as u64;
         self.built
             .groups
             .push((key, Arc::clone(&columns) as Arc<ErasedEntry>, bytes));
@@ -631,52 +625,54 @@ where
     }
 }
 
-/// What one entry's key retains, fixed at staging.
-fn charged_key_bytes(
-    key: &CoefficientGroupKey,
-    backings: &mut rustc_hash::FxHashSet<usize>,
-) -> usize {
-    let mut bytes = core::mem::size_of::<CoefficientGroupKey>()
+/// Rule O (#2192): an entry's key and value trees all point into the one
+/// arena the entry owns, the group key's.
+fn owns_one_arena<'k>(
+    key: &'k CoefficientGroupKey,
+    value_pairs: impl IntoIterator<Item = &'k FusionTreePairKey>,
+) -> bool {
+    let arena = key.group_key.codomain_tree();
+    arena.shares_arena(key.group_key.domain_tree())
+        && key.src_keys.iter().chain(value_pairs).all(|pair| {
+            arena.shares_arena(pair.codomain_tree()) && arena.shares_arena(pair.domain_tree())
+        })
+}
+
+/// What one entry's key retains, fixed at staging: its own fields and the
+/// entry arena, which by Rule O also holds every value tree.
+fn charged_key_bytes(key: &CoefficientGroupKey) -> usize {
+    core::mem::size_of::<CoefficientGroupKey>()
         .saturating_add(ENTRY_OVERHEAD_BYTES)
         // ponytail: the shared context is charged in full to every entry.
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(core::mem::size_of::<GroupContext>())
         .saturating_add(key.context.rule.charged_retained_bytes())
         .saturating_add(key.context.operation.charged_retained_bytes())
-        .saturating_add(key.group_key.charge_retained_backings(backings))
+        .saturating_add(key.group_key.codomain_tree().arena_retained_bytes())
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
             key.src_keys
                 .len()
                 .saturating_mul(core::mem::size_of::<FusionTreePairKey>()),
-        );
-    for src in key.src_keys.iter() {
-        bytes = bytes.saturating_add(src.charge_retained_backings(backings));
-    }
-    bytes
+        )
 }
 
 /// What one transform entry's value retains.
-fn charged_entry_bytes<T>(
-    specs: &[TreeTransformGroupBlockSpec<T>],
-    backings: &mut rustc_hash::FxHashSet<usize>,
-) -> usize {
+fn charged_entry_bytes<T>(specs: &[TreeTransformGroupBlockSpec<T>]) -> usize {
     core::mem::size_of::<CoefficientGroupEntry<T>>()
         .saturating_add(
             specs
                 .len()
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         )
-        .saturating_add(charged_spec_bytes(specs, backings))
+        .saturating_add(charged_spec_bytes(specs))
 }
 
 /// What one trace entry's value retains: its `Arc`, the inline value and
-/// its three exact-length slices, plus the destinations' key backings.
-fn charged_trace_bytes<T>(
-    columns: &TraceTerms<T>,
-    backings: &mut rustc_hash::FxHashSet<usize>,
-) -> usize {
-    let mut bytes = ARC_CONTROL_BYTES
+/// its three exact-length slices. The destinations' trees live in the entry
+/// arena, which the key charges.
+fn charged_trace_bytes<T>(columns: &TraceTerms<T>) -> usize {
+    ARC_CONTROL_BYTES
         .saturating_add(core::mem::size_of::<TraceTerms<T>>())
         .saturating_add(
             columns
@@ -689,21 +685,15 @@ fn charged_trace_bytes<T>(
             columns
                 .entry_count()
                 .saturating_mul(core::mem::size_of::<(usize, T)>()),
-        );
-    for destination in columns.destinations() {
-        bytes = bytes.saturating_add(destination.charge_retained_backings(backings));
-    }
-    bytes
+        )
 }
 
-/// Heap bytes of `specs` (excluding their inline structs), coefficients
-/// included once.
-fn charged_spec_bytes<T>(
-    specs: &[TreeTransformGroupBlockSpec<T>],
-    backings: &mut rustc_hash::FxHashSet<usize>,
-) -> usize {
+/// Heap bytes of `specs` (excluding their inline structs and the trees in
+/// the entry arena), coefficients included once.
+fn charged_spec_bytes<T>(specs: &[TreeTransformGroupBlockSpec<T>]) -> usize {
     let key_bytes = core::mem::size_of::<FusionTreePairKey>();
     let mut bytes = 0usize;
+    let mut previous_axes = None;
     // A `Multi` spec holds its keys and coefficients in three shared heap
     // slices (dst, src, coefficients); a `Single` spec holds them inline,
     // where the caller's `size_of` charge already counts them.
@@ -718,11 +708,11 @@ fn charged_spec_bytes<T>(
                 )
                 .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()));
         }
-        for key in spec.dst_keys().iter().chain(spec.src_keys()) {
-            bytes = bytes.saturating_add(key.charge_retained_backings(backings));
-        }
         if let Some(axes) = spec.source_axes() {
-            if backings.insert(axes.as_ptr() as usize) {
+            // ponytail: one build shares one axes `Arc` across its specs, so
+            // only a change of pointer is charged; interleaved sharing would
+            // overcount, never undercount.
+            if previous_axes.replace(axes.as_ptr()) != Some(axes.as_ptr()) {
                 bytes = bytes
                     .saturating_add(ARC_CONTROL_BYTES)
                     .saturating_add(axes.len().saturating_mul(core::mem::size_of::<usize>()));

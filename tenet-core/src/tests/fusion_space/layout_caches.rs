@@ -1011,3 +1011,54 @@ fn a_committed_permutation_memoizes_its_destination_in_the_source_entry() {
         DEGENERACY_STRUCTURE_CACHE_BYTE_BUDGET,
     );
 }
+
+#[test]
+fn a_sector_layout_entry_charges_its_tree_arena_once() {
+    // What (#2192 L2, Rule O): the layout keys and the sector structure built
+    // from them share one canonical arena, and the cache-1 entry charges it
+    // once, through the structure, not again for the keys.
+    let leg = SectorLeg::new([(u1(-1), 1), (u1(0), 2), (u1(1), 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let key = FusionTreeHomSpaceCacheKey::new(&U1FusionRule, &hom);
+    let layout = hom.fusion_tree_layout_data_uncached(&U1FusionRule);
+    let sector = Arc::clone(layout.sector.as_ref().unwrap());
+    let arena = Arc::clone(sector.trees.as_ref().unwrap());
+    assert!(layout.keys.len() > 1);
+    assert!(layout.keys.iter().all(|pair| {
+        Arc::ptr_eq(&arena, &pair.codomain_tree().arena)
+            && Arc::ptr_eq(&arena, &pair.domain_tree().arena)
+    }));
+    let owned = charged_fusion_tree_layout_bytes(&key, &layout);
+
+    // The same entry without its structure must charge the arena itself.
+    let FusionTreeHomSpaceLayoutData { keys, sectors, .. } = layout;
+    let unowned = FusionTreeHomSpaceLayoutData {
+        keys,
+        sectors,
+        sector: Err(CoreError::DuplicateBlockKey {
+            key: Box::new(BlockKey::trivial()),
+        }),
+    };
+    let alone = charged_fusion_tree_layout_bytes(&key, &unowned);
+    let census = sector.charged_heap_bytes();
+    // No undercount: the census covers the arena on top of the block and
+    // group tables, each sized here from its own length, not the census.
+    let tables = std::mem::size_of_val(sector.blocks())
+        + sector.fusion_tree_groups().len() * std::mem::size_of::<FusionTreeBlockGroup>()
+        + std::mem::size_of_val(sector.sorted_indices());
+    assert!(
+        census >= tables + arena.heap_bytes(),
+        "{census} < {tables} + arena {}",
+        arena.heap_bytes()
+    );
+    // Ledger relation, not a byte budget: dropping the structure removes its
+    // census and adds back exactly the one arena it charged.
+    assert_eq!(
+        owned as usize + arena.heap_bytes(),
+        alone as usize + census,
+        "the layout keys' arena is charged twice"
+    );
+}
