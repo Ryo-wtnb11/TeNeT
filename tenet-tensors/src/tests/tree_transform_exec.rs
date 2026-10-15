@@ -27,15 +27,19 @@ fn tree_transform_execution_context_reports_host_placement() {
 fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
-    let src = test_host_read_tensor_map_with_structure(
+    let src = TestTensor::from_vec_with_structure(
         vec![1.0_f64, 2.0, 3.0, 4.0],
         space.clone(),
         structure.clone(),
-    );
-    let mut dst = test_host_tensor_map_with_structure(vec![10.0_f64; 4], space, structure);
-    let transform =
-        TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 3.0)])
-            .unwrap();
+    )
+    .unwrap();
+    let mut dst = TestTensor::from_vec_with_structure(vec![10.0_f64; 4], space, structure).unwrap();
+    let transform = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
+        &[TreeTransformBlockSpec::single(0, 0, 3.0)],
+    )
+    .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
@@ -57,15 +61,19 @@ fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
 fn tree_transform_overwrite_execute_ignores_custom_host_destination_bits() {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
-    let src = test_host_read_tensor_map_with_structure(
+    let src = TestTensor::from_vec_with_structure(
         vec![1.0_f64, 2.0, 3.0, 4.0],
         space.clone(),
         structure.clone(),
-    );
-    let mut dst = test_host_tensor_map_with_structure(vec![f64::NAN; 4], space, structure);
-    let transform =
-        TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 3.0)])
-            .unwrap();
+    )
+    .unwrap();
+    let mut dst = TestTensor::from_vec_with_structure(vec![f64::NAN; 4], space, structure).unwrap();
+    let transform = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
+        &[TreeTransformBlockSpec::single(0, 0, 3.0)],
+    )
+    .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
@@ -481,18 +489,17 @@ fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() 
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         src_space,
         src_structure,
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], dst_space, dst_structure)
-            .unwrap();
-    let structure = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<f64>::from_vec_with_structure(vec![1.0; 4], dst_space, dst_structure).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1, 2],
@@ -537,18 +544,17 @@ fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
         ],
     )
     .unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         src_space,
         structure.clone(),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], dst_space, structure)
-            .unwrap();
-    let transform = TreeTransformStructure::compile(
-        &dst,
-        &src,
+        TestTensor::<f64>::from_vec_with_structure(vec![0.0; 8], dst_space, structure).unwrap();
+    let transform = TreeTransformStructure::compile_structures(
+        dst.structure(),
+        src.structure(),
         &[
             TreeTransformBlockSpec::multi(vec![2, 3], vec![2, 3], vec![11.0, 13.0, 17.0, 19.0]),
             TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![2.0, 3.0, 5.0, 7.0]),

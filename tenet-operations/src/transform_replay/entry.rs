@@ -168,56 +168,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) fn tree_transform_structure_overwrite_with_structural_recoupling<
-    A,
-    E,
-    D,
-    C,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    kernels: &mut A,
-    dense: &mut E,
-    workspace: &mut TreeTransformWorkspace<D>,
-    structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    alpha: D,
-    threads: usize,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D> + Clone + Send + Sync,
-    E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
-    C: Copy + Sync,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
-{
-    let dst_structure = Arc::clone(dst.structure());
-    let src_structure = Arc::clone(src.structure());
-    tree_transform_structure_overwrite_with_structural_recoupling_raw(
-        kernels,
-        dense,
-        workspace,
-        structure,
-        &dst_structure,
-        &src_structure,
-        dst.data_mut(),
-        src.data(),
-        alpha,
-        &[],
-        threads,
-    )
-}
-
 /// Replays a prepared structural-recoupling tree transform on host slices.
 ///
 /// `threads` selects the replay parallelism (a property of the executing

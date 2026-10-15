@@ -7,9 +7,6 @@ pub type DimVec = SmallVec<[usize; 8]>;
 /// Inline storage for per-leg duality flags.
 pub type DualVec = SmallVec<[bool; 8]>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Trivial;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Placement {
     Host,

@@ -27,8 +27,7 @@ pub use tenet_core::RuleIdentity;
 
 pub(crate) use adjoint::adjoint_bound_space_dyn_generic_checked;
 pub use adjoint::{
-    adjoint, adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn,
-    AdjointBlockMap,
+    adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn, AdjointBlockMap,
 };
 #[doc(hidden)]
 pub use admission::{
@@ -38,7 +37,6 @@ pub use admission::{
 pub use bound_tensor::BoundDynamicTensorRef;
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
-pub use contract::tensorcontract_structure;
 #[cfg(test)]
 pub(crate) use contract::{contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind};
 #[cfg(feature = "cuda")]

@@ -12,7 +12,7 @@ use tenet_tensors::{
     TreeTransformRuleCacheKey,
 };
 
-use crate::factorize::{BoundDynFactor, FactorScalar};
+use crate::factorize::{BoundDynFactor, FactorScalar, TestTensor};
 
 /// `lhs * rhs` of provider-bound factors by fusion contraction. The
 /// destination is created from the operands' shared provider and remains
@@ -65,13 +65,13 @@ where
     BoundDynFactor::from_bound(dst_space, dst_data, nout, nin)
 }
 
-/// Typed [`compose_bound_dyn`] over the full interface.
-pub(crate) fn compose<RuleKey, BT, BC, R, D, const A: usize, const B: usize, const C: usize>(
+/// [`compose_bound_dyn`] over unbound test operands, binding both to `rule`.
+pub(crate) fn compose<RuleKey, BT, BC, R, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     rule: &R,
-    lhs: &tenet_core::TensorMap<D, A, B>,
-    rhs: &tenet_core::TensorMap<D, B, C>,
-) -> Result<tenet_core::TensorMap<D, A, C>, OperationError>
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
+) -> Result<TestTensor<D>, OperationError>
 where
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
@@ -84,12 +84,12 @@ where
     let provider = Arc::new(rule.clone());
     let lhs = crate::factorize::BoundTensorMap::try_new(Arc::clone(&provider), lhs.clone())?;
     let rhs = crate::factorize::BoundTensorMap::try_new(Arc::clone(&provider), rhs.clone())?;
-    let lhs = BoundDynFactor::from_bound(lhs.space().clone(), lhs.data().to_vec(), A, B)?;
-    let rhs = BoundDynFactor::from_bound(rhs.space().clone(), rhs.data().to_vec(), B, C)?;
-    let out = compose_bound_dyn(context, &lhs, &rhs)?;
-    Ok(
-        crate::factorize::typed_from_bound_factor::<R, D, A, C>(out)?
-            .into_parts()
-            .1,
-    )
+    let bind = |tensor: crate::factorize::BoundTensorMap<R, D>| {
+        let (nout, nin) = (tensor.fusion_space().nout(), tensor.fusion_space().nin());
+        BoundDynFactor::from_bound(tensor.space().clone(), tensor.data().to_vec(), nout, nin)
+    };
+    let out = compose_bound_dyn(context, &bind(lhs)?, &bind(rhs)?)?;
+    Ok(crate::factorize::typed_from_bound_factor(out)?
+        .into_parts()
+        .1)
 }

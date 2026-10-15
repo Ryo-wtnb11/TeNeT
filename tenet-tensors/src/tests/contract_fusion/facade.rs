@@ -31,21 +31,19 @@ fn fibonacci_complex_provider_replays_crossing_free_prepared_contraction() {
         [vec![1, 1]],
     )
     .unwrap();
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(2.0, 1.0)],
         space.clone(),
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(3.0, -2.0)],
         space.clone(),
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::new(0.0, 0.0)],
-        space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::new(0.0, 0.0)], space)
+            .unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
     let mut context = TensorContractFusionExecutionContext::<
         Complex64,
@@ -351,12 +349,10 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
-    let lhs =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, 3.0], lhs_space).unwrap();
-    let rhs =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0, 7.0], rhs_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0, 3.0], lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![5.0, 7.0], rhs_space).unwrap();
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
 
     let specs = tensorcontract_fusion_block_specs(
         &rule,
@@ -387,8 +383,9 @@ fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
 
     assert_eq!(dst.data(), &[50.0, 102.0]);
 
-    let mut context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let mut context_dst = TestTensor::<f64>::from_vec_with_dynamic_space(
         vec![10.0, 20.0],
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -452,9 +449,10 @@ fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
         )
         .unwrap()
     };
-    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
-    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
-    let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
+    let lhs = TestTensor::from_vec_with_fusion_space(vec![2.0_f64, 3.0], fusion_space()).unwrap();
+    let rhs = TestTensor::from_vec_with_fusion_space(vec![5.0_f64, 7.0], fusion_space()).unwrap();
+    let mut dst =
+        TestTensor::from_vec_with_fusion_space(vec![10.0_f64, 20.0], fusion_space()).unwrap();
 
     fusion_contract_into(
         &rule,
@@ -489,9 +487,10 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
         )
         .unwrap()
     };
-    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
-    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
-    let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
+    let lhs = TestTensor::from_vec_with_fusion_space(vec![2.0_f64, 3.0], fusion_space()).unwrap();
+    let rhs = TestTensor::from_vec_with_fusion_space(vec![5.0_f64, 7.0], fusion_space()).unwrap();
+    let mut dst =
+        TestTensor::from_vec_with_fusion_space(vec![10.0_f64, 20.0], fusion_space()).unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     context_contract_into(
@@ -543,13 +542,13 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     let lhs_data = (0..len).map(fill(1.0)).collect::<Vec<_>>();
     let rhs_data = (0..len).map(fill(2.0)).collect::<Vec<_>>();
     let lhs =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(lhs_data, tensor_space.clone()).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(lhs_data, tensor_space.clone()).unwrap();
     let rhs =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(rhs_data, tensor_space.clone()).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(rhs_data, tensor_space.clone()).unwrap();
 
     // Route under test: swap axes through the fusion contraction facade.
     let mut dst_swap =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
             .unwrap();
     fusion_contract_into(
         &rule,
@@ -565,7 +564,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     // Reference: explicitly permute rhs codomain legs, then core compose.
     let permuted_space = space(&homspace);
     let mut rhs_permuted =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
     eager_tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 0], [2, 3]),
@@ -576,7 +575,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     )
     .unwrap();
     let mut dst_compose =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
             .unwrap();
     fusion_contract_into(
         &rule,
@@ -597,9 +596,9 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
         );
     }
 
-    let dst_dyn = DynamicFusionMapSpace::from_typed(dst_compose.fusion_space().unwrap());
-    let lhs_dyn = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
-    let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let dst_dyn = dst_compose.fusion_space().unwrap().as_ref().clone();
+    let lhs_dyn = lhs.fusion_space().unwrap().as_ref().clone();
+    let rhs_dyn = rhs.fusion_space().unwrap().as_ref().clone();
     for candidate in crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]) {
         for orientation in [
             crate::contract::FusionContractOrientation::LhsRhs,
@@ -619,11 +618,9 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 orientation,
             )
             .unwrap();
-            let mut actual = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-                vec![0.0; len],
-                tensor_space.clone(),
-            )
-            .unwrap();
+            let mut actual =
+                TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+                    .unwrap();
             let mut tree_backend = DenseTreeTransformOperations::default_executor();
             let mut tree_workspace = TreeTransformWorkspace::default();
             let mut contract_backend = DenseTreeTransformOperations::default_executor();
@@ -642,11 +639,9 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 0.0,
             )
             .unwrap();
-            let mut artifact = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-                vec![0.0; len],
-                tensor_space.clone(),
-            )
-            .unwrap();
+            let mut artifact =
+                TestTensor::<f64>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+                    .unwrap();
             crate::contract::execute_dynamic_tree_execution_artifact_for_test(
                 &rule,
                 &plan,

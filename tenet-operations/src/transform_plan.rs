@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreePairKey,
-    TensorMap, TensorStorage,
 };
 
 use crate::transform_helpers::{
@@ -868,32 +867,6 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             src_structure,
             storage_conjugate,
             || self.shared_coefficients(),
-        )
-    }
-    pub fn compile<
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &self,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    ) -> Result<TreeTransformStructure<T>, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        self.compile_shared_structures_internal(
-            Arc::clone(dst.structure()),
-            Arc::clone(src.structure()),
-            false,
         )
     }
 

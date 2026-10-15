@@ -89,37 +89,37 @@ where
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let core = tenet_core::TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
-        space,
-        0.0,
-        |key, indices| {
-            let BlockKey::FusionTree(tree) = key else {
-                unreachable!("fusion-tree blocks")
-            };
-            let position = keys.iter().position(|candidate| candidate == tree).unwrap();
-            let index = indices
-                .iter()
-                .enumerate()
-                .map(|(axis, &i)| (axis + 1) * i)
-                .sum::<usize>();
-            if tree.codomain_tree() == tree.domain_tree() {
-                3.0 + 0.25 * index as f64
-            } else {
-                0.5 + 0.5 * ((7 * position + 3 * index) % 5) as f64 - 1.0
-            }
-        },
+    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
+        Arc::new(rule),
     )
     .unwrap();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        tenet_tensors::DynamicFusionMapSpace::from_typed(core.fusion_space().unwrap()),
-        Arc::new(rule),
+    let mut fill = |key: &BlockKey, indices: &[usize]| -> f64 {
+        let BlockKey::FusionTree(tree) = key else {
+            unreachable!("fusion-tree blocks")
+        };
+        let position = keys.iter().position(|candidate| candidate == tree).unwrap();
+        let index = indices
+            .iter()
+            .enumerate()
+            .map(|(axis, &i)| (axis + 1) * i)
+            .sum::<usize>();
+        if tree.codomain_tree() == tree.domain_tree() {
+            3.0 + 0.25 * index as f64
+        } else {
+            0.5 + 0.5 * ((7 * position + 3 * index) % 5) as f64 - 1.0
+        }
+    };
+    let data = crate::typed::block_layout::apply_fill(
+        space.space(),
+        crate::typed::block_layout::Fill::BlockFn(&mut fill),
     )
     .unwrap();
     TensorMap {
         runtime: runtime.clone(),
         repr: owned_repr(TypedTensorBody {
             space,
-            data: Arc::new(TypedData::Dense(core.data().to_vec())),
+            data: Arc::new(TypedData::Dense(data)),
         }),
     }
 }

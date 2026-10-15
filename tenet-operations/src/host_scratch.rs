@@ -4,8 +4,6 @@ use tenet_core::{HostReadableStorage, HostWritableStorage, Placement, TensorStor
 /// Host-owned scratch buffer used by current raw host-slice replay paths.
 ///
 /// This keeps direct `Vec<T>` ownership out of categorical replay workspaces.
-/// Future storage-aware workspaces can replace this boundary with scratch
-/// buffers allocated from `TensorMap::similar_storage_filled`.
 #[derive(Clone, Debug)]
 pub struct HostScratchBuffer<T> {
     data: Vec<T>,

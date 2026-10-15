@@ -1,9 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use tenet_core::{
-    validate_block_storage_injective, BlockStructure, CoreError, TensorMap, TensorStorage,
-};
+use tenet_core::{validate_block_storage_injective, BlockStructure, CoreError};
 use tenet_dense::DenseGemmBatchJob;
 
 use crate::kernel_adapter::{normalize_fused_layout, BakedFusedLayout, FusedLayoutScratch};

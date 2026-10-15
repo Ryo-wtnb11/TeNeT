@@ -27,10 +27,10 @@ use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRe
 #[cfg(test)]
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
 /// `domain == codomain`); see [`exp_direct_into_dyn`] for the two routes.
-pub(crate) fn exp<E, R, D, const N: usize>(
+pub(crate) fn exp<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, N, N>,
-) -> Result<BoundTensorMap<R, D, N, N>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -837,11 +837,11 @@ where
 /// This is the exact Moore-Penrose inverse of the hard-thresholded
 /// effective-rank tensor. It is the Moore-Penrose inverse of the original
 /// tensor only when the cutoff discards no genuinely nonzero singular value.
-pub(crate) fn pinv<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn pinv<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
+    input: &BoundTensorMapRef<'_, R, D>,
     rcond: f64,
-) -> Result<BoundTensorMap<R, D, NIN, NOUT>, OperationError>
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -865,11 +865,11 @@ fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
 ///
 /// The context parameter is retained for source compatibility. Inverse itself
 /// is context-free and performs one dense solve per nonempty coupled sector.
-pub(crate) fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
+pub(crate) fn inv<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
-    input: &BoundTensorMapRef<'_, R, D, N, N>,
-) -> Result<BoundTensorMap<R, D, N, N>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<BoundTensorMap<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,

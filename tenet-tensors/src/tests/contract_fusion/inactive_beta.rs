@@ -45,10 +45,10 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     .try_bind_rule(&rule)
     .unwrap();
 
-    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
+        TestTensor::<f64>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
     let alpha = 2.0;
     let beta = 3.0;
@@ -178,12 +178,10 @@ fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_or
     // whole-destination axpby oracle also scales the absent odd block.
     oracle.push(beta * initial[1]);
 
-    let lhs =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-    let rhs =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
     let mut actual =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial, dst_space).unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial, dst_space).unwrap();
     let conjugate_axes =
         TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false);
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
@@ -281,13 +279,11 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     .try_bind_rule(&rule)
     .unwrap();
 
-    let lhs = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(vec![lhs_value], lhs_space).unwrap();
-    let rhs = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(vec![rhs_value], rhs_space).unwrap();
-    let mut dst = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(
-        vec![initial_even, initial_odd],
-        dst_space,
-    )
-    .unwrap();
+    let lhs = TestTensor::<T>::from_vec_with_fusion_space(vec![lhs_value], lhs_space).unwrap();
+    let rhs = TestTensor::<T>::from_vec_with_fusion_space(vec![rhs_value], rhs_space).unwrap();
+    let mut dst =
+        TestTensor::<T>::from_vec_with_fusion_space(vec![initial_even, initial_odd], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,

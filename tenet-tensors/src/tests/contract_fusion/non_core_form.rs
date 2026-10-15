@@ -141,21 +141,17 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     let initial_dst_for_context = initial_dst.clone();
     let alpha = Complex64::new(-1.5, 0.25);
     let beta = Complex64::new(0.25, -0.125);
-    let lhs =
-        TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-    let rhs =
-        TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-    let mut expected_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        initial_dst.clone(),
-        dst_space.clone(),
-    )
-    .unwrap();
-    let mut lhs_core = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+    let mut expected_dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space.clone())
+            .unwrap();
+    let mut lhs_core = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); lhs_core_space.required_len().unwrap()],
         lhs_core_space.clone(),
     )
     .unwrap();
-    let mut rhs_core = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
+    let mut rhs_core = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); rhs_core_space.required_len().unwrap()],
         rhs_core_space.clone(),
     )
@@ -171,7 +167,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
                 lowered_lhs_axes.to_vec(),
             ),
             &mut lhs_core,
-            &crate::adjoint(&rule, &lhs).unwrap(),
+            &lhs.adjoint(&rule).unwrap(),
             Complex64::one(),
             Complex64::zero(),
         )
@@ -199,7 +195,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
                 lowered_rhs_open_axes.to_vec(),
             ),
             &mut rhs_core,
-            &crate::adjoint(&rule, &rhs).unwrap(),
+            &rhs.adjoint(&rule).unwrap(),
             Complex64::one(),
             Complex64::zero(),
         )
@@ -229,7 +225,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     .unwrap();
 
     let mut explicit_dst =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
     let plan = fixture_contract_plan(
         &rule,
         explicit_dst.fusion_space().unwrap(),
@@ -252,8 +248,9 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         );
     }
 
-    let mut context_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut context_dst = TestTensor::<Complex64>::from_vec_with_dynamic_space(
         initial_dst_for_context.clone(),
+        expected_dst.dims().to_vec(),
         expected_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -393,17 +390,14 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     let lhs_data = vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)];
     let rhs_data = vec![Complex64::new(2.0, 0.5)];
     let initial_dst = vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)];
-    let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(lhs_data.clone(), src_space)
-        .unwrap();
-    let rhs =
-        TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-    let mut dst = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
-        initial_dst.clone(),
-        dst_space.clone(),
-    )
-    .unwrap();
+    let lhs =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data.clone(), src_space).unwrap();
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space.clone())
+            .unwrap();
     let mut expected_dst =
-        TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
     let axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[1, 0, 2]));
     let err = tensorcontract_fusion_block_specs(
         &rule,
@@ -428,17 +422,17 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         axes,
     )
     .unwrap();
-    let mut lhs_core = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
+    let mut lhs_core = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); lhs_core_space.required_len().unwrap()],
         lhs_core_space,
     )
     .unwrap();
-    let mut rhs_core = TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(
+    let mut rhs_core = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); rhs_core_space.required_len().unwrap()],
         rhs_core_space,
     )
     .unwrap();
-    let mut core_dst = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
+    let mut core_dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); core_dst_space.required_len().unwrap()],
         core_dst_space,
     )
@@ -492,8 +486,9 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         );
     }
 
-    let mut context_dst = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+    let mut context_dst = TestTensor::<Complex64>::from_vec_with_dynamic_space(
         vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)],
+        dst.dims().to_vec(),
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
@@ -602,12 +597,12 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     let lhs_data = vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)];
     let rhs_data = vec![Complex64::new(-2.0, 0.5), Complex64::new(4.0, 3.0)];
     let initial_dst = vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)];
-    let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space)
-        .unwrap();
-    let rhs = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space)
-        .unwrap();
+    let lhs =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space).unwrap();
+    let rhs =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space).unwrap();
     let mut dst =
-        TensorMap::<Complex64, 4, 0>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+        TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
             .unwrap();
     let alpha = Complex64::new(2.0, -0.25);
     let beta = Complex64::new(-1.0, 0.5);
@@ -650,16 +645,14 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
         )
         .unwrap();
         let rebuilt_lhs =
-            TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space)
+            TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space)
                 .unwrap();
         let rebuilt_rhs =
-            TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space)
+            TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space)
                 .unwrap();
-        let mut rebuilt_dst = TensorMap::<Complex64, 4, 0>::from_vec_with_fusion_space(
-            initial_dst.clone(),
-            dst_space,
-        )
-        .unwrap();
+        let mut rebuilt_dst =
+            TestTensor::<Complex64>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+                .unwrap();
         fusion_contract_into(
             &rule,
             &mut rebuilt_dst,
@@ -726,9 +719,9 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
         [vec![1, 1]],
     )
     .unwrap();
-    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
-    let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_fusion_space(vec![5.0], dst_space).unwrap();
+    let lhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
+    let rhs = TestTensor::<f64>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
+    let mut dst = TestTensor::<f64>::from_vec_with_fusion_space(vec![5.0], dst_space).unwrap();
     let lhs_before = lhs.data().to_vec();
     let rhs_before = rhs.data().to_vec();
     let mut context = TensorContractFusionExecutionContext::<f64, _>::default();

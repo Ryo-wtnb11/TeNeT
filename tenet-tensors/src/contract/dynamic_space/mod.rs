@@ -556,18 +556,6 @@ impl DynamicFusionMapSpace {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
-        rule: &R,
-        source: &FusionTensorMapSpace<NOUT, NIN>,
-        operation: &TreeTransformOperation,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols,
-    {
-        Self::from_typed(source).transformed(rule, operation)
-    }
-
     /// Space of the tree-transformed (permute / braid / transpose) tensor:
     /// the hom space is permuted and the full tree set of the result is
     /// enumerated (trees the transform coefficients never reach stay as

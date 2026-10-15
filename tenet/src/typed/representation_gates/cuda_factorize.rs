@@ -463,31 +463,31 @@ fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let core = tenet_core::TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
-        space,
-        0.0,
-        |key, _| {
-            let BlockKey::FusionTree(tree) = key else {
-                unreachable!("fusion-tree blocks")
-            };
-            if tree.codomain_tree() == tree.domain_tree() {
-                2.0
-            } else {
-                1.0
-            }
-        },
+    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
+        Arc::new(rule),
     )
     .unwrap();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        tenet_tensors::DynamicFusionMapSpace::from_typed(core.fusion_space().unwrap()),
-        Arc::new(rule),
+    let mut fill = |key: &BlockKey, _: &[usize]| -> f64 {
+        let BlockKey::FusionTree(tree) = key else {
+            unreachable!("fusion-tree blocks")
+        };
+        if tree.codomain_tree() == tree.domain_tree() {
+            2.0
+        } else {
+            1.0
+        }
+    };
+    let data = crate::typed::block_layout::apply_fill(
+        space.space(),
+        crate::typed::block_layout::Fill::BlockFn(&mut fill),
     )
     .unwrap();
     TensorMap {
         runtime: runtime.clone(),
         repr: owned_repr(TypedTensorBody {
             space,
-            data: Arc::new(TypedData::Dense(core.data().to_vec())),
+            data: Arc::new(TypedData::Dense(data)),
         }),
     }
 }

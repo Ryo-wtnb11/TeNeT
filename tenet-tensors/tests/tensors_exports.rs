@@ -6,10 +6,10 @@
 //! integration test or example of this crate, or by a retained public
 //! signature. The 2026-10-14 maintainer decision (#2222, superseding A14)
 //! deletes the static-rank layer: the `facade.rs` entries and their backend
-//! traits (leaf (a)) and the static contraction context, plan and replay
-//! entries (leaf (b)) are gone; the names still taking `tenet_core::TensorMap`
-//! (`tensorcontract_structure`) follow
-//! leaf (c). The structure caches, the
+//! traits (leaf (a)), the static contraction context, plan and replay
+//! entries (leaf (b)), and the `tenet_core::TensorMap`-taking `adjoint` and
+//! `tensorcontract_structure` (leaf (c)) are gone; every remaining entry takes
+//! a dynamic space. The structure caches, the
 //! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
 //! `tenet_operations` internals were narrowed to `pub(crate)`; #2215 deleted
 //! the dead entries and narrowed every name without a consumer outside this
@@ -166,7 +166,6 @@ fn firewall_ignores_comments_strings_and_restricted_visibility() {
 fn tenet_tensors_exports_exactly_the_pinned_names() {
     let expected = [
         // adjoint
-        "adjoint",
         "adjoint_bound_dyn",
         "adjoint_bound_space_dyn",
         "materialize_adjoint_data_dyn",
@@ -180,7 +179,6 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "admit_exact_tree_pair_layout",
         "exact_layout_tree_pair_hit",
         // contract
-        "tensorcontract_structure",
         "execute_storage_contract_members_cuda",
         "execute_storage_contract_resolution_on_cuda",
         "plan_compose",

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, TensorKitProductCodec, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, TensorKitProductCodec, TensorMapSpace,
+    U1FusionRule, U1Irrep,
 };
 use tenet_operations::ContractDestinationInit;
 use tenet_tensors::{
@@ -54,9 +54,9 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
 {
     let provider = Arc::new(rule.clone());
-    let bind = |tensor: &TensorMap<f64, 2, 2>| {
+    let bind = |space: &FusionTensorMapSpace<2, 2>| {
         BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+            DynamicFusionMapSpace::from_typed(space),
             Arc::clone(&provider),
         )
         .unwrap()
@@ -84,20 +84,13 @@ where
     };
     let lhs_space = space(homspace());
     let rhs_space = space(homspace());
-    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        (0..lhs_space.required_len().unwrap())
-            .map(|index| index as f64 * 0.25 - 2.0)
-            .collect(),
-        lhs_space,
-    )
-    .unwrap();
-    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        (0..rhs_space.required_len().unwrap())
-            .map(|index| index as f64 * 0.5 - 3.0)
-            .collect(),
-        rhs_space,
-    )
-    .unwrap();
+    let lhs_data: Vec<f64> = (0..lhs_space.required_len().unwrap())
+        .map(|index| index as f64 * 0.25 - 2.0)
+        .collect();
+    let rhs_data: Vec<f64> = (0..rhs_space.required_len().unwrap())
+        .map(|index| index as f64 * 0.5 - 3.0)
+        .collect();
+    let (lhs_bound, rhs_bound) = (bind(&lhs_space), bind(&rhs_space));
 
     for (lhs_axes, rhs_axes, output_axes) in WORKLOADS {
         let axes = || {
@@ -109,8 +102,8 @@ where
         };
         let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
             rule,
-            lhs.fusion_space().unwrap().homspace(),
-            rhs.fusion_space().unwrap().homspace(),
+            lhs_space.homspace(),
+            rhs_space.homspace(),
             &lhs_axes,
             &rhs_axes,
             &output_axes,
@@ -118,22 +111,18 @@ where
         )
         .unwrap();
         let dst_space = space(dst_hom);
-        let mut expected = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            vec![0.0; dst_space.required_len().unwrap()],
-            dst_space,
-        )
-        .unwrap();
+        let mut expected = vec![0.0; dst_space.required_len().unwrap()];
         let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
-        let (dst_bound, lhs_bound, rhs_bound) = (bind(&expected), bind(&lhs), bind(&rhs));
-        let dst_structure = Arc::clone(expected.structure());
+        let dst_bound = bind(&dst_space);
+        let dst_structure = Arc::clone(dst_space.subblock_structure());
         context
             .tensorcontract_fusion_dyn_into(
                 &dst_bound,
-                expected.data_mut(),
+                &mut expected,
                 &lhs_bound,
-                lhs.data(),
+                &lhs_data,
                 &rhs_bound,
-                rhs.data(),
+                &rhs_data,
                 axes(),
                 1.0,
                 0.0,
@@ -155,21 +144,21 @@ where
             context.execute_contract_resolution_host(
                 &prepared,
                 (&dst_structure, dst),
-                (lhs.structure(), lhs.data()),
-                (rhs.structure(), rhs.data()),
+                (lhs_space.subblock_structure(), &lhs_data),
+                (rhs_space.subblock_structure(), &rhs_data),
                 1.0,
                 ContractDestinationInit::Axpby(0.0),
             )
         };
         for _ in 0..2 {
-            replay(&mut context, actual.data_mut()).unwrap();
+            replay(&mut context, &mut actual).unwrap();
         }
         counting_alloc::start();
-        let result = replay(&mut context, actual.data_mut());
+        let result = replay(&mut context, &mut actual);
         let allocs = counting_alloc::stop();
         result.unwrap();
 
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual, expected);
         assert_eq!(allocs.calls, 0, "axes={lhs_axes:?}/{output_axes:?}");
     }
 }

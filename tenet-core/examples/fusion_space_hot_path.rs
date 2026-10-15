@@ -2,8 +2,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use tenet_core::{
-    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMapSpace,
+    U1FusionRule, U1Irrep,
 };
 
 const CHARGE_COUNTS: &[usize] = &[1, 8, 64, 512, 4096];
@@ -41,15 +41,13 @@ fn run_u1_case(charge_count: usize) {
     let fusion_space = fusion_space(&rule, &charges);
     let block_count = fusion_space.subblock_structure().block_count();
     let keys = fusion_space.homspace().fusion_tree_keys(&rule);
-    let data = vec![0.0_f64; fusion_space.required_len().unwrap()];
-    let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(data, fusion_space).unwrap();
+    let structure = fusion_space.subblock_structure();
 
     let lookup_iters = iterations(charge_count, 100_000);
     let tree_elapsed = elapsed_per_op(lookup_iters, charge_count, || {
         let mut checksum = 0usize;
         for key in keys.iter() {
-            let block = tensor.subblock_by_tree(key).unwrap();
-            checksum ^= block.offset();
+            checksum ^= structure.fusion_tree_pair_block(key).unwrap().offset();
         }
         black_box(checksum);
     });
@@ -58,10 +56,14 @@ fn run_u1_case(charge_count: usize) {
         for charge in &charges {
             let sector = U1Irrep::new(*charge).sector_id();
             let external_domain = U1Irrep::new(-*charge).sector_id();
-            let block = tensor
-                .subblock_by_sectors(&rule, &[sector, external_domain])
+            let keys = fusion_space
+                .homspace()
+                .fusion_tree_keys_from_external_sectors(&rule, &[sector, external_domain])
                 .unwrap();
-            checksum ^= block.offset();
+            let [key] = keys.as_slice() else {
+                panic!("one fusion tree per U(1) sector pair");
+            };
+            checksum ^= structure.fusion_tree_pair_block(key).unwrap().offset();
         }
         black_box(checksum);
     });

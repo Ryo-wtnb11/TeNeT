@@ -10,6 +10,8 @@ use std::cell::{Cell, RefCell};
 use num_complex::Complex64;
 use num_traits::{Float, Zero};
 #[cfg(test)]
+use tenet_core::FusionTensorMapSpace;
+#[cfg(test)]
 use tenet_core::InfallibleGeneric;
 use tenet_core::{
     BlockKey, BlockRef, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError,
@@ -17,8 +19,6 @@ use tenet_core::{
     FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, MultiplicityFreeRigidSymbols,
     RuleIdentity, SectorId, SectorLeg, SectorOrderKey, SectorStructure,
 };
-#[cfg(test)]
-use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
 use tenet_dense::{
     arity_mismatch, check_contiguous_output, DenseBackend, DenseDotConfig, DenseError,
     DenseExecutor, DenseFactorization, DenseOwned, DenseTensor, DenseView, DenseViewMut,

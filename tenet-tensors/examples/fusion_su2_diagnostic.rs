@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
+    BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMapSpace,
 };
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, BoundDynamicFusionMapSpace, DynamicFusionMapSpace,
@@ -12,12 +12,8 @@ use tenet_tensors::{
 fn main() {
     let rule = SU2FusionRule;
     let provider = Arc::new(rule);
-    let bind = |space: &FusionTensorMapSpace<1, 1>| {
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(space),
-            Arc::clone(&provider),
-        )
-        .unwrap()
+    let bind = |space: DynamicFusionMapSpace| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space, Arc::clone(&provider)).unwrap()
     };
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
@@ -105,86 +101,61 @@ fn main() {
     let rhs_data = (0..32)
         .map(|index| -3.0 + 0.25 * index as f64)
         .collect::<Vec<_>>();
-    let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-    let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-    let mut lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_core_space.required_len().unwrap()],
-        lhs_core_space.clone(),
-    )
-    .unwrap();
-    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_core_space.required_len().unwrap()],
-        rhs_core_space.clone(),
-    )
-    .unwrap();
-    let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, -1.0, 4.0, -3.0], dst_space)
-            .unwrap();
-    let lhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
-        Arc::clone(&provider),
-    )
-    .unwrap();
-    let rhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
-        Arc::clone(&provider),
-    )
-    .unwrap();
-    let dst_bound = bind(dst.fusion_space().unwrap());
+    let mut lhs_core_data = vec![0.0; lhs_core_space.required_len().unwrap()];
+    let mut rhs_core_data = vec![0.0; rhs_core_space.required_len().unwrap()];
+    let mut dst_data = vec![2.0, -1.0, 4.0, -3.0];
+    let lhs_bound = bind(DynamicFusionMapSpace::from_typed(&lhs_space));
+    let rhs_bound = bind(DynamicFusionMapSpace::from_typed(&rhs_space));
+    let dst_bound = bind(DynamicFusionMapSpace::from_typed(&dst_space));
     let plan =
         prepare_tensorcontract_fusion_plan_dyn(&dst_bound, &lhs_bound, &rhs_bound, axes).unwrap();
     let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
-    let lhs_core_structure = Arc::clone(lhs_core.structure());
     tree_context
         .tree_transform_dyn_into(
             &rule,
             plan.lhs_transform().clone(),
-            &lhs_core_structure,
-            lhs.structure(),
-            lhs_core.data_mut(),
-            lhs.data(),
+            lhs_core_space.subblock_structure(),
+            lhs_space.subblock_structure(),
+            &mut lhs_core_data,
+            &lhs_data,
             1.0,
             0.0,
         )
         .unwrap();
-    let rhs_core_structure = Arc::clone(rhs_core.structure());
     tree_context
         .tree_transform_dyn_into(
             &rule,
             plan.rhs_transform().clone(),
-            &rhs_core_structure,
-            rhs.structure(),
-            rhs_core.data_mut(),
-            rhs.data(),
+            rhs_core_space.subblock_structure(),
+            rhs_space.subblock_structure(),
+            &mut rhs_core_data,
+            &rhs_data,
             1.0,
             0.0,
         )
         .unwrap();
-    println!("lhs_core_data {:?}", lhs_core.data());
-    println!("rhs_core_data {:?}", rhs_core.data());
+    println!("lhs_core_data {lhs_core_data:?}");
+    println!("rhs_core_data {rhs_core_data:?}");
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
         .tensorcontract_fusion_dyn_into(
             &dst_bound,
-            dst.data_mut(),
+            &mut dst_data,
             &lhs_bound,
-            lhs.data(),
+            &lhs_data,
             &rhs_bound,
-            rhs.data(),
+            &rhs_data,
             axes,
             -1.5,
             0.25,
         )
         .unwrap();
-    println!("dst_data {:?}", dst.data());
-    println!(
-        "dst_checksum {:.12}",
-        dst.data().iter().copied().sum::<f64>()
-    );
+    println!("dst_data {dst_data:?}");
+    println!("dst_checksum {:.12}", dst_data.iter().copied().sum::<f64>());
 
     let tensorkit_dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
-        lhs.fusion_space().unwrap().homspace(),
-        rhs.fusion_space().unwrap().homspace(),
+        lhs_space.homspace(),
+        rhs_space.homspace(),
         tensorkit_axes.lhs_contracting_axes(),
         tensorkit_axes.rhs_contracting_axes(),
         &[1, 0],
@@ -202,28 +173,24 @@ fn main() {
         "tensorkit_order_dst_structure",
         tensorkit_dst_space.subblock_structure(),
     );
-    let mut tensorkit_order_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        vec![2.0, -1.0, 4.0, -3.0],
-        tensorkit_dst_space,
-    )
-    .unwrap();
+    let mut tensorkit_order_dst = vec![2.0, -1.0, 4.0, -3.0];
     TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
         .tensorcontract_fusion_dyn_into(
-            &bind(tensorkit_order_dst.fusion_space().unwrap()),
-            tensorkit_order_dst.data_mut(),
+            &bind(DynamicFusionMapSpace::from_typed(&tensorkit_dst_space)),
+            &mut tensorkit_order_dst,
             &lhs_bound,
-            lhs.data(),
+            &lhs_data,
             &rhs_bound,
-            rhs.data(),
+            &rhs_data,
             tensorkit_axes,
             -1.5,
             0.25,
         )
         .unwrap();
-    println!("tensorkit_order_dst_data {:?}", tensorkit_order_dst.data());
+    println!("tensorkit_order_dst_data {tensorkit_order_dst:?}");
     println!(
         "tensorkit_order_dst_checksum {:.12}",
-        tensorkit_order_dst.data().iter().copied().sum::<f64>()
+        tensorkit_order_dst.iter().copied().sum::<f64>()
     );
 }
 

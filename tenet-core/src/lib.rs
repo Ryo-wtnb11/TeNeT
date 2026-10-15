@@ -1,13 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Core TensorMap-facing data structures for TeNeT.
+//! Structural vocabulary of TeNeT: spaces and sectors, fusion trees and their
+//! keys, block structures and block views, and the structure caches.
 //!
-//! This crate owns TeNeT's public/core tensor view vocabulary. Lower-level
-//! crates may lower these views to concrete strided kernels, but external
-//! strided/backend types should not be required by TensorMap users.
+//! Lower-level crates may lower the block views to concrete strided kernels,
+//! but no external strided or backend type is required to use this crate.
 
 use core::fmt;
-use core::marker::PhantomData;
 use core::ops::{Add, Mul};
 use std::collections::{hash_map::Entry, BTreeMap};
 use std::hash::Hash;
@@ -64,8 +63,8 @@ pub use cache::{StructureCacheInfo, StructureCacheKind};
 /// Borrowed-key lookups into a [`StructureCache`] implement this.
 #[doc(hidden)]
 pub use quick_cache::Equivalent as StructureCacheEquivalent;
-mod tensor_map;
-pub use tensor_map::*;
+mod block_view;
+pub use block_view::*;
 mod error;
 pub use error::*;
 #[cfg(feature = "testing")]

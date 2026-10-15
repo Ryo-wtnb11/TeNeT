@@ -143,14 +143,17 @@ fn overwrite_single_does_not_read_nan_destinations_in_any_driver() {
     for threads in [1, 2] {
         let (mut dst, src, structure) = fixture();
         dst.data_mut().fill(f64::NAN);
-        tree_transform_structure_overwrite_with_structural_recoupling(
+        tree_transform_structure_overwrite_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
-            &mut dst,
-            &src,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
             1.0,
+            &[],
             threads,
         )
         .unwrap();

@@ -996,15 +996,14 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     assert!(!compiled.has_pack_gemm_scatter_blocks());
 
     let space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
-    let src = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+    let src = TestTensor::<f64>::from_vec_with_structure(
         vec![5.0, 7.0],
         space.clone(),
         structure.clone(),
     )
     .unwrap();
     let mut dst =
-        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![11.0, 13.0], space, structure)
-            .unwrap();
+        TestTensor::<f64>::from_vec_with_structure(vec![11.0, 13.0], space, structure).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     replay_into(

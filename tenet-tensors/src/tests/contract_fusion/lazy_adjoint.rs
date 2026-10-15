@@ -16,17 +16,17 @@ fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
         )
         .unwrap()
     };
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(2.0, 1.0), Complex64::new(3.0, -1.0)],
         space(),
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(5.0, 2.0), Complex64::new(7.0, -2.0)],
         space(),
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(10.0, 0.0), Complex64::new(20.0, 0.0)],
         space(),
     )
@@ -86,17 +86,17 @@ fn tensorcontract_fusion_lowers_rhs_categorical_adjoint_lazily() {
         )
         .unwrap()
     };
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(2.0, 1.0), Complex64::new(3.0, -1.0)],
         space(),
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(5.0, 2.0), Complex64::new(7.0, -2.0)],
         space(),
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(), Complex64::zero()],
         space(),
     )
@@ -156,17 +156,17 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(2.0, 1.0), Complex64::new(3.0, -1.0)],
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::new(5.0, 2.0), Complex64::new(7.0, -2.0)],
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(), Complex64::zero()],
         dst_space,
     )
@@ -208,7 +208,7 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
     let dst_space = z2_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -222,7 +222,7 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -236,11 +236,9 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -288,7 +286,7 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
     let dst_space = fermion_parity_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -302,7 +300,7 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -316,11 +314,9 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -366,7 +362,7 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
     let dst_space = z2_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -380,7 +376,7 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -394,11 +390,9 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -445,7 +439,7 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
     let dst_space = fermion_parity_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -459,7 +453,7 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -473,11 +467,9 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -524,7 +516,7 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
     let dst_space = z2_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -538,7 +530,7 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -552,11 +544,9 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -604,7 +594,7 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
     )
     .unwrap();
     let dst_space = fermion_parity_matrix_space_with_homspace(dst_hom, vec![2, 2]);
-    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let lhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(1.0, 1.0),
             Complex64::new(3.0, 2.0),
@@ -618,7 +608,7 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
         lhs_space,
     )
     .unwrap();
-    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let rhs = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![
             Complex64::new(5.0, -2.0),
             Complex64::new(7.0, -4.0),
@@ -632,11 +622,9 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
         rhs_space,
     )
     .unwrap();
-    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); 8],
-        dst_space,
-    )
-    .unwrap();
+    let mut dst =
+        TestTensor::<Complex64>::from_vec_with_fusion_space(vec![Complex64::zero(); 8], dst_space)
+            .unwrap();
 
     fusion_contract_into(
         &rule,
@@ -699,12 +687,12 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
         [vec![1, 1]],
     )
     .unwrap();
-    let lhs: TensorMap<Complex64, 1, 0> =
-        TensorMap::from_vec_with_fusion_space(vec![Complex64::new(2.0, 1.0)], lhs_space).unwrap();
-    let rhs: TensorMap<Complex64, 1, 0> =
-        TensorMap::from_vec_with_fusion_space(vec![Complex64::new(3.0, -1.0)], rhs_space).unwrap();
-    let mut dst: TensorMap<Complex64, 1, 1> =
-        TensorMap::from_vec_with_fusion_space(vec![Complex64::new(0.0, 0.0)], dst_space).unwrap();
+    let lhs: TestTensor<Complex64> =
+        TestTensor::from_vec_with_fusion_space(vec![Complex64::new(2.0, 1.0)], lhs_space).unwrap();
+    let rhs: TestTensor<Complex64> =
+        TestTensor::from_vec_with_fusion_space(vec![Complex64::new(3.0, -1.0)], rhs_space).unwrap();
+    let mut dst: TestTensor<Complex64> =
+        TestTensor::from_vec_with_fusion_space(vec![Complex64::new(0.0, 0.0)], dst_space).unwrap();
 
     fusion_contract_into(
         &rule,
@@ -928,17 +916,15 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     )
     .unwrap();
     let lhs_typed =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_fusion)
-            .unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(lhs_data.clone(), lhs_fusion).unwrap();
     let rhs_typed =
-        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(rhs_data.clone(), rhs_fusion)
-            .unwrap();
+        TestTensor::<Complex64>::from_vec_with_fusion_space(rhs_data.clone(), rhs_fusion).unwrap();
     let candidate = crate::contract::contracted_axis_order_candidates(&[0], &[0]).remove(0);
     let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
         provider.as_ref(),
         &dst_space,
-        &DynamicFusionMapSpace::from_typed(lhs_typed.fusion_space().unwrap()),
-        &DynamicFusionMapSpace::from_typed(rhs_typed.fusion_space().unwrap()),
+        &lhs_typed.fusion_space().unwrap().as_ref().clone(),
+        &rhs_typed.fusion_space().unwrap().as_ref().clone(),
         TensorContractSpec::new_with_conjugation(
             &[0],
             &[0],
@@ -950,7 +936,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         crate::contract::FusionContractOrientation::RhsLhs,
     )
     .unwrap();
-    let mut reverse_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut reverse_dst = TestTensor::<Complex64>::from_vec_with_fusion_space(
         vec![Complex64::zero(); oracle.len()],
         typed_dst_space,
     )
@@ -976,8 +962,9 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     for (&actual, &expected) in reverse_dst.data().iter().zip(&oracle) {
         assert!((actual - expected).norm() < 1.0e-10);
     }
-    let mut artifact_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let mut artifact_dst = TestTensor::<Complex64>::from_vec_with_dynamic_space(
         vec![Complex64::zero(); oracle.len()],
+        reverse_dst.dims().to_vec(),
         reverse_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();

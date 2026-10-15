@@ -212,7 +212,7 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
         .unwrap()
         .try_bind_rule(&FactorGenericRule)
         .unwrap();
-        let tensor = TensorMap::<Complex64, 2, 2>::from_block_fn_with_fusion_space(
+        let tensor = TestTensor::<Complex64>::from_block_fn_with_fusion_space(
             typed_space,
             Complex64::zero(),
             |key, indices| {
@@ -228,10 +228,7 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
             },
         )
         .unwrap();
-        (
-            DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
-            tensor.data().to_vec(),
-        )
+        (tensor.fusion_space().clone(), tensor.data().to_vec())
     };
     let (dynamic, general_data) = relayout(&general);
     let (_, hermitian_data) = relayout(&hermitian);
@@ -498,13 +495,13 @@ fn assert_eig_columns_match_up_to_scale<R>(
 /// [`hermitian_test_tensor`]'s layout with unsymmetrized hashed entries, so
 /// every coupled-sector matrix is full rank with a simple spectrum and its
 /// gauge-fixed factors are unique.
-fn generic_spectrum_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+fn generic_spectrum_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TestTensor<f64>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let template = hermitian_test_tensor(rule, sectors);
-    let space = template.fusion_space().unwrap().as_ref().clone();
-    TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+    let space = template.fusion_space().clone();
+    TestTensor::<f64>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
         let mut hash = 0x9e37_79b9_7f4a_7c15u64;
         let BlockKey::FusionTree(tree) = key else {
             return 0.0;
@@ -529,7 +526,7 @@ where
 /// and columns stacked in reverse tree order) is the same tensor, so its
 /// factors reconstruct it by tree identity and its SVD factors equal the
 /// facade's gauge-fixed ones.
-fn assert_reordered_compact_factor_publication<R, D>(provider: Arc<R>, facade: &TensorMap<D, 2, 2>)
+fn assert_reordered_compact_factor_publication<R, D>(provider: Arc<R>, facade: &TestTensor<D>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -623,14 +620,14 @@ where
     assert_factor_matches_facade("left_polar P", &expected.p, &actual.p);
 
     assert_reordered_compact_factor_publication(Arc::clone(&provider), &general);
-    let complex = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+    let complex = TestTensor::<Complex64>::from_vec_with_fusion_space(
         general
             .data()
             .iter()
             .enumerate()
             .map(|(index, &value)| Complex64::new(value, ((index * 7 + 3) % 13) as f64 * 0.2 - 1.0))
             .collect(),
-        general.fusion_space().unwrap().as_ref().clone(),
+        general.fusion_space().clone(),
     )
     .unwrap();
     assert_reordered_compact_factor_publication(provider, &complex);

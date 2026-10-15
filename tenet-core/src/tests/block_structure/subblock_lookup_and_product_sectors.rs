@@ -31,44 +31,7 @@ fn block_structure_finds_fusion_tree_subblock_by_key() {
 }
 
 #[test]
-fn tensormap_subblock_by_tree_returns_matching_view() {
-    let first =
-        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [true], [], [], [], [])
-            .unwrap();
-    let second =
-        FusionTreePairKey::try_pair_from_sector_ids([0], [0], 0, [false], [true], [], [], [], [])
-            .unwrap();
-    let structure = packed_fixture_structure(
-        2,
-        [
-            (BlockKey::from(second.clone()), vec![1, 2]),
-            (BlockKey::from(first.clone()), vec![2, 2]),
-        ],
-    )
-    .unwrap();
-    let space = TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap();
-    let tensor = TensorMap::<i32, 1, 1>::from_vec_with_structure(
-        vec![10, 20, 30, 40, 50, 60],
-        space,
-        structure,
-    )
-    .unwrap();
-
-    let first_view = tensor.subblock_by_tree(&first).unwrap();
-    let second_view = tensor.block_by_key(&BlockKey::from(second)).unwrap();
-
-    assert_eq!(first_view.shape(), &[2, 2]);
-    assert_eq!(first_view.offset(), 2);
-    assert_eq!(
-        &first_view.data()[first_view.offset()..first_view.offset() + 4],
-        &[30, 40, 50, 60]
-    );
-    assert_eq!(second_view.shape(), &[1, 2]);
-    assert_eq!(second_view.offset(), 0);
-}
-
-#[test]
-fn subblock_by_tree_reports_missing_fusion_tree_key() {
+fn fusion_tree_pair_block_reports_missing_key() {
     let existing =
         FusionTreePairKey::try_pair_from_sector_ids([0], [0], 0, [false], [true], [], [], [], [])
             .unwrap();
@@ -76,11 +39,8 @@ fn subblock_by_tree_reports_missing_fusion_tree_key() {
         FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [true], [], [], [], [])
             .unwrap();
     let structure = packed_fixture_structure(2, [(BlockKey::from(existing), vec![1, 1])]).unwrap();
-    let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-    let tensor =
-        TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
 
-    let err = tensor.subblock_by_tree(&missing).unwrap_err();
+    let err = structure.fusion_tree_pair_block(&missing).unwrap_err();
 
     assert_eq!(
         err,

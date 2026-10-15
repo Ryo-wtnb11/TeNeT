@@ -198,7 +198,7 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     )
     .unwrap();
     let len = tall_space.required_len().unwrap();
-    let tall = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let tall = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len).map(|i| ((i * 3 + 1) % 13) as f64 - 6.0).collect(),
         tall_space,
     )
@@ -247,7 +247,7 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     )
     .unwrap();
     let len = wide_space.required_len().unwrap();
-    let wide = TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(
+    let wide = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len).map(|i| ((i * 5 + 2) % 11) as f64 - 5.0).collect(),
         wide_space,
     )
@@ -632,7 +632,7 @@ where
     (bits, bytes)
 }
 
-fn multiplicity_free_tall_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 1>
+fn multiplicity_free_tall_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TestTensor<f64>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -652,7 +652,7 @@ where
     )
     .unwrap();
     let len = space.required_len().unwrap();
-    TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len)
             .map(|index| ((index * 13 + 7) % 31) as f64 * 0.25 - 3.5)
             .collect(),
@@ -663,11 +663,8 @@ where
 
 /// `source` in `D`; complex copies get a nonzero imaginary part unless
 /// `real_only` (a Hermitian source stays Hermitian).
-fn scalar_copy<D: FactorScalar, const NOUT: usize, const NIN: usize>(
-    source: &TensorMap<f64, NOUT, NIN>,
-    real_only: bool,
-) -> TensorMap<D, NOUT, NIN> {
-    TensorMap::from_vec_with_fusion_space(
+fn scalar_copy<D: FactorScalar>(source: &TestTensor<f64>, real_only: bool) -> TestTensor<D> {
+    TestTensor::from_vec_with_fusion_space(
         source
             .data()
             .iter()
@@ -681,7 +678,7 @@ fn scalar_copy<D: FactorScalar, const NOUT: usize, const NIN: usize>(
                 D::from_complex64(Complex64::new(value, imaginary))
             })
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap()
 }
@@ -696,15 +693,15 @@ where
     D: FactorScalar,
 {
     let provider = Arc::new(rule.clone());
-    let general = scalar_copy::<D, 2, 2>(&tsvd_test_tensor(&rule, sectors), false);
-    let tall = scalar_copy::<D, 2, 1>(&multiplicity_free_tall_test_tensor(&rule, sectors), false);
-    let hermitian = scalar_copy::<D, 2, 2>(&hermitian_test_tensor(&rule, sectors), true);
-    let bind = |tensor: &TensorMap<D, 2, 2>| bound_tensor(Arc::clone(&provider), tensor);
+    let general = scalar_copy::<D>(&tsvd_test_tensor(&rule, sectors), false);
+    let tall = scalar_copy::<D>(&multiplicity_free_tall_test_tensor(&rule, sectors), false);
+    let hermitian = scalar_copy::<D>(&hermitian_test_tensor(&rule, sectors), true);
+    let bind = |tensor: &TestTensor<D>| bound_tensor(Arc::clone(&provider), tensor);
     let tall_bound = bound_tensor(Arc::clone(&provider), &tall);
     let tall_ref = tall_bound.as_ref();
     let tall_input = tall_ref.dynamic();
 
-    let run = |general: &TensorMap<D, 2, 2>, hermitian: &TensorMap<D, 2, 2>| {
+    let run = |general: &TestTensor<D>, hermitian: &TestTensor<D>| {
         let (general, hermitian) = (bind(general), bind(hermitian));
         let (general, hermitian) = (general.as_ref(), hermitian.as_ref());
         let (general, hermitian) = (general.dynamic(), hermitian.dynamic());

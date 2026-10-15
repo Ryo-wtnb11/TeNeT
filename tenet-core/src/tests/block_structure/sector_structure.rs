@@ -779,7 +779,7 @@ fn transpose_tree_pair_block_matches_low_rank_and_nonselfdual_u1_oracles() {
 }
 
 #[test]
-fn tensormap_subblocks_by_sectors_returns_all_su2_simple_innerline_blocks() {
+fn external_sectors_select_all_su2_simple_innerline_blocks() {
     let rule = SU2FusionRule;
     let half = SectorId::new(1);
     let dense = TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap();
@@ -791,21 +791,26 @@ fn tensormap_subblocks_by_sectors_returns_all_su2_simple_innerline_blocks() {
         [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
     )
     .unwrap();
-    let tensor =
-        TensorMap::<i32, 3, 1>::from_vec_with_fusion_space(vec![11, 22], fusion_space).unwrap();
 
-    let blocks = tensor
-        .subblocks_by_sectors(&rule, &[half, half, half, half])
-        .unwrap();
+    let offsets = fusion_space
+        .homspace()
+        .fusion_tree_keys_from_external_sectors(&rule, &[half, half, half, half])
+        .unwrap()
+        .iter()
+        .map(|key| {
+            fusion_space
+                .subblock_structure()
+                .fusion_tree_pair_block(key)
+                .unwrap()
+                .offset()
+        })
+        .collect::<Vec<_>>();
 
-    assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0].offset(), 0);
-    assert_eq!(blocks[0].data()[blocks[0].offset()], 11);
-    assert_eq!(blocks[1].offset(), 1);
-    assert_eq!(blocks[1].data()[blocks[1].offset()], 22);
+    assert_eq!(offsets, [0, 1]);
 
-    let err = tensor
-        .subblock_by_sectors(&rule, &[half, half, half, half])
+    let err = fusion_space
+        .homspace()
+        .unique_fusion_tree_key_from_external_sectors(&rule, &[half, half, half, half])
         .unwrap_err();
     assert_eq!(
         err,

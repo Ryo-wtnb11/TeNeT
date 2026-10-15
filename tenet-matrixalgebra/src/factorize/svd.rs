@@ -9,10 +9,10 @@ use super::*;
 /// Per block the bond is `min(rows, cols)`; the square-`U` variant is
 /// MatrixAlgebraKit `svd_full` (later batch).
 #[derive(Clone, Debug)]
-pub(crate) struct SvdCompact<R, D, const NOUT: usize, const NIN: usize> {
-    pub u: BoundTensorMap<R, D, NOUT, 1>,
-    pub s: BoundTensorMap<R, D, 1, 1>,
-    pub vh: BoundTensorMap<R, D, 1, NIN>,
+pub(crate) struct SvdCompact<R, D> {
+    pub u: BoundTensorMap<R, D>,
+    pub s: BoundTensorMap<R, D>,
+    pub vh: BoundTensorMap<R, D>,
     pub singular_values: Vec<SectorSpectrum>,
 }
 
@@ -315,9 +315,9 @@ where
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
 /// `svd_vals`). Runs the dense SVD per sector through the executor and keeps
 /// only the spectra.
-pub(crate) fn svd_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_vals<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
+    input: &BoundTensorMapRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -438,10 +438,10 @@ where
 
 #[cfg(test)]
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
-pub(crate) fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_compact<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<SvdCompact<R, D, NOUT, NIN>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<SvdCompact<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1283,10 +1283,10 @@ where
 /// per sector `U` is the square `m x m` unitary, `S` the rectangular
 /// `m x n` diagonal, and `Vh` the square `n x n` unitary.
 #[derive(Clone, Debug)]
-pub(crate) struct SvdFull<R, D, const NOUT: usize, const NIN: usize> {
-    pub u: BoundTensorMap<R, D, NOUT, 1>,
-    pub s: BoundTensorMap<R, D, 1, 1>,
-    pub vh: BoundTensorMap<R, D, 1, NIN>,
+pub(crate) struct SvdFull<R, D> {
+    pub u: BoundTensorMap<R, D>,
+    pub s: BoundTensorMap<R, D>,
+    pub vh: BoundTensorMap<R, D>,
 }
 
 #[cfg(test)]
@@ -1362,10 +1362,10 @@ impl<R, D> SvdFullDyn<R, D> {
 /// existing dense-executor boundary. The two routes agree on the reconstructed
 /// input, the spectrum and unitarity, but the basis spanning the null space is
 /// not unique and differs between them.
-pub(crate) fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_full<E, R, D>(
     dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<SvdFull<R, D, NOUT, NIN>, OperationError>
+    input: &BoundTensorMapRef<'_, R, D>,
+) -> Result<SvdFull<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

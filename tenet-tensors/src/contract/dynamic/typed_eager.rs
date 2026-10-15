@@ -1,40 +1,22 @@
 use super::*;
 
-use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage};
+use crate::tests::TestTensor;
 use tenet_operations::TensorContractSpec;
 
 use super::super::fusion_block::tensorcontract_core_fusion_blocks_into_raw;
-use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<BT, BC, R, D>(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     rule: &R,
     plan: &FusionContractPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -44,15 +26,9 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
-    let lhs_source_space = DynamicFusionMapSpace::from_typed(
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
+    let lhs_source_space = lhs.dynamic_space();
     let lhs_transformed = transformed_source_space_and_structure(
         rule,
         lhs,
@@ -60,7 +36,7 @@ where
         plan.lhs_source_conjugate(),
     )?;
     let lhs_layout_borrowable = source_is_borrowable_core_layout(
-        &lhs_source_space,
+        lhs_source_space,
         lhs.structure(),
         &lhs_transformed.0,
         plan.lhs_transform(),
@@ -72,12 +48,9 @@ where
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     )?;
-    let rhs_source_space = DynamicFusionMapSpace::from_typed(
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
+    let rhs_source_space = rhs.dynamic_space();
     let rhs_layout_borrowable = source_is_borrowable_core_layout(
-        &rhs_source_space,
+        rhs_source_space,
         rhs.structure(),
         &rhs_space,
         plan.rhs_transform(),
@@ -173,10 +146,7 @@ where
     };
 
     if plan.output_transform_is_identity() {
-        let dst_space = DynamicFusionMapSpace::from_typed(
-            dst.fusion_space()
-                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        );
+        let dst_space = dst.dynamic_space().clone();
         let dst_structure = std::sync::Arc::clone(dst.structure());
         return tensorcontract_dynamic_core_into_raw(
             contract_backend,
@@ -223,34 +193,25 @@ where
     )
 }
 
-fn transformed_source_space_and_structure<
-    R,
-    D,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SSrc,
-    DSrc,
->(
+fn transformed_source_space_and_structure<R, D>(
     rule: &R,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    src: &TestTensor<D>,
     operation: &TreeTransformOperation,
     source_conjugate: bool,
 ) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    DSrc: TensorStorage<D>,
 {
-    let src_fusion = src
-        .fusion_space()
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let src_fusion = src.dynamic_space();
     if source_conjugate {
-        let adjoint = adjoint_fusion_space_view(rule, src_fusion)?;
-        let replay_structure = std::sync::Arc::clone(adjoint.subblock_structure());
-        let space = DynamicFusionMapSpace::transformed_from_typed(rule, &adjoint, operation)?;
+        src_fusion.validate_rule(rule)?;
+        let adjoint = src_fusion.adjoint_view()?;
+        let replay_structure = std::sync::Arc::clone(adjoint.structure());
+        let space = adjoint.transformed(rule, operation)?;
         Ok((space, replay_structure))
     } else {
         let replay_structure = std::sync::Arc::clone(src.structure());
-        let space = DynamicFusionMapSpace::transformed_from_typed(rule, src_fusion, operation)?;
+        let space = src_fusion.transformed(rule, operation)?;
         Ok((space, replay_structure))
     }
 }
@@ -259,21 +220,13 @@ where
     clippy::too_many_arguments,
     reason = "the typed-to-dynamic replay boundary keeps backend resources, transform, structures, buffers, conjugation, and alpha explicit"
 )]
-fn tree_pair_transform_typed_to_dynamic<
-    BT,
-    R,
-    D,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SSrc,
-    DSrc,
->(
+fn tree_pair_transform_typed_to_dynamic<BT, R, D>(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
     operation: TreeTransformOperation,
     dst: &mut OracleScratch<D>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    src: &TestTensor<D>,
     src_replay_structure: &std::sync::Arc<BlockStructure>,
     source_conjugate: bool,
     alpha: D,
@@ -284,7 +237,6 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DSrc: HostReadableStorage<D>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src_replay_structure)?;
     let structure = plan.compile_structures_with_storage_conjugation(
@@ -309,20 +261,12 @@ where
     clippy::too_many_arguments,
     reason = "the dynamic-to-typed replay boundary keeps backend resources, transform, operands, and alpha/beta explicit"
 )]
-fn tree_pair_transform_dynamic_to_typed<
-    BT,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    SDst,
-    DDst,
->(
+fn tree_pair_transform_dynamic_to_typed<BT, R, D>(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
     operation: TreeTransformOperation,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    dst: &mut TestTensor<D>,
     src: &OracleScratch<D>,
     alpha: D,
     beta: D,
@@ -332,7 +276,6 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
-    DDst: HostWritableStorage<D>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src.space().structure())?;
     let structure = plan.compile_structures(dst.structure(), src.space().structure())?;

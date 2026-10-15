@@ -1,6 +1,6 @@
 use super::super::scratch::DynamicFusionScratchWorkspace;
 use super::*;
-use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap};
+use crate::tests::TestTensor;
 
 // Reference contraction path. Its only production caller
 // (`tensorcontract_fusion_dynamic_into_context`) was removed as dead code.
@@ -8,25 +8,7 @@ use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap}
 // compare against, so it is test-only now.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
-    RuleKey,
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
+pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<RuleKey, BT, BC, R, D>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
@@ -34,9 +16,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
     plan: &FusionContractPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -47,22 +29,10 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
 {
-    let dst_space = DynamicFusionMapSpace::from_typed(
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let lhs_space = DynamicFusionMapSpace::from_typed(
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let rhs_space = DynamicFusionMapSpace::from_typed(
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
+    let dst_space = dst.dynamic_space().clone();
+    let lhs_space = lhs.dynamic_space().clone();
+    let rhs_space = rhs.dynamic_space().clone();
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let lhs_structure = std::sync::Arc::clone(lhs.structure());
     let rhs_structure = std::sync::Arc::clone(rhs.structure());
@@ -91,21 +61,12 @@ where
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_for_test<
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+pub(crate) fn execute_dynamic_tree_execution_artifact_for_test<R, D>(
     rule: &R,
     plan: &FusionContractPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
+    dst: &mut TestTensor<D>,
+    lhs: &TestTensor<D>,
+    rhs: &TestTensor<D>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>

@@ -70,14 +70,14 @@ fn exp_of_a_hermitian_tensor_inverts_under_negation() {
     let rule = Z2FusionRule;
     let raw = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     // Keep the spectrum modest so exp(t) exp(-t) stays well conditioned.
-    let tensor = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         raw.data().iter().map(|value| 0.1 * value).collect(),
-        raw.fusion_space().unwrap().as_ref().clone(),
+        raw.fusion_space().clone(),
     )
     .unwrap();
-    let negated = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let negated = TestTensor::<f64>::from_vec_with_fusion_space(
         tensor.data().iter().map(|value| -value).collect(),
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
@@ -117,7 +117,7 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     )
     .unwrap();
     let len = space.required_len().unwrap();
-    let canonical = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let canonical = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..len).map(|i| ((i * 3 + 2) % 11) as f64 - 5.0).collect(),
         space,
     )
@@ -201,7 +201,7 @@ fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
         &divisor_provider
     ));
     assert!(!Arc::ptr_eq(solved.space().provider_arc(), &rhs_provider));
-    let solved: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(solved).unwrap();
+    let solved: BoundTensorMap<_, _> = typed_from_bound_factor(solved).unwrap();
     let sectors = dense_sector_matrices(1, solved.tensor());
     let even = sectors
         .iter()
@@ -491,7 +491,7 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
     let divisor = bound_tensor(Arc::clone(&provider), &source);
     let rhs = bound_tensor(Arc::clone(&provider), &source);
     let output_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        dyn_space_of(&output).unwrap(),
+        output.fusion_space().clone(),
         Arc::clone(&provider),
     )
     .unwrap();
@@ -517,7 +517,7 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
     assert_eq!(dense.counts().solve, 0);
 }
 
-fn u1_block_map<D>(blocks: &[(i32, usize, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
+fn u1_block_map<D>(blocks: &[(i32, usize, usize, Vec<D>)]) -> TestTensor<D>
 where
     D: Copy + Zero,
 {
@@ -559,7 +559,7 @@ where
         shapes,
     )
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+    TestTensor::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
         let BlockKey::FusionTree(tree) = key else {
             return D::zero();
         };
@@ -573,7 +573,7 @@ where
     .unwrap()
 }
 
-fn scalar_block_endomorphism<R>(rule: &R, blocks: &[(SectorId, f64)]) -> TensorMap<f64, 1, 1>
+fn scalar_block_endomorphism<R>(rule: &R, blocks: &[(SectorId, f64)]) -> TestTensor<f64>
 where
     R: MultiplicityFreeFusionRule,
 {
@@ -590,7 +590,7 @@ where
         shapes,
     )
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, 0.0, |key, _| {
+    TestTensor::from_block_fn_with_fusion_space(space, 0.0, |key, _| {
         let BlockKey::FusionTree(tree) = key else {
             return 0.0;
         };
@@ -770,7 +770,7 @@ fn inv_reorders_a_complete_expert_tree_grid_by_key() {
     };
     let diagonal = |tree: &FusionTreeKey, row: usize| 2.0 + tree_code(tree) as f64 + row as f64;
     let upper = |tree: &FusionTreeKey| 0.25 + tree_code(tree) as f64 * 0.125;
-    let canonical = TensorMap::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+    let canonical = TestTensor::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
         let BlockKey::FusionTree(key) = key else {
             return 0.0;
         };
@@ -885,25 +885,20 @@ fn inv_dyn_reverses_isomorphic_spaces_with_different_tree_ranks() {
     for index in 0..6 {
         data[index + 6 * index] = index as f64 + 1.0;
     }
-    let tensor = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(data, space).unwrap();
+    let tensor = TestTensor::<f64>::from_vec_with_fusion_space(data, space).unwrap();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
     let inverse = inv_into_mf(&mut dense, &bound.as_ref().dynamic()).unwrap();
-    let inverse: BoundTensorMap<_, _, 1, 2> = typed_from_bound_factor(inverse).unwrap();
+    let inverse: BoundTensorMap<_, _> = typed_from_bound_factor(inverse).unwrap();
 
     assert_eq!(
-        inverse
-            .tensor()
-            .fusion_space()
-            .unwrap()
-            .homspace()
-            .codomain(),
-        tensor.fusion_space().unwrap().homspace().domain()
+        inverse.tensor().fusion_space().homspace().codomain(),
+        tensor.fusion_space().homspace().domain()
     );
     assert_eq!(
-        inverse.tensor().fusion_space().unwrap().homspace().domain(),
-        tensor.fusion_space().unwrap().homspace().codomain()
+        inverse.tensor().fusion_space().homspace().domain(),
+        tensor.fusion_space().homspace().codomain()
     );
     for row in 0..6 {
         for col in 0..6 {
@@ -1069,7 +1064,7 @@ fn inv_solves_the_rank_zero_scalar_sector() {
         shapes,
     )
     .unwrap();
-    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![-4.0], space).unwrap();
+    let scalar = TestTensor::<f64>::from_vec_with_fusion_space(vec![-4.0], space).unwrap();
     let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let mut context = default_context();
 
@@ -1114,13 +1109,13 @@ fn pinv_keeps_its_global_rcond_cutoff() {
 fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     let rule = Z2FusionRule;
     let source = mixed_rectangular_c32_tensor();
-    let canonical = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let canonical = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| Complex64::new(value.re as f64, value.im as f64))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let parent = padded_copy(&rule, &canonical);
@@ -1136,8 +1131,8 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_input_pack_bytes();
     let output = pinv_adjoint_parent_into_mf(&mut dense, &bound.as_ref().dynamic(), 0.0).unwrap();
-    let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
-    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &canonical).unwrap();
+    let output: BoundTensorMap<_, _> = typed_from_bound_factor(output).unwrap();
+    let adjoint = adjoint(provider.as_ref(), &canonical).unwrap();
     let first = crate::compose::compose(&mut context, provider.as_ref(), &adjoint, output.tensor())
         .unwrap();
     let reconstructed =
@@ -1219,7 +1214,7 @@ const EXP_ORACLE_RTOL: f64 = 1e-12;
 const EXP_INVERSE_RTOL: f64 = 1e-11;
 
 /// Column-major coupled-sector matrix of a single-tree `1 <- 1` U(1) tensor.
-fn u1_block_matrix<D: Copy + Zero>(tensor: &TensorMap<D, 1, 1>, charge: i32) -> Vec<D> {
+fn u1_block_matrix<D: Copy + Zero>(tensor: &TestTensor<D>, charge: i32) -> Vec<D> {
     let sector = U1Irrep::new(charge).sector_id();
     let structure = tensor.structure();
     let block = (0..structure.block_count())
@@ -1604,12 +1599,10 @@ fn taylor_exp(matrix: &[f64], order: usize, terms: usize) -> Vec<f64> {
 
 /// Column-major coupled-sector matrices of a canonical layout, read through the
 /// pre-existing region reader.
-fn coupled_sector_matrices<const NOUT: usize, const NIN: usize>(
-    tensor: &TensorMap<f64, NOUT, NIN>,
-) -> Vec<(SectorId, usize, Vec<f64>)> {
+fn coupled_sector_matrices(tensor: &TestTensor<f64>) -> Vec<(SectorId, usize, Vec<f64>)> {
     tensor
         .structure()
-        .coupled_sector_regions(NOUT)
+        .coupled_sector_regions(tensor.fusion_space().nout())
         .unwrap()
         .expect("canonical coupled-sector storage")
         .iter()
@@ -1630,23 +1623,23 @@ fn coupled_sector_matrices<const NOUT: usize, const NIN: usize>(
 
 /// Rank 2 <- 2 U(1) endomorphism whose coupled sectors carry one, two and three
 /// fusion trees, scaled into the oracle's comfortable range.
-fn exp_multitree_fixture() -> TensorMap<f64, 2, 2> {
+fn exp_multitree_fixture() -> TestTensor<f64> {
     let sectors: Vec<SectorId> = (0..3).map(|c| U1Irrep::new(c).sector_id()).collect();
     let tensor = tsvd_test_tensor(&U1FusionRule, &sectors);
-    TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    TestTensor::<f64>::from_vec_with_fusion_space(
         tensor
             .data()
             .iter()
             .map(|value| value * EXP_MULTITREE_SCALE)
             .collect(),
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap()
 }
 
 /// Entrywise comparison of a whole tensor's sectors against the series oracle.
 fn assert_multitree_exp_matches_the_series(
-    exponential: &TensorMap<f64, 2, 2>,
+    exponential: &TestTensor<f64>,
     sources: &[(SectorId, usize, Vec<f64>)],
     what: &str,
 ) {
@@ -1765,9 +1758,9 @@ fn exp_of_a_general_endomorphism_inverts_under_negation() {
     // What: exp(A) exp(-A) = 1 for a non-Hermitian A, the check that catches a
     // sign or a transposition the oracle blocks would also have to agree with.
     let tensor = exp_oracle_tensor::<f64>(1.0);
-    let negated = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let negated = TestTensor::<f64>::from_vec_with_fusion_space(
         tensor.data().iter().map(|value| -value).collect(),
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
     let rule = U1FusionRule;
@@ -1794,7 +1787,7 @@ fn exp_of_a_general_endomorphism_inverts_under_negation() {
     }
 }
 
-fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
+fn hermitian_exp_fixture() -> TestTensor<f64> {
     u1_block_endomorphism(&[
         (
             0,
@@ -1872,7 +1865,7 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     let vd_space = vd.space().space().clone();
     scale_axis_by_spectrum(&vd_space, vd.data_mut(), None, &exponentials).unwrap();
     let spectral = crate::compose::compose_bound_dyn(&mut context, &vd, &vh).unwrap();
-    let spectral: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(spectral).unwrap();
+    let spectral: BoundTensorMap<_, _> = typed_from_bound_factor(spectral).unwrap();
     numerics::assert_slices_close(
         "exp",
         exponential.tensor().data(),
@@ -2384,7 +2377,7 @@ fn exp_rejects_a_non_endomorphism() {
         shapes,
     )
     .unwrap();
-    let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| index as f64)
             .collect(),
@@ -2529,10 +2522,10 @@ fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values
     // ("inverse output tree basis does not transpose the source basis").
     let rule = U1FusionRule;
     let sectors = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
-    let scaled = |tensor: TensorMap<f64, 2, 2>| {
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+    let scaled = |tensor: TestTensor<f64>| {
+        TestTensor::<f64>::from_vec_with_fusion_space(
             tensor.data().iter().map(|value| 0.1 * value).collect(),
-            tensor.fusion_space().unwrap().as_ref().clone(),
+            tensor.fusion_space().clone(),
         )
         .unwrap()
     };

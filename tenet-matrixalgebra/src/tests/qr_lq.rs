@@ -401,13 +401,13 @@ fn compact_svd_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_span
     let Lq { l, q } = lq_compact_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &l, None, &q);
 
-    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let complex = TestTensor::<Complex64>::from_vec_with_fusion_space(
         tensor
             .data()
             .iter()
             .map(|&value| Complex64::new(value, value * 0.25))
             .collect(),
-        tensor.fusion_space().unwrap().as_ref().clone(),
+        tensor.fusion_space().clone(),
     )
     .unwrap();
     let complex_bound = bound_tensor(Arc::new(Z2FusionRule), &complex);
@@ -542,13 +542,13 @@ fn compact_qr_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     // What: one complex QR call reconstructs mixed rectangular sectors in final storage.
     let rule = Z2FusionRule;
     let source = mixed_rectangular_c32_tensor();
-    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| Complex64::new(value.re as f64, value.im as f64))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -601,13 +601,13 @@ fn compact_lq_c64_reconstructs_mixed_tall_and_wide_sectors_with_bounded_scratch(
     // What: one complex LQ call reconstructs mixed rectangular sectors using bounded adjoint scratch and final regions.
     let rule = Z2FusionRule;
     let source = mixed_rectangular_c32_tensor();
-    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+    let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         source
             .data()
             .iter()
             .map(|value| Complex64::new(value.re as f64, value.im as f64))
             .collect(),
-        source.fusion_space().unwrap().as_ref().clone(),
+        source.fusion_space().clone(),
     )
     .unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -957,13 +957,9 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     // agree (path agreement under the workspace rule, 3 = the long side), and
     // the full factors are orthonormal and reconstruct the input.
     let rule = Z2FusionRule;
-    let wide_space = rectangular_svd_tensor(2, 3)
-        .fusion_space()
-        .unwrap()
-        .as_ref()
-        .clone();
+    let wide_space = rectangular_svd_tensor(2, 3).fusion_space().clone();
     let wide =
-        TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
+        TestTensor::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
             .unwrap();
     let wide_input = bound_tensor(Arc::new(rule), &wide);
     let wide_input_ref = wide_input.as_ref();
