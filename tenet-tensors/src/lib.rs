@@ -25,9 +25,15 @@ mod tree_transform;
 
 pub use tenet_core::RuleIdentity;
 
+pub(crate) use adjoint::adjoint_bound_space_dyn_generic_checked;
 pub use adjoint::{
     adjoint, adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn,
-    AdjointBlockMap, AdjointBlockSource, AdjointScalar,
+    AdjointBlockMap,
+};
+#[doc(hidden)]
+pub use admission::{
+    admit_checked_generic_pair, reject_non_symmetric_contraction, require_symmetric_braiding,
+    SymmetricBraidingOp, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
 };
 pub use bound_tensor::BoundDynamicTensorRef;
 #[cfg(test)]
@@ -37,27 +43,31 @@ pub use contract::tensorcontract_structure;
 pub(crate) use contract::TensorContractFusionRoute;
 #[cfg(test)]
 pub(crate) use contract::{contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind};
+#[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use contract::{
-    copy_c_output_transform, CopyCRoute, CoreMiss, CoreRoute, DirectCoreExecutor, ExecCaps,
-    HostEagerExecutor,
+    execute_storage_contract_members_cuda, execute_storage_contract_resolution_on_cuda,
+    CudaContractMembersWorkspace, CudaContractScratch,
 };
 #[doc(hidden)]
 pub use contract::{
-    plan_compose, try_compile_storage_contract_core_route, CheckedContractStage,
-    HostContractMembersWorkspace, MultiplicityFreeContractStage, StagedContract,
-    StorageContractResolution,
+    plan_compose, try_compile_storage_contract_core_route, HostContractMembersWorkspace,
+    StagedContract, StorageContractResolution,
 };
 pub use contract::{
-    prepare_tensorcontract_fusion_plan_dyn, tensorcontract_fusion_block_specs,
-    zero_copy_contract_order_for_output_permute, FusionContractOrientation, FusionContractPlan,
-    HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
-    TensorContractBlockSpec, TensorContractFusionExecutionContext, TensorContractFusionProfile,
-    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+    prepare_tensorcontract_fusion_plan_dyn, tensorcontract_fusion_block_specs, FusionContractPlan,
+    HostTensorContractBackend, TensorContractBackend, TensorContractBlockSpec,
+    TensorContractFusionExecutionContext, TensorContractFusionProfile,
 };
 pub use contract::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
-    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,
+};
+#[doc(hidden)]
+pub use contract::{CopyCRoute, CoreRoute, DirectCoreExecutor, ExecCaps, HostEagerExecutor};
+#[cfg(test)]
+pub(crate) use contract::{
+    HostTensorContractWorkspace, PreparedCheckedGenericDynamicSpace, TensorContractStructure,
+    TensorContractWorkspace,
 };
 #[doc(hidden)]
 pub use mode::ContractRequest;
@@ -69,21 +79,6 @@ pub use oriented_elementwise::{
     fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_axpby_into,
     oriented_fusion_inner, oriented_fusion_inner_with, oriented_fusion_restrict_owned,
     stacked_fusion_restrict_owned, SectorRunTable, SelectedRuns,
-};
-// Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
-pub use adjoint::adjoint_bound_space_dyn_generic_checked;
-#[doc(hidden)]
-pub use admission::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
-#[doc(hidden)]
-pub use admission::{
-    admit_checked_generic_pair, admit_checked_generic_providers, reject_non_symmetric_contraction,
-    require_symmetric_braiding, SymmetricBraidingOp, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
-};
-#[cfg(feature = "cuda")]
-#[doc(hidden)]
-pub use contract::{
-    execute_storage_contract_members_cuda, execute_storage_contract_resolution_on_cuda,
-    CudaContractMembersWorkspace, CudaContractScratch,
 };
 #[doc(hidden)]
 pub use physical::{expand_physical_host, project_physical_host, PhysicalConversionError};
@@ -115,24 +110,27 @@ pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
+#[cfg(all(test, feature = "racah-generated"))]
+pub(crate) use tensortrace::{
+    tensortrace_checked_generic_in, tensortrace_fusion_dyn_owned_generic_checked,
+};
 pub use tensortrace::{
-    tensortrace_checked_generic_in, tensortrace_checked_generic_with,
-    tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
-    tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_preflight_checked,
-    tensortrace_fusion_dyn_preflight_generic_checked, tensortrace_fusion_dyn_structure_into_raw,
-    tensortrace_fusion_dyn_structure_owned, tensortrace_fusion_structure_into_host,
-    tensortrace_fusion_structure_owned_host, tensortrace_into_checked_generic_in,
-    tensortrace_into_checked_generic_with, tensortrace_into_multiplicity_free_in,
-    tensortrace_into_multiplicity_free_with, tensortrace_multiplicity_free_in,
-    tensortrace_multiplicity_free_with, tensortrace_stage_checked_generic,
-    tensortrace_stage_multiplicity_free, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStage, TracePreflight,
+    tensortrace_checked_generic_with, tensortrace_fusion_dyn_preflight_checked,
+    tensortrace_fusion_dyn_preflight_generic_checked, tensortrace_fusion_structure_into_host,
+    tensortrace_fusion_structure_owned_host, tensortrace_into_checked_generic_with,
+    tensortrace_into_multiplicity_free_with, tensortrace_multiplicity_free_with,
+    tensortrace_stage_checked_generic, tensortrace_stage_multiplicity_free,
+    TensorTraceFusionStructure, TracePreflight,
 };
 #[cfg(test)]
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
-pub use tree_context::{
-    CheckedTreeTransformStage, StagedTreeTransform, StructureOutcome, TreeTransformExecutionContext,
+#[cfg(test)]
+pub(crate) use tensortrace::{
+    tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
+    tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
+    tensortrace_multiplicity_free_in, TensorTraceFusionStructureTerm, TensorTraceStage,
 };
+pub use tree_context::{StagedTreeTransform, StructureOutcome, TreeTransformExecutionContext};
 #[doc(hidden)]
 pub use tree_transform::{
     admit_exact_tree_pair_layout, exact_layout_tree_pair_hit, TreeTransformOperationView,

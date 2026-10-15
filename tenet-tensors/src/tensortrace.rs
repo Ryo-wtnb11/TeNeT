@@ -1235,6 +1235,7 @@ where
 /// execution succeeds is a Rust ownership/error adaptation, not another
 /// numerical path.
 #[allow(clippy::type_complexity)]
+#[cfg(test)]
 fn tensortrace_owned_in<M, R, D, P>(
     stage: M::TraceStage<'_>,
     src: &BoundDynamicFusionMapSpace<R>,
@@ -1296,74 +1297,6 @@ where
     let value = scalar.then(|| read(&structure)).flatten();
     let out = execute(&structure, value, M::trace_nout(&stage))?;
     Ok((M::commit_trace(src, stage, pending)?, out))
-}
-
-/// `dst = alpha · trace(src) + beta · dst` into an existing destination:
-/// the owned trace's staging, compile and commit around a write into the
-/// caller's buffer (TensorKit `trace_permute!` / `_trace_permute!`).
-///
-/// A `read` answer is written as `alpha · value + beta · dst` (a strong zero
-/// for `beta = 0`); otherwise the compiled terms replay `payload` with
-/// TensorKit's `beta` pass first. The checked commit follows the write
-/// (#2063).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
-fn tensortrace_into_in<'d, M, R, D, P, E>(
-    src: &BoundDynamicFusionMapSpace<R>,
-    read: impl FnOnce(&TensorTraceFusionStructure<M::Coeff>) -> Option<D>,
-    payload: impl FnOnce() -> P,
-    axes: TensorTraceAxisSpec<'_>,
-    dst_nout: usize,
-    dst_space: &DynamicFusionMapSpace,
-    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-    alpha: D,
-    beta: D,
-) -> Result<(), E>
-where
-    M: TraceStaging<R>,
-    M::Error: From<OperationError>,
-    M::Coeff: Copy,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<M::Coeff>
-        + strided_kernel::MaybeSendSync
-        + 'd,
-    P: AsRef<[D]>,
-    E: From<M::Error> + From<OperationError>,
-{
-    trace_into_staged_in::<M, R, D, _, E>(
-        src,
-        read,
-        axes,
-        dst_nout,
-        dst_space,
-        dst_data,
-        |structure, value, dst| {
-            match (value, &mut *dst) {
-                (Some(value), [slot]) => {
-                    *slot = if beta == D::zero() {
-                        value * alpha
-                    } else {
-                        value * alpha + beta * *slot
-                    };
-                }
-                _ => tensortrace_fusion_structure_into_host(
-                    structure,
-                    dst,
-                    src.space().structure(),
-                    payload().as_ref(),
-                    alpha,
-                    beta,
-                )
-                .map_err(|error| E::from(M::Error::from(error)))?,
-            }
-            Ok(())
-        },
-    )
 }
 
 /// The skeleton of every trace into an existing destination, on any
@@ -1475,7 +1408,8 @@ where
 /// scalar destination from the compiled terms without the payload.
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
-pub fn tensortrace_multiplicity_free_in<R, D, P>(
+#[cfg(test)]
+pub(crate) fn tensortrace_multiplicity_free_in<R, D, P>(
     stage: TensorTraceStage<'_, R, BoundDynamicFusionMapSpace<R>>,
     src: &BoundDynamicFusionMapSpace<R>,
     read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
@@ -1506,7 +1440,8 @@ where
 /// scalar destination from the compiled terms without the payload.
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
-pub fn tensortrace_checked_generic_in<R, D, P>(
+#[cfg(test)]
+pub(crate) fn tensortrace_checked_generic_in<R, D, P>(
     stage: TensorTraceStage<'_, R, PreparedCheckedGenericDynamicSpace>,
     src: &BoundDynamicFusionMapSpace<R>,
     read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
@@ -1529,87 +1464,6 @@ where
 {
     tensortrace_owned_in::<CheckedGenericAdmissionMode, R, D, P>(
         stage, src, read, payload, axes, alpha,
-    )
-}
-
-/// [`tensortrace_multiplicity_free_in`] into an existing destination: the
-/// same staging and compile, `dst_space` compared with the staged
-/// destination (HomSpace before the pair duality, then the layout) before
-/// `dst_data` is asked for the buffer, then
-/// `dst = alpha · trace + beta · dst`.
-///
-/// This concrete cross-crate entrypoint is internal and unstable despite
-/// being public for `tenet`; downstream callers must not rely on it.
-#[doc(hidden)]
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub fn tensortrace_into_multiplicity_free_in<'d, R, D, P, E>(
-    src: &BoundDynamicFusionMapSpace<R>,
-    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
-    payload: impl FnOnce() -> P,
-    axes: TensorTraceAxisSpec<'_>,
-    dst_nout: usize,
-    dst_space: &DynamicFusionMapSpace,
-    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-    alpha: D,
-    beta: D,
-) -> Result<(), E>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<f64>
-        + strided_kernel::MaybeSendSync
-        + 'd,
-    P: AsRef<[D]>,
-    E: From<OperationError>,
-{
-    tensortrace_into_in::<MultiplicityFreeAdmissionMode, R, D, P, E>(
-        src, read, payload, axes, dst_nout, dst_space, dst_data, alpha, beta,
-    )
-}
-
-/// [`tensortrace_checked_generic_in`] into an existing destination: the
-/// same staging and compile, `dst_space` compared with the prepared
-/// destination before `dst_data` is asked for the buffer, the write, then
-/// the same commit and publication (#2063).
-///
-/// This concrete cross-crate entrypoint is internal and unstable despite
-/// being public for `tenet`; downstream callers must not rely on it.
-#[doc(hidden)]
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub fn tensortrace_into_checked_generic_in<'d, R, D, P, E>(
-    src: &BoundDynamicFusionMapSpace<R>,
-    read: impl FnOnce(&TensorTraceFusionStructure<f64>) -> Option<D>,
-    payload: impl FnOnce() -> P,
-    axes: TensorTraceAxisSpec<'_>,
-    dst_nout: usize,
-    dst_space: &DynamicFusionMapSpace,
-    dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-    alpha: D,
-    beta: D,
-) -> Result<(), E>
-where
-    R: CheckedGenericPivotal<Scalar = f64>,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<f64>
-        + strided_kernel::MaybeSendSync
-        + 'd,
-    P: AsRef<[D]>,
-    E: From<CheckedGenericPlanError<R::Error>> + From<OperationError>,
-{
-    tensortrace_into_in::<CheckedGenericAdmissionMode, R, D, P, E>(
-        src, read, payload, axes, dst_nout, dst_space, dst_data, alpha, beta,
     )
 }
 
@@ -1702,7 +1556,8 @@ where
 /// This is a lower-layer seam only; typed dispatch can adopt it once the
 /// Generic output-space admission is part of the facade contract.
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
+#[cfg(test)]
+pub(crate) fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     src_space: &BoundDynamicFusionMapSpace<R>,
     src_data: &[D],
@@ -2017,7 +1872,8 @@ where
 /// entry point when typed machine-boundary errors are required; the legacy
 /// wrapper above remains available to custom fusion rules.
 #[allow(clippy::too_many_arguments)]
-pub fn tensortrace_fusion_dyn_into_checked<R, D>(
+#[cfg(test)]
+pub(crate) fn tensortrace_fusion_dyn_into_checked<R, D>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     dst_data: &mut [D],
     src_space: &BoundDynamicFusionMapSpace<R>,
@@ -2097,7 +1953,8 @@ where
 
 /// Checked built-in counterpart of [`tensortrace_fusion_dyn_owned`].
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_owned_checked<R, D>(
+#[cfg(test)]
+pub(crate) fn tensortrace_fusion_dyn_owned_checked<R, D>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     src_space: &BoundDynamicFusionMapSpace<R>,
     src_data: &[D],
@@ -2169,7 +2026,8 @@ where
 /// Executes compiled trace terms into a new payload (the execution half of
 /// the owned trace entries).
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_structure_owned<C, D>(
+#[cfg(test)]
+pub(crate) fn tensortrace_fusion_dyn_structure_owned<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     src_space: &DynamicFusionMapSpace,
@@ -2272,11 +2130,12 @@ where
     Ok(data)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 /// Executes compiled trace terms into `dst_data` (the execution half of the
 /// trace-into entries).
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
+pub(crate) fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
@@ -2399,6 +2258,7 @@ where
 /// keeps its `MultiplicityFreeRigidSymbols` bound for custom rules; lowered
 /// built-in callers use this wrapper to validate metadata before compilation.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn tensortrace_fusion_dyn_into_checked_raw<R, D>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,

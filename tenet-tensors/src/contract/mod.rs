@@ -37,8 +37,8 @@ mod dynamic_space;
 mod fusion;
 #[cfg(test)]
 pub(crate) use fusion::contracted_axis_order_candidates;
-#[doc(hidden)]
-pub use fusion::FusionContractOrientation;
+#[cfg(test)]
+pub(crate) use fusion::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use fusion::{
     candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
@@ -59,8 +59,8 @@ mod route_cuda;
 mod route_host;
 #[doc(hidden)]
 pub use resolution::{
-    copy_c_output_transform, zero_copy_contract_order_for_output_permute, CopyCRoute, CoreMiss,
-    CoreRoute, DirectCoreExecutor, ExecCaps, HostEagerExecutor, StorageContractResolution,
+    CopyCRoute, CoreRoute, DirectCoreExecutor, ExecCaps, HostEagerExecutor,
+    StorageContractResolution,
 };
 #[cfg(test)]
 mod candidate_core_tests;
@@ -71,17 +71,15 @@ mod structure;
 
 #[cfg(test)]
 pub(crate) use backend::tensorcontract_structure_with_dense_executor_raw;
-pub use backend::{
-    HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
-    TensorContractWorkspace,
-};
-pub use checked_generic::CheckedContractStage;
+pub use backend::{HostTensorContractBackend, TensorContractBackend};
+#[cfg(test)]
+pub(crate) use backend::{HostTensorContractWorkspace, TensorContractWorkspace};
 #[cfg(test)]
 pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
+pub use context::StagedContract;
 pub use context::{
     plan_compose, try_compile_storage_contract_core_route, TensorContractFusionExecutionContext,
 };
-pub use context::{MultiplicityFreeContractStage, StagedContract};
 #[cfg(test)]
 pub(crate) use dynamic_space::{
     checked_layout_primer, checked_metadata_dispatcher, fusion_operand_projection_prepares,
@@ -107,10 +105,9 @@ pub(crate) use fusion::{
 };
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
-pub use structure::{
-    tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
-    TensorContractStructureTerm,
-};
+#[cfg(test)]
+pub(crate) use structure::TensorContractStructure;
+pub use structure::{tensorcontract_structure, TensorContractBlockSpec};
 pub use tenet_operations::TensorContractFusionProfile;
 #[cfg(test)]
 pub use tenet_operations::TensorContractFusionRoute;
