@@ -111,17 +111,7 @@ where
     fn axpby_checked(&self, alpha: D, other: &Self, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error.
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        // `DynamicFusionMapSpace: PartialEq` covers the hom space, the
-        // codomain/domain split and the block structure, which is exactly what
-        // makes the element-wise combination meaningful.
-        if self.logical_space().space() != other.logical_space().space() {
-            return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-                message: "tensors live on different spaces or block layouts",
-            }));
-        }
+        require_same_runtime_and_space(self, other)?;
         if let (Some(x), Some(y)) = (S::as_host(EXEC, self), S::as_host(EXEC, other)) {
             if let Some(sum) = x.compact_axpby(alpha, y, beta)? {
                 return S::from_host(EXEC, sum);
@@ -701,6 +691,25 @@ pub(super) fn destination_slice<R, D>(
     destination_storage_mut(destination).map(Vec::as_mut_slice)
 }
 
+/// Runtime first, then space: crossing runtimes is a trust-boundary violation
+/// rather than an algebra error. `DynamicFusionMapSpace: PartialEq` covers the
+/// hom space, the codomain/domain split and the block structure, which is
+/// exactly what makes an element-wise combination meaningful.
+pub(super) fn require_same_runtime_and_space<R, D, S>(
+    a: &TensorMap<R, D, S>,
+    b: &TensorMap<R, D, S>,
+) -> Result<(), Error> {
+    if !a.runtime.same_runtime(&b.runtime) {
+        return Err(Error::RuntimeMismatch);
+    }
+    if a.logical_space().space() != b.logical_space().space() {
+        return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
+            message: "tensors live on different spaces or block layouts",
+        }));
+    }
+    Ok(())
+}
+
 /// The one body of [`TensorMap::axpby_into`], shared with the empty-pair
 /// `trace_pairs_into`: the TensorKit order (runtime, space, then the
 /// destination checks) before the one storage kernel.
@@ -713,14 +722,7 @@ pub(super) fn axpby_into_checked<R, D, S>(
 where
     S: ElementwiseExec<R, D>,
 {
-    if !x.runtime.same_runtime(&destination.runtime) {
-        return Err(Error::RuntimeMismatch);
-    }
-    if x.logical_space().space() != destination.logical_space().space() {
-        return Err(Error::from(tenet_tensors::OperationError::SpaceMismatch {
-            message: "tensors live on different spaces or block layouts",
-        }));
-    }
+    require_same_runtime_and_space(x, destination)?;
     unique_dense_destination(
         destination,
         &x.storage_body().data,
