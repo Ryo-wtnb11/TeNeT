@@ -1,8 +1,5 @@
 use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreePairKey};
 
-#[cfg(test)]
-use tenet_core::{FusionRule, FusionTensorMapSpace};
-
 use crate::OperationError;
 use tenet_operations::{
     permutation_axes_inline, AxisVec, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
@@ -177,22 +174,6 @@ fn adjoint_tensor_axes_inline(
         .copied()
         .map(|axis| adjoint_tensor_axis(nout, nin, axis))
         .collect()
-}
-
-#[cfg(test)]
-pub(crate) fn adjoint_fusion_space_view<R, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    source: &FusionTensorMapSpace<NOUT, NIN>,
-) -> Result<FusionTensorMapSpace<NIN, NOUT>, OperationError>
-where
-    R: FusionRule,
-{
-    source
-        .validate_rule(rule)
-        .map_err(OperationError::from_core_preserving_context)?;
-    source
-        .adjoint_view()
-        .map_err(OperationError::from_core_preserving_context)
 }
 
 pub(crate) fn adjoint_block_structure_view(

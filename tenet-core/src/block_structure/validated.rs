@@ -5,7 +5,7 @@ use super::*;
 /// This proof is deliberately LOCAL: it covers tree shape, fusion and
 /// vertex-label admissibility under the provider-owned fusion style, and
 /// structure rank for provider-domain sector IDs in this borrowed structure. It is neither a
-/// [`FusionTensorMapSpace`] construction proof nor a firewall for arbitrary
+/// fusion-space construction proof nor a firewall for arbitrary
 /// numeric sector IDs.
 ///
 /// Why not make this crate-private: `tenet-tensors` consumes the proof across

@@ -777,15 +777,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DynamicFusionMapSpace;
     use num_complex::Complex64;
     use tenet_core::{
-        BlockSpec, BlockStructure, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-        SectorId, SectorLeg, TensorMapSpace, Z2FusionRule,
+        BlockSpec, BlockStructure, FusionProductSpace, FusionTreeHomSpace, SectorId, SectorLeg,
+        Z2FusionRule,
     };
 
     fn padded_fixture() -> (
-        crate::DynamicFusionMapSpace,
-        crate::DynamicFusionMapSpace,
+        DynamicFusionMapSpace,
+        DynamicFusionMapSpace,
         Vec<Complex64>,
         Vec<Complex64>,
     ) {
@@ -795,29 +796,19 @@ mod tests {
             FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
             FusionProductSpace::new([SectorLeg::new([(vacuum, 3)], false)]),
         );
-        let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-            homspace.clone(),
-            &rule,
-            [vec![2, 3]],
-        )
-        .unwrap();
-        let canonical = crate::DynamicFusionMapSpace::from_typed(&canonical);
+        let canonical =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), [vec![2, 3]])
+                .unwrap();
         let block = canonical.structure().only_block().unwrap();
         let padded_structure = BlockStructure::from_blocks_with_rank(
             2,
             vec![BlockSpec::with_key(block.key().clone(), vec![2, 3], vec![2, 5], 1).unwrap()],
         )
         .unwrap();
-        let padded = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
-            homspace,
-            padded_structure,
-        )
-        .unwrap()
-        .try_bind_rule(&rule)
-        .unwrap();
-        let padded = crate::DynamicFusionMapSpace::from_typed(&padded);
+        let padded = DynamicFusionMapSpace::try_from_layout(homspace, padded_structure)
+            .unwrap()
+            .try_bind_rule(&rule)
+            .unwrap();
         let (logical, _) =
             crate::adjoint::adjoint_dyn(&rule, &canonical, &[Complex64::zero(); 6]).unwrap();
         let direct = (0..6)
@@ -854,16 +845,11 @@ mod tests {
             FusionProductSpace::new([SectorLeg::new([(even, 3), (odd, 3)], false)]),
             FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
         );
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([6], [4]).unwrap(),
-            homspace,
-            &rule,
-            [vec![3, 2], vec![3, 2]],
-        )
-        .unwrap()
-        .subblock_structure()
-        .as_ref()
-        .clone()
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![3, 2], vec![3, 2]])
+            .unwrap()
+            .structure()
+            .as_ref()
+            .clone()
     }
 
     fn bind_source(
@@ -883,19 +869,10 @@ mod tests {
                 false,
             )]),
         );
-        let typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims(
-                [shapes[0][0] + shapes[1][0]],
-                [shapes[0][1] + shapes[1][1]],
-            )
-            .unwrap(),
-            homspace,
-            structure,
-        )
-        .unwrap()
-        .try_bind_rule(&rule)
-        .unwrap();
-        crate::DynamicFusionMapSpace::from_typed(&typed)
+        DynamicFusionMapSpace::try_from_layout(homspace, structure)
+            .unwrap()
+            .try_bind_rule(&rule)
+            .unwrap()
     }
 
     fn source_with_shapes(

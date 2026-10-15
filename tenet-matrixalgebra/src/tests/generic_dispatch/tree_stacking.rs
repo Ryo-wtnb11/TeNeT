@@ -204,8 +204,7 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
         identity: FactorGenericRule.rule_identity(),
     });
     let relayout = |source: &[Complex64]| {
-        let typed_space = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        let typed_space = DynamicFusionMapSpace::try_from_layout(
             canonical.space().homspace().clone(),
             mis_stacked.clone(),
         )

@@ -18,29 +18,13 @@ fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
         FusionProductSpace::new([leg(true), leg(true)]),
     );
     let lhs_shapes = vec![vec![1; 3]; lhs_hom.fusion_tree_keys(&rule).len()];
-    let lhs = crate::DynamicFusionMapSpace::from_typed(
-        &FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 2>::from_dims([3], [3, 3]).unwrap(),
-            lhs_hom,
-            &rule,
-            lhs_shapes,
-        )
-        .unwrap(),
-    );
+    let lhs = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, lhs_hom, lhs_shapes).unwrap();
     let rhs_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(true), leg(true)]),
         FusionProductSpace::new([leg(false)]),
     );
     let rhs_shapes = vec![vec![1; 3]; rhs_hom.fusion_tree_keys(&rule).len()];
-    let rhs = crate::DynamicFusionMapSpace::from_typed(
-        &FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 1>::from_dims([3, 3], [3]).unwrap(),
-            rhs_hom,
-            &rule,
-            rhs_shapes,
-        )
-        .unwrap(),
-    );
+    let rhs = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, rhs_hom, rhs_shapes).unwrap();
     let dst =
         crate::DynamicFusionMapSpace::contracted(&rule, &lhs, &rhs, &[1, 2], &[0, 1]).unwrap();
     let provider = Arc::new(rule);
@@ -164,8 +148,8 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
         .flat_map(|(lhs, rhs)| product(lhs, rhs))
         .collect::<Vec<_>>();
     let matrix_space = |rows, cols| {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2 * rows], [2 * cols]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new(
                     [(SectorId::new(0), rows), (SectorId::new(1), rows)],
@@ -176,42 +160,45 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
                     false,
                 )]),
             ),
-            &rule,
             [vec![rows, cols], vec![rows, cols]],
         )
         .unwrap()
     };
 
     for (lhs_adjoint, rhs_adjoint) in [(false, false), (true, false), (false, true), (true, true)] {
-        let lhs_parent_typed = if lhs_adjoint {
+        let lhs_parent = if lhs_adjoint {
             matrix_space(k, m)
         } else {
             matrix_space(m, k)
         };
         let lhs_logical_typed = if lhs_adjoint {
-            crate::lowering::adjoint_fusion_space_view(&rule, &lhs_parent_typed).unwrap()
+            lhs_parent
+                .validate_rule(&rule)
+                .and_then(|()| lhs_parent.adjoint_view())
+                .unwrap()
         } else {
-            lhs_parent_typed.clone()
+            lhs_parent.clone()
         };
-        let rhs_parent_typed = if rhs_adjoint {
+        let rhs_parent = if rhs_adjoint {
             matrix_space(n, k)
         } else {
             matrix_space(k, n)
         };
         let rhs_logical_typed = if rhs_adjoint {
-            crate::lowering::adjoint_fusion_space_view(&rule, &rhs_parent_typed).unwrap()
+            rhs_parent
+                .validate_rule(&rule)
+                .and_then(|()| rhs_parent.adjoint_view())
+                .unwrap()
         } else {
-            rhs_parent_typed.clone()
+            rhs_parent.clone()
         };
-        let lhs_parent = crate::DynamicFusionMapSpace::from_typed(&lhs_parent_typed);
-        let rhs_parent = crate::DynamicFusionMapSpace::from_typed(&rhs_parent_typed);
         let lhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            crate::DynamicFusionMapSpace::from_typed(&lhs_logical_typed),
+            lhs_logical_typed.clone(),
             Arc::clone(&provider),
         )
         .unwrap();
         let rhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            crate::DynamicFusionMapSpace::from_typed(&rhs_logical_typed),
+            rhs_logical_typed.clone(),
             Arc::clone(&provider),
         )
         .unwrap();
@@ -354,13 +341,12 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
     let provider = Arc::new(rule);
     let odd = SectorId::new(1);
     let space = |codomain_dual, domain_dual| {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
                 FusionProductSpace::new([SectorLeg::new([(odd, 1)], domain_dual)]),
             ),
-            &rule,
             [vec![1, 1]],
         )
         .unwrap()
@@ -371,25 +357,23 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
     let rhs_values = vec![3.0];
 
     for (lhs_adjoint, rhs_adjoint) in [(false, false), (true, false), (false, true), (true, true)] {
-        let lhs_parent_typed = if lhs_adjoint {
+        let lhs_parent = if lhs_adjoint {
             lhs_logical_typed.adjoint_view().unwrap()
         } else {
             lhs_logical_typed.clone()
         };
-        let rhs_parent_typed = if rhs_adjoint {
+        let rhs_parent = if rhs_adjoint {
             rhs_logical_typed.adjoint_view().unwrap()
         } else {
             rhs_logical_typed.clone()
         };
-        let lhs_parent = crate::DynamicFusionMapSpace::from_typed(&lhs_parent_typed);
-        let rhs_parent = crate::DynamicFusionMapSpace::from_typed(&rhs_parent_typed);
         let lhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            crate::DynamicFusionMapSpace::from_typed(&lhs_logical_typed),
+            lhs_logical_typed.clone(),
             Arc::clone(&provider),
         )
         .unwrap();
         let rhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            crate::DynamicFusionMapSpace::from_typed(&rhs_logical_typed),
+            rhs_logical_typed.clone(),
             Arc::clone(&provider),
         )
         .unwrap();

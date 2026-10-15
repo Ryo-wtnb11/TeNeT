@@ -42,8 +42,6 @@ pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};
 pub mod axes;
 mod storage;
 pub use storage::*;
-mod space;
-pub use space::*;
 mod sector;
 pub use sector::*;
 mod fusion_space;

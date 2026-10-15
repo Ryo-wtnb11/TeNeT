@@ -782,34 +782,21 @@ fn transpose_tree_pair_block_matches_low_rank_and_nonselfdual_u1_oracles() {
 fn external_sectors_select_all_su2_simple_innerline_blocks() {
     let rule = SU2FusionRule;
     let half = SectorId::new(1);
-    let dense = TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap();
     let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        dense,
-        hom,
-        &rule,
-        [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
-    )
-    .unwrap();
+    let structure = hom
+        .coupled_subblock_structure(&rule, 3, [vec![1, 1, 1, 1], vec![1, 1, 1, 1]])
+        .unwrap();
 
-    let offsets = fusion_space
-        .homspace()
+    let offsets = hom
         .fusion_tree_keys_from_external_sectors(&rule, &[half, half, half, half])
         .unwrap()
         .iter()
-        .map(|key| {
-            fusion_space
-                .subblock_structure()
-                .fusion_tree_pair_block(key)
-                .unwrap()
-                .offset()
-        })
+        .map(|key| structure.fusion_tree_pair_block(key).unwrap().offset())
         .collect::<Vec<_>>();
 
     assert_eq!(offsets, [0, 1]);
 
-    let err = fusion_space
-        .homspace()
+    let err = hom
         .unique_fusion_tree_key_from_external_sectors(&rule, &[half, half, half, half])
         .unwrap_err();
     assert_eq!(

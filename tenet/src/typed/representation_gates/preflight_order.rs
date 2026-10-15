@@ -361,7 +361,7 @@ fn padded(
     space: &BoundDynamicFusionMapSpace<U1FusionRule>,
 ) -> (BoundDynamicFusionMapSpace<U1FusionRule>, Vec<usize>) {
     let structure = space.space().structure();
-    let (mut offset, mut dimension, mut blocks, mut offsets) = (1, 0, Vec::new(), Vec::new());
+    let (mut offset, mut blocks, mut offsets) = (1, Vec::new(), Vec::new());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         blocks.push(
@@ -370,10 +370,8 @@ fn padded(
         );
         offsets.push(offset);
         offset += block.shape().iter().product::<usize>() + 1;
-        dimension += block.shape()[0];
     }
-    let typed = tenet_core::FusionTensorMapSpace::new_unbound(
-        tenet_core::TensorMapSpace::<1, 1>::from_dims([dimension], [dimension]).unwrap(),
+    let layout = DynamicFusionMapSpace::try_from_layout(
         space.space().homspace().clone(),
         BlockStructure::from_blocks_with_rank(2, blocks).unwrap(),
     )
@@ -381,7 +379,7 @@ fn padded(
     .try_bind_rule(space.provider())
     .unwrap();
     let expert = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
-        tenet_tensors::DynamicFusionMapSpace::from_typed(&typed),
+        layout.clone(),
         Arc::clone(space.provider_arc()),
     )
     .unwrap();

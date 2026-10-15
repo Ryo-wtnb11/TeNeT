@@ -3,9 +3,8 @@ use std::cell::Cell;
 use tenet_core::Placement;
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreePairKey, MultiplicityIndex, ProductFusionRule, SU2FusionRule,
-    SU2Irrep, SectorLeg, SectorVec, TensorMapSpace, TensorStorage, U1FusionRule, U1Irrep,
-    Z2FusionRule,
+    FusionTreePairKey, MultiplicityIndex, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorLeg,
+    SectorVec, TensorStorage, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
 use tenet_operations::ReportsPlacement;
@@ -79,10 +78,9 @@ fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
     // charged as RHS materialization and its packed matrix remains marked
     // for clearing before replay.
     let rule = SU2FusionRule;
-    let scalar = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([], []),
+    let scalar = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        FusionTreeHomSpace::from_sector_ids([], []),
         [vec![]],
     )
     .unwrap();
@@ -98,8 +96,7 @@ fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
         .collect::<Vec<_>>();
     assert_eq!(keys.len(), 14);
     assert_eq!(diagonal_keys.len(), 6);
-    let sparse = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<4, 4>::from_dims([1, 1, 1, 1], [1, 1, 1, 1]).unwrap(),
+    let sparse = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         crate::tests::packed_fixture_structure(
             8,
@@ -112,16 +109,12 @@ fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let complete = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<4, 4>::from_dims([1, 1, 1, 1], [1, 1, 1, 1]).unwrap(),
-        homspace,
+    let complete = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        homspace,
         vec![vec![1; 8]; keys.len()],
     )
     .unwrap();
-    let scalar = DynamicFusionMapSpace::from_typed(&scalar);
-    let sparse = DynamicFusionMapSpace::from_typed(&sparse);
-    let complete = DynamicFusionMapSpace::from_typed(&complete);
 
     let facts = crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
         &rule,
@@ -193,8 +186,7 @@ where
     assert_eq!(keys.len(), 2);
     let full_order = vec![keys[1].clone(), keys[0].clone()];
     let make_space = |keys: Vec<FusionTreePairKey>| {
-        FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        DynamicFusionMapSpace::try_from_layout(
             homspace.clone(),
             crate::tests::packed_fixture_structure(
                 2,
@@ -206,9 +198,9 @@ where
         .try_bind_rule(rule)
         .unwrap()
     };
-    let lhs = DynamicFusionMapSpace::from_typed(&make_space(full_order.clone()));
-    let rhs = DynamicFusionMapSpace::from_typed(&make_space(vec![keys[0].clone()]));
-    let dst = DynamicFusionMapSpace::from_typed(&make_space(full_order));
+    let lhs = make_space(full_order.clone());
+    let rhs = make_space(vec![keys[0].clone()]);
+    let dst = make_space(full_order);
 
     reset_layout_lookups();
     let plan = compile_fusion_block_contract_plan(
@@ -282,36 +274,20 @@ fn canonical_region_join_scales_missing_sector_without_layout_compile() {
     let rule = Z2FusionRule;
     let outer = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let inner = || SectorLeg::new([(SectorId::new(0), 1)], false);
-    let space = |codomain: SectorLeg, domain: SectorLeg, dims, shapes| {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            dims,
+    let space = |codomain: SectorLeg, domain: SectorLeg, shapes| {
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([codomain]),
                 FusionProductSpace::new([domain]),
             ),
-            &rule,
             shapes,
         )
         .unwrap()
     };
-    let lhs = DynamicFusionMapSpace::from_typed(&space(
-        outer(),
-        inner(),
-        TensorMapSpace::<1, 1>::from_dims([2], [1]).unwrap(),
-        vec![vec![1, 1]],
-    ));
-    let rhs = DynamicFusionMapSpace::from_typed(&space(
-        inner(),
-        outer(),
-        TensorMapSpace::<1, 1>::from_dims([1], [2]).unwrap(),
-        vec![vec![1, 1]],
-    ));
-    let dst = DynamicFusionMapSpace::from_typed(&space(
-        outer(),
-        outer(),
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        vec![vec![1, 1], vec![1, 1]],
-    ));
+    let lhs = space(outer(), inner(), vec![vec![1, 1]]);
+    let rhs = space(inner(), outer(), vec![vec![1, 1]]);
+    let dst = space(outer(), outer(), vec![vec![1, 1], vec![1, 1]]);
 
     reset_layout_lookups();
     let plan = compile_fusion_block_contract_plan(
@@ -428,8 +404,7 @@ fn generic_layout_keeps_interleaved_cartesian_vertex_order() {
     assert!(matches!(duplicate, CoreError::DuplicateBlockKey { .. }));
 
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
-    let space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+    let space = DynamicFusionMapSpace::try_from_layout(
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(), leg()]),
             FusionProductSpace::new([leg(), leg()]),
@@ -438,7 +413,7 @@ fn generic_layout_keeps_interleaved_cartesian_vertex_order() {
             .unwrap(),
     )
     .unwrap();
-    let dynamic = DynamicFusionMapSpace::from_typed(&space);
+    let dynamic = space;
     let mut layout = FusionBlockMatrixLayout::compile(&dynamic).unwrap();
     let finished = layout
         .clone()
@@ -545,13 +520,12 @@ fn storage_direct_replay_runs_without_host_slice_contract() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
                 FusionProductSpace::new([leg()]),
             ),
-            &rule,
             [vec![1, 1], vec![1, 1]],
         )
         .unwrap()
@@ -559,9 +533,9 @@ fn storage_direct_replay_runs_without_host_slice_contract() {
     let space = fusion_space();
     let plan = compile_fusion_block_contract_plan(
         &rule,
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
+        &space.clone(),
+        &space.clone(),
+        &space.clone(),
         TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
@@ -588,13 +562,12 @@ fn storage_direct_replay_matches_host_execute_raw() {
     let leg =
         |dims: usize| SectorLeg::new([(SectorId::new(0), dims), (SectorId::new(1), dims)], false);
     let fusion_space = |dims: usize| {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2 * dims], [2 * dims]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg(dims)]),
                 FusionProductSpace::new([leg(dims)]),
             ),
-            &rule,
             [vec![dims, dims], vec![dims, dims]],
         )
         .unwrap()
@@ -606,9 +579,9 @@ fn storage_direct_replay_matches_host_execute_raw() {
     reset_layout_lookups();
     let plan = compile_fusion_block_contract_plan(
         &rule,
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
+        &space.clone(),
+        &space.clone(),
+        &space.clone(),
         TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
@@ -618,7 +591,7 @@ fn storage_direct_replay_matches_host_execute_raw() {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TensorContractWorkspace::default();
     let mut expected = vec![0.0; len];
-    let structure = std::sync::Arc::clone(space.subblock_structure());
+    let structure = std::sync::Arc::clone(space.structure());
     let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
     plan.execute_raw(
         &mut crate::StridedHostKernelAdapter::default(),
@@ -651,19 +624,19 @@ fn storage_direct_replay_matches_host_execute_raw() {
 fn z2_adjoint_mapping_spaces() -> (DynamicFusionMapSpace, DynamicFusionMapSpace) {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 2)], false);
-    let storage = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
+    let storage = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &rule,
         [vec![2, 2], vec![2, 2]],
     )
     .unwrap();
-    let logical = crate::lowering::adjoint_fusion_space_view(&rule, &storage).unwrap();
-    let logical = DynamicFusionMapSpace::from_typed(&logical);
-    let storage = DynamicFusionMapSpace::from_typed(&storage);
+    let logical = storage
+        .validate_rule(&rule)
+        .and_then(|()| storage.adjoint_view())
+        .unwrap();
     (logical, storage)
 }
 
@@ -677,26 +650,14 @@ fn nonselfdual_u1_adjoint_projects_logical_order_to_parent_blocks() {
         FusionProductSpace::new([codomain]),
         FusionProductSpace::new([domain]),
     );
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
-        homspace.clone(),
-        &rule,
-        vec![vec![1, 1]; 3],
-    )
-    .unwrap();
-    let reversed_keys = (0..canonical.subblock_structure().block_count())
+    let canonical =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), vec![vec![1, 1]; 3])
+            .unwrap();
+    let reversed_keys = (0..canonical.structure().block_count())
         .rev()
-        .map(|index| {
-            canonical
-                .subblock_structure()
-                .block(index)
-                .unwrap()
-                .key()
-                .clone()
-        })
+        .map(|index| canonical.structure().block(index).unwrap().key().clone())
         .collect::<Vec<_>>();
-    let reordered = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+    let reordered = DynamicFusionMapSpace::try_from_layout(
         homspace,
         crate::tests::packed_fixture_structure(
             2,
@@ -707,7 +668,7 @@ fn nonselfdual_u1_adjoint_projects_logical_order_to_parent_blocks() {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let storage = DynamicFusionMapSpace::from_typed(&reordered);
+    let storage = reordered.clone();
     let operand = crate::FusionOperand::adjoint(&storage)
         .prepare(
             &rule,
@@ -739,13 +700,9 @@ fn z2_reordered_rank4() -> (DynamicFusionMapSpace, DynamicFusionMapSpace) {
     );
     let keys = homspace.fusion_tree_keys(&rule);
     let shapes = vec![vec![1; 4]; keys.len()];
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
-        homspace.clone(),
-        &rule,
-        shapes.clone(),
-    )
-    .unwrap();
+    let canonical =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), shapes.clone())
+            .unwrap();
     let mut reordered = keys.iter().cloned().zip(shapes).collect::<Vec<_>>();
     let mut start = 0usize;
     while start < reordered.len() {
@@ -758,16 +715,13 @@ fn z2_reordered_rank4() -> (DynamicFusionMapSpace, DynamicFusionMapSpace) {
         reordered[start..end].reverse();
         start = end;
     }
-    let storage = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+    let storage = DynamicFusionMapSpace::try_from_layout(
         homspace,
         BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap(),
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let canonical = DynamicFusionMapSpace::from_typed(&canonical);
-    let storage = DynamicFusionMapSpace::from_typed(&storage);
     (canonical, storage)
 }
 
@@ -1156,14 +1110,8 @@ fn rank22_adjoint_reentry_keeps_matrix_orientation() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let shapes = vec![vec![2; 4]; homspace.fusion_tree_keys(&rule).len()];
-    let typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
-    let space = DynamicFusionMapSpace::from_typed(&typed);
+    let layout = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
+    let space = layout;
     let dst = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
         space.clone(),
         std::sync::Arc::new(rule),
@@ -1244,13 +1192,12 @@ fn storage_direct_replay_on_cuda_matches_host() {
 
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 3), (SectorId::new(1), 3)], false);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([6], [6]).unwrap(),
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
             FusionProductSpace::new([leg()]),
         ),
-        &rule,
         [vec![3, 3], vec![3, 3]],
     )
     .unwrap();
@@ -1259,9 +1206,9 @@ fn storage_direct_replay_on_cuda_matches_host() {
     let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
     let plan = compile_fusion_block_contract_plan(
         &rule,
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
-        &DynamicFusionMapSpace::from_typed(&space),
+        &space.clone(),
+        &space.clone(),
+        &space.clone(),
         TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();

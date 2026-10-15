@@ -140,7 +140,6 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = || {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(), leg()]),
@@ -150,10 +149,9 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     let space = || {
         let hom = homspace();
         let key_count = hom.fusion_tree_keys(&rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-            hom,
+        DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            hom,
             vec![vec![degeneracy; 4]; key_count],
         )
         .unwrap()

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use tenet_core::{
     BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode,
-    CheckedGenericFusion, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
+    CheckedGenericFusion, FusionProductSpace, FusionRule, FusionStyleKind, FusionTreeHomSpace,
+    RuleIdentity, SectorId, SectorLeg, SectorVec,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
 use tenet_matrixalgebra::seam::{
@@ -279,16 +279,11 @@ fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
         })
         .collect();
     let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
-    let physical = labels.len() * degeneracy;
-    let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([physical; 2], [physical; 2]).unwrap(),
-        homspace,
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(provider.as_ref())
-    .unwrap();
-    let dynamic = DynamicFusionMapSpace::from_typed(&typed);
+    let layout = DynamicFusionMapSpace::try_from_layout(homspace, structure)
+        .unwrap()
+        .try_bind_rule(provider.as_ref())
+        .unwrap();
+    let dynamic = layout;
     let space = BoundDynamicFusionMapSpace::bind_generic(dynamic, provider).unwrap();
     let data = vec![1.0; space.space().required_len().unwrap()];
     Fixture { space, data }

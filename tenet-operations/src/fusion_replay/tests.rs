@@ -5,9 +5,8 @@ use std::ops::{Add, Mul};
 use num_complex::Complex64;
 use num_traits::Zero;
 use tenet_core::{
-    FibonacciFusionRule, FibonacciSector, FusionProductSpace, FusionTensorMapSpace,
-    FusionTreeHomSpace, MultiplicityFreeFusionSymbols, SectorCodec, SectorLeg, TensorMapSpace,
-    Z2FusionRule, Z2Irrep,
+    FibonacciFusionRule, FibonacciSector, FusionProductSpace, FusionTreeHomSpace,
+    MultiplicityFreeFusionSymbols, SectorCodec, SectorLeg, Z2FusionRule, Z2Irrep,
 };
 
 fn direct_group(rows: usize, cols: usize, offset: Option<usize>) -> FusionBlockMatrixGroup {
@@ -1013,14 +1012,10 @@ fn canonical_direct_plan_rejects_equal_dimension_tree_basis_mismatch() {
     );
     let keys = homspace.fusion_tree_keys(&rule);
     let shapes = vec![vec![1; 4]; keys.len()];
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
-        homspace,
-        &rule,
-        shapes.clone(),
-    )
-    .unwrap();
-    let canonical = Arc::clone(canonical.subblock_structure());
+    let canonical = homspace
+        .coupled_subblock_structure(&rule, 2, shapes.clone())
+        .unwrap();
+    let canonical = Arc::clone(&canonical);
     let mut reordered = keys.iter().cloned().zip(shapes).collect::<Vec<_>>();
     let mut start = 0usize;
     while start < reordered.len() {
@@ -1179,17 +1174,13 @@ impl Rank2Gemm<f64> for CountingBatchGemm {
 #[test]
 fn direct_replay_uses_one_batched_gemm_call() {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg()]),
-            FusionProductSpace::new([leg()]),
-        ),
-        &Z2FusionRule,
-        [vec![1, 1], vec![1, 1]],
+    let space = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
     )
+    .coupled_subblock_structure(&Z2FusionRule, 1, [vec![1, 1], vec![1, 1]])
     .unwrap();
-    let structure = Arc::clone(space.subblock_structure());
+    let structure = Arc::clone(&space);
     let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
         &structure,
         1,
@@ -1371,17 +1362,13 @@ impl StorageGemm<Complex64, Vec<Complex64>, Vec<Complex64>, Vec<Complex64>>
 #[test]
 fn scaled_storage_jobs_keep_canonical_coefficients_aligned_and_convert_payload() {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)], false);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg()]),
-            FusionProductSpace::new([leg()]),
-        ),
-        &Z2FusionRule,
-        [vec![2, 2], vec![1, 1]],
+    let space = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
     )
+    .coupled_subblock_structure(&Z2FusionRule, 1, [vec![2, 2], vec![1, 1]])
     .unwrap();
-    let structure = Arc::clone(space.subblock_structure());
+    let structure = Arc::clone(&space);
     let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
         &structure,
         1,
@@ -1455,23 +1442,19 @@ fn scaled_storage_jobs_keep_canonical_coefficients_aligned_and_convert_payload()
         [1.0, 2.0, 3.0, 4.0, -10.0].map(|value| Complex64::new(value, 0.0))
     );
 
-    let unit_first_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new(
-                [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-                false,
-            )]),
-            FusionProductSpace::new([SectorLeg::new(
-                [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-                false,
-            )]),
-        ),
-        &Z2FusionRule,
-        [vec![1, 1], vec![1, 1]],
+    let unit_first_space = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(
+            [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+            false,
+        )]),
+        FusionProductSpace::new([SectorLeg::new(
+            [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+            false,
+        )]),
     )
+    .coupled_subblock_structure(&Z2FusionRule, 1, [vec![1, 1], vec![1, 1]])
     .unwrap();
-    let unit_first_structure = Arc::clone(unit_first_space.subblock_structure());
+    let unit_first_structure = Arc::clone(&unit_first_space);
     let unit_first_plan =
         FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
             &unit_first_structure,
@@ -1740,25 +1723,20 @@ fn canonical_plan_zeroed_replay_skips_the_inactive_coupled_range() {
     let both = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)], false);
     let even = || SectorLeg::new([(Z2Irrep::EVEN, 2)], false);
     // `shapes` holds one `[rows, cols]` per coupled tree pair.
-    let space =
-        |codomain: SectorLeg, domain: SectorLeg, dims: [usize; 2], shapes: Vec<Vec<usize>>| {
-            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-                TensorMapSpace::<1, 1>::from_dims([dims[0]], [dims[1]]).unwrap(),
-                FusionTreeHomSpace::new(
-                    FusionProductSpace::new([codomain]),
-                    FusionProductSpace::new([domain]),
-                ),
-                &Z2FusionRule,
-                shapes,
-            )
-            .unwrap()
-        };
-    let dst = space(both(), both(), [5, 5], vec![vec![2, 2], vec![3, 3]]);
-    let lhs = space(both(), even(), [5, 2], vec![vec![2, 2]]);
-    let rhs = space(even(), both(), [2, 5], vec![vec![2, 2]]);
-    let dst_structure = Arc::clone(dst.subblock_structure());
-    let lhs_structure = Arc::clone(lhs.subblock_structure());
-    let rhs_structure = Arc::clone(rhs.subblock_structure());
+    let space = |codomain: SectorLeg, domain: SectorLeg, shapes: Vec<Vec<usize>>| {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([codomain]),
+            FusionProductSpace::new([domain]),
+        )
+        .coupled_subblock_structure(&Z2FusionRule, 1, shapes)
+        .unwrap()
+    };
+    let dst = space(both(), both(), vec![vec![2, 2], vec![3, 3]]);
+    let lhs = space(both(), even(), vec![vec![2, 2]]);
+    let rhs = space(even(), both(), vec![vec![2, 2]]);
+    let dst_structure = Arc::clone(&dst);
+    let lhs_structure = Arc::clone(&lhs);
+    let rhs_structure = Arc::clone(&rhs);
     let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
         &dst_structure,
         1,
@@ -2045,17 +2023,13 @@ fn componentwise_pack_matches_promoted_product_on_finite_values() {
 /// `[1, 2, 3, 4]` and `[10]`.
 fn signed_z2_storage_plan() -> (FusionBlockContractPlan<f64>, Vec<Complex64>, Vec<Complex64>) {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)], false);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg()]),
-            FusionProductSpace::new([leg()]),
-        ),
-        &Z2FusionRule,
-        [vec![2, 2], vec![1, 1]],
+    let space = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
     )
+    .coupled_subblock_structure(&Z2FusionRule, 1, [vec![2, 2], vec![1, 1]])
     .unwrap();
-    let structure = Arc::clone(space.subblock_structure());
+    let structure = Arc::clone(&space);
     let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
         &structure,
         1,

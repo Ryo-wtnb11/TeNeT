@@ -80,20 +80,12 @@ where
         }
     });
     let structure = BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, blocks).unwrap();
-    let dense_dim: usize = sectors.iter().map(|(_, d)| d).sum();
-    let space = tenet_core::FusionTensorMapSpace::new_unbound(
-        tenet_core::TensorMapSpace::<2, 2>::from_dims([dense_dim; 2], [dense_dim; 2]).unwrap(),
-        homspace,
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(&rule)
-    .unwrap();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
-        Arc::new(rule),
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::try_from_layout(homspace, structure)
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+    let space =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::new(rule)).unwrap();
     let mut fill = |key: &BlockKey, indices: &[usize]| -> f64 {
         let BlockKey::FusionTree(tree) = key else {
             unreachable!("fusion-tree blocks")

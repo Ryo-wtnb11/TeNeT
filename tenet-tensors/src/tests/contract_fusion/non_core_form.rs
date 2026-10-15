@@ -51,22 +51,26 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         rhs_conjugate,
     );
 
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         lhs_hom.clone(),
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         rhs_hom.clone(),
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
+    let lhs_adjoint_space = lhs_space
+        .validate_rule(&rule)
+        .and_then(|()| lhs_space.adjoint_view())
+        .unwrap();
+    let rhs_adjoint_space = rhs_space
+        .validate_rule(&rule)
+        .and_then(|()| rhs_space.adjoint_view())
+        .unwrap();
     let lowered_lhs_axes = maybe_adjoint_axes::<3, 1>(&source_lhs_contracting_axes, lhs_conjugate);
     let lowered_rhs_axes = maybe_adjoint_axes::<1, 3>(&source_rhs_contracting_axes, rhs_conjugate);
     let lowered_lhs_open_axes = complement_axes(4, &lowered_lhs_axes);
@@ -105,24 +109,17 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
             lowered_rhs_open_axes.as_slice(),
         )
         .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        dst_hom,
+    let dst_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, dst_hom, [vec![2, 2]]).unwrap();
+    let lhs_core_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
-    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         lhs_core_hom,
-        &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-        rhs_core_hom,
+    let rhs_core_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        rhs_core_hom,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
@@ -366,8 +363,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([], []);
     let scalar_key = BlockKey::from(rhs_hom.fusion_tree_keys(&rule)[0].clone());
-    let rhs_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::try_from_layout(
         rhs_hom,
         packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
@@ -378,10 +374,9 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         .homspace()
         .permute(&rule, &[0, 1, 2], &[])
         .unwrap();
-    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
-        lhs_core_hom,
+    let lhs_core_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        lhs_core_hom,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
@@ -573,24 +568,21 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
         ]),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         lhs_hom.clone(),
-        &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         rhs_hom.clone(),
-        &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
-        dst_hom.clone(),
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        dst_hom.clone(),
         [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
     )
     .unwrap();
@@ -623,24 +615,21 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
 
     let expected_structure = std::sync::Arc::clone(dst.structure());
     let rebuild_and_contract = || {
-        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+        let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             lhs_hom.clone(),
-            &rule,
             [vec![1, 1, 1], vec![1, 1, 1]],
         )
         .unwrap();
-        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
+        let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             rhs_hom.clone(),
-            &rule,
             [vec![1, 1, 1], vec![1, 1, 1]],
         )
         .unwrap();
-        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
-            dst_hom.clone(),
+        let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            dst_hom.clone(),
             [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
         )
         .unwrap();
@@ -692,22 +681,12 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
         )
     };
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        matrix_hom(),
+    let lhs_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, matrix_hom(), [vec![1, 1]]).unwrap();
+    let rhs_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, matrix_hom(), [vec![1, 1]]).unwrap();
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
-        [vec![1, 1]],
-    )
-    .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        matrix_hom(),
-        &rule,
-        [vec![1, 1]],
-    )
-    .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([
                 SectorLeg::new([(odd, 1)], false),
@@ -715,7 +694,6 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
             ]),
             FusionProductSpace::new([]),
         ),
-        &rule,
         [vec![1, 1]],
     )
     .unwrap();

@@ -25,7 +25,7 @@ fn tree_transform_execution_context_reports_host_placement() {
 
 #[test]
 fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let space = vec![2, 2];
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
     let src = TestTensor::from_vec_with_structure(
         vec![1.0_f64, 2.0, 3.0, 4.0],
@@ -59,7 +59,7 @@ fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
 
 #[test]
 fn tree_transform_overwrite_execute_ignores_custom_host_destination_bits() {
-    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let space = vec![2, 2];
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
     let src = TestTensor::from_vec_with_structure(
         vec![1.0_f64, 2.0, 3.0, 4.0],
@@ -484,8 +484,8 @@ fn tree_transform_dense_backend_matches_tensorkit_recoupling_orientation_for_gem
 
 #[test]
 fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_space = vec![6, 1];
+    let dst_space = vec![4, 1];
     let src_structure =
         BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
     let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
@@ -530,8 +530,8 @@ fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() 
 
 #[test]
 fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
-    let src_space = TensorMapSpace::<2, 0>::from_dims([8, 1], []).unwrap();
-    let dst_space = TensorMapSpace::<2, 0>::from_dims([8, 1], []).unwrap();
+    let src_space = vec![8, 1];
+    let dst_space = vec![8, 1];
     let structure = BlockStructure::packed_column_major(
         2,
         [

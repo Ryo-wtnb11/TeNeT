@@ -191,19 +191,11 @@ fn typed_factor_axis_sum_overflow_is_exact_without_storage_materialization() {
         )]),
         FusionProductSpace::new([]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
-        homspace,
-        &rule,
-        Vec::<Vec<usize>>::new(),
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, Vec::<Vec<usize>>::new())
+            .unwrap();
 
-    let error = TestTensor::<f64>::from_dyn(
-        Vec::new(),
-        tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
-    )
-    .unwrap_err();
+    let error = TestTensor::<f64>::from_dyn(Vec::new(), space).unwrap_err();
 
     assert_eq!(error, CoreError::ElementCountOverflow);
 }

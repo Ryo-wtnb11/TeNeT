@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, TensorKitProductCodec, TensorMapSpace,
-    U1FusionRule, U1Irrep,
+    FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeFusionRule,
+    MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2Irrep, SectorId,
+    SectorLeg, TensorKitProductCodec, U1FusionRule, U1Irrep,
 };
 use tenet_operations::ContractDestinationInit;
 use tenet_tensors::{
@@ -54,12 +53,9 @@ where
     R::Key: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
 {
     let provider = Arc::new(rule.clone());
-    let bind = |space: &FusionTensorMapSpace<2, 2>| {
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            DynamicFusionMapSpace::from_typed(space),
-            Arc::clone(&provider),
-        )
-        .unwrap()
+    let bind = |space: &DynamicFusionMapSpace| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free((*space).clone(), Arc::clone(&provider))
+            .unwrap()
     };
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
     let homspace = || {
@@ -70,17 +66,8 @@ where
     };
     let space = |hom: FusionTreeHomSpace| {
         let key_count = hom.fusion_tree_keys(rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 2>::from_dims(
-                [sectors.len(), sectors.len()],
-                [sectors.len(), sectors.len()],
-            )
-            .unwrap(),
-            hom,
-            rule,
-            vec![vec![1; 4]; key_count],
-        )
-        .unwrap()
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![1; 4]; key_count])
+            .unwrap()
     };
     let lhs_space = space(homspace());
     let rhs_space = space(homspace());
@@ -114,7 +101,7 @@ where
         let mut expected = vec![0.0; dst_space.required_len().unwrap()];
         let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         let dst_bound = bind(&dst_space);
-        let dst_structure = Arc::clone(dst_space.subblock_structure());
+        let dst_structure = Arc::clone(dst_space.structure());
         context
             .tensorcontract_fusion_dyn_into(
                 &dst_bound,
@@ -144,8 +131,8 @@ where
             context.execute_contract_resolution_host(
                 &prepared,
                 (&dst_structure, dst),
-                (lhs_space.subblock_structure(), &lhs_data),
-                (rhs_space.subblock_structure(), &rhs_data),
+                (lhs_space.structure(), &lhs_data),
+                (rhs_space.structure(), &rhs_data),
                 1.0,
                 ContractDestinationInit::Axpby(0.0),
             )

@@ -839,13 +839,7 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
             sector => panic!("unexpected Z2 sector {sector:?}"),
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([7], [7]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     let tensor = TestTensor::<Complex64>::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| {
@@ -1113,13 +1107,8 @@ fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
         FusionProductSpace::new([SectorLeg::new([(neutral, 2), (positive, 3)], false)]),
         FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
     );
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([5], [2]).unwrap(),
-        homspace,
-        &rule,
-        [vec![2, 2]],
-    )
-    .unwrap();
+    let space =
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![2, 2]]).unwrap();
     let tensor = TestTensor::from_vec_with_fusion_space(vec![1.0, 2.0, 3.0, 4.0], space).unwrap();
     let original_homspace = tensor.fusion_space().homspace().clone();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
@@ -1164,13 +1153,7 @@ fn svd_compact_preserves_asymmetric_non_self_dual_u1_factor_layouts() {
             sector => panic!("unexpected U(1) sector {sector:?}"),
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([5], [5]).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     let tensor = TestTensor::<f64>::from_vec_with_fusion_space(
         (0..space.required_len().unwrap())
             .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)

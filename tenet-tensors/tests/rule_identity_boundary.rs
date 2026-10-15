@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use tenet_core::{
-    BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SectorId, SectorVec, TensorMapSpace,
-    U1FusionRule, Z2FusionRule,
+    BlockStructure, BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeHomSpace,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    RuleIdentity, SU2FusionRule, SectorId, SectorVec, U1FusionRule, Z2FusionRule,
 };
 use tenet_tensors::{
     tensorcontract_fusion_block_specs, BoundDynamicFusionMapSpace,
@@ -91,32 +90,30 @@ impl MultiplicityFreeRigidSymbols for SymbolOnlyRule {
     }
 }
 
-fn bound_scalar_space<R>(rule: &R) -> FusionTensorMapSpace<0, 0>
+fn bound_scalar_space<R>(rule: &R) -> DynamicFusionMapSpace
 where
-    R: MultiplicityFreeFusionRule,
+    R: MultiplicityFreeRigidSymbols,
 {
-    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([], []),
+    DynamicFusionMapSpace::from_degeneracy_shapes(
         rule,
+        FusionTreeHomSpace::from_sector_ids([], []),
         [vec![]],
     )
     .unwrap()
 }
 
-fn unbound_scalar_space<R>(rule: &R) -> FusionTensorMapSpace<0, 0>
+fn unbound_scalar_space<R>(rule: &R) -> DynamicFusionMapSpace
 where
-    R: MultiplicityFreeFusionRule,
+    R: MultiplicityFreeRigidSymbols,
 {
     let bound = bound_scalar_space(rule);
     unbound_scalar_space_like(&bound)
 }
 
-fn unbound_scalar_space_like(bound: &FusionTensorMapSpace<0, 0>) -> FusionTensorMapSpace<0, 0> {
-    FusionTensorMapSpace::from_shared_subblock_structure(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+fn unbound_scalar_space_like(bound: &DynamicFusionMapSpace) -> DynamicFusionMapSpace {
+    DynamicFusionMapSpace::try_from_layout(
         bound.homspace().clone(),
-        bound.subblock_structure().clone(),
+        BlockStructure::clone(bound.structure()),
     )
     .unwrap()
 }
@@ -125,24 +122,21 @@ fn unbound_scalar_space_like(bound: &FusionTensorMapSpace<0, 0>) -> FusionTensor
 /// place a contraction's provider meets its spaces.
 fn bind<R>(
     rule: &R,
-    space: &FusionTensorMapSpace<0, 0>,
+    space: &DynamicFusionMapSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
     R: MultiplicityFreeFusionRule + Clone,
 {
-    BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(space),
-        Arc::new(rule.clone()),
-    )
+    BoundDynamicFusionMapSpace::bind_multiplicity_free((*space).clone(), Arc::new(rule.clone()))
 }
 
 /// The scalar contraction `dst = 1 * lhs * rhs` with every space bound to
 /// `rule`: the error of the first rejected binding, else of the contraction.
 fn scalar_contract_error<R>(
     rule: &R,
-    dst_space: FusionTensorMapSpace<0, 0>,
-    lhs_space: FusionTensorMapSpace<0, 0>,
-    rhs_space: FusionTensorMapSpace<0, 0>,
+    dst_space: DynamicFusionMapSpace,
+    lhs_space: DynamicFusionMapSpace,
+    rhs_space: DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
 ) -> OperationError
 where
@@ -190,6 +184,18 @@ fn assert_rule_mismatch(error: OperationError) {
 }
 
 #[test]
+fn bound_space_rejects_rebinding_to_same_type_with_different_semantics() {
+    let first = SymbolOnlyRule::new(1.0);
+    let second = SymbolOnlyRule::new(-1.0);
+    let space = unbound_scalar_space(&first).try_bind_rule(&first).unwrap();
+
+    assert!(matches!(
+        space.try_bind_rule(&second),
+        Err(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
 fn fusion_contract_block_specs_rejects_each_unbound_operand() {
     let rule = Z2FusionRule;
     let bound = || bound_scalar_space(&rule);
@@ -197,34 +203,13 @@ fn fusion_contract_block_specs_rejects_each_unbound_operand() {
     let axes = TensorContractSpec::with_default_output_order(&[], &[]);
 
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(
-            &rule,
-            &DynamicFusionMapSpace::from_typed(&unbound()),
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            axes,
-        )
-        .unwrap_err(),
+        tensorcontract_fusion_block_specs(&rule, &unbound(), &bound(), &bound(), axes).unwrap_err(),
     );
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(
-            &rule,
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            &DynamicFusionMapSpace::from_typed(&unbound()),
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            axes,
-        )
-        .unwrap_err(),
+        tensorcontract_fusion_block_specs(&rule, &bound(), &unbound(), &bound(), axes).unwrap_err(),
     );
     assert_missing_rule_identity(
-        tensorcontract_fusion_block_specs(
-            &rule,
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            &DynamicFusionMapSpace::from_typed(&bound()),
-            &DynamicFusionMapSpace::from_typed(&unbound()),
-            axes,
-        )
-        .unwrap_err(),
+        tensorcontract_fusion_block_specs(&rule, &bound(), &bound(), &unbound(), axes).unwrap_err(),
     );
 }
 

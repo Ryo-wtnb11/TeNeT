@@ -20,24 +20,21 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let even_key = key_for_sector(even);
     let odd_key = key_for_sector(odd);
 
-    let lhs_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let dst_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::try_from_layout(
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
@@ -102,8 +99,7 @@ fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_or
         FusionProductSpace::new([source_leg()]),
     );
     let source_space = || {
-        FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        DynamicFusionMapSpace::try_from_layout(
             homspace.clone(),
             packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
         )
@@ -111,8 +107,7 @@ fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_or
         .try_bind_rule(&rule)
         .unwrap()
     };
-    let dst_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1]), (odd_key, vec![1, 1])])
             .unwrap(),
@@ -123,16 +118,11 @@ fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_or
     let lhs_space = source_space();
     let rhs_space = source_space();
     let oracle_source_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-            source_homspace.clone(),
-            &rule,
-            [vec![1, 1]],
-        )
-        .unwrap()
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, source_homspace.clone(), [vec![1, 1]])
+            .unwrap()
     };
-    let lhs_dynamic = crate::DynamicFusionMapSpace::from_typed(&oracle_source_space());
-    let rhs_dynamic = crate::DynamicFusionMapSpace::from_typed(&oracle_source_space());
+    let lhs_dynamic = oracle_source_space();
+    let rhs_dynamic = oracle_source_space();
     let lhs_data = vec![Complex64::new(2.0, 3.0)];
     let rhs_data = vec![Complex64::new(5.0, -1.0)];
     let initial = vec![Complex64::new(10.0, 4.0), Complex64::new(20.0, -2.0)];
@@ -254,24 +244,21 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     let even_key = key_for_sector(even);
     let odd_key = key_for_sector(odd);
 
-    let lhs_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::try_from_layout(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let dst_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::try_from_layout(
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )

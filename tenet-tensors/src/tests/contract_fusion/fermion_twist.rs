@@ -4,33 +4,30 @@ use super::*;
 fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], true)]),
         ),
-        &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], true)]),
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
         ),
-        &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
         ),
-        &rule,
         [vec![1, 1]],
     )
     .unwrap();
@@ -77,13 +74,12 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let space = |codomain_dual: bool, domain_dual: bool| {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 2)], codomain_dual)]),
                 FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 2)], domain_dual)]),
             ),
-            &rule,
             [vec![1, 1], vec![2, 2]],
         )
         .unwrap()
@@ -274,33 +270,30 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     let odd = SectorId::new(1);
     let v = |dual: bool| SectorLeg::new([(even, 1), (odd, 2)], dual);
     let w = || SectorLeg::new([(even, 2)], false);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+    let lhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(false)]),
             FusionProductSpace::new([v(true)]),
         ),
-        &rule,
         [vec![1, 1], vec![2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
+    let rhs_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(true)]),
             FusionProductSpace::new([v(false), w()]),
         ),
-        &rule,
         [vec![1, 1, 2], vec![2, 2, 2]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
+    let dst_space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        &rule,
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(false)]),
             FusionProductSpace::new([v(false), w()]),
         ),
-        &rule,
         [vec![1, 1, 2], vec![2, 2, 2]],
     )
     .unwrap();
@@ -330,7 +323,7 @@ fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     let facts: Vec<crate::contract::FusionContractCandidateFacts> =
         crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
-            &DynamicFusionMapSpace::from_typed(&dst_space),
+            &dst_space.clone(),
             &lhs.fusion_space().unwrap().as_ref().clone(),
             &rhs.fusion_space().unwrap().as_ref().clone(),
             axes,

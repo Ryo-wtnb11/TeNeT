@@ -10,9 +10,8 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMapSpace, U1FusionRule,
-    U1Irrep,
+    BlockKey, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols, SU2Irrep,
+    SectorId, SectorLeg, U1FusionRule, U1Irrep,
 };
 use tenet_matrixalgebra::seam::{svd_vals_dyn, BoundDynamicTensorRef};
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
@@ -63,24 +62,20 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + Clone,
 {
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, DEGENERACY)), false);
-    let leg_dim = sectors.len() * DEGENERACY;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-        homspace,
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         rule,
+        homspace,
         vec![vec![DEGENERACY; 4]; key_count],
     )
     .unwrap();
-    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        DynamicFusionMapSpace::from_typed(&space),
-        Arc::new(rule.clone()),
-    )
-    .unwrap();
+    let space =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::new(rule.clone()))
+            .unwrap();
     let mut data = vec![0.0; space.space().required_len().unwrap()];
 
     let structure = std::sync::Arc::clone(space.space().structure());

@@ -657,7 +657,6 @@ mod cache_tests {
 
     use super::generic_toy_fusion::ToyGenericRule;
     use crate::tests::TestTensor;
-    use tenet_core::{FusionTensorMapSpace, TensorMapSpace};
 
     fn triple_rule() -> TripleRule {
         TripleRule::new(
@@ -734,27 +733,18 @@ mod cache_tests {
         FusionTreePairKey::pair(tree.clone(), tree)
     }
 
-    fn typed_u1_expert_space(
-        codomain_dim: usize,
-        domain_dim: usize,
+    fn u1_expert_space(
         homspace: FusionTreeHomSpace,
         structure: BlockStructure,
-    ) -> Result<FusionTensorMapSpace<1, 1>, CoreError> {
-        FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim]).unwrap(),
-            homspace,
-            structure,
-        )?
-        .try_bind_rule(&U1FusionRule)
+    ) -> Result<DynamicFusionMapSpace, CoreError> {
+        DynamicFusionMapSpace::try_from_layout(homspace, structure)?.try_bind_rule(&U1FusionRule)
     }
 
-    fn typed_u1_expert_tensor(
-        codomain_dim: usize,
-        domain_dim: usize,
+    fn u1_expert_tensor(
         homspace: FusionTreeHomSpace,
         structure: BlockStructure,
     ) -> TestTensor<OutputObservedValue> {
-        let space = typed_u1_expert_space(codomain_dim, domain_dim, homspace, structure).unwrap();
+        let space = u1_expert_space(homspace, structure).unwrap();
         let len = space.required_len().unwrap();
         TestTensor::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
     }
@@ -782,19 +772,15 @@ mod cache_tests {
         .unwrap()
     }
 
-    fn typed_u1_tensor() -> TestTensor<OutputObservedValue> {
+    fn u1_tensor() -> TestTensor<OutputObservedValue> {
         let rule = U1FusionRule;
         let one = U1Irrep::new(1).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(one, 2)], false)]);
         let homspace = FusionTreeHomSpace::new(leg(), leg());
         let count = homspace.fusion_tree_keys(&rule).len();
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-            homspace,
-            &rule,
-            vec![vec![2, 2]; count],
-        )
-        .unwrap();
+        let space =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, vec![vec![2, 2]; count])
+                .unwrap();
         let len = space.required_len().unwrap();
         TestTensor::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
     }
@@ -1060,7 +1046,7 @@ mod cache_tests {
         )
         .unwrap();
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let error = typed_u1_expert_space(1, 1, homspace, structure).unwrap_err();
+        let error = u1_expert_space(homspace, structure).unwrap_err();
         assert_eq!(
             error,
             CoreError::MalformedFusionTree {
@@ -1098,7 +1084,7 @@ mod cache_tests {
                 .collect(),
         )
         .unwrap();
-        let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
+        let tensor = u1_expert_tensor(homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let error = tensor.adjoint(&SU2FusionRule).unwrap_err();
@@ -1128,7 +1114,7 @@ mod cache_tests {
             ],
         )
         .unwrap();
-        let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
+        let tensor = u1_expert_tensor(homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let error = tensor.adjoint(&U1FusionRule).unwrap_err();
@@ -1162,7 +1148,7 @@ mod cache_tests {
         .unwrap();
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let error = typed_u1_expert_space(2, 3, homspace, structure).unwrap_err();
+        let error = u1_expert_space(homspace, structure).unwrap_err();
 
         assert_eq!(
             error,
@@ -1224,7 +1210,7 @@ mod cache_tests {
         .unwrap();
 
         for structure in [reordered, gapped] {
-            let tensor = typed_u1_expert_tensor(2, 2, homspace.clone(), structure);
+            let tensor = u1_expert_tensor(homspace.clone(), structure);
             OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
 
             let error = tensor.adjoint(&U1FusionRule).unwrap_err();
@@ -1264,7 +1250,7 @@ mod cache_tests {
                 .collect(),
         )
         .unwrap();
-        let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
+        let reordered_tensor = u1_expert_tensor(double_homspace, reordered);
         let reordered = reordered_tensor.dynamic_space().clone();
 
         let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
@@ -1416,7 +1402,7 @@ mod cache_tests {
     #[test]
     fn eager_adjoint_accepts_exact_storage() {
         // What: the eager adjoint keeps its ordinary exact-storage path.
-        let exact = typed_u1_tensor();
+        let exact = u1_tensor();
         let expected = exact.structure().required_len().unwrap();
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let output = exact.adjoint(&U1FusionRule).unwrap();
@@ -1504,15 +1490,14 @@ mod cache_tests {
             ]),
             FusionProductSpace::new([SectorLeg::new([(two, 1)], false)]),
         );
-        let typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+        let layout = DynamicFusionMapSpace::try_from_layout(
             homspace,
             BlockStructure::from_blocks_with_rank(3, Vec::new()).unwrap(),
         )
         .unwrap()
         .try_bind_rule(&rule)
         .unwrap();
-        let source = DynamicFusionMapSpace::from_typed(&typed);
+        let source = layout;
         reset_scratch_structure_builds();
 
         let error = adjoint_space_dyn_with_primer(

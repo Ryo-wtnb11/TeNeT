@@ -178,14 +178,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
             shape
         })
         .collect::<Vec<_>>();
-    let dims = full.u.tensor().dims();
-    let us_space = FusionTensorMapSpace::<2, 1>::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.tensor().dims()[1]]).unwrap(),
-        us_hom,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let us_space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, us_hom, shapes).unwrap();
     let mut us = TestTensor::<f64>::from_vec_with_fusion_space(
         vec![0.0; us_space.required_len().unwrap()],
         us_space,

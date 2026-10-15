@@ -182,7 +182,6 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
 
     // Tall map (2 codomain legs, 1 domain leg): nontrivial left null space.
     let tall_hom = FusionTreeHomSpace::new(
@@ -190,10 +189,9 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
         FusionProductSpace::new([leg()]),
     );
     let key_count = tall_hom.fusion_tree_keys(&rule).len();
-    let tall_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([leg_dim, leg_dim], [leg_dim]).unwrap(),
-        tall_hom,
+    let tall_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        tall_hom,
         vec![vec![degeneracy; 3]; key_count],
     )
     .unwrap();
@@ -239,10 +237,9 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = wide_hom.fusion_tree_keys(&rule).len();
-    let wide_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, 2>::from_dims([leg_dim], [leg_dim, leg_dim]).unwrap(),
-        wide_hom,
+    let wide_space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        wide_hom,
         vec![vec![degeneracy; 3]; key_count],
     )
     .unwrap();
@@ -638,16 +635,14 @@ where
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([leg_dim, leg_dim], [leg_dim]).unwrap(),
-        homspace,
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         rule,
+        homspace,
         vec![vec![degeneracy; 3]; key_count],
     )
     .unwrap();
@@ -1070,8 +1065,8 @@ fn mf_null_factor_space_is_staged_once_per_side_and_cached() {
     // structure `Arc`).
     let tensor = rectangular_svd_tensor(5, 2);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let typed = bound.as_ref();
-    let input = typed.dynamic();
+    let layout = bound.as_ref();
+    let input = layout.dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
     for left in [true, false] {

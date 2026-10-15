@@ -139,11 +139,9 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let dense = || TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap();
     let packed_space = |hom: FusionTreeHomSpace| {
         let keys = hom.fusion_tree_keys(&rule);
-        FusionTensorMapSpace::new_unbound(
-            dense(),
+        DynamicFusionMapSpace::try_from_layout(
             hom,
             crate::tests::packed_fixture_structure(
                 4,
@@ -157,11 +155,11 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
     };
     let coupled_space = |hom: FusionTreeHomSpace| {
         let shapes = vec![vec![degeneracy; 4]; hom.fusion_tree_keys(&rule).len()];
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense(), hom, &rule, shapes).unwrap()
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, shapes).unwrap()
     };
     let lhs_packed_space = packed_space(homspace());
     assert!(lhs_packed_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
@@ -175,7 +173,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
     .unwrap();
     let rhs_packed_space = packed_space(homspace());
     assert!(rhs_packed_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
@@ -189,13 +187,13 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
     .unwrap();
     let lhs_coupled_space = coupled_space(homspace());
     assert!(lhs_coupled_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
     let rhs_coupled_space = coupled_space(homspace());
     assert!(rhs_coupled_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
@@ -226,12 +224,12 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
     let dst_packed_space = packed_space(dst_hom.clone());
     let dst_coupled_space = coupled_space(dst_hom);
     assert!(dst_packed_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
     assert!(dst_coupled_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
@@ -291,10 +289,9 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
 #[test]
 fn coupled_layout_complex_scalar_contraction_matches_closed_form() {
     let rule = Z2FusionRule;
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([], []),
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
         &rule,
+        FusionTreeHomSpace::from_sector_ids([], []),
         [Vec::<usize>::new()],
     )
     .unwrap();
@@ -341,15 +338,11 @@ where
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let leg_dim = sectors.len() * degeneracy;
-    let dense =
-        || TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
     let shapes =
         |hom: &FusionTreeHomSpace| vec![vec![degeneracy; 4]; hom.fusion_tree_keys(rule).len()];
     let packed_space = |hom: FusionTreeHomSpace| {
         let keys = hom.fusion_tree_keys(rule);
-        FusionTensorMapSpace::new_unbound(
-            dense(),
+        DynamicFusionMapSpace::try_from_layout(
             hom,
             crate::tests::packed_fixture_structure(
                 4,
@@ -363,13 +356,12 @@ where
     };
     let coupled_space = |hom: FusionTreeHomSpace| {
         let shape_list = shapes(&hom);
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense(), hom, rule, shape_list)
-            .unwrap()
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, shape_list).unwrap()
     };
 
     let lhs_packed_space = packed_space(homspace());
     assert!(lhs_packed_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
@@ -381,7 +373,7 @@ where
     .unwrap();
     let rhs_packed_space = packed_space(homspace());
     assert!(rhs_packed_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
@@ -394,13 +386,13 @@ where
 
     let lhs_coupled_space = coupled_space(homspace());
     assert!(lhs_coupled_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
     let rhs_coupled_space = coupled_space(homspace());
     assert!(rhs_coupled_space
-        .subblock_structure()
+        .structure()
         .coupled_sector_regions(2)
         .unwrap()
         .is_some());
@@ -431,13 +423,13 @@ where
         .unwrap();
         let dst_packed_space = packed_space(dst_hom.clone());
         assert!(dst_packed_space
-            .subblock_structure()
+            .structure()
             .coupled_sector_regions(2)
             .unwrap()
             .is_none());
         let dst_coupled_space = coupled_space(dst_hom);
         assert!(dst_coupled_space
-            .subblock_structure()
+            .structure()
             .coupled_sector_regions(2)
             .unwrap()
             .is_some());
@@ -558,13 +550,11 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let leg_dim = 2 * degeneracy;
     let space = |hom: FusionTreeHomSpace| {
         let key_count = hom.fusion_tree_keys(&rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-            hom,
+        DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            hom,
             vec![vec![degeneracy; 4]; key_count],
         )
         .unwrap()

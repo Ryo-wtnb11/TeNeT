@@ -71,14 +71,11 @@ fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_f
         .collect();
     let structure =
         BlockStructure::coupled_sector_matrix_with_keys(&FactorGenericRule, 2, 4, blocks).unwrap();
-    let typed_space = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<2, 2>::from_dims([2, 1], [1, 1]).unwrap(),
-        base.space().homspace().clone(),
-        structure,
-    )
-    .unwrap()
-    .try_bind_rule(&FactorGenericRule)
-    .unwrap();
+    let typed_space =
+        DynamicFusionMapSpace::try_from_layout(base.space().homspace().clone(), structure)
+            .unwrap()
+            .try_bind_rule(&FactorGenericRule)
+            .unwrap();
     let tensor =
         TestTensor::<f64>::from_block_fn_with_fusion_space(typed_space, 0.0, |key, indices| {
             let block = base_structure
@@ -92,7 +89,7 @@ fn checked_generic_polar_and_pinv_land_a_tiled_source_whose_tree_order_differs_f
                     .sum::<usize>()]
         })
         .unwrap();
-    // The typed space was admitted for `FactorGenericRule`, so this
+    // The space was admitted for `FactorGenericRule`, so this
     // never-failing spy answers under that identity.
     let provider = Arc::new(LateGenericSpy {
         rule: FactorGenericRule,
@@ -363,13 +360,7 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let shapes = vec![Vec::new(); homspace.fusion_tree_keys(&rule).len()];
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-        homspace,
-        &rule,
-        shapes,
-    )
-    .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, shapes).unwrap();
     let scalar = TestTensor::<f64>::from_vec_with_fusion_space(vec![2.0], space).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let input = bound_tensor(Arc::new(rule), &scalar);

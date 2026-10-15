@@ -1716,10 +1716,9 @@ mod tests {
     use crate::contract::dynamic_space::{encoded_layout_primer, MetadataOutput, MetadataRequest};
     use crate::contract::{DynamicFusionMapSpace, FusionOperand};
     use crate::{TreeTransformOperation, TreeTransformOperationKind};
-    use std::sync::Arc;
     use tenet_core::{
-        BlockKey, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
-        FusionTreeHomSpace, SU2FusionRule, SectorId, SectorLeg, TensorMapSpace, U1FusionRule,
+        BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
+        SU2FusionRule, SectorId, SectorLeg, U1FusionRule,
     };
     use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
@@ -1758,44 +1757,23 @@ mod tests {
         }
     }
 
-    fn single_sector_typed_space(
-        rule: &U1FusionRule,
-        dimensions: [usize; 4],
-    ) -> FusionTensorMapSpace<2, 2> {
+    fn single_sector_space(rule: &U1FusionRule, dimensions: [usize; 4]) -> DynamicFusionMapSpace {
         let homspace = FusionTreeHomSpace::from_sector_ids(
             [(0, dimensions[0]), (0, dimensions[1])],
             [(0, dimensions[2]), (0, dimensions[3])],
         );
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<2, 2>::from_dims(
-                [dimensions[0], dimensions[1]],
-                [dimensions[2], dimensions[3]],
-            )
-            .unwrap(),
-            homspace,
-            rule,
-            [dimensions.to_vec()],
-        )
-        .unwrap()
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, [dimensions.to_vec()])
+            .unwrap()
     }
 
-    fn single_sector_space(rule: &U1FusionRule, dimensions: [usize; 4]) -> DynamicFusionMapSpace {
-        DynamicFusionMapSpace::from_typed(&single_sector_typed_space(rule, dimensions))
-    }
-
-    fn subset_copy(
-        rule: &U1FusionRule,
-        complete: &FusionTensorMapSpace<2, 2>,
-    ) -> DynamicFusionMapSpace {
-        let subset = FusionTensorMapSpace::from_shared_subblock_structure(
-            complete.dense_space().clone(),
+    fn subset_copy(rule: &U1FusionRule, complete: &DynamicFusionMapSpace) -> DynamicFusionMapSpace {
+        DynamicFusionMapSpace::try_from_layout(
             complete.homspace().clone(),
-            Arc::clone(complete.subblock_structure()),
+            BlockStructure::clone(complete.structure()),
         )
         .unwrap()
         .try_bind_rule(rule)
-        .unwrap();
-        DynamicFusionMapSpace::from_typed(&subset)
+        .unwrap()
     }
 
     fn selected_contract_axes(
@@ -1843,8 +1821,8 @@ mod tests {
         // What: prelowered candidate planning reaches the bound dispatcher
         // exactly once through an unprepared contraction-HomSpace request.
         let rule = U1FusionRule;
-        let lhs_typed = single_sector_typed_space(&rule, [2, 3, 4, 5]);
-        let rhs_typed = single_sector_typed_space(&rule, [5, 4, 6, 7]);
+        let lhs_typed = single_sector_space(&rule, [2, 3, 4, 5]);
+        let rhs_typed = single_sector_space(&rule, [5, 4, 6, 7]);
         let lhs = subset_copy(&rule, &lhs_typed);
         let rhs = subset_copy(&rule, &rhs_typed);
         let dst = single_sector_space(&rule, [2, 3, 6, 7]);
@@ -1981,12 +1959,12 @@ mod tests {
     #[test]
     fn complete_selector_skips_loser_layouts_and_matches_exact_fallback() {
         let rule = U1FusionRule;
-        let lhs_complete = single_sector_typed_space(&rule, [16, 16, 2, 3]);
-        let rhs_complete = single_sector_typed_space(&rule, [3, 2, 1, 1]);
-        let dst_complete = single_sector_typed_space(&rule, [16, 16, 1, 1]);
-        let lhs = DynamicFusionMapSpace::from_typed(&lhs_complete);
-        let rhs = DynamicFusionMapSpace::from_typed(&rhs_complete);
-        let dst = DynamicFusionMapSpace::from_typed(&dst_complete);
+        let lhs_complete = single_sector_space(&rule, [16, 16, 2, 3]);
+        let rhs_complete = single_sector_space(&rule, [3, 2, 1, 1]);
+        let dst_complete = single_sector_space(&rule, [16, 16, 1, 1]);
+        let lhs = lhs_complete.clone();
+        let rhs = rhs_complete.clone();
+        let dst = dst_complete.clone();
         let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]);
 
         reset_candidate_score_calls();
@@ -2021,20 +1999,19 @@ mod tests {
         let rule = FermionParityFusionRule;
         let odd = SectorId::new(1);
         let space = |codomain_dual: bool, domain_dual: bool| {
-            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            DynamicFusionMapSpace::from_degeneracy_shapes(
+                &rule,
                 FusionTreeHomSpace::new(
                     FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
                     FusionProductSpace::new([SectorLeg::new([(odd, 1)], domain_dual)]),
                 ),
-                &rule,
                 [vec![1, 1]],
             )
             .unwrap()
         };
-        let lhs = DynamicFusionMapSpace::from_typed(&space(false, true));
-        let rhs = DynamicFusionMapSpace::from_typed(&space(true, false));
-        let dst = DynamicFusionMapSpace::from_typed(&space(false, false));
+        let lhs = space(false, true);
+        let rhs = space(true, false);
+        let dst = space(false, false);
         let axis_order = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let axes =
             TensorContractSpec::with_default_output_order(axis_order.lhs(), axis_order.rhs());
@@ -2078,9 +2055,9 @@ mod tests {
     #[test]
     fn exact_fallback_skips_an_unavailable_loser() {
         let rule = U1FusionRule;
-        let lhs = single_sector_typed_space(&rule, [1, 1, 2, 3]);
-        let rhs = single_sector_typed_space(&rule, [3, 2, 16, 16]);
-        let dst = single_sector_typed_space(&rule, [1, 1, 16, 16]);
+        let lhs = single_sector_space(&rule, [1, 1, 2, 3]);
+        let rhs = single_sector_space(&rule, [3, 2, 16, 16]);
+        let dst = single_sector_space(&rule, [1, 1, 16, 16]);
         let lhs = subset_copy(&rule, &lhs);
         let rhs = subset_copy(&rule, &rhs);
         let dst = subset_copy(&rule, &dst);
@@ -2189,32 +2166,27 @@ mod tests {
         let rule = U1FusionRule;
         let sector = tenet_core::U1Irrep::new(0).sector_id();
         let vector_space = || {
-            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-                TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
+            DynamicFusionMapSpace::from_degeneracy_shapes(
+                &rule,
                 FusionTreeHomSpace::new(
                     FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
                     FusionProductSpace::new(Vec::<SectorLeg>::new()),
                 ),
-                &rule,
                 [vec![1]],
             )
             .unwrap()
         };
-        let lhs_typed = vector_space();
-        let rhs_typed = vector_space();
-        let dst_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        let lhs = vector_space();
+        let rhs = vector_space();
+        let dst = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &rule,
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
                 FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
             ),
-            &rule,
             [vec![1, 1]],
         )
         .unwrap();
-        let lhs = DynamicFusionMapSpace::from_typed(&lhs_typed);
-        let rhs = DynamicFusionMapSpace::from_typed(&rhs_typed);
-        let dst = DynamicFusionMapSpace::from_typed(&dst_typed);
         let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
             &dst,
@@ -2271,18 +2243,16 @@ mod tests {
         // What: an identity-axis operand with an incomplete SU2 tree grid is
         // charged for the complete core layout instead of treated as borrowed.
         let rule = SU2FusionRule;
-        let lhs_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
-            FusionTreeHomSpace::from_sector_ids([], []),
+        let lhs = DynamicFusionMapSpace::from_degeneracy_shapes(
             &rule,
+            FusionTreeHomSpace::from_sector_ids([], []),
             [vec![]],
         )
         .unwrap();
         let rhs_hom = FusionTreeHomSpace::from_sector_ids([], [(1, 1), (1, 1), (1, 1), (1, 1)]);
         let rhs_keys = rhs_hom.fusion_tree_keys(&rule);
         assert_eq!(rhs_keys.len(), 2);
-        let rhs_typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<0, 4>::from_dims([], [1, 1, 1, 1]).unwrap(),
+        let rhs = DynamicFusionMapSpace::try_from_layout(
             rhs_hom.clone(),
             crate::tests::packed_fixture_structure(
                 4,
@@ -2295,8 +2265,7 @@ mod tests {
         .unwrap();
         let dst_hom = rhs_hom.permute(&rule, &[0, 1, 2, 3], &[]).unwrap();
         let dst_keys = dst_hom.fusion_tree_keys(&rule);
-        let dst_typed = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+        let dst = DynamicFusionMapSpace::try_from_layout(
             dst_hom,
             crate::tests::packed_fixture_structure(
                 4,
@@ -2310,9 +2279,6 @@ mod tests {
         .unwrap()
         .try_bind_rule(&rule)
         .unwrap();
-        let lhs = DynamicFusionMapSpace::from_typed(&lhs_typed);
-        let rhs = DynamicFusionMapSpace::from_typed(&rhs_typed);
-        let dst = DynamicFusionMapSpace::from_typed(&dst_typed);
         let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
             &dst,
