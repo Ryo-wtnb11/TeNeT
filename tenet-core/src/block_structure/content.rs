@@ -311,7 +311,7 @@ impl SectorStructure {
     /// Conservative heap bytes this sector structure retains.
     pub(crate) fn charged_heap_bytes(&self) -> usize {
         // Sector and complete-layout entries share this immutable backing.
-        // Repeating its frozen-slice census would allocate a dedup set on
+        // Repeating its tree-arena census would allocate a dedup set on
         // every complete-layout miss, including degeneracy-only changes.
         *self
             .charged_heap_bytes

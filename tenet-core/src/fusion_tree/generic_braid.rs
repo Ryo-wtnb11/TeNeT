@@ -46,35 +46,47 @@ where
 {
     let kernel = GenericK(rule);
     let site = ArtinSite::new(&kernel, tree.uncoupled(), index, inverse)?;
-    let mut uncoupled = tree.uncoupled().to_vec();
-    uncoupled.swap(index, index + 1);
-    let mut is_dual = tree.is_dual().to_vec();
-    is_dual.swap(index, index + 1);
     let mut out = KeyArtinTerms {
         tree,
         index,
-        uncoupled: uncoupled.into(),
-        is_dual: is_dual.into(),
+        builder: TreeArenaBuilder::default(),
         terms: Vec::new(),
     };
     artin_surgery(&kernel, &site, tree, &mut out)?;
-    Ok(out.terms)
+    Ok(out.into_terms())
 }
 
-/// Generic Artin outputs as full keys carrying their vertex labels.
+/// Generic Artin outputs as full keys carrying their vertex labels, pushed
+/// into one arena per braid step.
 struct KeyArtinTerms<'t, S> {
     tree: &'t FusionTreeKey,
     index: usize,
-    uncoupled: Arc<[SectorId]>,
-    is_dual: Arc<[bool]>,
-    terms: Vec<(FusionTreeKey, S)>,
+    builder: TreeArenaBuilder,
+    terms: Vec<(usize, S)>,
+}
+
+impl<S> KeyArtinTerms<'_, S> {
+    fn into_terms(self) -> Vec<(FusionTreeKey, S)> {
+        let arena = self.builder.freeze();
+        self.terms
+            .into_iter()
+            .map(|(row, coefficient)| (arena.key(row), coefficient))
+            .collect()
+    }
 }
 
 impl<S, E> ArtinWriter<S, CheckedGenericSymbolError<E>> for KeyArtinTerms<'_, S> {
-    type Slot = FusionTreeKey;
+    type Slot = usize;
 
     fn reserve(&mut self, additional: usize) {
         self.terms.reserve_exact(additional);
+        let tree = self.tree;
+        self.builder.reserve_exact(
+            additional,
+            tree.uncoupled().len() + 1 + tree.innerlines().len(),
+            tree.vertices().len(),
+            tree.is_dual().len(),
+        );
     }
 
     fn begin(
@@ -84,45 +96,35 @@ impl<S, E> ArtinWriter<S, CheckedGenericSymbolError<E>> for KeyArtinTerms<'_, S>
     ) -> Result<Self::Slot, CheckedGenericSymbolError<E>> {
         let tree = self.tree;
         let index = self.index;
-        let innerlines: Arc<[SectorId]> = match innerline {
-            None => Arc::clone(&tree.innerlines),
-            Some((position, sector)) => {
-                let mut innerlines: SectorVec = tree.innerlines().iter().copied().collect();
-                *innerlines
-                    .get_mut(position)
-                    .ok_or(CoreError::MalformedFusionTree {
-                        message: artin_innerline_message(vertices),
-                    })? = sector;
-                innerlines.into_vec().into()
+        if innerline.is_some_and(|(position, _)| position >= tree.innerlines().len()) {
+            return Err(CoreError::MalformedFusionTree {
+                message: artin_innerline_message(vertices),
             }
-        };
+            .into());
+        }
         let label = |value: usize| {
             MultiplicityIndex::new(value + 1)
                 .expect("enumerated Generic multiplicity labels are one-based")
         };
-        let vertex_labels: Arc<[MultiplicityIndex]> = match vertices {
-            ArtinVertices::Keep => Arc::clone(&tree.vertices),
+        let mut labels: MultiplicityVec = tree.vertices().iter().copied().collect();
+        match vertices {
+            ArtinVertices::Keep => {}
             ArtinVertices::SwapUnit => {
-                if tree.vertices().len() <= index {
+                if labels.len() <= index {
                     return Err(CoreError::MalformedFusionTree {
                         message:
                             "unit braid past the first adjacent pair requires adjacent vertices",
                     }
                     .into());
                 }
-                let mut labels = tree.vertices().to_vec();
                 labels.swap(index - 1, index);
-                labels.into()
             }
             ArtinVertices::First { nu } => {
-                let mut labels: MultiplicityVec = tree.vertices().iter().copied().collect();
                 *labels.get_mut(0).ok_or(CoreError::MalformedFusionTree {
                     message: "first braid of a Generic tree requires a vertex",
                 })? = label(nu);
-                labels.into_vec().into()
             }
             ArtinVertices::Pair { sigma, lambda } => {
-                let mut labels: MultiplicityVec = tree.vertices().iter().copied().collect();
                 if labels.len() <= index {
                     return Err(CoreError::MalformedFusionTree {
                         message: "non-first Generic braid requires adjacent vertices",
@@ -131,15 +133,31 @@ impl<S, E> ArtinWriter<S, CheckedGenericSymbolError<E>> for KeyArtinTerms<'_, S>
                 }
                 labels[index - 1] = label(sigma);
                 labels[index] = label(lambda);
-                labels.into_vec().into()
+            }
+        }
+        let swapped = |position: usize| {
+            if position == index {
+                index + 1
+            } else if position == index + 1 {
+                index
+            } else {
+                position
             }
         };
-        Ok(FusionTreeKey::from_frozen(
-            Arc::clone(&self.uncoupled),
+        let uncoupled = tree.uncoupled();
+        let is_dual = tree.is_dual();
+        Ok(self.builder.push_parts(
+            (0..uncoupled.len()).map(|position| uncoupled[swapped(position)]),
             tree.coupled(),
-            Arc::clone(&self.is_dual),
-            innerlines,
-            vertex_labels,
+            (0..is_dual.len()).map(|position| is_dual[swapped(position)]),
+            tree.innerlines()
+                .iter()
+                .enumerate()
+                .map(|(position, &sector)| match innerline {
+                    Some((edited, replacement)) if edited == position => replacement,
+                    _ => sector,
+                }),
+            labels,
         ))
     }
 

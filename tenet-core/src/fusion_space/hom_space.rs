@@ -1219,8 +1219,33 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
-        let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
+        // Enumerate the side with fewer legs first and the other only for
+        // the coupled sectors that side reaches: the layout pairs only
+        // shared coupled sectors.
+        let coupled_of = |groups: &[CoupledFusionTrees]| {
+            groups
+                .iter()
+                .filter(|group| !group.trees.is_empty())
+                .map(|group| group.coupled)
+                .collect::<Vec<_>>()
+        };
+        let (codomain, domain) = if self.codomain().len() <= self.domain().len() {
+            let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
+            let domain = fusion_trees_by_coupled_for_space_within(
+                rule,
+                self.domain(),
+                Some(&coupled_of(&codomain)),
+            );
+            (codomain, domain)
+        } else {
+            let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
+            let codomain = fusion_trees_by_coupled_for_space_within(
+                rule,
+                self.codomain(),
+                Some(&coupled_of(&domain)),
+            );
+            (codomain, domain)
+        };
         fusion_tree_layout_data_from_groups(self.rank(), &codomain, &domain)
     }
 

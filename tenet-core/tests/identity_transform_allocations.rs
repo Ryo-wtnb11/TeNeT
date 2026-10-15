@@ -730,9 +730,10 @@ fn borrowed_unique_execution_allocations_do_not_scale_with_artin_schedule() {
     let (_, short_calls) = measured_allocations(|| run(&short));
     let (_, long_calls) = measured_allocations(|| run(&long));
 
-    // What: UniqueFusion replay allocations are bounded by the four frozen
-    // fields that actually change, not by the number of Artin steps.
-    const MUTATED_FIELD_OWNER_BUDGET: usize = 7;
+    // What: UniqueFusion replay allocations are bounded by the one frozen
+    // output arena (its sector, duality and vertex buffers and its `Arc`)
+    // and the term vectors, not by the number of Artin steps.
+    const MUTATED_FIELD_OWNER_BUDGET: usize = 8;
     assert!(short_calls <= MUTATED_FIELD_OWNER_BUDGET);
     assert!(long_calls <= MUTATED_FIELD_OWNER_BUDGET);
 }

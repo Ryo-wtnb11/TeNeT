@@ -74,17 +74,13 @@ pub(super) fn multiplicity_free_fold_output_frame(
     first_is_dual: bool,
 ) -> MultiplicityFreeTreePairFrame {
     MultiplicityFreeTreePairFrame {
-        codomain: MultiplicityFreeTreeFrame::from_frozen_externals(
-            frame.codomain.uncoupled[1..].iter().copied().collect(),
-            frame.codomain.is_dual[1..].iter().copied().collect(),
+        codomain: MultiplicityFreeTreeFrame::from_externals(
+            frame.codomain.uncoupled()[1..].iter().copied(),
+            frame.codomain.is_dual()[1..].iter().copied(),
         ),
-        domain: MultiplicityFreeTreeFrame::from_frozen_externals(
-            std::iter::once(dual_first)
-                .chain(frame.domain.uncoupled.iter().copied())
-                .collect(),
-            std::iter::once(!first_is_dual)
-                .chain(frame.domain.is_dual.iter().copied())
-                .collect(),
+        domain: MultiplicityFreeTreeFrame::from_externals(
+            std::iter::once(dual_first).chain(frame.domain.uncoupled().iter().copied()),
+            std::iter::once(!first_is_dual).chain(frame.domain.is_dual().iter().copied()),
         ),
     }
 }
@@ -166,8 +162,8 @@ pub(super) fn collect_multiplicity_free_tree_pair_locals_for_frame<R>(
 where
     R: MultiplicityFreeFusionRule,
 {
-    let codomain_coupled = reachable_coupled_sectors(rule, &frame.codomain.uncoupled);
-    let domain_coupled = reachable_coupled_sectors(rule, &frame.domain.uncoupled);
+    let codomain_coupled = reachable_coupled_sectors(rule, frame.codomain.uncoupled());
+    let domain_coupled = reachable_coupled_sectors(rule, frame.domain.uncoupled());
     let mut codomain_index = 0usize;
     let mut domain_index = 0usize;
     let mut locals = Vec::new();
@@ -180,12 +176,12 @@ where
             std::cmp::Ordering::Equal => {
                 let codomain = collect_multiplicity_free_tree_locals_for_coupled(
                     rule,
-                    &frame.codomain.uncoupled,
+                    frame.codomain.uncoupled(),
                     codomain_sector,
                 );
                 let domain = collect_multiplicity_free_tree_locals_for_coupled(
                     rule,
-                    &frame.domain.uncoupled,
+                    frame.domain.uncoupled(),
                     domain_sector,
                 );
                 for domain_local in &domain {
@@ -354,7 +350,7 @@ where
     }
 
     fn lift_leading(lift: &MultiplicityFreeTreeFrame) -> SectorId {
-        lift.uncoupled[0]
+        lift.uncoupled()[0]
     }
 
     fn check_lift<T: FramedTree + ?Sized>(
@@ -363,10 +359,10 @@ where
         tree: &T,
     ) -> Result<(), CoreError> {
         if tree.uncoupled().len() != tree.is_dual().len()
-            || lift.uncoupled.len() != lift.is_dual.len()
-            || lift.uncoupled.len() != tree.uncoupled().len() + 1
-            || lift.uncoupled[1..] != *tree.uncoupled()
-            || lift.is_dual[1..] != *tree.is_dual()
+            || lift.uncoupled().len() != lift.is_dual().len()
+            || lift.uncoupled().len() != tree.uncoupled().len() + 1
+            || lift.uncoupled()[1..] != *tree.uncoupled()
+            || lift.is_dual()[1..] != *tree.is_dual()
         {
             return Err(CoreError::MalformedFusionTree {
                 message: "multi_Fmove inverse requires one leading external sector",
@@ -397,11 +393,11 @@ where
         tree: &T,
     ) -> Result<Self::Moves, CoreError> {
         let rule = self.0;
-        let leading = lift.uncoupled[0];
+        let leading = lift.uncoupled()[0];
         let prefix_targets = multiplicity_free_inverse_prefix_targets(tree.uncoupled(), tree)?;
         let candidates = collect_multiplicity_free_tree_locals_for_coupled_where(
             rule,
-            &lift.uncoupled,
+            lift.uncoupled(),
             coupled,
             |prefix_len, prefix_coupled| {
                 multiplicity_free_inverse_prefix_allowed(
@@ -409,15 +405,15 @@ where
                     leading,
                     &prefix_targets,
                     prefix_len,
-                    lift.uncoupled.len(),
+                    lift.uncoupled().len(),
                     prefix_coupled,
                 )
             },
         );
         let coefficients = multiplicity_free_multi_associator_grouped_fixed_short(
             rule,
-            &lift.uncoupled,
-            &lift.is_dual,
+            lift.uncoupled(),
+            lift.is_dual(),
             &candidates,
             tree.uncoupled(),
             tree.is_dual(),
@@ -447,9 +443,9 @@ impl<R: MultiplicityFreeRigidSymbols> KeyedMultiFKernel for SimpleK<'_, R> {
                 local: &local,
             },
         )?;
-        let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
-            frame.uncoupled[1..].iter().copied().collect(),
-            frame.is_dual[1..].iter().copied().collect(),
+        let output_frame = MultiplicityFreeTreeFrame::from_externals(
+            frame.uncoupled()[1..].iter().copied(),
+            frame.is_dual()[1..].iter().copied(),
         );
         Ok(terms
             .into_iter()
@@ -465,13 +461,9 @@ impl<R: MultiplicityFreeRigidSymbols> KeyedMultiFKernel for SimpleK<'_, R> {
         leading_is_dual: bool,
     ) -> Result<Self::Moves, CoreError> {
         let (source_frame, source) = project_multiplicity_free_tree(self.0, tree)?;
-        let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
-            std::iter::once(leading)
-                .chain(tree.uncoupled().iter().copied())
-                .collect(),
-            std::iter::once(leading_is_dual)
-                .chain(tree.is_dual().iter().copied())
-                .collect(),
+        let output_frame = MultiplicityFreeTreeFrame::from_externals(
+            std::iter::once(leading).chain(tree.uncoupled().iter().copied()),
+            std::iter::once(leading_is_dual).chain(tree.is_dual().iter().copied()),
         );
         Ok(multi_fmove_inv_surgery(
             self,

@@ -232,6 +232,14 @@ impl<K, S> BlockSourceColumns<K, S> {
         &self.destinations
     }
 
+    /// Replace every destination in place, in order; a cache re-homes its
+    /// keys into the entry's own arena this way (Rule O, #2192).
+    pub fn rehome_destinations(&mut self, mut rehome: impl FnMut(&K) -> K) {
+        for destination in self.destinations.iter_mut() {
+            *destination = rehome(destination);
+        }
+    }
+
     #[inline]
     pub fn source_count(&self) -> usize {
         self.column_start.len() - 1

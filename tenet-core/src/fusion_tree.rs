@@ -1,5 +1,6 @@
 use super::*;
 
+mod arena;
 mod bend;
 mod block_ops;
 mod block_terms;
@@ -22,6 +23,7 @@ mod unique_braid;
 mod unique_rigid;
 mod view;
 
+pub use arena::*;
 pub(crate) use bend::*;
 pub use block_ops::*;
 pub use block_terms::*;

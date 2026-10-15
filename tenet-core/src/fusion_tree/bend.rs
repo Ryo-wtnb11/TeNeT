@@ -63,9 +63,9 @@ impl MultiplicityFreeBend {
         let (codomain, domain) = orient(left, &frame.codomain, &frame.domain);
         Ok(Self {
             site: BendSite::new(
-                &codomain.uncoupled,
-                &codomain.is_dual,
-                domain.uncoupled.len(),
+                codomain.uncoupled(),
+                codomain.is_dual(),
+                domain.uncoupled().len(),
             )?,
             left,
         })
@@ -84,23 +84,21 @@ impl MultiplicityFreeBend {
         let bent_is_dual = self.site.bent_is_dual()?;
         let (codomain, domain) = orient(self.left, &frame.codomain, &frame.domain);
         let kept = self.site.codomain_rank - 1;
-        let shrunk = MultiplicityFreeTreeFrame::from_frozen_externals(
-            codomain.uncoupled[..kept].into(),
-            codomain.is_dual[..kept].into(),
+        let shrunk = MultiplicityFreeTreeFrame::from_externals(
+            codomain.uncoupled()[..kept].iter().copied(),
+            codomain.is_dual()[..kept].iter().copied(),
         );
-        let grown = MultiplicityFreeTreeFrame::from_frozen_externals(
+        let grown = MultiplicityFreeTreeFrame::from_externals(
             domain
-                .uncoupled
+                .uncoupled()
                 .iter()
                 .copied()
-                .chain(std::iter::once(rule.dual(self.site.bent_sector)))
-                .collect(),
+                .chain(std::iter::once(rule.dual(self.site.bent_sector))),
             domain
-                .is_dual
+                .is_dual()
                 .iter()
                 .copied()
-                .chain(std::iter::once(!bent_is_dual))
-                .collect(),
+                .chain(std::iter::once(!bent_is_dual)),
         );
         let (codomain, domain) = orient(self.left, shrunk, grown);
         Ok(MultiplicityFreeTreePairFrame { codomain, domain })
@@ -301,7 +299,9 @@ where
     } else {
         &[]
     };
-    let new_codomain = FusionTreeKey::new(
+    // One arena for the new codomain tree and every new domain tree.
+    let mut builder = TreeArenaBuilder::default();
+    let new_codomain = builder.push_parts(
         codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
         lines.left_coupled,
         codomain.is_dual()[..codomain_rank - 1].iter().copied(),
@@ -311,37 +311,27 @@ where
 
     // Base domain data shared by every ν; only the appended vertex label varies
     // (TK :100-103, `uncoupled₂/coupled₂/isdual₂/inner₂` hoisted out of the loop).
-    let domain_uncoupled: Arc<[SectorId]> = domain
-        .uncoupled()
-        .iter()
-        .copied()
-        .chain(std::iter::once(row.bent_dual))
-        .collect::<Vec<_>>()
-        .into();
-    let domain_is_dual: Arc<[bool]> = domain
-        .is_dual()
-        .iter()
-        .copied()
-        .chain(std::iter::once(!lines.bent_is_dual))
-        .collect::<Vec<_>>()
-        .into();
-    let domain_innerlines: Arc<[SectorId]> = domain
-        .innerlines()
-        .iter()
-        .copied()
-        .chain((domain_rank > 1).then_some(lines.coupled))
-        .collect::<Vec<_>>()
-        .into();
-
-    let mut out: Vec<(FusionTreePairKey, C::Scalar)> = Vec::new();
+    let mut domains = Vec::new();
     for (nu0, coeff) in row.terms() {
         // vertices₂ = N₂>0 ? (f₂.vertices..., ν) : ()  (TK :107). ν is the
         // 1-based output vertex label (mu_index inverts this on the way back).
-        let new_domain = FusionTreeKey::from_frozen(
-            Arc::clone(&domain_uncoupled),
+        let new_domain = builder.push_parts(
+            domain
+                .uncoupled()
+                .iter()
+                .copied()
+                .chain(std::iter::once(row.bent_dual)),
             lines.left_coupled,
-            Arc::clone(&domain_is_dual),
-            Arc::clone(&domain_innerlines),
+            domain
+                .is_dual()
+                .iter()
+                .copied()
+                .chain(std::iter::once(!lines.bent_is_dual)),
+            domain
+                .innerlines()
+                .iter()
+                .copied()
+                .chain((domain_rank > 1).then_some(lines.coupled)),
             domain
                 .vertices()
                 .iter()
@@ -349,10 +339,16 @@ where
                 .chain((domain_rank > 0).then(|| {
                     MultiplicityIndex::new(nu0 + 1)
                         .expect("enumerated Generic multiplicity labels are one-based")
-                }))
-                .collect::<Vec<_>>()
-                .into(),
+                })),
         );
+        domains.push((new_domain, coeff));
+    }
+    let arena = builder.freeze();
+    let new_codomain = arena.key(new_codomain);
+
+    let mut out: Vec<(FusionTreePairKey, C::Scalar)> = Vec::with_capacity(domains.len());
+    for (new_domain, coeff) in domains {
+        let new_domain = arena.key(new_domain);
         let key = FusionTreePairKey::pair(new_codomain.clone(), new_domain);
         // TK block writes `U[row, col] = coeff` (:110), so a repeated key (only
         // when the domain was empty) is overwritten, keeping the last ν.

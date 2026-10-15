@@ -114,12 +114,12 @@ fn fusion_tree_key_debug_excludes_cache() {
     );
 }
 
-// Canary (#153) against silent growth of the hottest recoupling-plan key.
-// A smaller representation is allowed; growth requires re-checking the
-// compact Hash/Eq/Ord and allocation contracts.
+// Canary (#153, #2192) against silent growth of the hottest recoupling-plan
+// key: a handle into its holder's tree arena, two words. A smaller
+// representation is allowed; growth requires re-checking the arena design.
 #[test]
 fn fusion_tree_key_size_has_not_silently_grown() {
-    assert!(std::mem::size_of::<FusionTreeKey>() <= 264);
+    assert!(std::mem::size_of::<FusionTreeKey>() <= 2 * std::mem::size_of::<usize>());
     assert_eq!(
         std::mem::size_of::<MultiplicityIndex>(),
         std::mem::size_of::<usize>()

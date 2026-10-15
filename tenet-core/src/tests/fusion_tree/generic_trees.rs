@@ -248,9 +248,9 @@ fn fusion_tree_key_generic_distinguishes_vertices() {
 
 #[test]
 fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
-    // What: Generic fanout shares external fields; retained-byte accounting
-    // deduplicates one owner's shared backing but charges independently
-    // allocated equal-content backing separately.
+    // What: Generic fanout shares one arena; retained-byte accounting
+    // deduplicates one arena but charges an independently allocated
+    // equal-content arena separately.
     let rule = ToyOmRule;
     let a = SectorId::new(ToyOmRule::A);
     let c = SectorId::new(ToyOmRule::C);
@@ -259,10 +259,7 @@ fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
     assert!(trees.len() > 1);
     assert!(trees
         .windows(2)
-        .all(|trees| Arc::ptr_eq(&trees[0].uncoupled, &trees[1].uncoupled)));
-    assert!(trees
-        .windows(2)
-        .all(|trees| Arc::ptr_eq(&trees[0].is_dual, &trees[1].is_dual)));
+        .all(|trees| Arc::ptr_eq(&trees[0].arena, &trees[1].arena)));
 
     let independent = FusionTreeKey::new(
         trees[0].uncoupled().iter().copied(),
@@ -395,16 +392,17 @@ fn refute_b2a_bendright_uses_b_row_not_column() {
         let dom = FusionTreeKey::new([s], s, [false], [], []);
         let pair = FusionTreePairKey::pair(cod, dom);
         let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
-        // What: ν fanout owns only its changed vertex labels; the three
-        // unchanged domain fields share one frozen owner.
+        // What: the ν fanout shares one arena and differs only in its
+        // appended vertex label.
         assert_eq!(out.len(), 2);
         for terms in out.windows(2) {
             let left = terms[0].0.domain_tree();
             let right = terms[1].0.domain_tree();
-            assert!(Arc::ptr_eq(&left.uncoupled, &right.uncoupled));
-            assert!(Arc::ptr_eq(&left.is_dual, &right.is_dual));
-            assert!(Arc::ptr_eq(&left.innerlines, &right.innerlines));
-            assert!(!Arc::ptr_eq(&left.vertices, &right.vertices));
+            assert!(Arc::ptr_eq(&left.arena, &right.arena));
+            assert_eq!(left.uncoupled(), right.uncoupled());
+            assert_eq!(left.is_dual(), right.is_dual());
+            assert_eq!(left.innerlines(), right.innerlines());
+            assert_ne!(left.vertices(), right.vertices());
         }
         // Collect coeff keyed by output domain vertex label (=ν+1).
         let mut got = [0.0f64; 2];

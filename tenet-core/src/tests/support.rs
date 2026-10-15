@@ -2805,13 +2805,11 @@ pub(super) fn key_hash_fixture() -> (Vec<FusionTreeKey>, FusionTreeKey, FusionTr
         FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [2, 2])
             .unwrap(),
     ];
-    let shared = FusionTreeKey::from_frozen(
-        Arc::from(base.uncoupled()),
-        base.coupled(),
-        Arc::from(base.is_dual()),
-        Arc::from(base.innerlines()),
-        Arc::from(base.vertices()),
-    );
+    // The same tree on a later row of a shared arena.
+    let mut builder = TreeArenaBuilder::default();
+    builder.push_view(distinct[1].as_view());
+    let row = builder.push_view(base.as_view());
+    let shared = builder.freeze().key(row);
     let fresh = FusionTreeKey::new(
         base.uncoupled().iter().copied(),
         base.coupled(),

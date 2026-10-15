@@ -58,11 +58,7 @@ where
 {
     let checked = InfallibleGeneric::new(rule);
     match collect_generic_fusion_trees_for_coupled_frozen_checked(
-        &checked,
-        &Arc::from(uncoupled),
-        &Arc::from(is_dual),
-        effective,
-        coupled,
+        &checked, uncoupled, is_dual, effective, coupled,
     ) {
         Ok(trees) => trees,
         Err(CheckedGenericStructureError::Provider(never)) => match never {},
@@ -75,8 +71,8 @@ where
 #[cfg(any(test, feature = "testing"))]
 pub(super) fn collect_generic_fusion_trees_for_coupled_frozen<R>(
     rule: &R,
-    uncoupled: &Arc<[SectorId]>,
-    is_dual: &Arc<[bool]>,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
     effective: &[SectorId],
     coupled: SectorId,
 ) -> Vec<FusionTreeKey>
@@ -97,15 +93,41 @@ where
 
 pub(super) fn collect_generic_fusion_trees_for_coupled_frozen_checked<R>(
     rule: &R,
-    uncoupled: &Arc<[SectorId]>,
-    is_dual: &Arc<[bool]>,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
     effective: &[SectorId],
     coupled: SectorId,
 ) -> Result<Vec<FusionTreeKey>, CheckedGenericStructureError<R::Error>>
 where
     R: CheckedGenericFusion,
 {
-    let mut out = Vec::new();
+    let mut builder = TreeArenaBuilder::sharing();
+    push_generic_fusion_trees_for_coupled_checked(
+        rule,
+        &mut builder,
+        uncoupled,
+        is_dual,
+        effective,
+        coupled,
+    )?;
+    let count = builder.len();
+    let arena = builder.freeze();
+    Ok((0..count).map(|row| arena.key(row)).collect())
+}
+
+/// Push every standard-form tree (all vertex labels) of `uncoupled` into
+/// `coupled` as rows of `builder`.
+pub(super) fn push_generic_fusion_trees_for_coupled_checked<R>(
+    rule: &R,
+    builder: &mut TreeArenaBuilder,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Result<(), CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
     // `inner_rev` / `vtx_rev` accumulate outermost-first as the walk descends
     // (the top vertex/innerline is pushed first); the stored key wants
     // innermost-first, so emit reverses both — same discipline as
@@ -119,24 +141,19 @@ where
         &mut inner_rev,
         &mut vtx_rev,
         &mut |inner_rev, vtx_rev| {
-            out.push(FusionTreeKey::from_frozen(
-                Arc::clone(uncoupled),
+            builder.push_parts(
+                uncoupled.iter().copied(),
                 coupled,
-                Arc::clone(is_dual),
-                inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
-                vtx_rev
-                    .iter()
-                    .rev()
-                    .map(|&label| {
-                        MultiplicityIndex::new(label)
-                            .expect("enumerated Generic multiplicity labels are one-based")
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            ));
+                is_dual.iter().copied(),
+                inner_rev.iter().rev().copied(),
+                vtx_rev.iter().rev().map(|&label| {
+                    MultiplicityIndex::new(label)
+                        .expect("enumerated Generic multiplicity labels are one-based")
+                }),
+            );
         },
     )?;
-    Ok(out)
+    Ok(())
 }
 
 /// Recursive walker for [`collect_generic_fusion_trees_for_coupled`]. Mirrors
@@ -415,8 +432,8 @@ impl<C: GenericFRAccess> MultiFKernel for GenericK<'_, C> {
     fn tails<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E> {
         let rule = self.0;
         let first = tree.uncoupled()[0];
-        let tail_uncoupled: Arc<[SectorId]> = tree.uncoupled()[1..].into();
-        let tail_is_dual: Arc<[bool]> = tree.is_dual()[1..].into();
+        let tail_uncoupled = &tree.uncoupled()[1..];
+        let tail_is_dual = &tree.is_dual()[1..];
         let mut terms = Vec::new();
         let dual_first = rule
             .try_dual(first)
@@ -425,7 +442,7 @@ impl<C: GenericFRAccess> MultiFKernel for GenericK<'_, C> {
             .try_fusion_channels_in_table(dual_first, tree.coupled())
             .map_err(CheckedGenericSymbolError::Provider)?
         {
-            for tail in rule.try_fusion_trees(&tail_uncoupled, &tail_is_dual, tail_coupled)? {
+            for tail in rule.try_fusion_trees(tail_uncoupled, tail_is_dual, tail_coupled)? {
                 if let Some(coefficients) = generic_multi_associator_result(rule, tree, &tail)? {
                     terms.push((tail, coefficients));
                 }
@@ -469,10 +486,10 @@ impl<C: GenericFRAccess> MultiFKernel for GenericK<'_, C> {
         tree: &T,
     ) -> Result<Self::Moves, Self::E> {
         let rule = self.0;
-        let uncoupled: Arc<[SectorId]> = std::iter::once(leading)
+        let uncoupled: Vec<SectorId> = std::iter::once(leading)
             .chain(tree.uncoupled().iter().copied())
             .collect();
-        let dual: Arc<[bool]> = std::iter::once(leading_is_dual)
+        let dual: Vec<bool> = std::iter::once(leading_is_dual)
             .chain(tree.is_dual().iter().copied())
             .collect();
         let candidates = rule.try_fusion_trees(&uncoupled, &dual, coupled)?;

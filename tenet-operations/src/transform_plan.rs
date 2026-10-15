@@ -579,7 +579,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
 
     /// The source fusion-tree group. Why derived rather than stored: every
     /// constructor takes it from the first source key, so a stored copy is
-    /// 64 bytes per spec that a group key's four `Arc` bumps rebuild (#1998).
+    /// a group key per spec that two refcount bumps rebuild (#1998, #2192).
     #[inline]
     pub fn group_key(&self) -> FusionTreeGroupKey {
         self.entries.src()[0].group_key()
@@ -596,6 +596,32 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     #[inline]
     pub fn dst_keys(&self) -> &[FusionTreePairKey] {
         self.entries.dst()
+    }
+
+    /// Replace every key in place, destinations first, then sources, each in
+    /// order; a cache re-homes a freshly built spec's keys into the entry's
+    /// own arena this way (Rule O, #2192). A shared key slice is copied once.
+    #[doc(hidden)]
+    pub fn rehome_keys(&mut self, mut rehome: impl FnMut(&FusionTreePairKey) -> FusionTreePairKey) {
+        fn in_place(
+            keys: &mut Arc<[FusionTreePairKey]>,
+            rehome: &mut impl FnMut(&FusionTreePairKey) -> FusionTreePairKey,
+        ) {
+            match Arc::get_mut(keys) {
+                Some(keys) => keys.iter_mut().for_each(|key| *key = rehome(key)),
+                None => *keys = keys.iter().map(rehome).collect(),
+            }
+        }
+        match &mut self.entries {
+            SpecEntries::Single { dst, src, .. } => {
+                *dst = rehome(dst);
+                *src = rehome(src);
+            }
+            SpecEntries::Multi { dst, src, .. } => {
+                in_place(dst, &mut rehome);
+                in_place(src, &mut rehome);
+            }
+        }
     }
 
     #[inline]

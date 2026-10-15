@@ -23,7 +23,7 @@
 //! trace of TensorKit `_trace_permute!` permutes a `FusionTreeBlock` through
 //! the same cached `fsbraid`, then splits every row on every call; TeNeT
 //! stores the rows already lowered (split, `g₁ == g₂`, channel factor,
-//! #2149), since its Arc-backed, provider-admitted split costs allocations
+//! #2149), since its arena-backed, provider-admitted split costs allocations
 //! and queries per row where TensorKit's isbits split costs none. Unique
 //! trace stays uncached, as TensorKit's `NoCache`, since a trace hit saves
 //! no work over one phase per source.
@@ -55,9 +55,9 @@ use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    BlockSourceColumns, ErasedStructureCacheControl, FusionTreeGroupKey, FusionTreePairKey,
-    FusionTreePairOrientation, RuleIdentity, StructureCache, StructureCacheInfo,
-    StructureCacheKind,
+    BlockSourceColumns, DedupTreeArenaBuilder, ErasedStructureCacheControl, FusionTreeGroupKey,
+    FusionTreePairKey, FusionTreePairOrientation, RuleIdentity, StructureCache, StructureCacheInfo,
+    StructureCacheKind, TreeRehomer,
 };
 
 use tenet_core::BlockStructure;
@@ -408,15 +408,36 @@ impl ReuseContext {
         coefficient_groups().get(&view).ok_or(hash)
     }
 
-    /// The owned key of a freshly built group; its tree list is cloned only
-    /// here.
-    fn key(&self, hash: u64, (group_key, src_keys): SourceGroup<'_>) -> CoefficientGroupKey {
-        CoefficientGroupKey {
-            context: Arc::clone(&self.context),
-            group_key: group_key.clone(),
-            src_keys: src_keys.iter().map(|key| (*key).clone()).collect(),
-            hash,
+    /// Rule O (#2192): the owned key of a freshly built group and its value
+    /// point into one arena the entry owns, never into the source structure,
+    /// so an entry retains and is charged only its own trees. The returned
+    /// re-homer then yields `value_pairs`' new keys, in order.
+    fn rehomed_key<'v>(
+        &self,
+        hash: u64,
+        (group_key, src_keys): SourceGroup<'v>,
+        arena: &mut DedupTreeArenaBuilder,
+        value_pairs: impl Iterator<Item = &'v FusionTreePairKey> + Clone,
+    ) -> (CoefficientGroupKey, TreeRehomer) {
+        arena.reserve(
+            src_keys.iter().copied().chain(value_pairs.clone()),
+            std::iter::once(group_key),
+        );
+        arena.insert_group(group_key);
+        for key in src_keys {
+            arena.insert_pair(key);
         }
+        for key in value_pairs {
+            arena.insert_pair(key);
+        }
+        let mut rehomer = arena.rehome();
+        let key = CoefficientGroupKey {
+            context: Arc::clone(&self.context),
+            group_key: rehomer.group(),
+            src_keys: src_keys.iter().map(|_| rehomer.pair()).collect(),
+            hash,
+        };
+        (key, rehomer)
     }
 }
 
@@ -428,6 +449,8 @@ pub(crate) struct CoefficientGroupReuse<T> {
     /// Charge scratch reused across this build's staged groups: a fresh set
     /// per group would allocate once per Unique group.
     backings: RefCell<rustc_hash::FxHashSet<usize>>,
+    /// Entry-arena scratch reused across this build's staged groups.
+    arena: RefCell<DedupTreeArenaBuilder>,
     coefficient: PhantomData<fn() -> T>,
 }
 
@@ -446,6 +469,7 @@ where
             context: ReuseContext::new::<T>(rule, mode, scope, operation.clone(), orientation),
             built: RefCell::new(PendingCoefficientGroups::default()),
             backings: RefCell::default(),
+            arena: RefCell::default(),
             coefficient: PhantomData,
         }
     }
@@ -476,9 +500,22 @@ where
         &self,
         hash: u64,
         group: SourceGroup<'_>,
-        specs: Vec<TreeTransformGroupBlockSpec<T>>,
+        mut specs: Vec<TreeTransformGroupBlockSpec<T>>,
     ) -> Arc<CoefficientGroupEntry<T>> {
-        let key = self.context.key(hash, group);
+        let mut arena = self.arena.borrow_mut();
+        let (key, mut rehomer) = self.context.rehomed_key(
+            hash,
+            group,
+            &mut arena,
+            specs
+                .iter()
+                .flat_map(|spec| spec.dst_keys().iter().chain(spec.src_keys())),
+        );
+        for spec in &mut specs {
+            spec.rehome_keys(|_| rehomer.pair());
+        }
+        arena.recycle(rehomer);
+        drop(arena);
         let entry = Arc::new(CoefficientGroupEntry::new(specs));
         let bytes = {
             let mut backings = self.backings.borrow_mut();
@@ -514,6 +551,7 @@ pub(crate) struct TraceTermReuse<T> {
     context: ReuseContext,
     built: PendingCoefficientGroups,
     backings: rustc_hash::FxHashSet<usize>,
+    arena: DedupTreeArenaBuilder,
     coefficient: PhantomData<fn() -> T>,
 }
 
@@ -540,6 +578,7 @@ where
             ),
             built: PendingCoefficientGroups::default(),
             backings: rustc_hash::FxHashSet::default(),
+            arena: DedupTreeArenaBuilder::default(),
             coefficient: PhantomData,
         }
     }
@@ -568,9 +607,13 @@ where
         &mut self,
         hash: u64,
         group: SourceGroup<'_>,
-        columns: TraceTerms<T>,
+        mut columns: TraceTerms<T>,
     ) -> Arc<TraceTerms<T>> {
-        let key = self.context.key(hash, group);
+        let (key, mut rehomer) =
+            self.context
+                .rehomed_key(hash, group, &mut self.arena, columns.destinations().iter());
+        columns.rehome_destinations(|_| rehomer.pair());
+        self.arena.recycle(rehomer);
         let columns = Arc::new(columns);
         self.backings.clear();
         let bytes = charged_key_bytes(&key, &mut self.backings)

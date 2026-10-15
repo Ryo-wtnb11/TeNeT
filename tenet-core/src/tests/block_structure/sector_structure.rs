@@ -1110,3 +1110,248 @@ fn sector_structure_pairs_general_opaque_keys_by_sorted_merge() {
     assert_eq!(src.find_index(&key_b), Some(1));
     assert_eq!(dst.pair_indices_from(&src).unwrap(), vec![1, 0]);
 }
+
+fn side_symmetric_u1_keys() -> Arc<[FusionTreePairKey]> {
+    let leg = || SectorLeg::new([(u1(-1), 1), (u1(0), 1), (u1(1), 1)], false);
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    )
+    .fusion_tree_keys(&U1FusionRule)
+}
+
+fn tree_arena_of(structure: &SectorStructure, index: usize) -> Arc<TreeArena> {
+    let pair = structure.key(index).unwrap().as_fusion_tree_pair().unwrap();
+    Arc::clone(&pair.codomain_tree().arena)
+}
+
+#[test]
+fn a_structure_owns_its_tree_arena_and_reuses_only_a_complete_canonical_one() {
+    let keys = side_symmetric_u1_keys();
+    let layout_arena = Arc::clone(&keys[0].codomain_tree().arena);
+
+    // What: the layout keys already use their whole canonical arena, so a
+    // structure over all of them takes it without a copy (Rule O, #2192).
+    let full = SectorStructure::from_keys(4, keys.iter().cloned()).unwrap();
+    assert!(Arc::ptr_eq(&tree_arena_of(&full, 0), &layout_arena));
+
+    // What: a structure over three of those keys copies them into an arena
+    // of its own instead of pinning the large one, and finds the same keys.
+    let subset = SectorStructure::from_keys(4, keys.iter().take(3).cloned()).unwrap();
+    let subset_arena = tree_arena_of(&subset, 0);
+    assert!(!Arc::ptr_eq(&subset_arena, &layout_arena));
+    assert!(subset_arena.len() < layout_arena.len());
+    for index in 0..subset.block_count() {
+        let pair = subset.key(index).unwrap().as_fusion_tree_pair().unwrap();
+        assert!(Arc::ptr_eq(&pair.domain_tree().arena, &subset_arena));
+        assert_eq!(pair, &keys[index]);
+        assert_eq!(
+            subset.find_fusion_tree_pair_index(&keys[index]),
+            Some(index)
+        );
+    }
+    assert_eq!(subset.find_fusion_tree_pair_index(&keys[3]), None);
+}
+
+#[test]
+fn same_arena_lookup_of_swapped_trees_takes_the_content_search() {
+    let keys = side_symmetric_u1_keys();
+    let structure = SectorStructure::from_keys(4, keys.iter().cloned()).unwrap();
+    for index in 0..structure.block_count() {
+        let own = structure.key(index).unwrap().as_fusion_tree_pair().unwrap();
+        // What: both handles point into the structure's arena but onto the
+        // other side's rows, so the side-rank fast path must not apply; the
+        // answer is the block whose trees equal them by content.
+        let swapped =
+            FusionTreePairKey::pair(own.domain_tree().clone(), own.codomain_tree().clone());
+        let expected = (0..structure.block_count()).find(|&candidate| {
+            structure.key(candidate).unwrap() == &BlockKey::from(swapped.clone())
+        });
+        assert_eq!(structure.find_fusion_tree_pair_index(&swapped), expected);
+        assert_eq!(structure.find_fusion_tree_pair_index(own), Some(index));
+        assert_eq!(
+            structure.find_adjoint_fusion_tree_pair_index(&swapped),
+            Some(index)
+        );
+    }
+}
+
+#[test]
+fn same_arena_lookup_with_one_tree_on_the_wrong_side_takes_the_content_search() {
+    let keys = side_symmetric_u1_keys();
+    let structure = SectorStructure::from_keys(4, keys.iter().cloned()).unwrap();
+    let content_index = |pair: &FusionTreePairKey| {
+        (0..structure.block_count())
+            .find(|&candidate| structure.key(candidate).unwrap() == &BlockKey::from(pair.clone()))
+    };
+    for index in 0..structure.block_count() {
+        let own = structure.key(index).unwrap().as_fusion_tree_pair().unwrap();
+        // What: both handles point into the structure's arena, but one of
+        // them sits on the other side's rows (domain, domain) or (codomain,
+        // codomain); neither half of the side guard may be skipped.
+        for probe in [
+            FusionTreePairKey::pair(own.domain_tree().clone(), own.domain_tree().clone()),
+            FusionTreePairKey::pair(own.codomain_tree().clone(), own.codomain_tree().clone()),
+        ] {
+            let expected = content_index(&probe);
+            assert_eq!(structure.find_fusion_tree_pair_index(&probe), expected);
+        }
+    }
+    // The fixture must exercise hits, not only misses.
+    assert!((0..structure.block_count()).any(|index| {
+        let own = structure.key(index).unwrap().as_fusion_tree_pair().unwrap();
+        let probe = FusionTreePairKey::pair(own.domain_tree().clone(), own.domain_tree().clone());
+        structure.find_fusion_tree_pair_index(&probe).is_some()
+    }));
+}
+
+#[test]
+fn a_structure_of_side_swapped_layout_keys_does_not_reuse_their_arena() {
+    let keys = side_symmetric_u1_keys();
+    let layout_arena = Arc::clone(&keys[0].codomain_tree().arena);
+    // What: every arena row is used, but each codomain tree sits on a domain
+    // row and vice versa, so the arena is not this structure's canonical
+    // one; it is re-homed and every swapped key is found by content.
+    let swapped = keys
+        .iter()
+        .map(|key| FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone()))
+        .collect::<Vec<_>>();
+    let structure = SectorStructure::from_keys(4, swapped.iter().cloned()).unwrap();
+    assert!(!Arc::ptr_eq(&tree_arena_of(&structure, 0), &layout_arena));
+    for (index, key) in swapped.iter().enumerate() {
+        assert_eq!(structure.find_fusion_tree_pair_index(key), Some(index));
+        assert_eq!(structure.key(index).unwrap(), &BlockKey::from(key.clone()));
+    }
+}
+
+/// Keys of the SU(2) `½^⊗8 ← ½^⊗8` layout: many trees per external tuple.
+fn su2_half_keys() -> Arc<[FusionTreePairKey]> {
+    let half = || SectorLeg::new([(SU2Irrep::from_twice_spin(1).sector_id(), 1)], false);
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..4).map(|_| half())),
+        FusionProductSpace::new((0..4).map(|_| half())),
+    )
+    .fusion_tree_keys(&SU2FusionRule)
+}
+
+#[test]
+fn trees_of_one_external_tuple_store_their_externals_once() {
+    let keys = su2_half_keys();
+    // What: every tree of either side has the same uncoupled sectors,
+    // duality flags and vertex labels, so the arena stores them once and
+    // otherwise only each tree's coupled sector and inner lines (#2192),
+    // whatever order the keys arrive in.
+    for order in [
+        keys.iter().cloned().collect::<Vec<_>>(),
+        keys.iter().rev().cloned().collect(),
+        keys.iter()
+            .map(|key| {
+                FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone())
+            })
+            .collect(),
+    ] {
+        let structure = SectorStructure::from_keys(8, order.iter().cloned()).unwrap();
+        let arena = tree_arena_of(&structure, 0);
+        let lines = (0..arena.len())
+            .map(|row| 1 + arena.innerlines(row).len())
+            .sum::<usize>();
+        // One run of 4 uncoupled sectors, 3 vertices and 4 flags.
+        assert_eq!(arena.stored_entries(), (lines + 4, 3, 4));
+        for (index, key) in order.iter().enumerate() {
+            assert_eq!(structure.find_fusion_tree_pair_index(key), Some(index));
+        }
+    }
+}
+
+fn u1_raw_tree(uncoupled: &[usize], innerlines: &[usize], coupled: usize) -> FusionTreeKey {
+    FusionTreeKey::try_from_sector_ids_for_rule(
+        &U1FusionRule,
+        uncoupled.iter().copied(),
+        coupled,
+        uncoupled.iter().map(|_| false),
+        innerlines.iter().copied(),
+        std::iter::repeat_n(1usize, uncoupled.len().saturating_sub(1)),
+    )
+    .unwrap()
+}
+
+/// U(1) zigzag sector id of `charge`, and back.
+fn u1_id(charge: i64) -> usize {
+    (if charge >= 0 {
+        2 * charge
+    } else {
+        -2 * charge - 1
+    }) as usize
+}
+
+fn u1_charge(id: usize) -> i64 {
+    if id.is_multiple_of(2) {
+        (id / 2) as i64
+    } else {
+        -(id.div_ceil(2) as i64)
+    }
+}
+
+#[test]
+fn shared_runs_survive_a_content_hash_collision_of_different_lengths() {
+    // What: [a] and [b1, b2, b3] are valid U(1) uncoupled runs whose run
+    // hashes collide (found by lattice reduction, review r3). Sharing must
+    // compare stored length and content, never read past the stored run:
+    // the structure builds and every key is found as itself.
+    let (a, b1, b2, b3) = (
+        536870912usize,
+        268711625usize,
+        267632009usize,
+        536388608usize,
+    );
+    let sum = u1_charge(b1) + u1_charge(b2) + u1_charge(b3);
+    let keys = [
+        FusionTreePairKey::pair(
+            u1_raw_tree(&[a], &[], a),
+            u1_raw_tree(&[a, u1_id(0), u1_id(0)], &[a], a),
+        ),
+        FusionTreePairKey::pair(
+            u1_raw_tree(&[u1_id(sum)], &[], u1_id(sum)),
+            u1_raw_tree(
+                &[b1, b2, b3],
+                &[u1_id(u1_charge(b1) + u1_charge(b2))],
+                u1_id(sum),
+            ),
+        ),
+    ];
+    let structure = SectorStructure::from_keys(4, keys.iter().cloned()).unwrap();
+    for key in &keys {
+        let found = structure.find_fusion_tree_pair_index(key).unwrap();
+        assert_eq!(
+            structure.key(found).unwrap().as_fusion_tree_pair().unwrap(),
+            key
+        );
+    }
+}
+
+#[test]
+fn shared_runs_survive_a_content_hash_collision_of_equal_lengths() {
+    // What: these two raw two-sector runs have colliding run hashes (a
+    // two-dimensional lattice solution); each tree keeps its own content.
+    let raw = |uncoupled: [usize; 2], coupled: usize| {
+        FusionTreeKey::try_from_sector_ids(uncoupled, coupled, [false, false], [], [1]).unwrap()
+    };
+    let keys = [
+        FusionTreePairKey::pair(
+            raw([8589934592, 8589934592], 0),
+            raw([8589934592, 8589934592], 0),
+        ),
+        FusionTreePairKey::pair(
+            raw([5538824234, 5310866862], 0),
+            raw([5538824234, 5310866862], 0),
+        ),
+    ];
+    let structure = SectorStructure::from_keys(4, keys.iter().cloned()).unwrap();
+    for key in &keys {
+        let found = structure.find_fusion_tree_pair_index(key).unwrap();
+        assert_eq!(
+            structure.key(found).unwrap().as_fusion_tree_pair().unwrap(),
+            key
+        );
+    }
+}
