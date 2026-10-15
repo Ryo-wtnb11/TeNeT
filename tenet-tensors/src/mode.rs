@@ -1131,7 +1131,6 @@ where
         let key = CompletedTransformerKey::new::<f64>(
             identity.clone(),
             TransformerMode::CheckedGeneric,
-            TreeTransformScope::TreePair,
             operation,
             tenet_core::FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,

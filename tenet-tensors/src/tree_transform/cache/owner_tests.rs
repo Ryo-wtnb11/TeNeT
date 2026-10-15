@@ -14,7 +14,6 @@ use tenet_core::{
 use super::{
     resolve, take_completed_transformer_activity, CompletedTransformerKey, OrientedBasisOrder,
     TransformerMode, TreePairKeyRef, TreeTransformOperationView, TreeTransformPlanning,
-    TreeTransformScope,
 };
 use crate::{BoundDynamicFusionMapSpace, OperationError, TreeTransformOperation};
 
@@ -67,7 +66,6 @@ fn every_key_determinant_splits_entries() {
     let other_structure = fixture(1).0;
     let key = |rule: RuleIdentity,
                mode,
-               scope,
                operation: &TreeTransformOperation,
                orientation,
                basis_order,
@@ -78,7 +76,6 @@ fn every_key_determinant_splits_entries() {
         CompletedTransformerKey::new::<f64>(
             rule,
             mode,
-            scope,
             operation,
             orientation,
             basis_order,
@@ -93,7 +90,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -107,7 +103,6 @@ fn every_key_determinant_splits_entries() {
         key(
             RuleIdentity::of_type::<()>(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -119,7 +114,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::CheckedGeneric,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -131,21 +125,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TraceTerms {
-                open_codomain_rank: 0,
-            },
-            &operation,
-            FusionTreePairOrientation::Direct,
-            OrientedBasisOrder::Canonical,
-            false,
-            None,
-            &dst,
-            &src,
-        ),
-        key(
-            rule.clone(),
-            TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &TreeTransformOperation::transpose([1, 0], [2]),
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -157,7 +136,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -169,7 +147,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Adjoint,
             OrientedBasisOrder::Canonical,
@@ -181,7 +158,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Storage,
@@ -193,7 +169,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -205,7 +180,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -217,7 +191,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -229,7 +202,6 @@ fn every_key_determinant_splits_entries() {
         key(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -241,7 +213,6 @@ fn every_key_determinant_splits_entries() {
         CompletedTransformerKey::new::<Complex64>(
             rule.clone(),
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             &operation,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
@@ -259,7 +230,6 @@ fn every_key_determinant_splits_entries() {
     let rebuilt = key(
         rule.clone(),
         TransformerMode::MultiplicityFree,
-        TreeTransformScope::TreePair,
         &TreeTransformOperation::permute(vec![1, 0], vec![2]),
         FusionTreePairOrientation::Direct,
         OrientedBasisOrder::Canonical,
@@ -366,17 +336,16 @@ fn coefficient_types_are_separate_entries() {
         let args = (
             rule,
             TransformerMode::MultiplicityFree,
-            TreeTransformScope::TreePair,
             FusionTreePairOrientation::Direct,
             OrientedBasisOrder::Canonical,
         );
         if complex {
             CompletedTransformerKey::new::<Complex64>(
-                args.0, args.1, args.2, &operation, args.3, args.4, false, None, &dst, &src,
+                args.0, args.1, &operation, args.2, args.3, false, None, &dst, &src,
             )
         } else {
             CompletedTransformerKey::new::<f64>(
-                args.0, args.1, args.2, &operation, args.3, args.4, false, None, &dst, &src,
+                args.0, args.1, &operation, args.2, args.3, false, None, &dst, &src,
             )
         }
     };
