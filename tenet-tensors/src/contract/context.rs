@@ -773,118 +773,6 @@ where
         .map(drop)
     }
 
-    /// The owned multiplicity-free contraction `lhs·rhs` into a fresh
-    /// payload, split after its first `codomain_rank` output axes. Each
-    /// operand is its logical space, its storage operand (a lazy adjoint is
-    /// storage-conjugate) and its storage payload.
-    ///
-    /// This concrete cross-crate entrypoint is internal and unstable despite
-    /// being public for `tenet`; downstream callers must not rely on it.
-    #[doc(hidden)]
-    #[allow(clippy::type_complexity)]
-    pub fn tensorcontract_multiplicity_free_in<R>(
-        &mut self,
-        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (lhs_axes, rhs_axes, output_order): (&[usize], &[usize], OutputAxisOrder<'_>),
-        codomain_rank: usize,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
-    {
-        self.tensorcontract_in::<MultiplicityFreeContractStage<R>, R>(
-            (lhs_authority, lhs, lhs_data),
-            (rhs_authority, rhs, rhs_data),
-            ContractRequest::Contract {
-                axes: TensorContractSpec::new_with_conjugation(
-                    lhs_axes,
-                    rhs_axes,
-                    output_order,
-                    lhs.storage_conjugate(),
-                    rhs.storage_conjugate(),
-                ),
-                codomain_rank,
-            },
-        )
-    }
-
-    /// `dst = alpha · contract(lhs, rhs) + beta · dst` for multiplicity-free
-    /// operands (as in [`Self::tensorcontract_multiplicity_free_in`]) and an
-    /// existing destination: the owned entry's staging and commit around a
-    /// write into the caller's buffer. `dst_space` is compared with the
-    /// staged destination before `dst_data` is asked for the buffer.
-    ///
-    /// This concrete cross-crate entrypoint is internal and unstable despite
-    /// being public for `tenet`; downstream callers must not rely on it.
-    #[doc(hidden)]
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub fn tensorcontract_into_multiplicity_free_in<'d, R, E>(
-        &mut self,
-        (lhs_authority, lhs, lhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (rhs_authority, rhs, rhs_data): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        (lhs_axes, rhs_axes, output_order): (&[usize], &[usize], OutputAxisOrder<'_>),
-        codomain_rank: usize,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: impl FnOnce() -> Result<&'d mut [D], E>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), E>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        E: From<OperationError>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + 'd,
-    {
-        self.tensorcontract_into_in::<MultiplicityFreeContractStage<R>, R, E>(
-            (lhs_authority, lhs, lhs_data),
-            (rhs_authority, rhs, rhs_data),
-            ContractRequest::Contract {
-                axes: TensorContractSpec::new_with_conjugation(
-                    lhs_axes,
-                    rhs_axes,
-                    output_order,
-                    lhs.storage_conjugate(),
-                    rhs.storage_conjugate(),
-                ),
-                codomain_rank,
-            },
-            dst_space,
-            dst_data,
-            alpha,
-            beta,
-        )
-    }
-
-    /// The owned multiplicity-free composition `lhs ∘ rhs` (TensorKit
-    /// `mul!`) into a fresh payload; operands as in
-    /// [`Self::tensorcontract_multiplicity_free_in`].
-    ///
-    /// This concrete cross-crate entrypoint is internal and unstable despite
-    /// being public for `tenet`; downstream callers must not rely on it.
-    #[doc(hidden)]
-    #[allow(clippy::type_complexity)]
-    pub fn tensorcompose_multiplicity_free_in<R>(
-        &mut self,
-        lhs: (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-        rhs: (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>, &[D]),
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ZeroBytes,
-    {
-        self.tensorcontract_in::<MultiplicityFreeContractStage<R>, R>(
-            lhs,
-            rhs,
-            ContractRequest::Compose,
-        )
-    }
-
     /// The one owned Host contraction and composition of both modes, the
     /// steps every storage runs ([`StagedContract`]): stage the destination
     /// (multiplicity-free derives it; checked Generic admits the operands and
@@ -1122,12 +1010,12 @@ where
     /// [`Self::plan_contract`] after its canonical core declined (`miss`, from
     /// [`try_compile_storage_contract_core_route`] on the same request):
     /// TensorKit's `copyC` (`blas_contract!`, `tensoroperations.jl:436-446`
-    /// @cfaa073) when [`zero_copy_contract_order_for_output_permute`] takes it
+    /// @cfaa073) when [`copy_c_order`](super::resolution::copy_c_order) takes it
     /// — a zero-copy core into a temporary in its own default output, then one
     /// permute — else the `DynamicTree` artifact.
     ///
     /// Why the core precedes `copyC`: a contraction that has the canonical
-    /// core needs no output permute (`zero_copy_contract_order_for_output_permute`
+    /// core needs no output permute (`copy_c_order`
     /// returns `None` for it), so TensorKit's memcost never charges it `dim(C)`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]

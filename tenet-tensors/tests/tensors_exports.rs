@@ -8,10 +8,12 @@
 //! deletes the static-rank layer: the `facade.rs` entries and their backend
 //! traits (leaf (a)) and the static contraction context, plan and replay
 //! entries (leaf (b)) are gone; the names still taking `tenet_core::TensorMap`
-//! (`tensorcontract_structure`, `TensorContractStructure::compile*`) follow
+//! (`tensorcontract_structure`) follow
 //! leaf (c). The structure caches, the
 //! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
-//! `tenet_operations` internals were narrowed to `pub(crate)`.
+//! `tenet_operations` internals were narrowed to `pub(crate)`; #2215 deleted
+//! the dead entries and narrowed every name without a consumer outside this
+//! crate except those an integration test or example of this crate uses.
 //!
 //! Why a source scan and not an import list: an import list only proves
 //! presence, not absence.
@@ -167,11 +169,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "adjoint",
         "adjoint_bound_dyn",
         "adjoint_bound_space_dyn",
-        "adjoint_bound_space_dyn_generic_checked",
         "materialize_adjoint_data_dyn",
         "AdjointBlockMap",
-        "AdjointBlockSource",
-        "AdjointScalar",
         // backend_trace
         // bound_tensor
         "BoundDynamicTensorRef",
@@ -188,37 +187,26 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "prepare_tensorcontract_fusion_plan_dyn",
         "tensorcontract_fusion_block_specs",
         "try_compile_storage_contract_core_route",
-        "zero_copy_contract_order_for_output_permute",
-        "copy_c_output_transform",
         "CopyCRoute",
-        "CoreMiss",
         "CoreRoute",
         "DirectCoreExecutor",
         "ExecCaps",
         "HostEagerExecutor",
         "BoundDynamicFusionMapSpace",
-        "CheckedContractStage",
         "ContractRequest",
         "CudaContractScratch",
         "CudaContractMembersWorkspace",
         "DynamicFusionMapSpace",
         "HostContractMembersWorkspace",
-        "FusionContractOrientation",
         "FusionContractPlan",
         "FusionOperand",
         "HostTensorContractBackend",
-        "HostTensorContractWorkspace",
-        "MultiplicityFreeContractStage",
-        "PreparedCheckedGenericDynamicSpace",
         "StagedContract",
         "StorageContractResolution",
         "TensorContractBackend",
         "TensorContractBlockSpec",
         "TensorContractFusionExecutionContext",
         "TensorContractFusionProfile",
-        "TensorContractStructure",
-        "TensorContractStructureTerm",
-        "TensorContractWorkspace",
         "ValidatedDynamicFusionLayout",
         // facade
         // oriented_elementwise
@@ -265,39 +253,25 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "WideScalar",
         "ZeroBytes",
         // tensortrace
-        "tensortrace_fusion_dyn_into_checked",
-        "tensortrace_fusion_dyn_owned_checked",
-        "tensortrace_fusion_dyn_owned_generic_checked",
         "tensortrace_fusion_dyn_preflight_checked",
         "tensortrace_fusion_dyn_preflight_generic_checked",
         "tensortrace_stage_multiplicity_free",
         "tensortrace_stage_checked_generic",
-        "tensortrace_multiplicity_free_in",
-        "tensortrace_checked_generic_in",
-        "tensortrace_into_multiplicity_free_in",
-        "tensortrace_into_checked_generic_in",
         "tensortrace_multiplicity_free_with",
         "tensortrace_checked_generic_with",
         "tensortrace_into_multiplicity_free_with",
         "tensortrace_into_checked_generic_with",
         "tensortrace_fusion_structure_owned_host",
         "tensortrace_fusion_structure_into_host",
-        "TensorTraceStage",
         "TracePreflight",
-        "tensortrace_fusion_dyn_structure_into_raw",
-        "tensortrace_fusion_dyn_structure_owned",
         "tensortrace_fusion_structure_into_on_cuda",
-        "FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING",
         "NON_SYMMETRIC_CONTRACTION_UNSUPPORTED",
         "SymmetricBraidingOp",
         "admit_checked_generic_pair",
-        "admit_checked_generic_providers",
         "reject_non_symmetric_contraction",
         "require_symmetric_braiding",
         "TensorTraceFusionStructure",
-        "TensorTraceFusionStructureTerm",
         // tree_context
-        "CheckedTreeTransformStage",
         "CoefficientAlgebra",
         "StagedTreeTransform",
         "StructureOutcome",

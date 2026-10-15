@@ -771,41 +771,8 @@ pub fn copy_c_output_transform(
 /// is not Complete: the one-call route then applies and keeps its errors.
 /// Candidate checks are axis and dual-flag comparisons, with the fermionic
 /// twist declined as on the Host Core route.
-#[doc(hidden)]
-pub fn zero_copy_contract_order_for_output_permute<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: FusionOperand<'_>,
-    rhs: FusionOperand<'_>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
-) -> Option<FusionContractOrientation>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    copy_c_order(
-        || {
-            Ok::<_, OperationError>(
-                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic,
-            )
-        },
-        |homspace, axes| rhs_contract_axes_require_twist(rule, homspace, axes),
-        &|space| super::dynamic::storage_layout_is_canonical(rule, space),
-        dst,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_axes,
-        None,
-        false,
-    )
-}
-
-/// [`zero_copy_contract_order_for_output_permute`], with the requested-order
-/// question optionally answered (`requested_zero_copy`: the `candidate_seen`
+///
+/// The requested-order question is optionally answered (`requested_zero_copy`: the `candidate_seen`
 /// of the planner's core walk over the requested order, which therefore runs
 /// once) and the twist rule of the core the temporary will run.
 ///
