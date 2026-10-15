@@ -312,8 +312,7 @@ pub(crate) use numeric::{
 };
 use numeric::{max_abs, pinv_seam_error, scaled_power};
 mod block_layout;
-#[cfg(test)]
-pub(crate) use block_layout::CAT_PLAN_DECLINES_ORIENTED;
+pub(crate) mod probe;
 pub(crate) use block_layout::{
     apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan, flip_block_factor,
     flip_toggled_homspace, logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
@@ -336,14 +335,6 @@ pub(crate) use cuda_factor::{
 use cuda_factor::{
     download_cuda_reduction_partials, executed_routes, validate_cuda_reduction_placement,
     validate_cuda_svd_middle_regions, TypedCudaQrScratch, TypedCudaSvdScratch,
-};
-#[cfg(all(test, feature = "cuda"))]
-use cuda_factor::{
-    observe_cuda_arithmetic, observe_cuda_qr_output_upload,
-    observe_cuda_svd_final_storage_creation, CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE,
-    CUDA_EIGH_FORCE_SELECTOR, CUDA_EIGH_REVERSE_ODD_SECTORS, CUDA_EIGH_SELECTOR_UPLOADS,
-    CUDA_EIGH_TREEWISE, CUDA_QR_OBSERVATION, CUDA_REDUCTION_BUFFER_OBSERVATION,
-    CUDA_SVD_OBSERVATION, CUDA_SVD_TREEWISE,
 };
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::seam::{compact_factor_routes, CompactFactorPlan, CompactFactorRoute};
@@ -386,15 +377,8 @@ pub use fusion_tree::{
     BlockFusionTrees, CoupledBlock, CoupledBlockPayload, FusionTreeLabels, SectorSpectrum,
 };
 mod tensor_repr;
-#[cfg(test)]
-pub(crate) use tensor_repr::ADJOINT_MATERIALIZATIONS;
 use tensor_repr::{
     borrowed_view_unsupported, owned_repr, TypedAdjointView, TypedTensorBody, TypedTensorRepr,
-};
-#[cfg(test)]
-use tensor_repr::{
-    observe_adjoint_materialization, observe_materialization_pool, DIAGONAL_MATERIALIZATIONS,
-    MATERIALIZATION_POOLS, UNCACHED_ADJOINT_MATERIALIZATIONS,
 };
 pub use tensor_repr::{PayloadConversion, PhysicalDense, TensorMap, TensorRef};
 mod cat;

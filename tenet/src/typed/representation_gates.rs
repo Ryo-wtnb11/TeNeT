@@ -1,4 +1,5 @@
 use super::*;
+use crate::typed::probe::{self, Event};
 
 include!("../../tests/common/predicate_chains.rs");
 include!("../../tests/support/report.rs");
@@ -246,7 +247,7 @@ fn storage_parameter_clone_shares_non_clone_payload() {
 
 #[test]
 fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let source = u1_lazy_fixture();
     let diagonal = source.svd_compact(&[0, 1], &[2]).unwrap().s;
     let lazy = source.adjoint().unwrap();
@@ -254,12 +255,12 @@ fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
     assert_eq!(source.placement(), Placement::Host);
     assert_eq!(diagonal.placement(), Placement::Host);
     assert_eq!(lazy.placement(), Placement::Host);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
 fn typed_zeros_like_is_exact_and_representation_preserving() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let source = u1_lazy_fixture();
     let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
     let index = std::cell::Cell::new(0usize);
@@ -347,7 +348,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
         .iter()
         .flat_map(|entry| &entry.values)
         .all(|value| value.to_bits() == 0));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let lazy = dense.adjoint().unwrap();
     let lazy_zero = lazy.zeros_like().unwrap();
@@ -573,7 +574,7 @@ fn fz2_fixture() -> TensorMap<tenet_core::FermionParityFusionRule, f64> {
 
 #[test]
 fn unit_insert_and_remove_share_the_dense_payload_arc() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     // What (#580 PR 5, gate 5): the O(1) property the PR 0 gate
     // `a_body_on_a_different_space_reuses_the_payload_allocation` proved
     // by hand-constructing a body, now proved through the real
@@ -587,7 +588,7 @@ fn unit_insert_and_remove_share_the_dense_payload_arc() {
     let inserted = tensor.insert_unit(1, Side::Domain, Duality::Plain).unwrap();
     assert!(!Arc::ptr_eq(owned(&tensor), owned(&inserted)));
     assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&inserted).data));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let removed = inserted.remove_unit(1).unwrap();
     assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&removed).data));
     // One payload allocation, three bodies holding it.

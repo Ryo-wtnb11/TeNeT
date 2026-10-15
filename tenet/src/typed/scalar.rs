@@ -567,7 +567,7 @@ where
             TypedTensorRepr::Owned(body) => body.materialized_dense_data(),
             TypedTensorRepr::Adjoint(view) => {
                 #[cfg(test)]
-                observe_adjoint_materialization();
+                probe::hit(probe::Event::AdjointMaterialization);
                 adjoint = tenet_tensors::materialize_adjoint_data_dyn(
                     view.parent.space.space(),
                     view.logical_space.space(),

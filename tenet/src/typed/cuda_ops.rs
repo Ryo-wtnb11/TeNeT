@@ -213,10 +213,7 @@ where
         // As for typed CUDA QR, all provider work and final-space admission
         // complete before the execution lock and before any output exists.
         let (source, plan) = self.cuda_factor_preflight("svd_compact", None)?;
-        #[cfg(test)]
-        let treewise = CUDA_SVD_TREEWISE.with(std::cell::Cell::get);
-        #[cfg(not(test))]
-        let treewise = false;
+        let treewise = probe::RoutePolicy::current().svd_treewise;
         let left_space = plan.left_space(self.logical_space())?;
         let right_space = plan.right_space(self.logical_space())?;
         let middle_space = plan.bond_space(self.logical_space())?;
@@ -238,15 +235,15 @@ where
             )?;
             let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
-            observe_cuda_svd_final_storage_creation();
+            probe::hit(probe::Event::CudaSvdOutputUpload);
             let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
-            observe_cuda_svd_final_storage_creation();
+            probe::hit(probe::Event::CudaSvdOutputUpload);
             // The zero upload is the only device allocation path until #740;
             // every value then arrives by a device copy.
             let mut middle_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; middle_len])?;
             #[cfg(test)]
-            observe_cuda_svd_final_storage_creation();
+            probe::hit(probe::Event::CudaSvdOutputUpload);
 
             let max_rows = executed_routes(&plan)
                 .map(|(route, _, _)| plan.source_regions()[route.source_region()].rows())
@@ -380,6 +377,7 @@ where
             "eigh_full",
             Some(tenet_matrixalgebra::seam::EndomorphismFamily::EighFull),
         )?;
+        let policy = probe::RoutePolicy::current();
 
         // Admission is complete. Validate every block before the first EIGH so
         // a late nonfinite or non-Hermitian sector cannot trigger partial
@@ -411,8 +409,6 @@ where
             let cuda = &mut *lease;
             let mut device_spectra = Vec::with_capacity(plan.source_regions().len());
             let mut vectors = Vec::with_capacity(plan.source_regions().len());
-            #[cfg(test)]
-            let mut decomposition_ordinal = 0;
             for region in plan.source_regions().iter() {
                 let n = region.rows();
                 if n == 0 {
@@ -422,10 +418,7 @@ where
                 let (values, vector) =
                     typed_cuda_eigh_region::<D>(cuda, &source.0, region.range().start, n)?;
                 #[cfg(test)]
-                {
-                    decomposition_ordinal += 1;
-                    Self::inject_cuda_eigh_failure("decomposition", decomposition_ordinal)?;
-                }
+                Self::inject_cuda_eigh_failure("decomposition")?;
                 device_spectra.push(values);
                 vectors.push(Some(vector));
             }
@@ -433,7 +426,7 @@ where
             let mut spectra = Vec::with_capacity(plan.source_regions().len());
             let mut orders = Vec::with_capacity(plan.source_regions().len());
             let mut permuted = false;
-            for (region, _sector_index) in plan.source_regions().iter().zip(0usize..) {
+            for (region, sector_index) in plan.source_regions().iter().zip(0usize..) {
                 let n = region.rows();
                 let values = if n == 0 {
                     Vec::new()
@@ -449,17 +442,13 @@ where
                 }
                 let mut order = vec![0; n];
                 let reorder = tenet_matrixalgebra::seam::ascending_eigh_order(&values, &mut order);
-                // Test-only: reverse every odd sector's order, so the selector
-                // path sees a real, non-identity permutation.
-                #[cfg(test)]
+                // A test policy reverses every odd sector's order, so the
+                // selector path sees a real, non-identity permutation.
                 let reorder = reorder
-                    || (CUDA_EIGH_REVERSE_ODD_SECTORS.with(std::cell::Cell::get)
-                        && _sector_index % 2 == 1
-                        && n >= 2
-                        && {
-                            order.reverse();
-                            true
-                        });
+                    || (policy.eigh_reverse_odd_sectors && sector_index % 2 == 1 && n >= 2 && {
+                        order.reverse();
+                        true
+                    });
                 let sorted = if reorder {
                     permuted = true;
                     order.iter().map(|&index| values[index]).collect()
@@ -472,9 +461,12 @@ where
                 });
                 orders.push(order);
             }
-            #[cfg(test)]
-            let permuted = permuted || CUDA_EIGH_FORCE_SELECTOR.with(std::cell::Cell::get);
-            (spectra, vectors, orders, permuted)
+            (
+                spectra,
+                vectors,
+                orders,
+                permuted || policy.eigh_force_selector,
+            )
         };
 
         // Every factor-space admission is provider work on the host: no CUDA
@@ -529,34 +521,17 @@ where
                     ),
                 )?)
             };
-            #[cfg(test)]
-            if selector.is_some() {
-                CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| {
-                    if let Some(count) = uploads.get() {
-                        uploads.set(Some(count + 1));
-                    }
-                });
-            }
-            #[cfg(test)]
-            let mut assembly_ordinal = 0;
             for ((route, left, _), &selector_offset) in
                 executed_routes(&plan).zip(&selector_offsets)
             {
                 #[cfg(test)]
-                {
-                    assembly_ordinal += 1;
-                    Self::inject_cuda_eigh_failure("assembly", assembly_ordinal)?;
-                }
+                Self::inject_cuda_eigh_failure("assembly")?;
                 let raw = raw_vectors[route.source_region()]
                     .take()
                     .ok_or_else(|| internal_layout_error("CUDA EIGH route has no eigenvectors"))?;
                 let left_region = &plan.left_regions()[left];
                 let n = route.rank();
-                #[cfg(test)]
-                let aligned = plan.left_preserves_trees(route)
-                    && !CUDA_EIGH_TREEWISE.with(std::cell::Cell::get);
-                #[cfg(not(test))]
-                let aligned = plan.left_preserves_trees(route);
+                let aligned = plan.left_preserves_trees(route) && !policy.eigh_treewise;
                 let Some(selector) = selector.as_ref() else {
                     if aligned {
                         copy_whole_factor(cuda, &mut vector_data, left_region, &raw)?;
@@ -613,8 +588,8 @@ where
     }
 
     #[cfg(test)]
-    fn inject_cuda_eigh_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
-        if CUDA_EIGH_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
+    fn inject_cuda_eigh_failure(stage: &'static str) -> Result<(), Error> {
+        if probe::fires(probe::Fault::CudaEigh(stage)) {
             return Err(Error::InvalidArgument(format!(
                 "injected CUDA EIGH {stage} failure"
             )));
@@ -687,10 +662,10 @@ where
             )?;
             let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
-            observe_cuda_qr_output_upload();
+            probe::hit(probe::Event::CudaQrOutputUpload);
             let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
-            observe_cuda_qr_output_upload();
+            probe::hit(probe::Event::CudaQrOutputUpload);
             for (route, left, right) in executed_routes(&plan) {
                 let rank = route.rank();
                 let source_region = &plan.source_regions()[route.source_region()];

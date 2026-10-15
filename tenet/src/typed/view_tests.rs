@@ -15,9 +15,8 @@ use tenet_core::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 
-use super::{
-    ContractSpec, GradedSpace, Side, TensorMap, ADJOINT_MATERIALIZATIONS, DIAGONAL_MATERIALIZATIONS,
-};
+use super::probe::{self, Event, RoutePolicy};
+use super::{ContractSpec, GradedSpace, Side, TensorMap};
 use crate::error::{Alternative, Error};
 use crate::runtime::Runtime;
 
@@ -27,11 +26,17 @@ fn runtime() -> Runtime {
 
 /// Runs `f` and returns its value with the number of entries into adjoint
 /// payload materialization it made.
-fn probe<T>(f: impl FnOnce() -> T) -> (T, usize) {
-    ADJOINT_MATERIALIZATIONS.set(Some(0));
+fn adjoint_entries<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let adjoint = probe::record();
     let value = f();
-    (value, ADJOINT_MATERIALIZATIONS.replace(None).unwrap())
+    (value, adjoint.get(Event::AdjointMaterialization))
 }
+
+/// Forces the declined adjoint-oriented cat plan.
+const DECLINE_ORIENTED_CAT: RoutePolicy = RoutePolicy {
+    cat_declines_oriented: true,
+    ..RoutePolicy::DEFAULT
+};
 
 /// The refusal names the operation and the `materialize` remedy.
 fn is_unsupported(error: &impl std::fmt::Display, operation: &'static str) -> bool {
@@ -67,7 +72,7 @@ macro_rules! assert_same_tensor {
 /// materialization entries.
 macro_rules! direct {
     ($what:expr, $view_call:expr, $owned_call:expr) => {{
-        let (view, entries) = probe(|| $view_call);
+        let (view, entries) = adjoint_entries(|| $view_call);
         assert_eq!(entries, 0, "{}: view entered materialization", $what);
         let view = view.unwrap_or_else(|error| panic!("{}: view: {error}", $what));
         let owned = $owned_call.unwrap_or_else(|error| panic!("{}: owned: {error}", $what));
@@ -80,7 +85,7 @@ macro_rules! direct {
 /// the remedy gives the owned-lazy result.
 macro_rules! refused {
     ($what:expr, $view_call:expr, $owned_call:expr, $remedy_call:expr) => {{
-        let (view, entries) = probe(|| $view_call);
+        let (view, entries) = adjoint_entries(|| $view_call);
         assert_eq!(
             entries, 0,
             "{}: refused view entered materialization",
@@ -88,7 +93,7 @@ macro_rules! refused {
         );
         let error = view.err().expect(concat!($what, ": view must be refused"));
         assert!(is_unsupported(&error, $what), "{}: {error}", $what);
-        let (owned, owned_entries) = probe(|| $owned_call);
+        let (owned, owned_entries) = adjoint_entries(|| $owned_call);
         assert!(owned_entries >= 1, "{}: positive control", $what);
         assert_same_tensor!($remedy_call.unwrap(), owned.unwrap(), $what);
     }};
@@ -113,7 +118,7 @@ macro_rules! shared_suite {
 
         let mut view = a.materialize().unwrap();
         let mut owned = a.materialize().unwrap();
-        let (result, entries) = probe(|| lazy.axpby_into(&mut view, $beta, $alpha));
+        let (result, entries) = adjoint_entries(|| lazy.axpby_into(&mut view, $beta, $alpha));
         assert_eq!(entries, 0, "{what}: axpby_into");
         result.unwrap();
         lazy.materialize()
@@ -151,11 +156,11 @@ macro_rules! shared_suite {
         // Refusal precedes the work these operations do on an owned lazy
         // receiver: no entry into materialization at all.
         let a_lazy = a.adjoint().unwrap();
-        let (view, entries) = probe(|| a_lazy.otimes(b.adjoint_view()));
+        let (view, entries) = adjoint_entries(|| a_lazy.otimes(b.adjoint_view()));
         assert_eq!(entries, 0, "{what}: otimes on a lazy receiver");
         assert!(is_unsupported(&view.err().unwrap(), "otimes"));
         let s_lazy = s.adjoint().unwrap();
-        let (view, entries) = probe(|| s_lazy.solve(&[0, 1], &[2, 3], b.adjoint_view(), &[0, 1], &[2]));
+        let (view, entries) = adjoint_entries(|| s_lazy.solve(&[0, 1], &[2, 3], b.adjoint_view(), &[0, 1], &[2]));
         assert_eq!(entries, 0, "{what}: solve on a lazy receiver");
         assert!(is_unsupported(&view.err().unwrap(), "solve"));
 
@@ -197,7 +202,7 @@ macro_rules! mf_suite {
 
         let mut destination = owned.zeros_like().unwrap();
         let mut expected = owned.zeros_like().unwrap();
-        let (result, entries) = probe(|| {
+        let (result, entries) = adjoint_entries(|| {
             a.contract_into(
                 b.adjoint_view(),
                 &ContractSpec {
@@ -334,7 +339,7 @@ fn checked_generic_su3_view_matches_owned_lazy_adjoint() {
             assert_same_tensor!(view, owned, format!("{}: contract", $what));
             let mut destination = owned.scale($alpha * 0.0).unwrap();
             let mut expected = owned.scale($alpha * 0.0).unwrap();
-            let (result, entries) = probe(|| {
+            let (result, entries) = adjoint_entries(|| {
                 a.contract_into(b.adjoint_view(), &spec, &mut destination, $alpha, $alpha * 0.0)
             });
             assert_eq!(entries, 0, "{}: contract_into", $what);
@@ -365,7 +370,7 @@ fn deligne_product_refuses_an_adjoint_view() {
     );
     // The left operand is not committed before the refusal.
     let a_lazy = a.adjoint().unwrap();
-    let (view, entries) = probe(|| a_lazy.deligne_product(b.adjoint_view(), product));
+    let (view, entries) = adjoint_entries(|| a_lazy.deligne_product(b.adjoint_view(), product));
     assert_eq!(entries, 0);
     assert!(is_unsupported(&view.err().unwrap(), "deligne_product"));
 }
@@ -379,7 +384,7 @@ fn a_plain_view_is_the_tensor_itself() {
     let lazy = b.adjoint().unwrap();
     // `&lazy` is not marked: `otimes` materializes an owned lazy adjoint
     // operation-locally, as its cost section documents.
-    let (result, entries) = probe(|| a.otimes(&lazy));
+    let (result, entries) = adjoint_entries(|| a.otimes(&lazy));
     assert!(entries >= 1);
     result.unwrap();
     let view: super::TensorRef<'_, _, f64> = (&a).into();
@@ -439,7 +444,7 @@ mod cuda {
             let mut destination = owned.zeros_like().unwrap();
             let mut expected = owned.zeros_like().unwrap();
             let one = <$dtype>::from(1.0);
-            let (result, entries) = probe(|| {
+            let (result, entries) = adjoint_entries(|| {
                 a.contract_into(
                     b.adjoint_view(),
                     &ContractSpec {
@@ -497,14 +502,14 @@ mod cuda {
             );
 
             // Pre-existing device rejections of a lazy operand are unchanged.
-            let (view, entries) = probe(|| a.axpby($alpha, b.adjoint_view(), $beta));
+            let (view, entries) = adjoint_entries(|| a.axpby($alpha, b.adjoint_view(), $beta));
             assert_eq!(entries, 0);
             assert_eq!(
                 view.err().unwrap(),
                 a.axpby($alpha, &lazy, $beta).err().unwrap(),
                 "{what}: mixed axpby"
             );
-            let (view, entries) = probe(|| a.inner(b.adjoint_view()));
+            let (view, entries) = adjoint_entries(|| a.inner(b.adjoint_view()));
             assert_eq!(entries, 0);
             assert_eq!(
                 view.err().unwrap(),
@@ -513,7 +518,7 @@ mod cuda {
             );
 
             // Positive control for the device probe.
-            let (_, entries) = probe(|| lazy.materialize().unwrap());
+            let (_, entries) = adjoint_entries(|| lazy.materialize().unwrap());
             assert_eq!(entries, 1, "{what}: device probe");
         }};
     }
@@ -671,12 +676,6 @@ fn compact_diagonal_partners_read_the_view_in_place() {
 /// public geometry is known to reach; the test hook forces the decline.
 #[test]
 fn cat_refuses_an_adjoint_view_when_its_plan_declines() {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
-        }
-    }
     let runtime = runtime();
     let v = u1(&[(-1, 2), (0, 1), (1, 3)]);
     let w = u1(&[(0, 2), (1, 1)]);
@@ -686,28 +685,22 @@ fn cat_refuses_an_adjoint_view_when_its_plan_declines() {
         TensorMap::rand_with_seed(&runtime, [&w], [&v, &v], 2).unwrap();
     let lazy = b.adjoint().unwrap();
     let fast = a.cat(&lazy, Side::Domain).unwrap();
-    let _reset = Reset;
-    super::CAT_PLAN_DECLINES_ORIENTED.set(true);
-    refused!(
-        "cat",
-        a.cat(b.adjoint_view(), Side::Domain),
-        a.cat(&lazy, Side::Domain),
-        a.cat(&lazy.materialize().unwrap(), Side::Domain)
-    );
-    // The declined fallback of the owned lazy adjoint equals the plan result.
-    assert_same_tensor!(a.cat(&lazy, Side::Domain).unwrap(), fast, "cat fallback");
+    probe::with_routes(DECLINE_ORIENTED_CAT, || {
+        refused!(
+            "cat",
+            a.cat(b.adjoint_view(), Side::Domain),
+            a.cat(&lazy, Side::Domain),
+            a.cat(&lazy.materialize().unwrap(), Side::Domain)
+        );
+        // The declined fallback of the owned lazy adjoint equals the plan result.
+        assert_same_tensor!(a.cat(&lazy, Side::Domain).unwrap(), fast, "cat fallback");
+    });
 }
 
 /// The declined-plan fallback materializes a lazy adjoint while reading a
 /// compact diagonal directly. The result is bitwise the fast-plan result.
 #[test]
 fn cat_fallback_reads_compact_operand_without_densifying() {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
-        }
-    }
     let runtime = runtime();
     let bond = u1(&[(-1, 2), (0, 1), (1, 3)]);
     let spectra = bond
@@ -734,7 +727,6 @@ fn cat_fallback_reads_compact_operand_without_densifying() {
             .map(|v| v.to_bits())
             .collect::<Vec<_>>()
     };
-    let _reset = Reset;
     for side in [Side::Domain, Side::Codomain] {
         for (name, lhs, rhs, compact) in [
             ("d|lazy", &d, &lazy, 0usize),
@@ -752,18 +744,15 @@ fn cat_fallback_reads_compact_operand_without_densifying() {
             } else {
                 rhs
             };
-            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
             let oracle = oracle_lhs
                 .materialize()
                 .unwrap()
                 .cat(&oracle_rhs.materialize().unwrap(), side)
                 .unwrap();
             let fast = lhs.cat(rhs, side).unwrap();
-            super::CAT_PLAN_DECLINES_ORIENTED.set(true);
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            let slow = lhs.cat(rhs, side).unwrap();
-            let entries = DIAGONAL_MATERIALIZATIONS.get();
-            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
+            let diagonal = probe::record();
+            let slow = probe::with_routes(DECLINE_ORIENTED_CAT, || lhs.cat(rhs, side).unwrap());
+            let entries = diagonal.get(Event::DiagonalMaterialization);
             assert_eq!(
                 bits(&slow),
                 bits(&fast),
@@ -791,16 +780,16 @@ fn dense_data_borrows_dense_storage_and_never_materializes() {
     let runtime = runtime();
     let v = su2(&[(0, 2), (1, 1)]);
     let t: TensorMap<_, Complex64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 3).unwrap();
-    let (dense, entries) = probe(|| t.dense_data().unwrap());
+    let (dense, entries) = adjoint_entries(|| t.dense_data().unwrap());
     assert_eq!(entries, 0);
     assert_eq!(dense.as_ptr(), t.dense_data().unwrap().as_ptr());
 
     let adjoint = t.adjoint().unwrap();
-    let (refused, entries) = probe(|| adjoint.dense_data().map(<[_]>::len));
+    let (refused, entries) = adjoint_entries(|| adjoint.dense_data().map(<[_]>::len));
     assert_eq!(entries, 0, "dense_data entered adjoint materialization");
     assert!(is_unsupported(&refused.unwrap_err(), "dense_data"));
     // Positive control: the explicit path enters the probe.
-    let (materialized, entries) = probe(|| adjoint.materialize().unwrap());
+    let (materialized, entries) = adjoint_entries(|| adjoint.materialize().unwrap());
     assert_eq!(entries, 1);
     assert_eq!(materialized.dense_data().unwrap().len(), dense.len());
 
@@ -815,21 +804,21 @@ fn dense_data_borrows_dense_storage_and_never_materializes() {
         })
         .collect::<Vec<_>>();
     let d: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &bond, spectra).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(is_unsupported(&d.dense_data().unwrap_err(), "dense_data"));
     assert!(is_unsupported(
         &d.subblocks().map(|_| ()).unwrap_err(),
         "subblocks"
     ));
     assert_eq!(
-        DIAGONAL_MATERIALIZATIONS.get(),
+        densified.get(Event::DiagonalMaterialization),
         0,
         "dense_data densified a compact diagonal"
     );
     let dense_d = d.materialize().unwrap();
     assert_eq!(dense_d.dense_data().unwrap().len(), 2 * 2 + 1);
     assert!(dense_d.subblocks().is_ok());
-    let (refused, entries) = probe(|| adjoint.subblocks().map(|_| ()));
+    let (refused, entries) = adjoint_entries(|| adjoint.subblocks().map(|_| ()));
     assert_eq!(entries, 0, "subblocks entered adjoint materialization");
     assert!(is_unsupported(&refused.unwrap_err(), "subblocks"));
 }

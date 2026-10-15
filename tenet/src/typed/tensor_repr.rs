@@ -102,23 +102,6 @@ impl<R, D, S> TypedAdjointView<R, D, S> {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Entries into adjoint payload materialization
-    /// (`materialized_tensor_uncached`), counted while `Some`.
-    pub(crate) static ADJOINT_MATERIALIZATIONS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) fn observe_adjoint_materialization() {
-    ADJOINT_MATERIALIZATIONS.with(|observation| {
-        if let Some(entries) = observation.get() {
-            observation.set(Some(entries + 1));
-        }
-    });
-}
-
 /// Borrowed view of a [`TensorMap`], optionally as its adjoint.
 ///
 /// `&t` converts into the plain view and [`TensorMap::adjoint_view`] gives
@@ -222,28 +205,6 @@ impl<R, D, S> TensorMap<R, D, S> {
         *view = Arc::new(marked);
         self
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static UNCACHED_ADJOINT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Operation-local densifications of a compact diagonal payload
-    /// (`TypedTensorBody::materialized_dense_data`).
-    pub(crate) static DIAGONAL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// `(inside, outside)` a runtime Host pool: the adjoint materializations
-    /// and diagonal densifications on this thread (#1996).
-    pub(crate) static MATERIALIZATION_POOLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// Records whether a materialization site runs inside a runtime Host pool.
-#[cfg(test)]
-pub(super) fn observe_materialization_pool() {
-    let (inside, outside) = MATERIALIZATION_POOLS.get();
-    MATERIALIZATION_POOLS.set(if crate::runtime::host_pool_entered() {
-        (inside + 1, outside)
-    } else {
-        (inside, outside + 1)
-    });
 }
 
 pub(super) enum TypedTensorRepr<R, D, S = Vec<D>> {

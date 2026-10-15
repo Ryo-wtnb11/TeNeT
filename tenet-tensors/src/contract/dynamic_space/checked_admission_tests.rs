@@ -350,7 +350,7 @@ fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
     ] {
         tenet_core::clear_structure_caches();
         clear_structure_caches();
-        reset_scratch_publication_observations();
+        reset_scratch_structure_builds();
         let before = (
             structure_cache_info(StructureCacheKind::SectorStructure),
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
@@ -370,7 +370,7 @@ fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
             ),
             before
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0));
+        assert_eq!(scratch_structure_builds(), 0);
     }
 }
 
@@ -465,7 +465,7 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
         subset.admission = FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
         let original = subset.clone();
 
-        reset_scratch_publication_observations();
+        reset_scratch_structure_builds();
         let before = (
             structure_cache_info(StructureCacheKind::SectorStructure),
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
@@ -489,6 +489,6 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
             ),
             before
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0));
+        assert_eq!(scratch_structure_builds(), 0);
     }
 }

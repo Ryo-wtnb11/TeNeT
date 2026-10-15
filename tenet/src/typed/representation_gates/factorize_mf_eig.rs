@@ -21,7 +21,7 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(
         d.diagview().unwrap()[0].values,
@@ -32,11 +32,11 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
         ]
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let _ = input.eigh_full(&[1], &[0], HermitianTol::DEFAULT).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
 }
 
@@ -61,9 +61,9 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
                 .unwrap()
                 .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             assert_eq!(d.diagview().unwrap()[0].values, $sorted);
             assert_eq!(d.codomain(), v.domain());
@@ -162,9 +162,9 @@ fn compact_diagonal_eigh_full_signed_zeros_remain_a_valid_eigenbasis() {
         .unwrap()
         .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(
         d.diagview().unwrap()[0].values,
         dense.d.diagview().unwrap()[0].values
@@ -202,9 +202,9 @@ fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
                 .unwrap()
                 .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             assert_eq!(d.diagview().unwrap(), $expected);
             assert_eq!(v.codomain(), input.codomain());
@@ -379,10 +379,10 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     // The dense route's relative Hermiticity check passes `1 + 1e-15 i`, and
     // the eigenvalue is its real part; the diagonal applies the same check
     // directly, with no materialization and no dense EIGH.
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eigh { d, .. } = near.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
 
     // A nonfinite diagonal is refused by the shared finite-input stage before
@@ -397,12 +397,12 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
             }],
         )
         .unwrap();
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let actual = input
             .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .map(drop)
             .unwrap_err();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert!(report(&actual).contains("eigh input components must be finite"));
     }
     let extreme: TensorMap<_, f32> = TensorMap::diagonal(
@@ -415,7 +415,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     )
     .unwrap();
     let calls_before = calls.total();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         extreme
             .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
@@ -426,7 +426,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
             .values,
         [f32::MAX]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), calls_before);
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -437,7 +437,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(matches!(
         input.eigh_full(&[0, 1], &[], HermitianTol::DEFAULT),
         Err(Error::Operation(error))
@@ -445,7 +445,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
                 message: "eigh requires an endomorphism (codomain == domain)"
             })
     ));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 1);
 }
 
 #[test]
@@ -480,9 +480,9 @@ fn compact_diagonal_eigh_full_changed_roles_match_explicit_dense_permute() {
         .unwrap()
         .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eigh { d, v } = input.eigh_full(&[1], &[0], HermitianTol::DEFAULT).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(d.diagview().unwrap(), reference.d.diagview().unwrap());
     assert_eq!(d.codomain(), reference.d.codomain());
     assert_eq!(d.domain(), reference.d.domain());
@@ -531,7 +531,7 @@ fn compact_diagonal_eig_full_skips_dense_input_and_solver() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eig { d, v } = input.eig_full(&[0], &[1]).unwrap();
     assert_eq!(
         d.diagview().unwrap()[0].values,
@@ -542,11 +542,11 @@ fn compact_diagonal_eig_full_skips_dense_input_and_solver() {
         ]
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.of(EIG_FULL), 0);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let _ = input.eig_full(&[1], &[0]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.of(EIG_FULL), 0);
 }
 
@@ -566,9 +566,9 @@ fn compact_diagonal_eig_full_hand_permutation_all_scalars() {
             )
             .unwrap();
             let original = input.diagview().unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let Eig { d, v } = input.eig_full(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), original);
             assert_eq!(d.diagview().unwrap()[0].values, $expected);
             assert_eq!(d.codomain(), v.domain());
@@ -666,9 +666,9 @@ fn compact_diagonal_eig_full_preserves_sector_spaces_and_zero_regions() {
                 TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
             let original = input.diagview().unwrap();
             let dense = input.materialize().unwrap().eig_full(&[0], &[1]).unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let Eig { d, v } = input.eig_full(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), original);
             assert_eq!(d.diagview().unwrap(), $expected);
             assert_eq!(d.codomain(), v.domain());
@@ -842,9 +842,9 @@ fn compact_diagonal_eig_full_changed_roles_match_explicit_dense_permute() {
     let swapped = input.permute(&[1], &[0]).unwrap();
     assert_ne!(swapped.diagview().unwrap(), input.diagview().unwrap());
     let reference = swapped.materialize().unwrap().eig_full(&[0], &[1]).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eig { d, v } = input.eig_full(&[1], &[0]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(d.diagview().unwrap(), reference.d.diagview().unwrap());
     assert_eq!(d.codomain(), reference.d.codomain());
     assert_eq!(d.domain(), reference.d.domain());
@@ -878,9 +878,9 @@ fn compact_diagonal_eig_full_ties_and_signed_zeros_are_valid() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let Eig { d, v } = input.eig_full(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let values = &d.diagview().unwrap()[0].values;
     assert_eq!(values.len(), 4);
     // Lexicographic (re, im) under IEEE total order, as MAK's `isless`:
@@ -952,13 +952,13 @@ fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
         // the overflowing `MAX + MAX i` by the dense route's eigenvalue check;
         // no materialization or dense EIG either way.
         let before = calls.of(EIG_FULL);
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let error = input.eig_full(&[0], &[1]).map(drop).unwrap_err();
         assert!(
             is_eig_value_error(&error, value.re.is_finite() && value.im.is_finite()),
             "{error:?}"
         );
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
         assert_eq!(calls.of(EIG_FULL), before);
     }
     let input: TensorMap<_, f32> = TensorMap::diagonal(
@@ -971,14 +971,14 @@ fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
     )
     .unwrap();
     let before = calls.of(EIG_FULL);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         input.eig_full(&[0], &[1]).unwrap().d.diagview().unwrap()[0].values,
         [num_complex::Complex32::new(f32::MAX, 0.0)]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.of(EIG_FULL), before);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(matches!(
         input.eig_full(&[0, 1], &[]),
         Err(Error::Operation(error))
@@ -986,7 +986,7 @@ fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
                 message: "eig requires an endomorphism (codomain == domain)"
             })
     ));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 1);
 }
 
 #[test]
@@ -1021,7 +1021,7 @@ fn compact_diagonal_eig_vals_skips_dense_input_and_solver() {
     )
     .unwrap();
     let saved = input.diagview().unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let result = input.eig_vals(&[0], &[1]).unwrap();
     assert_eq!(
         result[0].values,
@@ -1035,7 +1035,7 @@ fn compact_diagonal_eig_vals_skips_dense_input_and_solver() {
         result[1].values,
         vec![Complex64::new(-2.0, 0.0), Complex64::new(0.0, 2.0)]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
     assert_eq!(input.diagview().unwrap(), saved);
 }
@@ -1049,9 +1049,9 @@ fn compact_diagonal_eig_vals_match_hand_spectra_across_scalars_and_sectors() {
                 TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
             let saved = input.diagview().unwrap();
             let dense_values = input.materialize().unwrap().eig_vals(&[0], &[1]).unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let actual = input.eig_vals(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             let expected: Vec<Vec<Complex64>> = $expected;
             assert_eq!(actual.len(), expected.len());
@@ -1224,9 +1224,9 @@ fn compact_diagonal_eig_vals_match_hand_spectra_across_scalars_and_sectors() {
     let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
     let input: TensorMap<_, f64> =
         TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(input.eig_vals(&[0], &[1]).unwrap().is_empty());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -1253,13 +1253,13 @@ fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
         .unwrap();
         // As `eig_full`: the shared finite-input stage, or the dense route's
         // eigenvalue check for the overflowing `MAX + MAX i`.
-        DIAGONAL_MATERIALIZATIONS.set(0);
+        let densified = probe::record();
         let error = input.eig_vals(&[0], &[1]).unwrap_err();
         assert!(
             is_eig_value_error(&error, value.re.is_finite() && value.im.is_finite()),
             "{error:?}"
         );
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     }
     assert_eq!(calls.total(), 0);
     let input: TensorMap<_, f64> = TensorMap::diagonal(
@@ -1271,7 +1271,7 @@ fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let error = input.eig_vals(&[0, 1], &[]).unwrap_err();
     assert!(matches!(
         error,
@@ -1283,7 +1283,7 @@ fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
                 }
             )
     ));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 1);
 }
 
 #[test]
@@ -1313,11 +1313,11 @@ fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
         ],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let result = source.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(result[0].values, vec![-4.0, 0.0, 1.0]);
     assert_eq!(result[1].values, vec![-2.0, 2.0]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
 }
 
@@ -1331,9 +1331,9 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
             let saved = input.diagview().unwrap();
             let dense = input.materialize().unwrap();
             let dense_values = dense.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
+            let densified = probe::record();
             let actual = input.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             let expected: Vec<Vec<f64>> = $expected;
             assert_eq!(actual.len(), expected.len());
@@ -1470,12 +1470,12 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
     let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
     let input: TensorMap<_, f64> =
         TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert!(input
         .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap()
         .is_empty());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[test]
@@ -1497,12 +1497,12 @@ fn compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     .unwrap();
     // Within the dense route's relative Hermiticity tolerance the eigenvalue
     // is the real part, read directly.
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     assert_eq!(
         near.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap()[0].values,
         [1.0]
     );
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
@@ -1515,12 +1515,12 @@ fn compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     )
     .unwrap();
     // NaN is refused by the shared finite-input stage.
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let error = nonfinite
         .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap_err();
     assert!(report(&error).contains("eigh input components must be finite"));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_eq!(calls.total(), 0);
 }
 
@@ -1550,14 +1550,14 @@ fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
         }],
     )
     .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     for actual in [
         real.eigh_vals(&[0], &[1], HermitianTol::DEFAULT),
         complex.eigh_vals(&[0], &[1], HermitianTol::DEFAULT),
     ] {
         assert_eq!(actual.unwrap()[0].values, expected);
     }
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 /// A finite diagonal entry whose eigenvalue overflows is the eigensolver's

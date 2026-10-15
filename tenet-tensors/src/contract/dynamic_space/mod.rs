@@ -46,15 +46,6 @@ thread_local! {
     static SCRATCH_STRUCTURE_BUILDS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
-    static SCRATCH_STRUCTURE_ADMISSIONS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static SCRATCH_HOMSPACE_ID_REQUESTS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static LOWERED_LAYOUT_COMMITS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
 }
 
 #[cfg(test)]
@@ -106,21 +97,14 @@ fn legacy_shape_path_builds() -> usize {
 }
 
 #[cfg(test)]
-pub(crate) fn reset_scratch_publication_observations() {
+pub(crate) fn reset_scratch_structure_builds() {
     SCRATCH_STRUCTURE_BUILDS.set(0);
-    SCRATCH_STRUCTURE_ADMISSIONS.set(0);
-    SCRATCH_HOMSPACE_ID_REQUESTS.set(0);
-    LOWERED_LAYOUT_COMMITS.set(0);
 }
 
+/// Scratch structures built on this thread since the last reset.
 #[cfg(test)]
-/// `(scratch builds, scratch admissions, HomSpace ID requests, layout commits)`.
-pub(crate) fn scratch_publication_observations() -> (usize, usize, usize) {
-    (
-        SCRATCH_STRUCTURE_BUILDS.get(),
-        SCRATCH_STRUCTURE_ADMISSIONS.get(),
-        SCRATCH_HOMSPACE_ID_REQUESTS.get(),
-    )
+pub(crate) fn scratch_structure_builds() -> usize {
+    SCRATCH_STRUCTURE_BUILDS.get()
 }
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch

@@ -1,5 +1,25 @@
 use super::*;
 
+/// `(zero uploads, kernels)` of the device arithmetic in `recording`.
+#[cfg(feature = "cuda")]
+fn arithmetic(recording: &probe::Recording) -> (usize, usize) {
+    (
+        recording.get(Event::CudaZeroUpload),
+        recording.get(Event::CudaArithmeticKernel),
+    )
+}
+
+/// `(downloads, device partials, host partials)` of the device reductions
+/// in `recording`.
+#[cfg(feature = "cuda")]
+fn reduction(recording: &probe::Recording) -> (usize, usize, usize) {
+    (
+        recording.get(Event::CudaReductionDownload),
+        recording.get(Event::CudaReductionDevicePartials),
+        recording.get(Event::CudaReductionHostPartials),
+    )
+}
+
 #[cfg(feature = "cuda")]
 fn assert_cuda_tensor_matches_host<R>(
     actual: &TensorMap<R, f64>,
@@ -107,7 +127,7 @@ fn typed_cuda_owned_metadata_validation_orders_ordinal_before_length() {
 #[cfg(feature = "cuda")]
 #[test]
 fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let source = u1_lazy_fixture();
     let diagonal = source
         .svd_compact(&codomain_axes(&source), &domain_axes(&source))
@@ -146,14 +166,14 @@ fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
 
     assert_eq!(malformed.to_cuda().unwrap_err(), missing_context);
     assert!(matches!(lazy.to_cuda(), Err(error) if error == missing_context));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore]
 fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(
@@ -182,14 +202,14 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     .unwrap();
     let diagonal_device = diagonal.to_cuda().unwrap();
     assert_eq!(diagonal_device.placement(), Placement::Cuda(0));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     let diagonal_host = diagonal_device.to_host().unwrap();
     assert!(matches!(
         owned(&diagonal_host).data.as_ref(),
         TypedData::Dense(_)
     ));
     assert_eq!(diagonal_host.dense_data().unwrap(), expected_diagonal);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let lazy = source.adjoint().unwrap();
     let expected_lazy = tenet_tensors::materialize_adjoint_data_dyn(
@@ -203,15 +223,11 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         unreachable!("transfer preserves the lazy view")
     };
     let expected_norm = source.norm(2.0).unwrap();
-    CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+    let recording = probe::record();
     assert!(
         (lazy_device.norm(2.0).unwrap() - expected_norm).abs() <= 1e-12 * (1.0 + expected_norm)
     );
-    let observed = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-        let observed = observation.get().unwrap();
-        observation.set(None);
-        observed
-    });
+    let observed = reduction(&recording);
     let sector_count = sector_regions(
         source.logical_space().space().structure(),
         source.logical_space().space().nout(),
@@ -226,22 +242,15 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     // no coefficient is uploaded (#2187) and nothing is downloaded.
     macro_rules! observed_arithmetic {
         ($expression:expr, $arithmetic:expr, $reduction:expr) => {{
-            CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0))));
-            CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+            let recording = probe::record();
             let before = tenet_dense::cuda_transfer_stats();
             let result = $expression;
             let after = tenet_dense::cuda_transfer_stats();
             let (zero_uploads, _): (usize, usize) = $arithmetic;
             assert_eq!(after.h2d_calls - before.h2d_calls, zero_uploads as u64);
             assert_eq!(after.d2h_calls, before.d2h_calls);
-            CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-                assert_eq!(observation.get(), Some($arithmetic));
-                observation.set(None);
-            });
-            CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-                assert_eq!(observation.get(), Some($reduction));
-                observation.set(None);
-            });
+            assert_eq!(arithmetic(&recording), $arithmetic);
+            assert_eq!(reduction(&recording), $reduction);
             result
         }};
     }
@@ -258,16 +267,12 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
             empty_storage,
         )),
     };
-    let work_sentinel = (usize::MAX, usize::MAX);
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(work_sentinel)));
+    let recording = probe::record();
     assert!(matches!(
         malformed_length.scale(2.0),
         Err(Error::InvalidArgument(message)) if message.contains("payload length")
     ));
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(work_sentinel));
-        observation.set(None);
-    });
+    assert_eq!(arithmetic(&recording), (0, 0));
 
     // One `combine` body for every representation (#2187): one zero upload,
     // then one strided read per stored block of each nonzero-coefficient
@@ -350,26 +355,18 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
 
     let mut missing_context = lazy_device.clone();
     missing_context.runtime = Runtime::builder().build().unwrap();
-    let preflight_sentinel = (usize::MAX, usize::MAX, usize::MAX);
-    let arithmetic_sentinel = (usize::MAX, usize::MAX);
-    CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some(preflight_sentinel)));
+    let recording = probe::record();
     assert!(matches!(
         missing_context.norm(2.0),
         Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
     ));
-    CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(preflight_sentinel));
-        observation.set(None);
-    });
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(arithmetic_sentinel)));
+    assert_eq!(reduction(&recording), (0, 0, 0));
+    let recording = probe::record();
     assert!(matches!(
         missing_context.zeros_like(),
         Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
     ));
-    CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        assert_eq!(observation.get(), Some(arithmetic_sentinel));
-        observation.set(None);
-    });
+    assert_eq!(arithmetic(&recording), (0, 0));
     let device_clone = lazy_device.clone();
     let TypedTensorRepr::Adjoint(clone_view) = &device_clone.repr else {
         unreachable!("clone preserves the lazy view")
@@ -414,20 +411,9 @@ fn typed_cuda_complex_payload_costs_the_same_device_calls_as_f64() {
         .unwrap();
 
     fn observe<T>(run: impl FnOnce() -> T) -> ((usize, usize), (usize, usize, usize)) {
-        CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0))));
-        CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+        let recording = probe::record();
         drop(run());
-        let arithmetic = CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-            let observed = observation.get().unwrap();
-            observation.set(None);
-            observed
-        });
-        let reduction = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
-            let observed = observation.get().unwrap();
-            observation.set(None);
-            observed
-        });
-        (arithmetic, reduction)
+        (arithmetic(&recording), reduction(&recording))
     }
 
     let real_device = real.to_cuda().unwrap();

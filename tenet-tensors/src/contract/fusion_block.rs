@@ -89,13 +89,54 @@ impl<'a, R> CoreContractPreflight<'a, R> {
             dst_homspace.rank(),
             axes,
         )?;
-        Ok(Self {
+        Ok(Self::with_axis_plan(
             rule,
             dst_homspace,
             lhs_homspace,
             rhs_homspace,
             axis_plan,
-        })
+        ))
+    }
+
+    /// [`Self::compile_oriented`] without the test compile counts, for the
+    /// debug re-check of work production already did.
+    #[cfg(debug_assertions)]
+    fn compile_oriented_unobserved(
+        rule: &'a R,
+        dst_homspace: &'a FusionTreeHomSpace,
+        lhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        rhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Self, OperationError> {
+        let axis_plan = TensorContractAxisPlan::compile_unobserved(
+            lhs_homspace.rank(),
+            rhs_homspace.rank(),
+            dst_homspace.rank(),
+            axes,
+        )?;
+        Ok(Self::with_axis_plan(
+            rule,
+            dst_homspace,
+            lhs_homspace,
+            rhs_homspace,
+            axis_plan,
+        ))
+    }
+
+    fn with_axis_plan(
+        rule: &'a R,
+        dst_homspace: &'a FusionTreeHomSpace,
+        lhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        rhs_homspace: OrientedFusionTreeHomSpace<'a>,
+        axis_plan: TensorContractAxisPlan,
+    ) -> Self {
+        Self {
+            rule,
+            dst_homspace,
+            lhs_homspace,
+            rhs_homspace,
+            axis_plan,
+        }
     }
 
     /// The core form check (geometry only), then the mode's destination
@@ -154,21 +195,14 @@ impl<'a, R> CoreContractPreflight<'a, R> {
     }
 }
 
+/// The direct-homspace preflight of the test-only
+/// `compile_fusion_block_contract_plan`; production compiles go through
+/// [`CoreContractPreflight::compile_oriented`].
+#[cfg(test)]
 impl<'a, R> CoreContractPreflight<'a, R>
 where
     R: FusionRule,
 {
-    pub(super) fn compile(
-        rule: &'a R,
-        dst: &'a DynamicFusionMapSpace,
-        lhs: &'a DynamicFusionMapSpace,
-        rhs: &'a DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Self, OperationError> {
-        validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
-        Self::compile_homspaces(rule, dst.homspace(), lhs.homspace(), rhs.homspace(), axes)
-    }
-
     pub(super) fn compile_homspaces(
         rule: &'a R,
         dst_homspace: &'a FusionTreeHomSpace,
@@ -194,11 +228,15 @@ where
     pub(super) fn require_core_geometry(
         self,
     ) -> Result<ValidatedCoreContract<'a, R>, OperationError> {
-        self.validate_core_geometry()?
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: "core fusion-block contraction requires core source and output axes",
-            })
+        require_core_form(self.validate_core_geometry()?)
     }
+}
+
+#[cfg(any(test, debug_assertions))]
+fn require_core_form<T>(validated: Option<T>) -> Result<T, OperationError> {
+    validated.ok_or(OperationError::UnsupportedTensorContractScope {
+        message: "core fusion-block contraction requires core source and output axes",
+    })
 }
 
 impl<'a, R> ValidatedCoreContract<'a, R> {
@@ -232,6 +270,30 @@ where
 {
     #[cfg(test)]
     EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(EXPECTED_CORE_HOMSPACE_DERIVATIONS.get() + 1);
+    contracted_homspace_matches(
+        rule,
+        lhs,
+        rhs,
+        lhs_contracting_axes,
+        rhs_contracting_axes,
+        output_axes,
+        dst,
+    )
+}
+
+/// [`core_homspace_matches`] without the test check count.
+fn contracted_homspace_matches<R>(
+    rule: &R,
+    lhs: OrientedFusionTreeHomSpace<'_>,
+    rhs: OrientedFusionTreeHomSpace<'_>,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+    output_axes: &[usize],
+    dst: &FusionTreeHomSpace,
+) -> Result<bool, OperationError>
+where
+    R: FusionRule,
+{
     OrientedFusionTreeHomSpace::tensorcontract_homspace_matches(
         rule,
         lhs,
@@ -261,8 +323,8 @@ pub(crate) fn reset_core_contract_derivations() {
 
 /// Asserts what [`super::resolution::compile_derived_core_plan`] relies on:
 /// the full core preflight and destination check accept the plan-derived
-/// operands. Leaves the compile counters as they were, so tests keep
-/// counting the production work only.
+/// operands. Runs the uncounted compile and check, so tests count the
+/// production work only.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_core_geometry<R>(
     rule: &R,
@@ -273,23 +335,18 @@ pub(crate) fn debug_assert_core_geometry<R>(
 ) where
     R: FusionRule,
 {
-    #[cfg(test)]
-    let counts = (
-        CORE_CONTRACT_PREFLIGHTS.get(),
-        EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
-        super::structure::tensor_contract_axis_plan_compiles(),
-    );
     let checked = reject_fusion_contract_conjugation(core_axes).and_then(|()| {
-        CoreContractPreflight::compile(rule, dst, lhs, rhs, core_axes)?
-            .require_core_geometry()
+        validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
+        let preflight = CoreContractPreflight::compile_oriented_unobserved(
+            rule,
+            dst.homspace(),
+            OrientedFusionTreeHomSpace::new(lhs.homspace(), FusionTreePairOrientation::Direct),
+            OrientedFusionTreeHomSpace::new(rhs.homspace(), FusionTreePairOrientation::Direct),
+            core_axes,
+        )?;
+        require_core_form(preflight.validate_core_geometry_with(contracted_homspace_matches)?)
             .map(|_| ())
     });
-    #[cfg(test)]
-    {
-        CORE_CONTRACT_PREFLIGHTS.set(counts.0);
-        EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(counts.1);
-        super::structure::set_tensor_contract_axis_plan_compiles(counts.2);
-    }
     debug_assert!(
         checked.is_ok(),
         "plan-derived core operands failed the core preflight: {checked:?}"

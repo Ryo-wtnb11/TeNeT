@@ -714,7 +714,7 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
 
 #[test]
 fn solve_is_transactional_provider_native_and_cache_cold() {
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let lhs_provider = Arc::new(U1FusionRule);
     let rhs_provider = Arc::new(U1FusionRule);
@@ -828,8 +828,8 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     .unwrap();
     let compact_solution = divisor.solve(&[0], &[1], &compact_rhs, &[0], &[1]).unwrap();
     // A dense divisor densifies the compact RHS into its solve buffer once.
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 1);
+    let densified = probe::record();
 
     let compact_divisor = TensorMap::diagonal(
         &runtime,
@@ -852,7 +852,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     assert!(compact_compact.spectrum().is_some());
     assert_eq!(compact_compact.spectrum().unwrap()[0].values, [1.0, 0.75]);
     assert_eq!(compact_compact.spectrum().unwrap()[1].values, [0.625]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert_typed_map_close(
         &divisor.compose(&compact_solution).unwrap(),
         &compact_rhs,
@@ -865,7 +865,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         scaled.logical_space().provider_arc(),
         compact_divisor.logical_space().provider_arc()
     ));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 
     let singular = TensorMap::diagonal(
         &runtime,
@@ -889,7 +889,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
                 tenet_dense::DenseError::NumericalFailure { op: "solve_into", .. }
             ))
     ));
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
 #[cfg(feature = "racah-generated")]

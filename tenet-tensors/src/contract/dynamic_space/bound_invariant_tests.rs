@@ -815,7 +815,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_structure_caches();
-    reset_scratch_publication_observations();
+    reset_scratch_structure_builds();
     let raw = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
     let structure = Arc::clone(raw.structure());
 
@@ -828,7 +828,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
         FusionSpaceAdmission::Complete(_)
     ));
     assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
-    assert_eq!(scratch_publication_observations(), (0, 0, 0));
+    assert_eq!(scratch_structure_builds(), 0);
 
     let rule = lowered_product_rule();
     let pair = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(2).sector_id());
@@ -842,7 +842,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
     .unwrap();
     let raw = DynamicFusionMapSpace::from_typed(&typed);
     let structure = Arc::clone(raw.structure());
-    reset_scratch_publication_observations();
+    reset_scratch_structure_builds();
 
     let bound =
         BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule)).unwrap();
@@ -852,7 +852,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
         FusionSpaceAdmission::Complete(_)
     ));
     assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
-    assert_eq!(scratch_publication_observations(), (0, 0, 0));
+    assert_eq!(scratch_structure_builds(), 0);
 }
 
 #[test]
@@ -898,7 +898,7 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
     };
 
     clear_structure_caches();
-    reset_scratch_publication_observations();
+    reset_scratch_structure_builds();
     let mut mismatched = base.clone();
     mismatched.admission = FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity());
     assert!(matches!(
@@ -908,14 +908,14 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
         ),
         Err(OperationError::Core(CoreError::FusionRuleMismatch { .. }))
     ));
-    assert_eq!(scratch_publication_observations(), (0, 0, 0));
+    assert_eq!(scratch_structure_builds(), 0);
 
     for admission in [
         FusionSpaceAdmission::Subset(U1FusionRule.rule_identity()),
         FusionSpaceAdmission::Complete(U1FusionRule.rule_identity()),
     ] {
         clear_structure_caches();
-        reset_scratch_publication_observations();
+        reset_scratch_structure_builds();
         let mut raw = base.clone();
         raw.admission = admission.clone();
         let original = raw.clone();
@@ -931,7 +931,7 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
                 }
         ));
         assert_eq!(original.admission(), &admission);
-        assert_eq!(scratch_publication_observations(), (0, 0, 0));
+        assert_eq!(scratch_structure_builds(), 0);
     }
 }
 
@@ -976,7 +976,7 @@ fn lowered_bind_preserves_omitted_product_codec_failure() {
         adjoint: OnceLock::new(),
     };
     clear_structure_caches();
-    reset_scratch_publication_observations();
+    reset_scratch_structure_builds();
 
     let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule))
         .unwrap_err();
@@ -984,7 +984,7 @@ fn lowered_bind_preserves_omitted_product_codec_failure() {
         error,
         OperationError::FusionAlgebra(Box::new(FusionAlgebraError::ProductCodec(expected)))
     );
-    assert_eq!(scratch_publication_observations(), (0, 0, 0));
+    assert_eq!(scratch_structure_builds(), 0);
 }
 
 #[test]
@@ -1018,7 +1018,7 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
     .unwrap();
     let raw = DynamicFusionMapSpace::from_typed(&subset);
     let original = raw.clone();
-    reset_scratch_publication_observations();
+    reset_scratch_structure_builds();
 
     assert!(matches!(
         BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(Z2FusionRule),),
@@ -1028,7 +1028,7 @@ fn lowered_subset_to_complete_validates_grid_before_commit() {
         original.admission(),
         FusionSpaceAdmission::Subset(_)
     ));
-    assert_eq!(scratch_publication_observations(), (0, 0, 0));
+    assert_eq!(scratch_structure_builds(), 0);
 }
 
 #[test]

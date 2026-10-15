@@ -134,7 +134,7 @@ where
     )
     .unwrap();
     assert_eq!(provider.twist_calls.load(Ordering::Relaxed), 0);
-    DIAGONAL_MATERIALIZATIONS.set(0);
+    let densified = probe::record();
     let result = diagonal.trace_pairs(&[(0, 1)]);
     assert!(matches!(
         result,
@@ -143,7 +143,7 @@ where
         )))
     ));
     assert_eq!(provider.twist_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
     assert!(matches!(
         owned(&diagonal).data.as_ref(),
         TypedData::Diagonal(_)

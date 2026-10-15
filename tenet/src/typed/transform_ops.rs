@@ -1274,7 +1274,7 @@ where
         .ok_or_else(|| internal_layout_error("multiplicity-free transform input is owned"))?;
     let src_len = transform_source_len(body)?;
     #[cfg(test)]
-    crate::tensor_core::observe_tree_transform_seam_call();
+    super::probe::hit(super::probe::Event::TreeTransformSeamCall);
     let staged = D::lane(lease.context())?
         .tree_context_mut()
         .stage_tree_transform_multiplicity_free_in(&body.space, None, src_len, &operation)?;
