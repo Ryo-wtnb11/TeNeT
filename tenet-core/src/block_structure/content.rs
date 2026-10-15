@@ -308,44 +308,37 @@ impl BlockStructureContent {
 }
 
 impl SectorStructure {
-    /// Conservative heap bytes this sector structure retains.
+    /// Heap bytes this sector structure retains, its tree arena once.
     pub(crate) fn charged_heap_bytes(&self) -> usize {
-        // Sector and complete-layout entries share this immutable backing.
-        // Repeating its tree-arena census would allocate a dedup set on
-        // every complete-layout miss, including degeneracy-only changes.
+        // Why memoised although the census no longer allocates: parked
+        // network workspaces re-charge their layouts on every park, and the
+        // census is O(blocks).
         *self
             .charged_heap_bytes
             .get_or_init(|| self.count_heap_bytes())
     }
 
     fn count_heap_bytes(&self) -> usize {
-        fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
-            match key {
-                BlockKey::Dense => 0,
-                BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
-                BlockKey::FusionTree(pair) => {
-                    charge_fusion_tree_key_backings(seen, pair.codomain_tree())
-                        .saturating_add(charge_fusion_tree_key_backings(seen, pair.domain_tree()))
+        // Rule O (#2192): every fusion-tree key here, group keys included,
+        // points into `trees`, so that one arena is the whole key charge.
+        debug_assert!(self.holds_only_own_trees());
+        let sector_blocks = self
+            .blocks
+            .iter()
+            .fold(0usize, |bytes, block| match block.key() {
+                BlockKey::Opaque(key) => {
+                    bytes.saturating_add(spilled_smallvec_heap_bytes(&key.words))
                 }
-            }
-        }
-
-        let mut frozen_backings = rustc_hash::FxHashSet::default();
-        let sector_blocks = self.blocks.iter().fold(0usize, |bytes, block| {
-            bytes.saturating_add(key_bytes(block.key(), &mut frozen_backings))
-        });
+                BlockKey::Dense | BlockKey::FusionTree(_) => bytes,
+            });
         let groups = self.fusion_tree_groups.iter().fold(0usize, |bytes, group| {
-            bytes
-                .saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
-                .saturating_add(charge_fusion_tree_group_key_backings(
-                    &mut frozen_backings,
-                    &group.group_key,
-                ))
+            bytes.saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
         });
         let compact_lookup = self
             .compact_lookup
             .as_ref()
             .map_or(0, |lookup| spilled_smallvec_heap_bytes(&lookup.indices));
+        let trees = self.trees.as_ref().map_or(0, |arena| arena.heap_bytes());
 
         self.blocks
             .capacity()
@@ -359,6 +352,22 @@ impl SectorStructure {
             .saturating_add(groups)
             .saturating_add(spilled_smallvec_heap_bytes(&self.sorted_indices))
             .saturating_add(compact_lookup)
+            .saturating_add(trees)
+    }
+
+    fn holds_only_own_trees(&self) -> bool {
+        let own = |tree: &crate::FusionTreeKey| {
+            self.trees
+                .as_ref()
+                .is_some_and(|arena| Arc::ptr_eq(arena, &tree.arena))
+        };
+        self.blocks.iter().all(|block| match block.key() {
+            BlockKey::FusionTree(pair) => own(pair.codomain_tree()) && own(pair.domain_tree()),
+            BlockKey::Dense | BlockKey::Opaque(_) => true,
+        }) && self
+            .fusion_tree_groups
+            .iter()
+            .all(|group| own(group.group_key.codomain_tree()) && own(group.group_key.domain_tree()))
     }
 }
 

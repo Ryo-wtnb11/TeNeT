@@ -283,17 +283,36 @@ fn an_entry_charges_its_recoupling_matrix_and_trees() {
     let (key, _) = handle
         .context
         .rehomed_key(0, (&multi.0, &refs), &mut arena, std::iter::empty());
-    let mut backings = Default::default();
-    let bytes = charged_key_bytes(&key, &mut backings).saturating_add(charged_entry_bytes(
-        std::slice::from_ref(&spec),
-        &mut backings,
-    ));
-    // What: the n x n matrix, the two key lists and every tree pair's heap
-    // backing are inside the charge.
+    let bytes =
+        charged_key_bytes(&key).saturating_add(charged_entry_bytes(std::slice::from_ref(&spec)));
+    // What: the n x n matrix, the two key lists and the entry's tree arena
+    // are inside the charge.
     let floor = width * width * core::mem::size_of::<f64>()
         + 2 * width * core::mem::size_of::<FusionTreePairKey>()
+        + key.group_key.codomain_tree().arena_retained_bytes()
         + ENTRY_OVERHEAD_BYTES;
     assert!(bytes > floor, "{bytes} <= {floor}");
+
+    // What: the key charge moves with its entry arena, byte for byte. The
+    // same key over a lone two-row group arena differs only in that arena.
+    let lone = CoefficientGroupKey {
+        context: Arc::clone(&key.context),
+        group_key: FusionTreeGroupKey::new(
+            multi.0.codomain_uncoupled().iter().copied(),
+            multi.0.domain_uncoupled().iter().copied(),
+            multi.0.codomain_is_dual().iter().copied(),
+            multi.0.domain_is_dual().iter().copied(),
+        ),
+        src_keys: key.src_keys.clone(),
+        hash: key.hash,
+    };
+    let arena = |key: &CoefficientGroupKey| key.group_key.codomain_tree().arena_retained_bytes();
+    assert_ne!(arena(&key), arena(&lone));
+    assert_eq!(
+        charged_key_bytes(&key) as i64 - charged_key_bytes(&lone) as i64,
+        arena(&key) as i64 - arena(&lone) as i64,
+        "the key charge must include its entry arena"
+    );
 }
 
 /// Standalone context (no Runtime): a degeneracy-only change is a cache-3
@@ -433,11 +452,9 @@ fn a_staged_entry_owns_one_arena_for_its_key_and_value() {
 
     // What: the key's group and source pairs and the value's destination and
     // source pairs all point into one arena (charged once), never into the
-    // source structure's (charged again on top), and are equal by content
-    // (Rule O, #2192).
-    let mut seen = rustc_hash::FxHashSet::default();
-    let entry_bytes = key.group_key.charge_retained_backings(&mut seen);
-    assert!(entry_bytes > 0);
+    // source structure's, and are equal by content (Rule O, #2192).
+    let arena = key.group_key.codomain_tree();
+    assert!(arena.shares_arena(key.group_key.domain_tree()));
     let spec = &entry.specs()[0];
     for pair in key
         .src_keys
@@ -445,9 +462,10 @@ fn a_staged_entry_owns_one_arena_for_its_key_and_value() {
         .chain(spec.dst_keys())
         .chain(spec.src_keys())
     {
-        assert_eq!(pair.charge_retained_backings(&mut seen), 0);
+        assert!(arena.shares_arena(pair.codomain_tree()));
+        assert!(arena.shares_arena(pair.domain_tree()));
     }
-    assert!(multi.1[0].charge_retained_backings(&mut seen) > 0);
+    assert!(!arena.shares_arena(multi.1[0].codomain_tree()));
     assert_eq!(key.group_key, multi.0);
     assert_eq!(&*key.src_keys, &multi.1[..]);
     assert_eq!(spec.dst_keys(), &multi.1[..]);
@@ -481,11 +499,12 @@ fn a_staged_trace_entry_owns_one_arena_for_its_key_and_destinations() {
     // What: the key and every destination of a trace entry point into one
     // arena (charged once), never into the source structure's (Rule O,
     // #2192), and keep their content.
-    let mut seen = rustc_hash::FxHashSet::default();
-    assert!(key.group_key.charge_retained_backings(&mut seen) > 0);
+    let arena = key.group_key.codomain_tree();
+    assert!(arena.shares_arena(key.group_key.domain_tree()));
     for pair in key.src_keys.iter().chain(entry.destinations()) {
-        assert_eq!(pair.charge_retained_backings(&mut seen), 0);
+        assert!(arena.shares_arena(pair.codomain_tree()));
+        assert!(arena.shares_arena(pair.domain_tree()));
     }
-    assert!(multi.1[0].charge_retained_backings(&mut seen) > 0);
+    assert!(!arena.shares_arena(multi.1[0].codomain_tree()));
     assert_eq!(entry.destinations(), &multi.1[..]);
 }

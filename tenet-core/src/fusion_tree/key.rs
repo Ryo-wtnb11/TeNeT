@@ -57,11 +57,18 @@ impl fmt::Debug for FusionTreeGroupKey {
 }
 
 impl FusionTreeGroupKey {
-    /// Heap bytes of the arenas this group keeps alive, each counted once
-    /// across calls that share `seen`.
+    /// The codomain tree handle, whose arena a Rule O holder charges.
     #[doc(hidden)]
-    pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
-        charge_fusion_tree_group_key_backings(seen, self)
+    #[inline]
+    pub fn codomain_tree(&self) -> &FusionTreeKey {
+        &self.codomain
+    }
+
+    /// The domain tree handle.
+    #[doc(hidden)]
+    #[inline]
+    pub fn domain_tree(&self) -> &FusionTreeKey {
+        &self.domain
     }
 
     pub fn new<Codomain, Domain, CodomainDual, DomainDual>(
@@ -225,6 +232,22 @@ impl fmt::Debug for FusionTreeKey {
 }
 
 impl FusionTreeKey {
+    /// Heap bytes of the tree arena this key keeps alive. Under Rule O
+    /// (#2192) every key of one holder points into the holder's own arena,
+    /// so the holder charges this once, through any of its keys.
+    #[doc(hidden)]
+    #[inline]
+    pub fn arena_retained_bytes(&self) -> usize {
+        self.arena.heap_bytes()
+    }
+
+    /// Whether both handles point into one arena.
+    #[doc(hidden)]
+    #[inline]
+    pub fn shares_arena(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.arena, &other.arena)
+    }
+
     #[cfg(test)]
     pub(crate) fn cached_hash_for_test(&self) -> u64 {
         self.arena.hash(self.index)
@@ -483,33 +506,6 @@ impl FusionTreeKey {
     }
 }
 
-/// The arena's heap bytes, counted once across calls that share `seen`.
-pub(crate) fn charge_tree_arena(
-    seen: &mut rustc_hash::FxHashSet<usize>,
-    arena: &Arc<TreeArena>,
-) -> usize {
-    if seen.insert(Arc::as_ptr(arena) as usize) {
-        arena.heap_bytes()
-    } else {
-        0
-    }
-}
-
-pub(crate) fn charge_fusion_tree_key_backings(
-    seen: &mut rustc_hash::FxHashSet<usize>,
-    tree: &FusionTreeKey,
-) -> usize {
-    charge_tree_arena(seen, &tree.arena)
-}
-
-pub(crate) fn charge_fusion_tree_group_key_backings(
-    seen: &mut rustc_hash::FxHashSet<usize>,
-    group: &FusionTreeGroupKey,
-) -> usize {
-    charge_tree_arena(seen, &group.codomain.arena)
-        .saturating_add(charge_tree_arena(seen, &group.domain.arena))
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct ValidatedFusionTree<'a, R> {
     pub(crate) rule: &'a R,
@@ -677,14 +673,6 @@ where
 }
 
 impl FusionTreePairKey {
-    /// Heap bytes of the arenas this pair keeps alive, each counted once
-    /// across calls that share `seen`.
-    #[doc(hidden)]
-    pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
-        charge_fusion_tree_key_backings(seen, &self.codomain_tree)
-            .saturating_add(charge_fusion_tree_key_backings(seen, &self.domain_tree))
-    }
-
     /// Validate both trees and their shared coupled sector.
     ///
     /// # Provider-domain precondition

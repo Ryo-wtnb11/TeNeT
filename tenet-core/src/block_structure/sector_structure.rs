@@ -140,7 +140,7 @@ pub struct SectorStructure {
     /// `fusion_tree_groups` (Rule O, #2192); `None` for other kinds and when
     /// empty. Its per-side row order is the tree order, so a row index is the
     /// tree's rank on its side.
-    trees: Option<Arc<TreeArena>>,
+    pub(crate) trees: Option<Arc<TreeArena>>,
     pub(super) blocks: Vec<SectorBlock>,
     pub(super) fusion_tree_groups: Vec<FusionTreeBlockGroup>,
     pub(super) sorted_indices: DimVec,
@@ -158,8 +158,8 @@ impl Clone for SectorStructure {
             fusion_tree_groups: self.fusion_tree_groups.clone(),
             sorted_indices: self.sorted_indices.clone(),
             compact_lookup: self.compact_lookup.clone(),
-            // Vec cloning may change capacity, so the backing census cannot
-            // be copied even though semantic equality is preserved.
+            // Vec cloning may change capacity, so the census cannot be
+            // copied even though semantic equality is preserved.
             charged_heap_bytes: OnceLock::new(),
         }
     }

@@ -173,16 +173,30 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
     let key_bytes = std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
         .saturating_add(identity.homspace.charged_retained_bytes())
         .saturating_add(identity.rule.charged_retained_bytes());
-    let mut frozen_backings = rustc_hash::FxHashSet::default();
-    let tree_bytes = layout.keys.iter().fold(0usize, |bytes, key| {
-        [key.codomain_tree(), key.domain_tree()]
-            .iter()
-            .fold(bytes, |tree_bytes, tree| {
-                tree_bytes
-                    .saturating_add(std::mem::size_of::<FusionTreeKey>())
-                    .saturating_add(charge_fusion_tree_key_backings(&mut frozen_backings, tree))
-            })
-    });
+    // Rule O (#2192): the layout keys point into one canonical arena, which
+    // the sector structure reuses. Charge it here only when that structure
+    // does not, so it is charged exactly once per entry.
+    let arena = layout.keys.first().map(|key| &key.codomain_tree().arena);
+    debug_assert!(layout.keys.iter().all(|key| arena.is_some_and(|arena| {
+        Arc::ptr_eq(arena, &key.codomain_tree().arena)
+            && Arc::ptr_eq(arena, &key.domain_tree().arena)
+    })));
+    let sector_arena = layout
+        .sector
+        .as_ref()
+        .ok()
+        .and_then(|sector| sector.trees.as_ref());
+    let arena_bytes = match arena {
+        Some(arena) if !sector_arena.is_some_and(|sector| Arc::ptr_eq(sector, arena)) => {
+            arena.heap_bytes()
+        }
+        _ => 0,
+    };
+    let tree_bytes = layout
+        .keys
+        .len()
+        .saturating_mul(std::mem::size_of::<FusionTreePairKey>())
+        .saturating_add(arena_bytes);
     let sector_bytes = layout
         .sectors
         .capacity()
