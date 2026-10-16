@@ -10,7 +10,7 @@ downstream code imports from `symtn::typed` and `symtn::sector`.
 Publish only after the previous layer is visible in the crates.io index. Each
 package is packaged and inspected before it is published.
 
-1. `symtn-sectors` (after a compatible Racah release is available)
+1. `symtn-sectors` (after a compatible fusion-symbols release is available)
 2. `symtn-core`
 3. `symtn-dense`
 4. `symtn-operations`
@@ -19,7 +19,6 @@ package is packaged and inspected before it is published.
 7. `symtn`
 8. `symtn-macros` (no symtn dependencies; any time before `symtn-network`)
 9. `symtn-network`
-10. `symtn-category-data`
 
 ## Checks for each package
 
@@ -43,12 +42,12 @@ symtn = "0.1.1"
 ```
 
 The fixture must compile `use symtn::typed::{Runtime, TensorMap}` without a sibling checkout,
-Tenferro source override, or Racah git override.
+Tenferro source override, or fusion-symbols git override.
 
 ## External prerequisites
 
 The workspace manifests pin the `tenferro-*` crates at 0.7.1 (`symtn-dense/Cargo.toml`),
-`t4a-cubecl-runtime` at `=0.10.1` (kept in lockstep with Tenferro), and `racah` at 0.2.4
-(`symtn-sectors/Cargo.toml`).
+`t4a-cubecl-runtime` at `=0.10.1` (kept in lockstep with Tenferro), and `fusion-symbols` at
+0.3.0 (`symtn-sectors/Cargo.toml`).
 The registry-only gate must still verify compatible resolved versions before a
 future release.

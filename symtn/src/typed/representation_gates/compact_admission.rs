@@ -2,7 +2,7 @@
 //! through one matrix-algebra authority in both fusion modes.
 //!
 //! The same spectra run on a multiplicity-free U(1) and SU(2) rule and on
-//! the checked SU(3) rule (racah), on the canonical bond layout, its dual,
+//! the checked SU(3) rule (fusion-symbols), on the canonical bond layout, its dual,
 //! and (multiplicity-free) an expert (padded) layout of the same bond. Every op must take the same route
 //! class with bit-identical values in every row. The oracle is independent of
 //! the route under test: compact `inv`/`pinv`/`exp`/`\` are elementwise
@@ -264,7 +264,7 @@ where
         let t: TensorMap<_, D> =
             TensorMap::diagonal(&runtime, &bond, spectra(&bond, two, three)).unwrap();
         // Why no expert layout here: `bind_generic` needs a `FusionRule`, which
-        // the checked racah provider is not; the checked expert-layout
+        // the checked fusion-symbols provider is not; the checked expert-layout
         // admission is pinned at the seam with a generic spy provider.
         all.push((name, matrix!(t, rcond)));
     }

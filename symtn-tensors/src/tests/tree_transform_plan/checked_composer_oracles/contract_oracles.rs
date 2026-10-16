@@ -5,7 +5,7 @@
 //! `RhsLhs` winner and an output transform.
 //!
 //! - Physical dense oracle (non-dual legs): every operand and the result
-//!   are expanded with SU(3) racah CGC splitting tensors (outer
+//!   are expanded with SU(3) fusion-symbols CGC splitting tensors (outer
 //!   multiplicity two on `8 ⊗ 8 → 8`), the operands are contracted as dense
 //!   arrays, and the result must equal the expanded output. Legs carry
 //!   several sectors with degeneracies, so the results span several

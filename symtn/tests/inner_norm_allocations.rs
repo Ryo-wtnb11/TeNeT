@@ -309,7 +309,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
 }
 
 /// SU(N) checked `dim` allocates per query (`symtn-sectors/src/sun.rs::
-/// decode_dynkin`'s `Vec<i64>` plus racah's own irrep decode), so the
+/// decode_dynkin`'s `Vec<i64>` plus fusion-symbols' own irrep decode), so the
 /// reductions still pay the provider's cost once per coupled sector; the
 /// reduction owners themselves add none (before #1219: one map allocation on
 /// top of the G provider queries).

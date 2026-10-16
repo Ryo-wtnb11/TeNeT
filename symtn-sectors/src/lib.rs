@@ -2,8 +2,8 @@
 
 //! Category vocabulary shared by symtn's sector and tensor layers.
 //!
-//! The process-global racah coefficient caches are application policy: only
-//! the application calls `racah::cache::{reset, trim_to, configure_cache_budgets}`,
+//! The process-global fusion-symbols coefficient caches are application
+//! policy: only the application calls `fusion_symbols::cache::{reset, trim_to, configure_cache_budgets}`,
 //! never symtn.
 
 use smallvec::SmallVec;
@@ -24,6 +24,9 @@ pub use cu1::{CU1FusionRule, CU1Irrep, CU1_MAX_TWICE_CHARGE};
 
 mod fibonacci;
 pub use fibonacci::{FibonacciFusionRule, FibonacciSector};
+
+mod fibonacci_table;
+pub use fibonacci_table::{FibonacciTableError, FibonacciTableRule};
 
 mod su2;
 pub use su2::{SU2CoefficientError, SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};

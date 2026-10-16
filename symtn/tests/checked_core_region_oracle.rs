@@ -6,7 +6,7 @@
 //! - the block-product oracle: `block(A_p ∘ B_p, c) = block(A_p, c) ·
 //!   block(B_p, c)` for the core-ordered operands (TensorKit `mul!`, one GEMM
 //!   per coupled sector), for GenericToy (outer multiplicity two), SU(2) and
-//!   racah SU(3) (outer multiplicity two);
+//!   fusion-symbols SU(3) (outer multiplicity two);
 //! - the reference steps `C = permute(A_p ∘ B_p)` (TensorKit
 //!   `blas_contract!`) for SU(2) and SU(3);
 //! - SU(2) through the checked SU(N) provider against the multiplicity-free

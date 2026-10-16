@@ -93,7 +93,7 @@ fn measure_case(
 ) {
     let space = homspace(legs, codomain_rank);
     let plain = Arc::new(SUNFusionRule::new(3).unwrap());
-    // Warm racah's symbol caches; symtn's caches are cleared per sample.
+    // Warm fusion-symbols' symbol caches; symtn's caches are cleared per sample.
     public_cold(&plain, &space, &operation);
     let count = std::env::var("SYMTN_MEASURE_SAMPLES")
         .ok()
@@ -103,7 +103,7 @@ fn measure_case(
         .map(|_| public_cold(&plain, &space, &operation))
         .collect::<Vec<_>>();
     let (allocs, _, blocks) = samples[0];
-    // Not asserted equal: racah's byte-budgeted symbol caches may evict and
+    // Not asserted equal: fusion-symbols' byte-budgeted symbol caches may evict and
     // regenerate between samples, which allocates inside the provider.
     let calls_max = samples.iter().map(|sample| sample.0.calls).max().unwrap();
     let ns = median(samples.iter().map(|sample| sample.1).collect());

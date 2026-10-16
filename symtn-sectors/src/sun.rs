@@ -26,7 +26,7 @@ pub struct SUNFusionRule {
 /// misses are converted per call exactly as before (#2120).
 const IRREP_TABLE_CAPACITY: usize = 1 << 16;
 
-/// Interned `SectorId <-> racah Irrep` pairs and duals of one SU(N) rule (#2120).
+/// Interned `SectorId <-> fusion-symbols Irrep` pairs and duals of one SU(N) rule (#2120).
 ///
 /// The codec is a bijection between ids and SU(`n`) irreps fixed by `n`, so
 /// either side is a complete key for the other, and the dual is a function of
@@ -40,8 +40,8 @@ struct IrrepTable(RwLock<IrrepMaps>);
 
 #[derive(Default)]
 struct IrrepMaps {
-    by_id: HashMap<SectorId, Arc<racah::sun::Irrep>>,
-    by_irrep: HashMap<Arc<racah::sun::Irrep>, SectorId>,
+    by_id: HashMap<SectorId, Arc<fusion_symbols::sun::Irrep>>,
+    by_irrep: HashMap<Arc<fusion_symbols::sun::Irrep>, SectorId>,
     duals: HashMap<SectorId, SectorId>,
 }
 
@@ -52,12 +52,12 @@ impl fmt::Debug for IrrepTable {
 }
 
 impl IrrepTable {
-    fn by_id(&self, sector: SectorId) -> Option<Arc<racah::sun::Irrep>> {
+    fn by_id(&self, sector: SectorId) -> Option<Arc<fusion_symbols::sun::Irrep>> {
         let maps = self.0.read().unwrap_or_else(PoisonError::into_inner);
         maps.by_id.get(&sector).cloned()
     }
 
-    fn by_irrep(&self, irrep: &racah::sun::Irrep) -> Option<SectorId> {
+    fn by_irrep(&self, irrep: &fusion_symbols::sun::Irrep) -> Option<SectorId> {
         let maps = self.0.read().unwrap_or_else(PoisonError::into_inner);
         maps.by_irrep.get(irrep).copied()
     }
@@ -78,7 +78,11 @@ impl IrrepTable {
 
     /// Records a pair and returns the interned irrep (the first one inserted
     /// when threads race on the same sector).
-    fn insert(&self, sector: SectorId, irrep: Arc<racah::sun::Irrep>) -> Arc<racah::sun::Irrep> {
+    fn insert(
+        &self,
+        sector: SectorId,
+        irrep: Arc<fusion_symbols::sun::Irrep>,
+    ) -> Arc<fusion_symbols::sun::Irrep> {
         let mut maps = self.0.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = maps.by_id.get(&sector) {
             return existing.clone();
@@ -195,7 +199,7 @@ impl std::error::Error for SUNFusionRuleError {
 /// Opaque: the authority's own error is reachable only through
 /// [`std::error::Error::source`].
 #[derive(Clone, Debug, PartialEq)]
-pub struct SUNSymbolError(racah::sun::SunError);
+pub struct SUNSymbolError(fusion_symbols::sun::SunError);
 
 impl fmt::Display for SUNSymbolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -209,7 +213,7 @@ impl std::error::Error for SUNSymbolError {
     }
 }
 
-fn racah_error(error: racah::sun::SunError) -> SUNFusionRuleError {
+fn racah_error(error: fusion_symbols::sun::SunError) -> SUNFusionRuleError {
     SUNFusionRuleError::Racah(SUNSymbolError(error))
 }
 
@@ -345,7 +349,8 @@ impl SUNFusionRule {
     }
 
     fn identity_bytes(n: usize) -> Arc<[u8]> {
-        let mut bytes = Vec::with_capacity(racah::sun::sun_authority_fingerprint().len() + 32);
+        let mut bytes =
+            Vec::with_capacity(fusion_symbols::sun::sun_authority_fingerprint().len() + 32);
         bytes.extend_from_slice(CODEC_VERSION);
         bytes.extend_from_slice(&(usize::BITS).to_le_bytes());
         bytes.extend_from_slice(&n.to_le_bytes());
@@ -353,20 +358,23 @@ impl SUNFusionRule {
         bytes.extend_from_slice(
             b":rigid=f64-finite-exact-dim:f-axes=mu-nu-kappa-lambda:r-axes=mu-nu:pivotal=f-sign-0000",
         );
-        bytes.extend_from_slice(racah::sun::sun_authority_fingerprint());
+        bytes.extend_from_slice(fusion_symbols::sun::sun_authority_fingerprint());
         Arc::from(bytes)
     }
 
-    fn irrep(&self, sector: SectorId) -> Result<Arc<racah::sun::Irrep>, SUNFusionRuleError> {
+    fn irrep(
+        &self,
+        sector: SectorId,
+    ) -> Result<Arc<fusion_symbols::sun::Irrep>, SUNFusionRuleError> {
         if let Some(irrep) = self.irreps.by_id(sector) {
             return Ok(irrep);
         }
         let labels = self.decode_dynkin(sector)?;
-        let irrep = racah::sun::Irrep::from_dynkin(&labels).map_err(racah_error)?;
+        let irrep = fusion_symbols::sun::Irrep::from_dynkin(&labels).map_err(racah_error)?;
         Ok(self.irreps.insert(sector, Arc::new(irrep)))
     }
 
-    fn sector(&self, irrep: &racah::sun::Irrep) -> Result<SectorId, SUNFusionRuleError> {
+    fn sector(&self, irrep: &fusion_symbols::sun::Irrep) -> Result<SectorId, SUNFusionRuleError> {
         if let Some(sector) = self.irreps.by_irrep(irrep) {
             return Ok(sector);
         }
@@ -415,8 +423,9 @@ impl CheckedGenericFusion for SUNFusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        let product = racah::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
-            .map_err(racah_error)?;
+        let product =
+            fusion_symbols::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
+                .map_err(racah_error)?;
         let mut channels: SectorVec = product
             .iter()
             .map(|(irrep, _)| self.sector(irrep))
@@ -439,8 +448,9 @@ impl CheckedGenericFusion for SUNFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
-        let product = racah::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
-            .map_err(racah_error)?;
+        let product =
+            fusion_symbols::sun::shared_directproduct(&*self.irrep(left)?, &*self.irrep(right)?)
+                .map_err(racah_error)?;
         Ok(product.multiplicity(&*self.irrep(coupled)?) as usize)
     }
 }
@@ -504,7 +514,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         e: SectorId,
         f: SectorId,
     ) -> Result<GenericFArray<f64>, Self::Error> {
-        let block = racah::sun::f_symbol(
+        let block = fusion_symbols::sun::f_symbol(
             &*self.irrep(a)?,
             &*self.irrep(b)?,
             &*self.irrep(c)?,
@@ -524,8 +534,9 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<f64>, Self::Error> {
-        let block = racah::sun::r_symbol(&*self.irrep(a)?, &*self.irrep(b)?, &*self.irrep(c)?)
-            .map_err(racah_error)?;
+        let block =
+            fusion_symbols::sun::r_symbol(&*self.irrep(a)?, &*self.irrep(b)?, &*self.irrep(c)?)
+                .map_err(racah_error)?;
         GenericRMatrix::try_new(block.data().to_vec(), block.dim(), block.dim())
             .map_err(SUNFusionRuleError::MalformedSymbolData)
     }
@@ -628,13 +639,13 @@ mod tests {
     use super::*;
 
     /// The 0.2.3 adapter derived the FS phase as sign F[a,ā,a,a;1,1], the dual
-    /// by Dynkin reversal, and the twist as a constant; racah 0.2.4 owns all
-    /// three. The racah APIs must reproduce those derivations bit for bit.
+    /// by Dynkin reversal, and the twist as a constant; fusion-symbols 0.3.0 owns all
+    /// three. The fusion-symbols APIs must reproduce those derivations bit for bit.
     #[test]
     fn racah_rigid_data_matches_former_adapter_derivations() {
         for (n, max_total) in [(2, 6), (3, 3), (4, 2)] {
             let rule = SUNFusionRule::new(n).unwrap();
-            let unit = racah::sun::Irrep::trivial(n).unwrap();
+            let unit = fusion_symbols::sun::Irrep::trivial(n).unwrap();
             let mut swept = 0;
             for id in 0.. {
                 let sector = SectorId::new(id);
@@ -642,9 +653,9 @@ mod tests {
                 if labels.iter().sum::<i64>() > max_total {
                     break;
                 }
-                let a = racah::sun::Irrep::from_dynkin(&labels).unwrap();
+                let a = fusion_symbols::sun::Irrep::from_dynkin(&labels).unwrap();
                 let dual = a.dual();
-                let block = racah::sun::f_symbol(&a, &dual, &a, &a, &unit, &unit).unwrap();
+                let block = fusion_symbols::sun::f_symbol(&a, &dual, &a, &a, &unit, &unit).unwrap();
                 assert_eq!(block.dims(), [1, 1, 1, 1]);
                 let f_sign = block.at(0, 0, 0, 0).signum();
                 assert_eq!(
@@ -794,7 +805,7 @@ mod tests {
         expected.extend_from_slice(
             b":rigid=f64-finite-exact-dim:f-axes=mu-nu-kappa-lambda:r-axes=mu-nu:pivotal=f-sign-0000",
         );
-        expected.extend_from_slice(racah::sun::sun_authority_fingerprint());
+        expected.extend_from_slice(fusion_symbols::sun::sun_authority_fingerprint());
         assert_eq!(original.as_ref(), expected);
         let mut changed = original.to_vec();
         changed[0] ^= 1;
@@ -831,7 +842,10 @@ mod tests {
         let first = rule.irrep(three).unwrap();
         assert!(Arc::ptr_eq(&first, &rule.irrep(three).unwrap()));
         assert!(Arc::ptr_eq(&first, &rule.clone().irrep(three).unwrap()));
-        assert_eq!(*first, racah::sun::Irrep::from_dynkin(&[1, 0]).unwrap());
+        assert_eq!(
+            *first,
+            fusion_symbols::sun::Irrep::from_dynkin(&[1, 0]).unwrap()
+        );
         assert_ne!(*rule.irrep(eight).unwrap(), *first);
         assert_eq!(rule.sector(&first).unwrap(), three);
 
@@ -1003,13 +1017,13 @@ mod tests {
         assert!(matches!(
             rule.try_r_symbol_generic(three, three, eight),
             Err(SUNFusionRuleError::Racah(SUNSymbolError(
-                racah::sun::SunError::ZeroFusionChannel { .. }
+                fusion_symbols::sun::SunError::ZeroFusionChannel { .. }
             )))
         ));
         assert!(matches!(
             rule.try_f_symbol_generic(three, three, three, three, eight, three),
             Err(SUNFusionRuleError::Racah(SUNSymbolError(
-                racah::sun::SunError::ZeroFusionChannel { .. }
+                fusion_symbols::sun::SunError::ZeroFusionChannel { .. }
             )))
         ));
 

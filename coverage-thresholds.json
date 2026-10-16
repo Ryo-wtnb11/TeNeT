@@ -3,7 +3,6 @@
   "default": 80,
   "crates": {
     "symtn": 90,
-    "symtn-category-data": 91,
     "symtn-core": 88,
     "symtn-dense": 87,
     "symtn-matrixalgebra": 91,

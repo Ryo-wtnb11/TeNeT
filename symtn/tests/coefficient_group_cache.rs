@@ -188,7 +188,7 @@ fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
         leg(&[([1, 0], 2), ([1, 1], 1)]),
         leg(&[([0, 0], 1), ([1, 0], 2), ([1, 1], 1)]),
         // Why not bit equality: the checked-Generic SU(3) coefficients are
-        // summed through racah's randomly seeded hash maps, so two cold
+        // summed through fusion-symbols' randomly seeded hash maps, so two cold
         // Runtimes already differ in the last bits.
         exact: false
     );

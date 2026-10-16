@@ -60,7 +60,7 @@ then lexicographically, as TensorKitSectors 0.3.9 `isless` does for products
 | `FermionParityFusionRule` | even < odd (`src/fermions.jl`) | id = parity | yes |
 | `SU2FusionRule` | `isless(s1.j, s2.j)` (`src/irreps/su2irrep.jl`) | id = `2j` | yes |
 | `CU1FusionRule` | `j`, then `s` at `j = 0`: `0+ < 0- < 1/2 < 1 < ...` (`src/irreps/cu1irrep.jl`) | id = `findindex - 1` | yes |
-| `FibonacciFusionRule`, `CategoryDataFibonacci` | unit < tau (`src/anyons.jl`) | id | yes |
+| `FibonacciFusionRule`, `FibonacciTableRule` | unit < tau (`src/anyons.jl`) | id | yes |
 | `ProductFusionRule` (any codec, any nesting) | `isless(::ProductSector)`: degree `sum(findindex) - n`, then lexicographic over the flattened factors (`src/product.jl`) | factor keys concatenated | no in general |
 | `SUNFusionRule` (checked Generic) | SUNRepresentations 0.4.0 `isless(::SUNIrrep)`: Dynkin-label sum, then lexicographic (`src/sunirrep.jl`) | id (encoded in that order) | yes |
 

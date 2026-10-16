@@ -70,7 +70,6 @@ the source, dependency graph, and result.
 | `docs/tensorkit_compatibility_todo.md` | Misleading | Presented as current status while saying CUDA must not be exposed and describing host-only boundaries that have since changed. Split durable semantic decisions from obsolete implementation notes. |
 | `docs/tensorkit_semantic_naming_audit.md` | Historical | Pre-migration naming audit containing former public names. Archive as decision history. |
 | `docs/tk_api_parity.md` | Misleading | Claims current TensorKit parity but still marks block access and `\`/`/` solve as design-gated; current facade has `TensorMap::block` and `TensorMap::solve`. Regenerate from the operation matrix, not export-name presence. |
-| `tenet-category-data/references.md` | Valid | Exact data provenance, hashes, projection epoch and executable golden tests are pinned by source/tests. |
 | `tenet/references.md` | Valid | Current rustdoc provenance pins TensorKit 0.17.0, TensorKitSectors 0.3.4 and MatrixAlgebraKit 0.6.9 and was updated with the current facade. It is provenance, not competitor-current performance evidence. |
 | `tenet/src/mathematics.md` | Salvageable | Included and rendered by rustdoc, but prose-only categorical and support claims have not yet passed the independent Phase B oracle. Retain as source material, not audited truth. |
 | `tenet/src/tutorial.md` | Valid | Included in `tenet` rustdoc; all Rust blocks pass current doctests. Later operation-matrix work may narrow support wording, but examples are current and executable. |

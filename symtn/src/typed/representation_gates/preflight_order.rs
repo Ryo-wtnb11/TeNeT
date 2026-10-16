@@ -2,7 +2,7 @@
 //! misuse in both fusion modes, in one order — runtime, rule, operand shape
 //! (codomain equality, isomorphism, endomorphism), borrowed-view admission,
 //! then representation — on multiplicity-free U(1) and SU(2) and on the
-//! checked SU(3) rule (racah; those rows need `racah-generated`). The expected first error of every row is the
+//! checked SU(3) rule (fusion-symbols; those rows need `racah-generated`). The expected first error of every row is the
 //! one TensorKit's precedence implies (`src/tensors/linalg.jl` `inv`, `\`,
 //! `exp!`; `src/tensors/diagonal.jl` `D \ t`), written out below rather than
 //! derived from either mode.
