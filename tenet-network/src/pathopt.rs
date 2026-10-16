@@ -268,7 +268,7 @@ impl PathStrategy {
 /// use tenet_contract::prelude::*;
 /// use tenet_contract::OptEinsumPathOptimizer;
 ///
-/// let ir = parse_einsum("ab,bc,cd->ad")?;
+/// let ir = NetworkIR::from_labels(vec![vec!["a".into(), "b".into()], vec!["b".into(), "c".into()], vec!["c".into(), "d".into()]], vec!["a".into(), "d".into()])?;
 /// let infos = vec![
 ///     DenseTensorInfo::new(vec![2, 3]),
 ///     DenseTensorInfo::new(vec![3, 4]),
@@ -366,12 +366,12 @@ fn path_to_active_pairs(path: &[Vec<usize>], tensor_count: usize) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_einsum;
+    use crate::ir::test_ir;
     use crate::{ContractionPlan, DenseTensorInfo};
 
     #[test]
     fn build_inputs_maps_labels_to_unique_symbols() {
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),
@@ -409,7 +409,7 @@ mod tests {
     fn optimizer_produces_valid_pairwise_plan() {
         // Chain of 3 tensors -> 2 pairwise steps; opt-einsum must be no worse
         // than TeNeT's greedy baseline.
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn extended_optimizer_options_produce_valid_plans() {
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),

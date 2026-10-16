@@ -27,7 +27,7 @@ const PLAN_HEADER: &str = "tenet-contract-plan-v1";
 /// ```text
 /// use tenet_contract::prelude::*;
 ///
-/// let ir = parse_einsum("ab,bc,cd->ad")?;
+/// let ir = NetworkIR::from_labels(vec![vec!["a".into(), "b".into()], vec!["b".into(), "c".into()], vec!["c".into(), "d".into()]], vec!["a".into(), "d".into()])?;
 /// let infos = vec![
 ///     DenseTensorInfo::new(vec![2, 3]),
 ///     DenseTensorInfo::new(vec![3, 4]),
@@ -100,7 +100,7 @@ impl ActivePair {
 /// ```text
 /// use tenet_contract::prelude::*;
 ///
-/// let ir = parse_einsum("ab,bc->ac")?;
+/// let ir = NetworkIR::from_labels(vec![vec!["a".into(), "b".into()], vec!["b".into(), "c".into()]], vec!["a".into(), "c".into()])?;
 /// let infos = vec![
 ///     DenseTensorInfo::new(vec![2, 3]),
 ///     DenseTensorInfo::new(vec![3, 4]),
@@ -614,8 +614,8 @@ fn invalid_serialized_plan(message: impl Into<String>) -> ContractError {
 mod tests {
     use super::*;
     use crate::cost::DenseTensorInfo;
+    use crate::ir::test_ir;
     use crate::optimizer::{DenseContractionOptimizer, GreedyDenseOptimizer};
-    use crate::parse::parse_einsum;
 
     fn label(s: &str) -> TemporaryLabel {
         TemporaryLabel::new(s)
@@ -625,7 +625,7 @@ mod tests {
     /// `from_steps` also checks `result_labels` mathematical consistency.
     #[test]
     fn greedy_plan_result_labels_validate() {
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn dense_active_pair_path_charges_intermediate_orientation_cost() {
-        let ir = parse_einsum("x y, x z, y w -> z w").unwrap();
+        let ir = test_ir(&[&["x", "y"], &["x", "z"], &["y", "w"]], &["z", "w"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![2, 5]),
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn dense_plan_charges_final_output_permute_cost() {
-        let ir = parse_einsum("ab,bc->ca").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["c", "a"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 5]),
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn aggregate_costs_saturate_and_preserve_exact_totals() {
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let saturated = ContractionPlan::from_steps(&ir, chain_steps(usize::MAX, 1)).unwrap();
         assert_eq!(saturated.total_cost(), usize::MAX);
         assert_eq!(saturated.tree().unwrap().total_cost(), usize::MAX);
@@ -714,14 +714,14 @@ mod tests {
         assert_eq!(ordinary.total_cost(), 42);
         assert_eq!(ordinary.tree().unwrap().total_cost(), 42);
 
-        let leaf = ContractionPlan::from_steps(&parse_einsum("a->a").unwrap(), Vec::new()).unwrap();
+        let leaf = ContractionPlan::from_steps(&test_ir(&[&["a"]], &["a"]), Vec::new()).unwrap();
         assert_eq!(leaf.total_cost(), 0);
         assert_eq!(leaf.tree().unwrap().total_cost(), 0);
     }
 
     #[test]
     fn dense_cost_report_saturates_supplied_and_greedy_totals() {
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let small = DenseCostModel::from_network(
             &ir,
             &[
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn hand_built_plan_with_correct_result_labels_validates() {
         // ab,bc->ac : contract `b`, open legs are a (lhs) then c (rhs).
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let steps = vec![ContractionStep::new(
             TensorId::new(0),
             TensorId::new(1),
@@ -778,7 +778,7 @@ mod tests {
     fn hand_built_intermediate_permuted_order_validates() {
         // ab,bc,cd->ad : first contract tensors 1,2 (b? no) -> contract pair
         // (0,1) sharing b gives open {a,c}; declare it permuted as [c, a].
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let steps = vec![
             ContractionStep::new(
                 TensorId::new(0),
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn hand_built_plan_with_wrong_result_labels_is_rejected() {
         // ab,bc,cd->ad : first step contracts (0,1) sharing `b`; open legs {a,c}.
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let steps = vec![
             ContractionStep::new(
                 TensorId::new(0),
@@ -845,7 +845,7 @@ mod tests {
     /// A spurious extra label that is on neither operand is rejected too.
     #[test]
     fn hand_built_plan_with_extra_label_is_rejected() {
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let steps = vec![
             ContractionStep::new(
                 TensorId::new(0),

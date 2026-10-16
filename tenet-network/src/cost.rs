@@ -113,7 +113,7 @@ impl DenseCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_einsum;
+    use crate::ir::test_ir;
 
     fn label(s: &str) -> TemporaryLabel {
         TemporaryLabel::new(s)
@@ -128,7 +128,7 @@ mod tests {
     fn dense_tensor_size_saturates_on_overflow() {
         let big = 1usize << 14; // 16384
                                 // Five distinct legs, each dim 2^14 -> product 2^70 > usize::MAX.
-        let ir = parse_einsum("abcde->abcde").unwrap();
+        let ir = test_ir(&[&["a", "b", "c", "d", "e"]], &["a", "b", "c", "d", "e"]);
         let infos = vec![DenseTensorInfo::new(vec![big, big, big, big, big])];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn dense_pair_cost_saturates_on_overflow() {
         let big = 1usize << 14;
-        let ir = parse_einsum("abc,cde->abde").unwrap();
+        let ir = test_ir(&[&["a", "b", "c"], &["c", "d", "e"]], &["a", "b", "d", "e"]);
         let infos = vec![
             DenseTensorInfo::new(vec![big, big, big]),
             DenseTensorInfo::new(vec![big, big, big]),

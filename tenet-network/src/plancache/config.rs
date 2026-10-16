@@ -329,7 +329,8 @@ pub struct PlanCacheStats {
     pub workspace_reuses: u64,
     /// Slot-table capacity growth events across cached workspaces.
     pub workspace_slot_grows: u64,
-    /// Owned topology materializations performed by the static macro path.
+    /// Owned topology entries materialized by [`Network::contract`](crate::Network::contract)
+    /// lookups that did not hit (misses and replans).
     pub topology_materializations: u64,
     /// Idle execution workspaces retained by current cached plans.
     pub idle_workspaces: usize,

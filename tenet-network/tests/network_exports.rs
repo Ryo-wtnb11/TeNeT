@@ -212,6 +212,8 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "SymmetricSlicedPlan",
         // tree
         "ContractionTree",
+        // index-notation front-end (tenet-macros)
+        "contract",
     ]
     .into_iter()
     .map(str::to_owned)

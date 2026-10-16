@@ -1870,7 +1870,7 @@ fn typed_split_moving_step_is_one_contract_equal_to_contract_then_permute() {
 }
 
 #[test]
-fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
+fn default_cached_contract_replays_rank_four_orientation_after_shape_drift_f64() {
     let runtime = Runtime::builder().build().unwrap();
     assert_eq!(
         crate::plan_cache_config(&runtime).optimizer,
@@ -1881,7 +1881,7 @@ fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
 }
 
 #[test]
-fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_c64() {
+fn default_cached_contract_replays_rank_four_orientation_after_shape_drift_c64() {
     let runtime = Runtime::builder().build().unwrap();
     assert_eq!(
         crate::plan_cache_config(&runtime).optimizer,

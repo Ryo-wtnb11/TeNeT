@@ -1,0 +1,5 @@
+error: label `j` is repeated within one operand (an intra-operand trace), which contract! does not take; hint: trace it first with `TensorMap::trace_pairs`
+ --> tests/ui/trace.rs:4:38
+  |
+4 |     let _ = contract!([i] := a[i, j, j]);
+  |                                      ^

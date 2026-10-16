@@ -13,6 +13,14 @@ pub trait NetworkOperand: network_operand_sealed::Sealed + Sized {
 
     #[doc(hidden)]
     fn contract_network(network: &Network, tensors: &[&Self]) -> Result<Self, Self::Error>;
+
+    /// [`contract!`](crate::contract)'s operand: method auto-deref takes
+    /// both a tensor and a reference to one (`(w.get(0)?)[i; j]`) to
+    /// `&Self`, which `&(expr)` cannot.
+    #[doc(hidden)]
+    fn __contract_operand(&self) -> &Self {
+        self
+    }
 }
 
 impl Network {

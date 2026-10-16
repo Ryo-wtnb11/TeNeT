@@ -282,3 +282,11 @@ fn validate_einsum_support(
     }
     Ok(())
 }
+
+/// The network of written label lists, for planner unit tests.
+#[cfg(test)]
+pub(crate) fn test_ir(inputs: &[&[&str]], output: &[&str]) -> NetworkIR {
+    let labels = |labels: &[&str]| labels.iter().map(|&label| label.into()).collect();
+    NetworkIR::from_labels(inputs.iter().map(|l| labels(l)).collect(), labels(output))
+        .expect("valid test network")
+}
