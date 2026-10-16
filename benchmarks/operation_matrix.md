@@ -4,7 +4,7 @@
 uses a fresh `Runtime` and constructs its fixture before timing. Owned rows run
 one cold call followed by warm-up and repeated calls in that same process.
 The wrapper records the OS, architecture, CPU name, Rust compiler, Cargo,
-full TeNeT SHA and dirty state, lock SHA-256, selected package/features/backend,
+full symtn SHA and dirty state, lock SHA-256, selected package/features/backend,
 and the built Tenferro and Racah package versions, Cargo sources, active
 features, and available registry VCS revisions before the CSV. TensorKit
 records the Julia kernel/machine/CPU report alongside its pinned package and
@@ -92,7 +92,7 @@ same Apple Accelerate provider as the pinned TensorKit environment.
 `OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
 profiler can inspect the live process; it is outside every reported timer.
 `OP_MATRIX_CACHE=disabled` sets the process-global completed-transformer and
-composed-coefficient budgets to zero (`tenet::cache::configure_budgets`), so
+composed-coefficient budgets to zero (`symtn::cache::configure_budgets`), so
 every transformer and coefficient-group build is offered and counted as a
 rejection: the disabled-control rows are not fully cold. The setting is
 process-global, not per Runtime. The default is `enabled`.
@@ -347,16 +347,16 @@ julia --project=benchmarks/tensorkit_benchmark \
 The TensorKit script records its exact revision, Julia and AppleAccelerate
 versions, BLAS configuration, first-call timing, warm timing, and Julia's
 per-call allocated bytes. It uses the same rank-3 fixture and axis placement
-for TeNeT's `permute`, planar `transpose`, and `repartition` rows, and the same
+for symtn's `permute`, planar `transpose`, and `repartition` rows, and the same
 rank-4 fixture and middle trace pair for the direct/lazy-adjoint trace rows.
 The same rank-4 values feed matched direct/lazy-adjoint `scale`, `add`, `norm`,
 and `inner` rows; both implementations validate the same norm identities
 outside the timer.
 It also reports TensorKit's real caller-destination trace form;
-the canonical TeNeT typed facade has no matching destination method. Its
+the canonical symtn typed facade has no matching destination method. Its
 first-call row can include JIT compilation and may observe
 process-global TensorKit caches warmed by earlier rows; it is not directly
-comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm rows under
+comparable to symtn's fresh-`Runtime` cold row. Only matching warm rows under
 the recorded one-thread BLAS configuration are timing controls.
 
 The remaining #9 rows (ordered contract, compact SVD, compact diagonal,

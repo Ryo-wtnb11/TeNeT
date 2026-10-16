@@ -9,9 +9,9 @@ on:
     paths:
       - 'Cargo.toml'
       - '**/Cargo.toml'
-      - 'tenet-dense/**'
-      - 'tenet/src/runtime.rs'
-      - 'tenet-operations/**'
+      - 'symtn-dense/**'
+      - 'symtn/src/runtime.rs'
+      - 'symtn-operations/**'
       - '.github/workflows/ci.yml'
       - '.github/workflows/openblas.yml'
       - '.github/actions/cargo-build-script-cache/**'
@@ -37,18 +37,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: tenet
+          path: symtn
       - name: Record source revisions
         run: |
-          git -C tenet log -1 --format='TeNeT %H'
+          git -C symtn log -1 --format='symtn %H'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tenet
+          workspaces: symtn
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-openblas
-      - uses: ./tenet/.github/actions/cargo-build-script-cache
+      - uses: ./symtn/.github/actions/cargo-build-script-cache
         with:
           key: backend-openblas
       - run: cargo check --locked --workspace --all-targets --no-default-features --features blas-openblas
-        working-directory: tenet
+        working-directory: symtn

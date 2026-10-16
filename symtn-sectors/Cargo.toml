@@ -1,0 +1,30 @@
+[package]
+name = "symtn-sectors"
+version = "0.1.1"
+description = "Fusion-rule providers and sector types for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn_sectors"
+path = "src/lib.rs"
+
+[features]
+default = []
+racah-generated = ["racah/cgc-gen", "dep:num-traits"]
+# The infallible Generic symbol tier (`GenericFusionSymbols`,
+# `GenericRigidSymbols`): test oracles for this and sibling crates only;
+# production Generic is checked only (#1854).
+testing = []
+
+[dependencies]
+smallvec = { version = "1", features = ["const_generics", "union"] }
+num-complex = "0.4"
+num-traits = { version = "0.2", optional = true }
+racah = { version = "0.2.4" }
+
+[dev-dependencies]
+# Enables `testing` for this crate's own integration tests.
+symtn-sectors = { path = ".", features = ["testing"] }

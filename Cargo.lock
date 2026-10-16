@@ -3267,6 +3267,133 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "symtn"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "rayon",
+ "smallvec",
+ "symtn-core",
+ "symtn-dense",
+ "symtn-matrixalgebra",
+ "symtn-operations",
+ "symtn-tensors",
+]
+
+[[package]]
+name = "symtn-category-data"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "symtn",
+ "symtn-sectors",
+]
+
+[[package]]
+name = "symtn-core"
+version = "0.1.1"
+dependencies = [
+ "criterion",
+ "num-complex",
+ "quick_cache",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "symtn-core",
+ "symtn-sectors",
+]
+
+[[package]]
+name = "symtn-dense"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "t4a-cubecl-runtime",
+ "tenferro-cpu",
+ "tenferro-gpu",
+ "tenferro-linalg",
+ "tenferro-tensor",
+]
+
+[[package]]
+name = "symtn-macros"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "trybuild",
+]
+
+[[package]]
+name = "symtn-matrixalgebra"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "rustc-hash 2.1.3",
+ "symtn-core",
+ "symtn-dense",
+ "symtn-tensors",
+]
+
+[[package]]
+name = "symtn-network"
+version = "0.1.1"
+dependencies = [
+ "command-group",
+ "libc",
+ "lru",
+ "opt-einsum-path",
+ "serde_json",
+ "symtn",
+ "symtn-macros",
+]
+
+[[package]]
+name = "symtn-operations"
+version = "0.1.1"
+dependencies = [
+ "criterion",
+ "num-complex",
+ "num-traits",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "strided-kernel",
+ "symtn-core",
+ "symtn-dense",
+ "symtn-operations",
+]
+
+[[package]]
+name = "symtn-sectors"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "racah",
+ "smallvec",
+ "symtn-sectors",
+]
+
+[[package]]
+name = "symtn-tensors"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "racah",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "strided-kernel",
+ "symtn-core",
+ "symtn-dense",
+ "symtn-operations",
+ "symtn-sectors",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3609,133 +3736,6 @@ name = "target-tuple"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
-
-[[package]]
-name = "tenet-category-data"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "tenet-rs",
- "tenet-sectors",
-]
-
-[[package]]
-name = "tenet-core"
-version = "0.1.1"
-dependencies = [
- "criterion",
- "num-complex",
- "quick_cache",
- "rustc-hash 2.1.3",
- "smallvec",
- "tenet-core",
- "tenet-sectors",
-]
-
-[[package]]
-name = "tenet-dense"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "t4a-cubecl-runtime",
- "tenferro-cpu",
- "tenferro-gpu",
- "tenferro-linalg",
- "tenferro-tensor",
-]
-
-[[package]]
-name = "tenet-macros"
-version = "0.1.1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "trybuild",
-]
-
-[[package]]
-name = "tenet-matrixalgebra"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "num-traits",
- "rustc-hash 2.1.3",
- "tenet-core",
- "tenet-dense",
- "tenet-tensors",
-]
-
-[[package]]
-name = "tenet-network"
-version = "0.1.1"
-dependencies = [
- "command-group",
- "libc",
- "lru",
- "opt-einsum-path",
- "serde_json",
- "tenet-macros",
- "tenet-rs",
-]
-
-[[package]]
-name = "tenet-operations"
-version = "0.1.1"
-dependencies = [
- "criterion",
- "num-complex",
- "num-traits",
- "rayon",
- "rustc-hash 2.1.3",
- "smallvec",
- "strided-kernel",
- "tenet-core",
- "tenet-dense",
- "tenet-operations",
-]
-
-[[package]]
-name = "tenet-rs"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "rayon",
- "smallvec",
- "tenet-core",
- "tenet-dense",
- "tenet-matrixalgebra",
- "tenet-operations",
- "tenet-tensors",
-]
-
-[[package]]
-name = "tenet-sectors"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "num-traits",
- "racah",
- "smallvec",
- "tenet-sectors",
-]
-
-[[package]]
-name = "tenet-tensors"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "num-traits",
- "racah",
- "rayon",
- "rustc-hash 2.1.3",
- "smallvec",
- "strided-kernel",
- "tenet-core",
- "tenet-dense",
- "tenet-operations",
- "tenet-sectors",
-]
 
 [[package]]
 name = "tenferro-ad"

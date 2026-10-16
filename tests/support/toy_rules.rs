@@ -1,4 +1,4 @@
-//! A two-sector checked Generic toy rule several tenet test targets share
+//! A two-sector checked Generic toy rule several symtn test targets share
 //! (#1828): sectors `Vacuum` and `X`, `X (x) X -> Vacuum + X` with outer
 //! multiplicity two on `X (x) X -> X`, an allocation-free `dim`, and a typed
 //! error for any other sector id.
@@ -13,7 +13,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use tenet::sector::{
+use symtn::sector::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
     SectorId, SectorVec, TypedSectorAdmission,

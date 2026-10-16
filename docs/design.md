@@ -1,6 +1,6 @@
-# TeNeT design
+# symtn design
 
-TeNeT supplies symmetric tensor primitives from which applications build their
+symtn supplies symmetric tensor primitives from which applications build their
 own algorithms. Its public API exposes tensor maps, spaces, categorical
 providers, and mathematical operations. It does not prescribe an MPS, PEPS,
 VMC, or device-transfer schedule. This makes the same small operations usable
@@ -17,8 +17,8 @@ destination methods are explicit options for repeated work.
 
 TensorKit supplies the reference for mathematical conventions and public
 behavior. QSpace supplies applicable reduced-block, runtime-rank, and
-contiguous-dataflow techniques. TeNeT implements the selected semantics with
-Rust ownership and checked errors. See [the mathematics](../tenet/src/mathematics.md)
+contiguous-dataflow techniques. symtn implements the selected semantics with
+Rust ownership and checked errors. See [the mathematics](../symtn/src/mathematics.md)
 and [provider interface](provider_interface.md) for the precise conventions
 and trait bounds.
 
@@ -32,10 +32,10 @@ TensorMap operation and checked arguments
   -> checked result or caller-provided destination
 ```
 
-The fusion-rule provider owns categorical labels and coefficients. TeNeT owns
+The fusion-rule provider owns categorical labels and coefficients. symtn owns
 fusion-tree semantics, recoupling, signs, block layouts, structural pack and
 scatter decisions, and result validation. Racah generates SU(2) coefficient
-data; TeNeT does not mirror its tables. Tenferro owns dense kernels,
+data; symtn does not mirror its tables. Tenferro owns dense kernels,
 factorizations, provider execution resources, and backend scheduling. Strided
 owns applicable strided traversal and movement primitives.
 
@@ -56,9 +56,9 @@ and Multi pack/GEMM/scatter work to bound storage. General contraction can
 also require source transforms and a destination transform around its core
 block contraction. These are semantic steps, not extra user-visible operations.
 
-This boundary lets TeNeT group small dense jobs *within* an operation. The
+This boundary lets symtn group small dense jobs *within* an operation. The
 application chooses the sequence of operations and may design an
-algorithm-specific fusion or batch. TeNeT does not run a second CPU scheduler
+algorithm-specific fusion or batch. symtn does not run a second CPU scheduler
 around concurrent Tenferro calls. A new fused public operation needs a
 concrete measured cost and an explicit semantic contract.
 
@@ -78,7 +78,7 @@ eigendecomposition.
 `StackedTensorMap` is an expert fixed-stride representation for homogeneous
 members. It is not a required batch type for ordinary tensor operations.
 General member-batched contract is not public yet
-([#1506](https://github.com/Ryo-wtnb11/TeNeT/issues/1506)). Public prepared
+([#1506](https://github.com/Ryo-wtnb11/symtn-rs/issues/1506)). Public prepared
 APIs remain operation-specific; there is no general public work graph or
 mandatory logical batch type.
 
@@ -93,12 +93,12 @@ for the current selection and resource contract.
 
 | Concern | Current source |
 | --- | --- |
-| Public tensor API and operation dispatch | [`tenet/src/typed.rs`](../tenet/src/typed.rs) and its `typed/` modules |
-| Symmetry providers | [`tenet-sectors`](../tenet-sectors/) |
-| Fusion-tree spaces and block structure | [`tenet-core`](../tenet-core/) |
-| Structural operations and replay | [`tenet-operations`](../tenet-operations/) and [`tenet-tensors`](../tenet-tensors/) |
-| Dense backend boundary | [`tenet-dense`](../tenet-dense/) |
-| Network planning and contraction | [`tenet-network`](../tenet-network/) |
+| Public tensor API and operation dispatch | [`symtn/src/typed.rs`](../symtn/src/typed.rs) and its `typed/` modules |
+| Symmetry providers | [`symtn-sectors`](../symtn-sectors/) |
+| Fusion-tree spaces and block structure | [`symtn-core`](../symtn-core/) |
+| Structural operations and replay | [`symtn-operations`](../symtn-operations/) and [`symtn-tensors`](../symtn-tensors/) |
+| Dense backend boundary | [`symtn-dense`](../symtn-dense/) |
+| Network planning and contraction | [`symtn-network`](../symtn-network/) |
 
 This page describes the ownership boundary, not a claim that every operation
 works for every provider, scalar, or placement. The current API, method docs,

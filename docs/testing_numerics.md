@@ -31,7 +31,7 @@ module that has `Complex32` and `Complex64` in scope. It applies
 
     K * sqrt(terms) * eps(dtype) * max(1, scale),    K = 32,
 
-the rule of `tenet/tests/single_precision_oracle/mod.rs`:
+the rule of `symtn/tests/single_precision_oracle/mod.rs`:
 
 - `eps` is `f32::EPSILON` for `f32`/`Complex32` and `f64::EPSILON` for
   `f64`/`Complex64`; complex values are compared by the modulus of the error;

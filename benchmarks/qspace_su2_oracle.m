@@ -1,4 +1,4 @@
-% QSpace SU(2) spin-half oracle for TeNeT issue #9.
+% QSpace SU(2) spin-half oracle for symtn issue #9.
 %
 % Reference environment:
 %   QSpace public master e87ccd14d2efdfd50b66fb58e85ac1d1b3000347

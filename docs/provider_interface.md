@@ -1,18 +1,18 @@
 # Writing a symmetry provider
 
-A TeNeT *provider* is a Rust value that supplies categorical data: fusion
+A symtn *provider* is a Rust value that supplies categorical data: fusion
 channels, duals, F/R symbols, and quantum dimensions. Tensor operations select
-the traits they need, so providers shipped by `tenet-sectors` and providers
+the traits they need, so providers shipped by `symtn-sectors` and providers
 defined in another crate use the same public capability bounds. A provider that
 implements the required traits can use the ordinary `GradedSpace<R>` /
-`TensorMap<R, D, S>` API. Through the `tenet` facade, every trait and type
-named here is imported from `tenet::sector`.
+`TensorMap<R, D, S>` API. Through the `symtn` facade, every trait and type
+named here is imported from `symtn::sector`.
 
 This document is the contract. It says what you must implement, what each trait
 owns, which laws the engine assumes without checking, and the current typed API
 boundaries.
 
-Read [`tenet/src/mathematics.md`](../tenet/src/mathematics.md) first if you need
+Read [`symtn/src/mathematics.md`](../symtn/src/mathematics.md) first if you need
 the tensor-map convention itself (`codomain <- domain`, duality, block layout).
 That document defines the semantics; this one defines the provider interface.
 
@@ -33,15 +33,15 @@ rigidity traits supply F/R coefficients, dimensions, twists, and bends. A
 provider with outer multiplicity (`N_ab^c > 1`) uses the checked Generic traits;
 see [Outer multiplicity](#outer-multiplicity).
 
-`tenet-sectors/src/fibonacci.rs` is the smallest complete non-abelian
+`symtn-sectors/src/fibonacci.rs` is the smallest complete non-abelian
 categorical example;
-`tenet-sectors/src/abelian.rs` has the abelian ones;
-`tenet-sectors/src/su2.rs` shows a provider that delegates its coefficients to an
+`symtn-sectors/src/abelian.rs` has the abelian ones;
+`symtn-sectors/src/su2.rs` shows a provider that delegates its coefficients to an
 external crate.
 
 ## 1. `FusionRule`
 
-`FusionRule` in `tenet-sectors/src/algebra.rs` is the engine's infallible
+`FusionRule` in `symtn-sectors/src/algebra.rs` is the engine's infallible
 algebra interface.
 
 ```rust
@@ -72,13 +72,13 @@ symmetric braiding (`R` squares to the identity up to signs); `Anyonic` and
 them, as TensorKit `blas_contract!` does, while `compose` admits every style.
 
 **`fusion_channels` order is part of your convention.** Keep it stable and match
-your reference. `FibonacciFusionRule` in `tenet-sectors/src/fibonacci.rs`, for
+your reference. `FibonacciFusionRule` in `symtn-sectors/src/fibonacci.rs`, for
 example, documents that it lists the vacuum first to match TensorKitSectors'
 iteration order.
 
 ### `RuleIdentity`
 
-`RuleIdentity` is defined in `tenet-sectors/src/rule_identity.rs`. Equal
+`RuleIdentity` is defined in `symtn-sectors/src/rule_identity.rs`. Equal
 identities promise that all categorical data that can affect layout or
 coefficients agrees: styles, vacuum, channels, duals, F, R, dimensions, twists,
 bends, and the codec. It is not, by itself, the complete key for every retained
@@ -101,7 +101,7 @@ share cache entries.
 
 ## 2. `CheckedFusionAlgebra`
 
-`CheckedFusionAlgebra` in `tenet-sectors/src/algebra.rs` provides the same core
+`CheckedFusionAlgebra` in `symtn-sectors/src/algebra.rs` provides the same core
 algebra queries as fallible operations. This is where a provider validates that
 an incoming `SectorId` is in its domain:
 
@@ -113,7 +113,7 @@ fn try_nsymbol(&self, l: SectorId, r: SectorId, c: SectorId) -> Result<usize, Fu
 
 Checked construction runs through these methods. A provider may retain
 successful catalog entries created before a later failure. The failed operation
-still returns no TeNeT tensor or partial factor tuple.
+still returns no symtn tensor or partial factor tuple.
 
 Both `FusionRule` and `CheckedFusionAlgebra` implementations are required, and
 they must agree. Implement the checked logic once, then forward the infallible
@@ -122,7 +122,7 @@ methods to the `dual_or_panic`, `fusion_channels_or_panic`, and
 
 ## 3. `SectorCodec`
 
-`SectorCodec` in `tenet-sectors/src/algebra.rs` defines the public label type
+`SectorCodec` in `symtn-sectors/src/algebra.rs` defines the public label type
 and its translation to `SectorId`. Without it the provider can still work at
 the expert layer but is not reachable through `GradedSpace`/`TensorMap`,
 because those return labels, never ids. `FibonacciFusionRule` implements this
@@ -145,7 +145,7 @@ range — that value came from the user.
 
 ## Multiplicity-free coefficients
 
-`MultiplicityFreeFusionRule` in `tenet-sectors/src/algebra.rs` is an empty
+`MultiplicityFreeFusionRule` in `symtn-sectors/src/algebra.rs` is an empty
 marker asserting
 `N_ab^c ∈ {0, 1}`.
 
@@ -173,7 +173,7 @@ configuration is nonzero (for `R`, `N(a,b,c)`; for `F`, `N(a,b,e)`,
 tree. Off-shell values are unspecified — a provider may return any scalar, `0`,
 or panic — and callers gate with `nsymbol`, as the engine does. Do not rely on
 a zero. TensorKitSectors multiplies by or gates on the `Nsymbol`s, so its
-off-shell value is `0`; the TeNeT providers do not all agree (Abelian rules
+off-shell value is `0`; the symtn providers do not all agree (Abelian rules
 return `1`, `FermionParity` `R` returns `-1` for two odd legs, CU(1),
 Fibonacci and SU(2) `R` return `0`). `ProductFusionRule` multiplies its components' values, so it inherits each
 component's off-shell value and panics. `a_symbol_scalar`, `b_symbol_scalar`
@@ -195,7 +195,7 @@ Two capability flags, both defaulting to the conservative answer:
 `CanonicalUnitFusionRule` asserts the vacuum is self-dual,
 that `1 ⊗ a -> a` and `a ⊗ 1 -> a` are the only channels involved, and that
 unitors and associators act as the identity there. `FibonacciFusionRule` shows a
-`Simple` provider that still qualifies (`tenet-sectors/src/fibonacci.rs`).
+`Simple` provider that still qualifies (`symtn-sectors/src/fibonacci.rs`).
 
 ## Outer multiplicity
 
@@ -213,7 +213,7 @@ because truncation budgets and quantum-dimension-weighted norms compare
 `dim(c)` exactly, as TensorKit's integer dimensions do.
 
 `InfallibleGeneric<'a, R>` adapts an existing infallible
-provider to the checked interface; see `tenet-sectors/src/sun.rs` for a
+provider to the checked interface; see `symtn-sectors/src/sun.rs` for a
 catalog-bounded provider. Its `try_dim_scalar` is the testing-tier
 `GenericRigidSymbols::dim_scalar`, which likewise defaults to
 `sqrt_dim_scalar²`: override it for any integer dimension that is not a
@@ -262,7 +262,7 @@ providers cannot implement. The same public trait bounds apply to both.
 
 ## Validating your provider
 
-TeNeT validates representability and structural shapes but does not prove
+symtn validates representability and structural shapes but does not prove
 categorical coherence laws such as the pentagon and hexagon identities.
 
 - validate F/R/dimension/twist coefficients against an independent reference,

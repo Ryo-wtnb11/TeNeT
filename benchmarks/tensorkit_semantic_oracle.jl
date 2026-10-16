@@ -1,18 +1,18 @@
-# TensorKit semantic oracle for the TeNeT verification suite (issue #9).
+# TensorKit semantic oracle for the symtn verification suite (issue #9).
 #
 # Section 1 dumps F/R/twist/frobenius_schur_phase symbol tables; a
-# representative subset is hardcoded in `tenet-core/tests/semantic_axioms.rs`.
+# representative subset is hardcoded in `symtn-core/tests/semantic_axioms.rs`.
 # Section 2 runs TensorKit's own pentagon/hexagon checkers over the same
 # sector windows the Rust axiom sweep uses (assurance that both sides check
 # the same equations, TensorKitSectors/src/sectors.jl `pentagon_equation` /
 # `hexagon_equation`).
 # Section 3 produces the basis-independent invariant stream (norm, tr,
 # singular values) for the seeded operation sequence mirrored by
-# `cross_library_invariant_stream_*` in `tenet/tests/semantic_suite.rs`.
+# `cross_library_invariant_stream_*` in `symtn/tests/semantic_suite.rs`.
 # Section 4 records planar repartition fixtures consumed by the typed-facade
-# regression tests in `tenet/tests/typed_facade.rs`.
+# regression tests in `symtn/tests/typed_facade.rs`.
 # Section 6 records the disjoint U(1) zero-map null-space completion consumed
-# by `tenet/tests/tk_disjoint_null.rs`.
+# by `symtn/tests/tk_disjoint_null.rs`.
 #
 # Run (Julia 1.11.6, pinned TensorKit main `f87ca7f`):
 #   julia --project=benchmarks/tensorkit_oracle \

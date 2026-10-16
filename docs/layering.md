@@ -1,6 +1,6 @@
 # Layering and ownership
 
-TeNeT is one layer of a stack. Each layer owns one kind of knowledge and
+symtn is one layer of a stack. Each layer owns one kind of knowledge and
 reaches the next layer through a narrow interface. This document is the
 authority for **which layer owns what**. Each section separates the
 **target** ownership from the **current** state; the
@@ -10,8 +10,8 @@ The split follows TensorKit's ecosystem:
 
 | Concern | TensorKit ecosystem | This stack |
 | --- | --- | --- |
-| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | `racah` (current) and a sibling crate in the racah repository (planned) |
-| Symmetric tensors, fusion trees, structure, transforms | TensorKit.jl | TeNeT |
+| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | the [`fusion-symbols`](https://github.com/Ryo-wtnb11/fusion-symbols) crate (formerly `racah`; symtn still depends on the published racah 0.2.4 until fusion-symbols is published) |
+| Symmetric tensors, fusion trees, structure, transforms | TensorKit.jl | symtn |
 | Dense arrays, linear algebra, devices | LinearAlgebra, TensorOperations.jl | tenferro |
 | Strided data movement | Strided.jl | strided-rs (`strided-kernel`) |
 | Copy-free strided contraction | TBLIS via TensorOperations | tprims, inside tenferro (planned) |
@@ -22,15 +22,15 @@ The split follows TensorKit's ecosystem:
 ```mermaid
 flowchart TB
     APP["Application<br/>MPS / PEPS / VMC algorithms"]
-    TENET["<b>TeNeT</b><br/>tensor maps, fusion trees, structure, transforms"]
-    SYM["<b>Symbol layer</b> (racah repository)<br/>racah: Lie-group coefficients<br/>sibling crate (planned): abelian groups, then other categories"]
+    SYMTN["<b>symtn</b><br/>tensor maps, fusion trees, structure, transforms"]
+    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd modules<br/>planned: fibonacci, category_data, abelian, product"]
     DENSE["<b>tenferro</b><br/>dense kernels, linalg, CPU/GPU providers"]
     STR["<b>strided-rs</b><br/>strided data-movement kernels"]
     PRIMS["tprims (planned)<br/>copy-free strided contraction"]
-    APP --> TENET
-    TENET --> SYM
-    TENET --> DENSE
-    TENET --> STR
+    APP --> SYMTN
+    SYMTN --> SYM
+    SYMTN --> DENSE
+    SYMTN --> STR
     DENSE --> STR
     DENSE -.planned.-> PRIMS
     SYM --> DENSE
@@ -42,7 +42,10 @@ The symbol layer uses tenferro only for the dense linear algebra of CGC
 generation (`racah` `src/sun/linalg.rs` and `src/bcd/linalg.rs`, behind
 `cgc-gen`). It uses no tensor or fusion-tree concept.
 
-### 1. Symbol layer (racah repository)
+### 1. Symbol layer (`fusion-symbols` crate)
+
+The symbol layer is the `fusion-symbols` crate (formerly `racah`; symtn still
+depends on the published racah 0.2.4 until fusion-symbols is published).
 
 **Target ownership.** For each group or category, the symbol layer owns the
 elementary data a fusion category needs:
@@ -53,14 +56,14 @@ elementary data a fusion category needs:
 - 3j and 6j symbols, CGC, F-symbols and R-symbols;
 - the caches of that data.
 
-It owns nothing about tensors, fusion trees as TeNeT represents them, block
+It owns nothing about tensors, fusion trees as symtn represents them, block
 structures, layouts or sector-label encodings (`SectorId`), and nothing
 shaped around one consumer's call pattern.
 
 | Crate | Owns |
 | --- | --- |
-| `racah` (current) | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in racah's QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
-| sibling crate (planned, name undecided) | First scope: the abelian groups Z2, Z_N and U1 (#2016). Fermion parity is still undecided. CU(1), Fibonacci, tabulated categories and Deligne products are later candidates; they stay in TeNeT for now. |
+| `fusion-symbols` (formerly `racah`), modules `su2`, `sun`, `bcd` | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in racah's QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
+| `fusion-symbols`, planned modules `fibonacci`, `category_data`, `abelian`, `product` | Abelian groups, Fibonacci, tabulated categories and Deligne products (#2016); they stay in symtn until those modules ship. Fermion parity is still undecided. |
 
 **Target: one provider shape across crates.** Every crate should answer N,
 dims, dual, FS phase and indicator, twist, F and R in the same shape, so a
@@ -95,7 +98,7 @@ consumer adapts every crate the same way.
   floating-point bits may differ across dense backends or thread counts,
   within tolerance.
 
-### 2. TeNeT (this repository)
+### 2. symtn (this repository)
 
 **Owns:**
 - tensor maps and graded spaces;
@@ -109,7 +112,7 @@ consumer adapts every crate the same way.
 - the caches of all of the above.
 
 **Does not own:**
-- generation or caching of elementary symbols; TeNeT only adapts them;
+- generation or caching of elementary symbols; symtn only adapts them;
 - dense kernels, factorization algorithms, provider or device dispatch,
   provider workspace, or the choice of dense kernel. These belong to
   tenferro, or to strided-rs for data movement.
@@ -117,16 +120,16 @@ consumer adapts every crate the same way.
 
 | Crate | Owns |
 | --- | --- |
-| `tenet-sectors` | Fusion-rule providers and the adapter onto the symbol layer. **Rule (target):** codec and type conversion only, with no symbol math and no symbol-layer types or cache policy in its public API. Current gap: #2016. |
-| `tenet-category-data` | Pinned category tables. They are a later candidate for the symbol layer's sibling crate. |
-| `tenet-core` | Spaces, HomSpaces, fusion trees, checked fusion algebra, block structure, and the HomSpace-level structure caches. |
-| `tenet-operations` | Tree-transform plans, replay, and stacked/direct dense-job descriptions, with strided data movement. |
-| `tenet-tensors` | Contraction, trace and transform planning and execution over reduced blocks, and the tree-transform caches. |
-| `tenet-matrixalgebra` | Per-sector factorization stages over a mode-generic factor-space authority. |
-| `tenet-dense` | The only adapter onto tenferro: dense executors, sessions and device placement. |
-| `tenet` (`tenet-rs`) | Typed facade: `TensorMap`, the eager and prepared APIs, and `Runtime`. |
-| `tenet-network` | Labeled network contraction (`Network::contract`), planning and the plan cache. |
-| `tenet-macros` | The `contract!` index-notation proc macro, re-exported by `tenet-network`; syntax and compile-time label validation only. |
+| `symtn-sectors` | Fusion-rule providers and the adapter onto the symbol layer. **Rule (target):** codec and type conversion only, with no symbol math and no symbol-layer types or cache policy in its public API. Current gap: #2016. |
+| `symtn-category-data` | Pinned category tables. They are a later candidate for the `category_data` module of `fusion-symbols`. |
+| `symtn-core` | Spaces, HomSpaces, fusion trees, checked fusion algebra, block structure, and the HomSpace-level structure caches. |
+| `symtn-operations` | Tree-transform plans, replay, and stacked/direct dense-job descriptions, with strided data movement. |
+| `symtn-tensors` | Contraction, trace and transform planning and execution over reduced blocks, and the tree-transform caches. |
+| `symtn-matrixalgebra` | Per-sector factorization stages over a mode-generic factor-space authority. |
+| `symtn-dense` | The only adapter onto tenferro: dense executors, sessions and device placement. |
+| `symtn` (`symtn`) | Typed facade: `TensorMap`, the eager and prepared APIs, and `Runtime`. |
+| `symtn-network` | Labeled network contraction (`Network::contract`), planning and the plan cache. |
+| `symtn-macros` | The `contract!` index-notation proc macro, re-exported by `symtn-network`; syntax and compile-time label validation only. |
 
 **Structure-layer caches.** Four caches, mirroring TensorKit's
 `@cached` set at cfaa073 (#2014):
@@ -145,23 +148,23 @@ caches 1 and, for non-Unique fusion, 4.
 
 **Current caches.**
 - The process-global sector-layout and complete-HomSpace caches live in
-  `tenet-core`. The complete entry owns the canonical HomSpace, block content
+  `symtn-core`. The complete entry owns the canonical HomSpace, block content
   and `BlockStructure` wrapper, whose coupled-sector region memo is charged
   to the entry as it materializes.
 - Separate block-content, wrapper and HomSpace intern tables are removed.
 - The completed-transformer cache is process-global and owned by
-  `tenet-tensors`, registered with `tenet-core`'s structure-cache registry.
+  `symtn-tensors`, registered with `symtn-core`'s structure-cache registry.
   It retains structure-free replay cores keyed by content ids and publishes
   only keys whose structures are canonical (resident in, or admitted to, the
   complete-HomSpace cache).
 - The composed-coefficient cache (#2014-4) is process-global and owned by
-  `tenet-tensors`, registered the same way. It retains one source
+  `symtn-tensors`, registered the same way. It retains one source
   fusion-tree group's transform specs, keyed on sectors and trees only (no
   degeneracy, no content id), so a degeneracy-only change rebuilds no F/R
   coefficient. Unique fusion never enters it, as TensorKit's `NoCache`.
   Checked
   Generic transforms publish their groups only after the destination commit.
-- The four share `StructureCache` and one public control, `tenet::cache`
+- The four share `StructureCache` and one public control, `symtn::cache`
   (`stats`, `clear`, `configure_budgets`).
 
 ### 3. tenferro and strided-rs (dense backend)
@@ -177,38 +180,38 @@ caches 1 and, for non-Unique fusion, 4.
 **strided-rs owns** strided data-movement kernels, such as permute and
 strided copy.
 
-**TeNeT's rule.**
-- TeNeT hands tenferro whole problems: grouped or batched GEMM over reduced
+**symtn's rule.**
+- symtn hands tenferro whole problems: grouped or batched GEMM over reduced
   blocks, and per-sector factorizations.
 - It does not select a dense kernel and does not remove a provider.
 - Backend gaps are filed as tenferro issues. They are not worked around with
-  TeNeT-local kernels.
+  symtn-local kernels.
 
-## Inside TeNeT
+## Inside symtn
 
-TeNeT's crates form tiers. Arrows mean "depends on". The edges come from
+symtn's crates form tiers. Arrows mean "depends on". The edges come from
 `cargo metadata` (normal dependencies only).
 
 ```mermaid
 flowchart TB
     subgraph facade["Facade"]
-        RS["<b>tenet-rs</b> (tenet)<br/>TensorMap, eager and prepared APIs, Runtime"]
-        NET["<b>tenet-network</b><br/>network contraction"]
+        RS["<b>symtn</b> (symtn)<br/>TensorMap, eager and prepared APIs, Runtime"]
+        NET["<b>symtn-network</b><br/>network contraction"]
     end
     subgraph exec["Execution"]
-        MA["<b>tenet-matrixalgebra</b><br/>per-sector factorization stages"]
-        TT["<b>tenet-tensors</b><br/>contract / trace / transform planning and execution,<br/>tree-transform caches"]
-        OP["<b>tenet-operations</b><br/>tree-transform plans, replay, dense-job descriptions"]
+        MA["<b>symtn-matrixalgebra</b><br/>per-sector factorization stages"]
+        TT["<b>symtn-tensors</b><br/>contract / trace / transform planning and execution,<br/>tree-transform caches"]
+        OP["<b>symtn-operations</b><br/>tree-transform plans, replay, dense-job descriptions"]
     end
     subgraph structure["Structure"]
-        CORE["<b>tenet-core</b><br/>spaces, HomSpaces, fusion trees, checked fusion algebra,<br/>block structure, HomSpace-level caches"]
+        CORE["<b>symtn-core</b><br/>spaces, HomSpaces, fusion trees, checked fusion algebra,<br/>block structure, HomSpace-level caches"]
     end
     subgraph provider["Providers"]
-        SEC["<b>tenet-sectors</b><br/>fusion rules, racah adapter"]
-        CAT["<b>tenet-category-data</b><br/>pinned category tables"]
+        SEC["<b>symtn-sectors</b><br/>fusion rules, racah adapter"]
+        CAT["<b>symtn-category-data</b><br/>pinned category tables"]
     end
     subgraph backend["Backend adapter"]
-        DENSE["<b>tenet-dense</b><br/>dense executors, sessions, placement"]
+        DENSE["<b>symtn-dense</b><br/>dense executors, sessions, placement"]
     end
 
     NET --> RS
@@ -233,52 +236,52 @@ flowchart TB
     TT --> STR
 ```
 
-**Rules inside TeNeT**
+**Rules inside symtn**
 - Dependencies point down the tiers: facade, then execution, then structure,
-  then providers. The structure tier (`tenet-core`) never depends on
+  then providers. The structure tier (`symtn-core`) never depends on
   execution, dense or device code.
 - Exactly one crate touches each external layer:
-  - `tenet-sectors` touches the symbol layer;
-  - `tenet-dense` touches tenferro;
+  - `symtn-sectors` touches the symbol layer;
+  - `symtn-dense` touches tenferro;
   - strided-rs is used only where structural data movement happens
-    (`tenet-operations`, `tenet-tensors`).
+    (`symtn-operations`, `symtn-tensors`).
 
 **One operation across the crates**
 
 ```text
-contract (tenet-rs facade)
-  -> admit and represent (tenet-rs, tenet-core spaces and fusion trees)
-  -> plan_contract: route Core / CopyC / DynamicTree (tenet-tensors)
-  -> tree-transform plan and replay for operands or output (tenet-operations, cached in tenet-tensors)
-  -> grouped GEMM over reduced blocks (tenet-dense -> tenferro)
+contract (symtn facade)
+  -> admit and represent (symtn, symtn-core spaces and fusion trees)
+  -> plan_contract: route Core / CopyC / DynamicTree (symtn-tensors)
+  -> tree-transform plan and replay for operands or output (symtn-operations, cached in symtn-tensors)
+  -> grouped GEMM over reduced blocks (symtn-dense -> tenferro)
 
-svd / qr / eigh (tenet-rs facade, one body over FusionMode)
-  -> with_leg_roles and input (tenet-rs)
-  -> per-family `*_from_source::<Mode>` entry and per-sector stages (tenet-matrixalgebra)
-  -> per-sector factorization requests (tenet-dense -> tenferro)
-  -> factor spaces published through the mode's FactorSpaceAuthority (tenet-matrixalgebra, tenet-core)
+svd / qr / eigh (symtn facade, one body over FusionMode)
+  -> with_leg_roles and input (symtn)
+  -> per-family `*_from_source::<Mode>` entry and per-sector stages (symtn-matrixalgebra)
+  -> per-sector factorization requests (symtn-dense -> tenferro)
+  -> factor spaces published through the mode's FactorSpaceAuthority (symtn-matrixalgebra, symtn-core)
 ```
 
 How a facade body is selected by admission mode (`R::Mode: Typed*Dispatch`) and
 by storage (`S: *Exec`, `ExecToken`) is described in the "Operation dispatch"
-section of the `tenet::typed` module documentation (`tenet/src/typed.rs`).
+section of the `symtn::typed` module documentation (`symtn/src/typed.rs`).
 
 **Who owns which cache**
 
 There are four structure caches behind one `quick_cache` wrapper
-(`tenet-core/src/cache.rs`, #2014), mirroring TensorKit's `@cached`
+(`symtn-core/src/cache.rs`, #2014), mirroring TensorKit's `@cached`
 functions. Clearing and sizing them belongs to the application
-(`tenet::cache::clear`, `tenet::cache::configure_budgets`), never to library
+(`symtn::cache::clear`, `symtn::cache::configure_budgets`), never to library
 code.
 
-Structure caches (`tenet::cache::stats` reports them):
+Structure caches (`symtn::cache::stats` reports them):
 
 | Cache | Key | Crate | Scope | TensorKit cfaa073 |
 | --- | --- | --- | --- | --- |
-| Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `tenet-core` | process-global | `sectorstructure` |
-| Degeneracy structure: complete `BlockStructure` | rule, MF/Generic mode and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
-| Completed tree transformer | rule, mode, coefficient type, scope, operation, orientation, basis order, storage conjugation, logical source, dst and src content ids | `tenet-tensors` (`tree_transform/cache.rs`) | process-global | `treetransposer` / `treebraider` |
-| Transformation coefficients (`TreeTransformCoefficients`), Simple and Generic fusion | rule, mode, coefficient type, scope, operation, orientation, source group (uncoupled sectors and duals) and its ordered source tree pairs; no degeneracies, content ids or storage conjugation | `tenet-tensors` (`tree_transform/cache/coefficients.rs`) | process-global | `fstranspose` / `fsbraid` (Unique is `NoCache`, as in TensorKit). Trace groups (`_trace_permute!`'s `permute(::FusionTreeBlock)` plus its per-row split, `g₁ == g₂` and channel factor) use scope `TraceTerms { open_codomain_rank }` with a presence-preserving sparse column value over the lowered open tree pairs (#2149); Unique trace stays uncached |
+| Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `symtn-core` | process-global | `sectorstructure` |
+| Degeneracy structure: complete `BlockStructure` | rule, MF/Generic mode and the full HomSpace | `symtn-core` | process-global | `degeneracystructure` |
+| Completed tree transformer | rule, mode, coefficient type, scope, operation, orientation, basis order, storage conjugation, logical source, dst and src content ids | `symtn-tensors` (`tree_transform/cache.rs`) | process-global | `treetransposer` / `treebraider` |
+| Transformation coefficients (`TreeTransformCoefficients`), Simple and Generic fusion | rule, mode, coefficient type, scope, operation, orientation, source group (uncoupled sectors and duals) and its ordered source tree pairs; no degeneracies, content ids or storage conjugation | `symtn-tensors` (`tree_transform/cache/coefficients.rs`) | process-global | `fstranspose` / `fsbraid` (Unique is `NoCache`, as in TensorKit). Trace groups (`_trace_permute!`'s `permute(::FusionTreeBlock)` plus its per-row split, `g₁ == g₂` and channel factor) use scope `TraceTerms { open_codomain_rank }` with a presence-preserving sparse column value over the lowered open tree pairs (#2149); Unique trace stays uncached |
 
 The complete-HomSpace owner replaces the separate block-structure and
 HomSpace intern tables (#2014 PR 2); the completed-transformer owner replaces
@@ -291,24 +294,24 @@ Outside the four, by design:
 
 | Cache | Crate | Why separate |
 | --- | --- | --- |
-| Network plan cache | `tenet-network` | execution level: keyed by network topology |
-| CUDA prepared tree-transform structures | `tenet-operations` | execution level: device copies of cached structures |
-| cuTENSOR plan ledger | `tenet-dense` | execution level: tenferro's plan cache |
-| Elementary symbols (F, R, CGC, ...) | racah, not TeNeT | symbol layer |
+| Network plan cache | `symtn-network` | execution level: keyed by network topology |
+| CUDA prepared tree-transform structures | `symtn-operations` | execution level: device copies of cached structures |
+| cuTENSOR plan ledger | `symtn-dense` | execution level: tenferro's plan cache |
+| Elementary symbols (F, R, CGC, ...) | racah, not symtn | symbol layer |
 
 ## Interfaces between layers
 
 | From → to | Through | Shape |
 | --- | --- | --- |
-| TeNeT → symbol layer | `tenet-sectors` | Mathematical queries (`N`, `dims`, `dual`, FS phase, `twist`, `F`, `R`), converted into TeNeT types. |
-| TeNeT → tenferro | `tenet-dense` | Grouped dense jobs and per-sector factorization requests, inside one execution context. |
-| TeNeT → strided-rs | `tenet-operations`, `tenet-tensors` | Strided data-movement kernels for structural permutation, pack and scatter. |
+| symtn → symbol layer | `symtn-sectors` | Mathematical queries (`N`, `dims`, `dual`, FS phase, `twist`, `F`, `R`), converted into symtn types. |
+| symtn → tenferro | `symtn-dense` | Grouped dense jobs and per-sector factorization requests, inside one execution context. |
+| symtn → strided-rs | `symtn-operations`, `symtn-tensors` | Strided data-movement kernels for structural permutation, pack and scatter. |
 | Symbol layer → tenferro | racah's CGC-generation modules only | Small dense SVD, QR, least squares and matmul. Errors are carried as strings. |
 
 **Boundary rules (target).**
 - **Imports.** One crate per consumer imports a given dense or symbol
-  dependency. Today that holds for tenferro (only `tenet-dense`) and racah
-  (only `tenet-sectors`; `tenet-tensors` tests use racah as a
+  dependency. Today that holds for tenferro (only `symtn-dense`) and racah
+  (only `symtn-sectors`; `symtn-tensors` tests use racah as a
   dev-dependency to reset its caches as the application would). strided-rs is used where structural data movement
   happens.
 - **Public types.** A higher layer's public API exposes no type from a lower
@@ -321,12 +324,12 @@ Outside the four, by design:
 
 ## Current deviations (tracked)
 
-- **Category symbols generated in TeNeT.** Abelian groups, CU(1), Fibonacci,
-  products and `tenet-category-data` are still generated in TeNeT. The
+- **Category symbols generated in symtn.** Abelian groups, CU(1), Fibonacci,
+  products and `symtn-category-data` are still generated in symtn. The
   abelian groups move first (#2016); the rest are later candidates.
-- **A tenferro type in TeNeT's public API.** `tenet-dense` re-exports
+- **A tenferro type in symtn's public API.** `symtn-dense` re-exports
   `tenferro_cpu::CpuBackendKind`, and it reaches the facade through
-  `tenet::expert` and the `Runtime` builder (`gemm_kind`).
+  `symtn::expert` and the `Runtime` builder (`gemm_kind`).
 - **Stated exception: process-global CubeCL setting.**
-  `tenet-dense::cuda_adapter::context::single_cubecl_stream` sets CubeCL's
+  `symtn-dense::cuda_adapter::context::single_cubecl_stream` sets CubeCL's
   process-wide `max_streams = 1`, which correctness requires (#1391).

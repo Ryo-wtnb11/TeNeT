@@ -1,0 +1,31 @@
+[package]
+name = "symtn-matrixalgebra"
+version = "0.1.1"
+description = "Blockwise matrix factorizations for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+symtn-core = { version = "0.1.1", path = "../symtn-core" }
+symtn-dense = { version = "0.1.1", path = "../symtn-dense", default-features = false }
+symtn-tensors = { version = "0.1.1", path = "../symtn-tensors", default-features = false }
+num-complex = "0.4"
+num-traits = "0.2"
+rustc-hash = "2"
+
+[dev-dependencies]
+# Generic test fixtures implement the infallible symbol tier, which is
+# test-only (#1854).
+symtn-core = { version = "0.1.1", path = "../symtn-core", features = ["testing"] }
+
+[features]
+default = ["cpu-faer"]
+cpu-faer = ["symtn-tensors/cpu-faer"]
+cpu-blas = ["symtn-tensors/cpu-blas"]
+blas-accelerate = ["symtn-tensors/blas-accelerate"]
+blas-openblas = ["symtn-tensors/blas-openblas"]
+blas-mkl = ["symtn-tensors/blas-mkl"]
+# Test-only: admits `SUNFusionRule` so checked-Generic SU(3) fixtures run here.
+racah-generated = ["symtn-tensors/racah-generated"]

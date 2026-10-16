@@ -1,4 +1,4 @@
-# TeNeT development instructions
+# symtn development instructions
 
 Read [AGENTS.md](AGENTS.md), [REPOSITORY_RULES.md](REPOSITORY_RULES.md), and
 [docs/README.md](docs/README.md) before changing this repository. Keep

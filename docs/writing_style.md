@@ -1,6 +1,6 @@
 # Writing style
 
-TeNeT documentation describes the current code. Current source and executable
+symtn documentation describes the current code. Current source and executable
 tests are the primary evidence; older issues, roadmaps, benchmarks, and external
 libraries are supporting evidence, not substitutes for the current
 implementation.
@@ -12,8 +12,8 @@ Use plain, direct English:
   "compatible";
 - keep API terms precise: a provider supplies categorical data, a
   `GradedSpace` describes a leg, and `TensorMap` uses `codomain <- domain`;
-- use references to support a stated TeNeT convention or comparison, not to
-  define TeNeT's structure;
+- use references to support a stated symtn convention or comparison, not to
+  define symtn's structure;
 - state limitations with a source, test, issue, or measurement, and separate a
   missing proof from an unsupported API.
 
@@ -23,7 +23,7 @@ Short examples:
 | --- | --- |
 | "All providers are fully supported." | "The checked Generic Host operations covered by current tests are listed in the operation matrix." |
 | "This is much faster." | "Benchmark X measured Y on the stated fixture and revision." |
-| "TensorKit defines this layout." | "TeNeT uses this layout; the cited TensorKit source is the comparison." |
+| "TensorKit defines this layout." | "symtn uses this layout; the cited TensorKit source is the comparison." |
 
 Choose words from the context, not by mechanical replacement:
 

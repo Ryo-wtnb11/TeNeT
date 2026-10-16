@@ -2,11 +2,11 @@
 set -eu
 
 : "${FINITE_TORUS_DIR:?set FINITE_TORUS_DIR to finite-torus/migrate}"
-: "${TENFERRO_DIR:?set TENFERRO_DIR to the tenferro checkout used by TeNeT}"
+: "${TENFERRO_DIR:?set TENFERRO_DIR to the tenferro checkout used by symtn}"
 RUNS="${RUNS:-5}"
 WARMLOOP="${WARMLOOP:-40}"
 CHIS="${CHIS:-16 32}"
-tenet_root=$(git rev-parse --show-toplevel)
+symtn_root=$(git rev-parse --show-toplevel)
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -23,11 +23,11 @@ metadata_file=$(mktemp)
 time_file=$(mktemp)
 tenferro_map_file=$(mktemp)
 trap 'rm -f "$metadata_file" "$time_file" "$tenferro_map_file"' EXIT HUP INT TERM
-if [ ! -f "$tenet_root/Cargo.lock" ]; then
+if [ ! -f "$symtn_root/Cargo.lock" ]; then
     cargo generate-lockfile
 fi
 cargo metadata --locked --format-version 1 >"$metadata_file"
-tenet_lock_before=$(sha256_file "$tenet_root/Cargo.lock")
+symtn_lock_before=$(sha256_file "$symtn_root/Cargo.lock")
 
 if ! python3 -c '
 import json, sys
@@ -73,9 +73,9 @@ if ! tenferro_sha=$(git -C "$resolved_tenferro_root" rev-parse HEAD); then
     exit 1
 fi
 
-printf 'tenet_sha=%s\n' "$(git rev-parse HEAD)"
+printf 'symtn_sha=%s\n' "$(git rev-parse HEAD)"
 printf 'tenferro_root=%s tenferro_sha=%s\n' "$resolved_tenferro_root" "$tenferro_sha"
-printf 'tenet_cargo_lock_sha256=%s\n' "$tenet_lock_before"
+printf 'symtn_cargo_lock_sha256=%s\n' "$symtn_lock_before"
 printf 'rustc=%s\n' "$(rustc -Vv | tr '\n' ' ')"
 printf 'system=%s\n' "$(uname -a)"
 printf 'runs=%s warmloop=%s chis=%s\n' "$RUNS" "$WARMLOOP" "$CHIS"
@@ -83,23 +83,23 @@ printf 'RAYON_NUM_THREADS=%s OPENBLAS_NUM_THREADS=%s OMP_NUM_THREADS=%s MKL_NUM_
     "${RAYON_NUM_THREADS:-unset}" "${OPENBLAS_NUM_THREADS:-unset}" \
     "${OMP_NUM_THREADS:-unset}" "${MKL_NUM_THREADS:-unset}"
 
-cargo test --locked --release -p tenet-core hom_space_id_remains_semantic_after_intern_eviction \
+cargo test --locked --release -p symtn-core hom_space_id_remains_semantic_after_intern_eviction \
     --lib --no-run --message-format=json >"$metadata_file"
 test_binary=$(python3 -c '
 import json, sys
 paths = []
 for line in open(sys.argv[1]):
     record = json.loads(line)
-    if record.get("reason") == "compiler-artifact" and record["target"]["name"] == "tenet_core":
+    if record.get("reason") == "compiler-artifact" and record["target"]["name"] == "symtn_core":
         executable = record.get("executable")
         if executable:
             paths.append(executable)
 if not paths:
-    raise SystemExit("tenet-core release test executable missing from Cargo output")
+    raise SystemExit("symtn-core release test executable missing from Cargo output")
 print(paths[-1])
 ' "$metadata_file")
 if [ -z "$test_binary" ]; then
-    printf 'tenet-core release test binary not found\n' >&2
+    printf 'symtn-core release test binary not found\n' >&2
     exit 1
 fi
 sample=1
@@ -141,13 +141,13 @@ if [ ! -f "$finite_lock" ]; then
 fi
 cargo metadata --locked --format-version 1 >"$metadata_file"
 case "$(cat "$metadata_file")" in
-    *"$tenet_root/tenet/Cargo.toml"*) ;;
-    *) printf 'finite-torus does not resolve tenet from %s\n' "$tenet_root" >&2; exit 1 ;;
+    *"$symtn_root/symtn/Cargo.toml"*) ;;
+    *) printf 'finite-torus does not resolve symtn from %s\n' "$symtn_root" >&2; exit 1 ;;
 esac
 finite_lock_before=$(sha256_file "$finite_lock")
 printf 'finite_torus_sha=%s finite_torus_lock_sha256=%s\n' \
     "$finite_sha" "$finite_lock_before"
-cargo tree --locked -e features -p tenet >"$metadata_file"
+cargo tree --locked -e features -p symtn >"$metadata_file"
 printf 'feature_tree_sha256=%s\n' "$(sha256_file "$metadata_file")"
 cargo build --locked --release --example bench_energy --message-format=json >"$metadata_file"
 bench_binary=$(python3 -c '
@@ -176,7 +176,7 @@ if [ "$(sha256_file "$finite_lock")" != "$finite_lock_before" ]; then
     printf 'finite-torus Cargo.lock changed during the audit\n' >&2
     exit 1
 fi
-if [ "$(sha256_file "$tenet_root/Cargo.lock")" != "$tenet_lock_before" ]; then
-    printf 'TeNeT Cargo.lock changed during the audit\n' >&2
+if [ "$(sha256_file "$symtn_root/Cargo.lock")" != "$symtn_lock_before" ]; then
+    printf 'symtn Cargo.lock changed during the audit\n' >&2
     exit 1
 fi

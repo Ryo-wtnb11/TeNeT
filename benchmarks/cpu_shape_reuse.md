@@ -1,6 +1,6 @@
 # CPU network shape-reuse benchmark protocol
 
-Issue: #1141 (parent #1140). Baseline authority: TeNeT
+Issue: #1141 (parent #1140). Baseline authority: symtn
 `4ea8348dad1cf2dbc3907a89c1734aae29881580`.
 
 `microbench_cpu_shape_reuse` measures one deterministic two-step, three-operand
@@ -56,24 +56,27 @@ asserts the selected `(A, B)` then `(C, AB)` plan. Its execution enters
 `HostNetworkModeDispatch::contract_step`; those source facts alone do not prove
 whether a backend call packed or copied data.
 
-The benchmark uses the checked-in evidence lock copied to root before the run:
+The benchmark uses the checked-in evidence lock copied to root before the run
+(records before #2273, including this lock, use `tenet-<x>` / `TENET_*`; they
+are now `symtn-<x>` / `SYMTN_*`. To reproduce the recorded run, check out its
+baseline revision):
 
 ```sh
 cp benchmarks/cpu_shape_reuse.Cargo.lock Cargo.lock
 RAYON_NUM_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 \
 CARGO_TARGET_DIR=../tenet/target cargo run --locked --release \
-  -p tenet-network --example microbench_cpu_shape_reuse --no-default-features \
+  -p symtn-network --example microbench_cpu_shape_reuse --no-default-features \
   --features cpu-faer > /absolute/path/to/raw.csv
 ```
 
-`TENET_CPU_SHAPE_SAMPLES` controls the number of isolated child processes per
+`SYMTN_CPU_SHAPE_SAMPLES` controls the number of isolated child processes per
 case/workspace pair (default 5). The `median` row is the complete raw row whose
 `ns_per_iter` is the sample median; raw rows remain in the same CSV.
-`TENET_CPU_SHAPE_WORKSPACE_FILTER=fresh` or `reuse` runs only that workspace
+`SYMTN_CPU_SHAPE_WORKSPACE_FILTER=fresh` or `reuse` runs only that workspace
 mode, which permits valid baseline fresh evidence when reuse correctness fails.
 
-Record the exact TeNeT SHA, lock SHA-256, command, `rustc -Vv`, CPU/OS details,
+Record the exact symtn SHA, lock SHA-256, command, `rustc -Vv`, CPU/OS details,
 and raw CSV under `libraries/reviews/cpu-data-20260912/`. Run the committed
 baseline harness and final benchmark commit with the same executable settings.
 Do not report a speedup or non-regression unless the two commits differ in

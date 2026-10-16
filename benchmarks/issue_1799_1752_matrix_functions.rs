@@ -1,4 +1,4 @@
-//! Copy into tenet/examples/issue_1799_1752_matrix_functions.rs, then run with
+//! Copy into symtn/examples/issue_1799_1752_matrix_functions.rs, then run with
 //! --release. Input setup is outside timing; publication and drop are inside
 //! every call. Multiplicity-free dense `pinv`, Hermitian and general `exp`,
 //! left/right polar and their lazy-adjoint routes on `[V, V] <- [V, V]`.
@@ -8,8 +8,8 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Instant;
-use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{GradedSpace, LinalgBackend, Runtime, TensorMap};
+use symtn::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use symtn::typed::{GradedSpace, LinalgBackend, Runtime, TensorMap};
 
 struct Allocator;
 static COUNT: AtomicBool = AtomicBool::new(false);
