@@ -1,0 +1,70 @@
+[package]
+name = "symtn-dense"
+version = "0.1.1"
+description = "Dense block execution for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn_dense"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu-faer"]
+tenferro = [
+    "dep:tenferro-cpu",
+    "dep:tenferro-linalg",
+    "dep:tenferro-tensor",
+]
+cpu-faer = [
+    "tenferro",
+    "tenferro-cpu/cpu-faer",
+    "tenferro-linalg/cpu-faer",
+]
+cpu-blas-core = [
+    "tenferro",
+    "tenferro-cpu/cpu-blas",
+    "tenferro-linalg/cpu-blas",
+]
+cpu-blas = [
+    "cpu-blas-core",
+]
+blas-accelerate = [
+    "cpu-blas-core",
+    "tenferro-cpu/blas-accelerate",
+    "tenferro-linalg/blas-accelerate",
+]
+blas-openblas = [
+    "cpu-blas-core",
+    "tenferro-cpu/blas-openblas",
+    "tenferro-linalg/blas-openblas",
+]
+blas-mkl = [
+    "cpu-blas-core",
+    "tenferro-cpu/blas-mkl",
+    "tenferro-linalg/blas-mkl",
+]
+cuda = [
+    "tenferro",
+    "dep:tenferro-gpu",
+    "dep:cubecl-runtime",
+    "tenferro-gpu/cuda",
+    "tenferro-linalg/cuda",
+]
+provider-inject = [
+    "cpu-blas-core",
+    "tenferro-cpu/provider-inject",
+    "tenferro-linalg/provider-inject",
+]
+
+[dependencies]
+num-complex = "0.4"
+tenferro-cpu = { version = "0.7.1", default-features = false, optional = true }
+tenferro-linalg = { version = "0.7.1", default-features = false, optional = true }
+tenferro-tensor = { version = "0.7.1", default-features = false, optional = true }
+tenferro-gpu = { version = "0.7.1", default-features = false, optional = true }
+# The version tenferro-gpu pins, named only to set its process-wide stream
+# count before the first client load (`single_cubecl_stream`, #1391).
+cubecl-runtime = { package = "t4a-cubecl-runtime", version = "=0.10.1", optional = true }

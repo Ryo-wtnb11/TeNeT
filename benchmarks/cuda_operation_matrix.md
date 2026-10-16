@@ -6,12 +6,12 @@ current device path costs per call, it is never a CI timing gate, and no
 measured value feeds a dispatch decision.
 
 Runner: `benchmarks/cuda_operation_matrix.sh`
-Executable: `tenet-network/examples/cuda_operation_matrix.rs`
+Executable: `symtn-network/examples/cuda_operation_matrix.rs`
 (feature `cuda`; without it the binary prints an unsupported message and exits
 with status 2).
 
-The example lives in `tenet-network`, not `tenet`, because the canonical
-network row needs `Network`, and `tenet-network` depends on `tenet` rather
+The example lives in `symtn-network`, not `symtn`, because the canonical
+network row needs `Network`, and `symtn-network` depends on `symtn` rather
 than the other way round.
 
 ## Protocol
@@ -67,7 +67,7 @@ initialization the `cold` cells no longer carry stays visible.
 
 ### Synchronization and the completion barrier
 
-No device synchronization is reachable through TeNeT's public API, and
+No device synchronization is reachable through symtn's public API, and
 tenferro's `with_cubecl` success path does not synchronize. A timed region
 therefore measures submission unless the operation itself downloads (`norm`,
 `inner`, the factorizations' spectra).
@@ -83,7 +83,7 @@ submitted.
 
 ### Peak device memory
 
-Absent. Neither TeNeT nor tenferro exposes a device allocation high-water
+Absent. Neither symtn nor tenferro exposes a device allocation high-water
 mark, and an `nvidia-smi --query-gpu=memory.used` sample would observe the
 whole device rather than this process's buffers. `device_allocs` counts
 buffers, not bytes retained.
@@ -154,9 +154,9 @@ The `blocks` column records the requested value.
 | `barrier_d2h_calls`, `barrier_d2h_bytes` | the completion barrier's own downloads, outside the timed region |
 | `check` | `ok:<oracle>`, `MISMATCH:<oracle>`, or the skip reason |
 
-The device columns come from `tenet::expert::cuda_transfer_stats()`, an
+The device columns come from `symtn::expert::cuda_transfer_stats()`, an
 always-compiled, `Relaxed`, backend-local counter set in
-`tenet-dense/src/cuda_adapter/mod.rs`. They are observability only: nothing in the
+`symtn-dense/src/cuda_adapter/mod.rs`. They are observability only: nothing in the
 library reads them back, so no execution decision depends on them.
 
 ## Oracles

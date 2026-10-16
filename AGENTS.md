@@ -1,6 +1,6 @@
-# TeNeT agent instructions
+# symtn agent instructions
 
-Read [REPOSITORY_RULES.md](REPOSITORY_RULES.md) for the authoritative TeNeT
+Read [REPOSITORY_RULES.md](REPOSITORY_RULES.md) for the authoritative symtn
 quality gates. The parent workspace `AGENTS.md`, when present, also applies.
 Use [docs/README.md](docs/README.md) to find current design and testing
 documents. Historical audits and issue notes are evidence for their recorded
@@ -12,7 +12,7 @@ path. For mathematical or representation changes, record the corresponding
 TensorKit and QSpace production paths and build an independent oracle.
 
 Keep the public API as small symmetric tensor operations that applications can
-compose. TeNeT owns categorical semantics and block structure; Tenferro owns
+compose. symtn owns categorical semantics and block structure; Tenferro owns
 dense kernels and backend resources. Reuse existing execution seams. Do not
 add a general work graph, a second CPU scheduler, a symmetry-specific engine
 path, or a cache to hide an avoidably slow eager operation.

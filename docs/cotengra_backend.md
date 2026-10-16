@@ -46,20 +46,20 @@ uv run --project tools/cotengra-python python -c \
 
 ## Enabling it in a crate
 
-Turn on the `cotengra-python` feature on `tenet-network`:
+Turn on the `cotengra-python` feature on `symtn-network`:
 
 ```toml
-tenet-network = { path = "...", features = ["cotengra-python"] }
+symtn-network = { path = "...", features = ["cotengra-python"] }
 ```
 
 ## Using it from Rust
 
 ```rust
-use tenet_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use symtn_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
 use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python")
+    CotengraPythonConfig::with_uv_project("/path/to/symtn-rs/tools/cotengra-python")
         .timeout(Duration::from_secs(120)),
 );
 let rt = Runtime::builder().build()?;
@@ -67,10 +67,10 @@ configure_plan_cache(&rt, PlanCacheConfig { optimizer, ..Default::default() });
 ```
 
 The project path is stored verbatim and resolved by `uv` against the process
-working directory at launch; TeNeT neither probes the CWD nor bakes in a
+working directory at launch; symtn neither probes the CWD nor bakes in a
 source-tree location, so a downstream crate passes an absolute path (or one
 built from its own `CARGO_MANIFEST_DIR`). The interpreter is a config field;
-TeNeT reads no environment variable to choose it:
+symtn reads no environment variable to choose it:
 
 - `CotengraPythonConfig::python(program)` — run a specific interpreter directly.
 - `CotengraPythonConfig::uv_project(path)` — use `uv run --project <path> python`.
@@ -82,7 +82,7 @@ TeNeT reads no environment variable to choose it:
 `target_size` / `step_size` / `max_repeats` / `allow_outer`).
 
 Request transfer and planner search share a five-minute deadline by default. On
-expiry TeNeT terminates the whole Python process group (including `uv`
+expiry symtn terminates the whole Python process group (including `uv`
 descendants) and reaps it. Use `.timeout(duration)` to choose another finite
 deadline. `.without_timeout()` is the explicit unbounded opt-out.
 
@@ -114,7 +114,7 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
   not automatically lower or execute slices.
 - **Windows process-group creation errors**: `command-group` 5.0.1 can fail
   after spawning a suspended child but before returning its handle if Job
-  assignment or thread resumption fails. TeNeT's timeout and unwind guarantees
+  assignment or thread resumption fails. symtn's timeout and unwind guarantees
   begin after successful group creation; the dependency does not expose the
   child needed to clean up this rare spawn-error path. This dependency boundary
-  is tracked in [issue #1048](https://github.com/Ryo-wtnb11/TeNeT/issues/1048).
+  is tracked in [issue #1048](https://github.com/Ryo-wtnb11/symtn-rs/issues/1048).

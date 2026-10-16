@@ -1,4 +1,4 @@
-//! Fixtures several tenet test targets share verbatim (#1827).
+//! Fixtures several symtn test targets share verbatim (#1827).
 //!
 //! Test targets include this file with
 //! `#[path = ".../tests/support/fixtures.rs"] mod fixtures;`. Leg fixtures
@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use tenet::typed::{Runtime, TensorMap};
+use symtn::typed::{Runtime, TensorMap};
 
 /// A host Runtime with one dense thread, so results and allocation counts do
 /// not depend on the machine's core count.
@@ -38,8 +38,8 @@ pub use cuda::*;
 mod cuda {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    use tenet::expert::{CudaPlanCacheStats, CudaTransferStats};
-    use tenet::typed::Runtime;
+    use symtn::expert::{CudaPlanCacheStats, CudaTransferStats};
+    use symtn::typed::Runtime;
 
     static SERIAL: Mutex<()> = Mutex::new(());
 

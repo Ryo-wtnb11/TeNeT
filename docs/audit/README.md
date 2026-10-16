@@ -6,6 +6,10 @@ artifact at the same stable path; use its Git history to retain earlier
 snapshots. `public-api.jsonl` is generated evidence tied to the revision named
 by `artifact-classification.md` and must not be hand-edited.
 
+Records before #2273 use `tenet` / `tenet-<x>` / `TENET_*`; they are now
+`symtn` / `symtn-<x>` / `SYMTN_*`. `Ryo-wtnb11/TeNeT` links redirect to
+`Ryo-wtnb11/symtn-rs`.
+
 | Artifact | Authority | Later outcome |
 | --- | --- | --- |
 | [Artifact classification](artifact-classification.md) | `8999ec3678b7f894a3547b1a930802a1adfe90a0` | Documentation reconciliation: [current documentation index](../README.md). |

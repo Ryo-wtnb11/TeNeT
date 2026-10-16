@@ -6,7 +6,7 @@
 //! module must have `Complex32` and `Complex64` in scope.
 //!
 //! The bound is `K * sqrt(terms) * eps(dtype) * max(1, scale)`, the rule of
-//! `tenet/tests/single_precision_oracle/mod.rs`: `terms` is the number of
+//! `symtn/tests/single_precision_oracle/mod.rs`: `terms` is the number of
 //! floating terms that reach one compared entry, `scale` the largest oracle
 //! magnitude. A call site that needs a conditioning factor states its origin.
 

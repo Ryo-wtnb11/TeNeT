@@ -1,0 +1,19 @@
+[package]
+name = "symtn-category-data"
+version = "0.1.1"
+description = "Fusion-category data tables for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn_category_data"
+path = "src/lib.rs"
+
+[dependencies]
+num-complex = "0.4"
+symtn-sectors = { version = "0.1.1", path = "../symtn-sectors" }
+
+[dev-dependencies]
+symtn = { package = "symtn", version = "0.1.1", path = "../symtn" }

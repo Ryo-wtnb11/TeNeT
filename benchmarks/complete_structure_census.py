@@ -3,7 +3,7 @@
 
     complete_structure_census.py STEPS.csv[.gz] TRACE.txt[.gz]
 
-STEPS.csv holds the `STEP` rows of `tenet-network/examples/complete_structure_census.rs`;
+STEPS.csv holds the `STEP` rows of `symtn-network/examples/complete_structure_census.rs`;
 TRACE.txt the `M`/`L`/`A` lines of `complete_structure_census_lldb.py` from the
 same run. The script
 

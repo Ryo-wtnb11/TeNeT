@@ -1,33 +1,40 @@
-# TeNeT
+# symtn
 
 **Symmetric tensor primitives for composable algorithms in Rust.**
 
-TeNeT provides small operations on block-sparse tensor maps: construct a space,
+symtn provides small operations on block-sparse tensor maps: construct a space,
 build a tensor, permute or braid its legs, contract, trace, or factorize it.
 An algorithm written by a person or a coding agent can combine these operations
 without implementing fusion trees, sector bookkeeping, or dense block layouts.
 
 The caller chooses the algorithm, operation order, and when to move a tensor
-between Host and CUDA storage. Within each supported operation, TeNeT handles
+between Host and CUDA storage. Within each supported operation, symtn handles
 symmetry-aware decomposition, block layout and data movement, and submission of
 dense work. [Tenferro](https://github.com/tensor4all/tenferro-rs) supplies the
 dense kernels and provider resources. This division keeps individual operations
 optimizable without hiding the algorithm inside a large workflow API.
 
-TeNeT is under active development; the public API is not yet stable. Ordinary
-applications use the `tenet-rs` package (imported as `tenet`). Add
-`tenet-network` for labeled tensor networks and network planning.
+symtn is under active development; the public API is not yet stable. Ordinary
+applications use the `symtn` crate. Add
+`symtn-network` for labeled tensor networks and network planning. The crates
+are not yet published on crates.io; depend on the repository:
+
+```toml
+[dependencies]
+symtn = { git = "https://github.com/Ryo-wtnb11/symtn-rs" }
+symtn-network = { git = "https://github.com/Ryo-wtnb11/symtn-rs" }
+```
 
 ## Acknowledgments and upstream work
 
-TeNeT builds on [TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl) and [QSpace](https://bitbucket.org/qspace4u/). We thank their authors and contributors.
+symtn builds on [TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl) and [QSpace](https://bitbucket.org/qspace4u/). We thank their authors and contributors.
 
-See [provenance and references](tenet/references.md) for detailed source correspondences.
+See [provenance and references](symtn/references.md) for detailed source correspondences.
 
 ## Citation
 
-**If you use TeNeT in research, please cite TensorKit and QSpace.** This requests scholarly credit for the work on which
-TeNeT builds; it does not add a condition to the software license.
+**If you use symtn in research, please cite TensorKit and QSpace.** This requests scholarly credit for the work on which
+symtn builds; it does not add a condition to the software license.
 
 - **TensorKit:** Lukas Devos and Jutho Haegeman, *TensorKit.jl: A Julia package
   for large-scale tensor computations, with a hint of category theory* (2025),
@@ -48,8 +55,8 @@ describes one leg by its charge sectors and degeneracies. A `TensorMap` is a map
 
 ```rust
 use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+use symtn::sector::{U1FusionRule, U1Irrep};
+use symtn::typed::{Error, GradedSpace, Runtime, TensorMap};
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
@@ -69,17 +76,17 @@ fn main() -> Result<(), Error> {
 
 For a runnable labeled contraction with `contract!` (index notation over
 `Network::contract`), use
-[`tenet-network/examples/quickstart.rs`](tenet-network/examples/quickstart.rs):
+[`symtn-network/examples/quickstart.rs`](symtn-network/examples/quickstart.rs):
 
 ```sh
-cargo run -p tenet-network --example quickstart
+cargo run -p symtn-network --example quickstart
 ```
 
 ## Operations and documentation
 
-TeNeT provides `permute`, `braid`, `contract`, `trace_pairs`, `qr_compact`,
+symtn provides `permute`, `braid`, `contract`, `trace_pairs`, `qr_compact`,
 `svd_compact`, and other operations that an application can compose into its
-own algorithm. The [tenet crate guide](tenet/README.md) maps these operations
+own algorithm. The [symtn crate guide](symtn/README.md) maps these operations
 to methods and links to the tutorial.
 
 Supported operations depend on the symmetry provider, scalar type, and

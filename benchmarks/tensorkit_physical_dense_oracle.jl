@@ -1,4 +1,4 @@
-# TensorKit `convert(Array, t)` fixtures for `tenet/tests/physical_dense.rs`
+# TensorKit `convert(Array, t)` fixtures for `symtn/tests/physical_dense.rs`
 # (issue #1464).
 #
 # Every symmetry-allowed reduced element is set by `value` below, which
@@ -9,7 +9,7 @@
 # Run (Julia 1.11.6, pinned TensorKit main `f87ca7f` = 0.17.1):
 #   julia --project=benchmarks/tensorkit_oracle \
 #     benchmarks/tensorkit_physical_dense_oracle.jl \
-#     > tenet/tests/fixtures/physical_dense/tensorkit_dense.txt
+#     > symtn/tests/fixtures/physical_dense/tensorkit_dense.txt
 
 using TensorKit
 using Printf

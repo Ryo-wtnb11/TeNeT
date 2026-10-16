@@ -1,14 +1,14 @@
 # Documentation map
 
-The [root README](../README.md) is the entry point for users. The `tenet`
-crate's [tutorial](../tenet/src/tutorial.md) and generated rustdoc contain
+The [root README](../README.md) is the entry point for users. The `symtn`
+crate's [tutorial](../symtn/src/tutorial.md) and generated rustdoc contain
 operation examples and function-level contracts.
 
 | Read for | Document |
 | --- | --- |
 | Layer ownership (symbols, tensors, dense backend) | [Layering and ownership](layering.md) |
-| Architecture and ownership | [TeNeT design](design.md) |
-| Mathematical conventions | [Tensor-map mathematics](../tenet/src/mathematics.md) |
+| Architecture and ownership | [symtn design](design.md) |
+| Mathematical conventions | [Tensor-map mathematics](../symtn/src/mathematics.md) |
 | Implementing a symmetry provider | [Provider interface](provider_interface.md) |
 | Selecting dense and device backends | [Backend policy](backend_policy.md) |
 | Structural complexity obligations | [Complexity policy](complexity_parity_policy.md) |

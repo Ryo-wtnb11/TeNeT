@@ -1,25 +1,25 @@
-# Releasing TeNeT
+# Releasing symtn
 
 This is the checklist for a future registry release. The facade is
-`tenet-rs` 0.1.1; the workspace pins the Tenferro 0.7.1 line. Its Rust library
-target remains `tenet`, so
-downstream code imports from `tenet::typed` and `tenet::sector`.
+`symtn` 0.1.1; the workspace pins the Tenferro 0.7.1 line. Its Rust library
+target remains `symtn`, so
+downstream code imports from `symtn::typed` and `symtn::sector`.
 
 ## Publication order
 
 Publish only after the previous layer is visible in the crates.io index. Each
 package is packaged and inspected before it is published.
 
-1. `tenet-sectors` (after a compatible Racah release is available)
-2. `tenet-core`
-3. `tenet-dense`
-4. `tenet-operations`
-5. `tenet-tensors`
-6. `tenet-matrixalgebra`
-7. `tenet-rs`
-8. `tenet-macros` (no TeNeT dependencies; any time before `tenet-network`)
-9. `tenet-network`
-10. `tenet-category-data`
+1. `symtn-sectors` (after a compatible Racah release is available)
+2. `symtn-core`
+3. `symtn-dense`
+4. `symtn-operations`
+5. `symtn-tensors`
+6. `symtn-matrixalgebra`
+7. `symtn`
+8. `symtn-macros` (no symtn dependencies; any time before `symtn-network`)
+9. `symtn-network`
+10. `symtn-category-data`
 
 ## Checks for each package
 
@@ -39,16 +39,16 @@ After the complete closure is published, build a clean downstream fixture:
 
 ```toml
 [dependencies]
-tenet = { package = "tenet-rs", version = "0.1.1" }
+symtn = "0.1.1"
 ```
 
-The fixture must compile `use tenet::typed::{Runtime, TensorMap}` without a sibling checkout,
+The fixture must compile `use symtn::typed::{Runtime, TensorMap}` without a sibling checkout,
 Tenferro source override, or Racah git override.
 
 ## External prerequisites
 
-The workspace manifests pin the `tenferro-*` crates at 0.7.1 (`tenet-dense/Cargo.toml`),
+The workspace manifests pin the `tenferro-*` crates at 0.7.1 (`symtn-dense/Cargo.toml`),
 `t4a-cubecl-runtime` at `=0.10.1` (kept in lockstep with Tenferro), and `racah` at 0.2.4
-(`tenet-sectors/Cargo.toml`).
+(`symtn-sectors/Cargo.toml`).
 The registry-only gate must still verify compatible resolved versions before a
 future release.

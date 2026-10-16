@@ -5,7 +5,7 @@
 //! `blas-*` features. Gates that only hold on faer (allocation budgets, bit
 //! pins) branch on this at run time.
 
-use tenet::expert::CpuBackendKind;
+use symtn::expert::CpuBackendKind;
 
 pub fn faer_is_default_backend() -> bool {
     CpuBackendKind::default_compiled() == CpuBackendKind::Faer

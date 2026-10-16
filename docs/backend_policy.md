@@ -1,6 +1,6 @@
 # Backend selection policy
 
-TeNeT's design axis is maintainability + extensibility (idiomatic Rust) *and*
+symtn's design axis is maintainability + extensibility (idiomatic Rust) *and*
 speed on dynamic-rank tensor networks. A first-class part of that extensibility
 is being able to **choose the execution backend** for a compute primitive
 (linear algebra, transpose/tree-transform, contraction/GEMM, device placement)
@@ -15,7 +15,7 @@ how backends are structured and selected.
 
 **Start at the supported Tenferro/Strided boundary.** Add a trait, builder
 knob, or retained execution state only when a concrete supported requirement
-cannot be expressed through that boundary. TeNeT owns categorical semantics
+cannot be expressed through that boundary. symtn owns categorical semantics
 and layout decisions; Tenferro owns dense-provider resources and Strided owns
 applicable strided movement. Do not pre-abstract every plausible seam.
 
@@ -24,7 +24,7 @@ applicable strided movement. Do not pre-abstract every plausible seam.
 Existing execution seams include:
 
 - `DenseExecutor` — the dense linear algebra (per-coupled-sector GEMM, SVD, eig,
-  QR, inv, exp). `tenet-matrixalgebra` is already generic over it
+  QR, inv, exp). `symtn-matrixalgebra` is already generic over it
   (`fn eigh_full_dyn<E>(dense: &mut E, …)`).
 - `TreeTransformBackend` — tree transforms / transposes (permute, braid, twist).
 - `TensorContractBackend` / `HostTensorContractBackend` — contraction (the
@@ -85,9 +85,9 @@ State today:
    capability gates are distinct from separately recorded performance evidence;
    wall-clock timing is not a CI pass/fail gate.
 
-6. **Routing in `tenet`, dense kernels in `tenferro` + adapters.** 2D
-   normalization and direct/SVD-invariant routing decisions live in `tenet`;
-   dense kernels remain behind Tenferro adapters. `tenet` routes; it does not
+6. **Routing in `symtn`, dense kernels in `tenferro` + adapters.** 2D
+   normalization and direct/SVD-invariant routing decisions live in `symtn`;
+   dense kernels remain behind Tenferro adapters. `symtn` routes; it does not
    embed kernels.
 
 ## Parallel execution (current state)
@@ -105,7 +105,7 @@ falls back to the runtime state lock for factorization. That context's Rayon
 pool is the runtime's one CPU pool: a Host eager operation enters it through
 its execution lease (or directly, for strided-only operations), and its
 tree-transform replay, plan compile and strided-kernel regions are installed
-there (`tenet_operations::host_pool`), with `recoupling_threads` as a degree
+there (`symtn_operations::host_pool`), with `recoupling_threads` as a degree
 cap inside it. Building a runtime has no process-global side effect, and
 the runtime reads no environment variable (an application that wants
 `RAYON_NUM_THREADS`-style control reads it and passes
@@ -146,8 +146,8 @@ field. Every CubeCL command and every Tenferro vendor call (cuBLAS, cuSOLVER,
 cuTENSOR use the same stream slot) of every thread then runs on one CUDA
 stream per device, in enqueue order, which follows happens-before between
 threads; the unpublished cursor is never needed for ordering. This also
-covers CubeCL or Tenferro users of the device outside TeNeT in the same
-process, provided TeNeT opens its device first. If something else loaded
+covers CubeCL or Tenferro users of the device outside symtn in the same
+process, provided symtn opens its device first. If something else loaded
 CubeCL's configuration first with more than one stream, opening a device
 fails with `DenseError::Unsupported` rather than running unordered.
 
@@ -158,7 +158,7 @@ call `flush_cubecl`, while cuTENSOR and cuBLAS rely on the blocking
 blocking call for a buffer created on the calling thread whose address it
 has cached, so a CubeCL kernel still queued unflushed into such a buffer can
 reach the stream after a later vendor call on it (tensor4all/tenferro-rs#1868;
-independent of the stream count, and possible within one thread). In TeNeT
+independent of the stream count, and possible within one thread). In symtn
 only the empty-contraction scale or fill of an owned destination queues such
 a kernel.
 
@@ -217,7 +217,7 @@ revision, configuration, and raw measurement evidence.
 
 - Start with an existing Tenferro/Strided boundary; add a trait or selection
   knob only for a concrete supported requirement it cannot express.
-- Keep a dense kernel `tenferro`-side and expose it to `tenet` through an
+- Keep a dense kernel `tenferro`-side and expose it to `symtn` through an
   adapter when a new backend is warranted.
 - Prove supported mathematical semantics with dtype-appropriate tolerances and
   test unsupported provider capabilities explicitly.

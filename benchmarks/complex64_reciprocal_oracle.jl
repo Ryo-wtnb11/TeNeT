@@ -1,15 +1,15 @@
-# Julia reference oracle for `Base.inv(::ComplexF64)`, TeNeT's TensorKit/Julia
+# Julia reference oracle for `Base.inv(::ComplexF64)`, symtn's TensorKit/Julia
 # semantics reference for the compact `inv`/`pinv` reciprocal of a diagonal
 # `Complex64` entry (issue #1463).
 #
-# `tenet/src/typed.rs`'s `julia_complex64_reciprocal` is a literal,
+# `symtn/src/typed.rs`'s `julia_complex64_reciprocal` is a literal,
 # line-cited port of `Base.inv(w::ComplexF64)` (`base/complex.jl:479`) and
 # its `robust_cinv` kernel (`base/complex.jl:508`) — the Baudin-Smith
 # fallback used once the fast path's safe-square range
 # (`sqrt(floatmin/2) <= max(|re|,|im|) <= sqrt(floatmax/2)`) does not apply.
 # Because the Rust port matches Julia's operation order and constants
 # exactly (`muladd` -> `mul_add`, `copysign`/`flipsign` -> `f64::copysign`),
-# `tenet/tests/scaled_complex64_reciprocal.rs` checks it against this
+# `symtn/tests/scaled_complex64_reciprocal.rs` checks it against this
 # script's output *bitwise*, not within a tolerance.
 #
 # The Float32 path (`inv(z::Complex{Float32})`, `base/complex.jl:473`,
@@ -18,13 +18,13 @@
 # multiply-based branch, so it never needs the ComplexF64 fast-path/
 # robust_cinv split the main case list above probes, but is still checked
 # bitwise here rather than only against the decimal-tolerance oracle in
-# `tenet/tests/single_precision_advanced_linalg.rs`.
+# `symtn/tests/single_precision_advanced_linalg.rs`.
 #
 # Run (Julia 1.11.6, Base only, no packages):
 #   julia benchmarks/complex64_reciprocal_oracle.jl > benchmarks/complex64_reciprocal_oracle.out
 #
 # The committed .out fixture and its SHA-256 manifest live next to this
-# script; `tenet/tests/scaled_complex64_reciprocal.rs` embeds the same
+# script; `symtn/tests/scaled_complex64_reciprocal.rs` embeds the same
 # (label, input bits, output bits) rows as Rust constants rather than
 # reading the fixture file at test time, so re-running this script after an
 # intentional change to the case list means re-embedding its output too.
@@ -36,7 +36,7 @@ hex16(u::UInt64) = string(u; base=16, pad=16)
 # (label, re bits, im bits) — the same 2^{+-}600, 2^{+-}511/512 (the naive
 # algorithm's old squaring-overflow boundary), 2^{+-}1022 (largest/smallest
 # normal), true-subnormal, purely-real/imaginary, and random-sweep cases
-# `tenet/tests/scaled_complex64_reciprocal.rs` uses, plus infinite-component
+# `symtn/tests/scaled_complex64_reciprocal.rs` uses, plus infinite-component
 # cases the coordinator asked to add (Julia's `inv` returns signed zeros for
 # those, not NaN).
 const CASES = [
@@ -188,7 +188,7 @@ end
 
 # ---------------------------------------------------------------------------
 # ComplexF32: `inv(z::Complex{Float32})` (`base/complex.jl:473`), ported as
-# `julia_complex32_reciprocal_wide` (`tenet/src/typed.rs`). This path widens
+# `julia_complex32_reciprocal_wide` (`symtn/src/typed.rs`). This path widens
 # to `ComplexF64` before dividing, so — unlike the `ComplexF64` path above —
 # it never reaches the scaled/`robust_cinv` fallback for any finite `f32`
 # input; these cases exist to pin the widen/narrow port itself (including

@@ -1,0 +1,45 @@
+[package]
+name = "symtn"
+version = "0.1.1"
+description = "Symmetric tensors and tensor-network operations"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu-faer"]
+cpu-faer = ["symtn-tensors/cpu-faer", "symtn-matrixalgebra/cpu-faer"]
+cpu-blas = ["symtn-tensors/cpu-blas", "symtn-matrixalgebra/cpu-blas"]
+blas-accelerate = ["symtn-tensors/blas-accelerate", "symtn-matrixalgebra/blas-accelerate"]
+blas-openblas = ["symtn-tensors/blas-openblas", "symtn-matrixalgebra/blas-openblas"]
+blas-mkl = ["symtn-tensors/blas-mkl", "symtn-matrixalgebra/blas-mkl"]
+provider-inject = ["symtn-tensors/provider-inject"]
+cuda = ["symtn-dense/cuda", "symtn-tensors/cuda"]
+racah-generated = ["symtn-core/racah-generated", "symtn-tensors/racah-generated"]
+
+[dependencies]
+num-complex = "0.4"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+symtn-core = { version = "0.1.1", path = "../symtn-core" }
+symtn-dense = { version = "0.1.1", path = "../symtn-dense", default-features = false }
+symtn-matrixalgebra = { version = "0.1.1", path = "../symtn-matrixalgebra", default-features = false }
+symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-features = false }
+symtn-tensors = { version = "0.1.1", path = "../symtn-tensors", default-features = false }
+
+[dev-dependencies]
+rayon = "1.10"
+# Reference-oracle replay driver (#1767).
+symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-features = false, features = ["testing"] }
+# The CUDA member workspace's failure seam (#1859).
+symtn-tensors = { version = "0.1.1", path = "../symtn-tensors", default-features = false, features = ["testing"] }
+
+[lints.clippy]
+# Edition 2024 (merged doctests) makes clippy suggest let-chains for nested
+# `if let`. Why-not apply them: the workspace's 2021 rustfmt style cannot
+# format let-chains, and the 2024 style would reformat the whole crate.
+collapsible_if = "allow"

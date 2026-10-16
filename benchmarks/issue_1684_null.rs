@@ -1,4 +1,4 @@
-//! Copy into tenet/examples/issue_1684_null.rs and build with --release.
+//! Copy into symtn/examples/issue_1684_null.rs and build with --release.
 //! Every measured call includes public factor publication and output drop.
 use num_complex::Complex64;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -6,8 +6,8 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Instant;
-use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{GradedSpace, LinalgBackend, Runtime, SectorSpectrum, TensorMap};
+use symtn::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use symtn::typed::{GradedSpace, LinalgBackend, Runtime, SectorSpectrum, TensorMap};
 
 struct Allocator;
 static COUNT: AtomicBool = AtomicBool::new(false);

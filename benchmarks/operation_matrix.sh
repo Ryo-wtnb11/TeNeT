@@ -22,12 +22,12 @@ sha256_file() {
     fi
 }
 
-tenet_sha="$(git rev-parse HEAD)"
-tenet_dirty=false
+symtn_sha="$(git rev-parse HEAD)"
+symtn_dirty=false
 if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
-    tenet_dirty=true
+    symtn_dirty=true
 fi
-export TENET_AUTHORITY="$tenet_sha dirty=$tenet_dirty"
+export SYMTN_AUTHORITY="$symtn_sha dirty=$symtn_dirty"
 
 sample_dir="$(mktemp -d)"
 metadata_file="$(mktemp)"
@@ -48,9 +48,9 @@ if [[ ! -f Cargo.lock ]]; then
 fi
 lock_sha256="$(sha256_file Cargo.lock)"
 cargo metadata --locked --offline --format-version 1 \
-    --manifest-path tenet/Cargo.toml --no-default-features \
+    --manifest-path symtn/Cargo.toml --no-default-features \
     --features "$OP_MATRIX_CARGO_FEATURES" >"$metadata_file"
-cargo build --locked --offline --release -p tenet-rs --example operation_matrix \
+cargo build --locked --offline --release -p symtn --example operation_matrix \
     --no-default-features --features "$OP_MATRIX_CARGO_FEATURES" \
     --message-format=json-render-diagnostics >"$build_file"
 resolved_authorities="$(python3 - "$metadata_file" "$build_file" <<'PY'
@@ -70,7 +70,7 @@ for line in open(sys.argv[2]):
     if package["name"].startswith("tenferro-") or package["name"] == "racah":
         built.setdefault(package_id, set()).add(tuple(sorted(record["features"])))
 if not built:
-    raise SystemExit("Cargo build reported no Tenferro or Racah compiler artifacts for tenet-rs")
+    raise SystemExit("Cargo build reported no Tenferro or Racah compiler artifacts for symtn")
 tenferro_records = []
 racah_records = []
 for package_id, feature_sets in sorted(
@@ -94,9 +94,9 @@ for package_id, feature_sets in sorted(
         )
         (racah_records if package["name"] == "racah" else tenferro_records).append(record)
 if not tenferro_records:
-    raise SystemExit("Cargo build reported no Tenferro compiler artifacts for tenet-rs")
+    raise SystemExit("Cargo build reported no Tenferro compiler artifacts for symtn")
 if not racah_records:
-    raise SystemExit("Cargo build reported no Racah compiler artifact for tenet-rs")
+    raise SystemExit("Cargo build reported no Racah compiler artifact for symtn")
 print("tenferro=" + "; ".join(tenferro_records))
 print("racah=" + "; ".join(racah_records))
 PY
@@ -116,14 +116,14 @@ fi
 printf '# host_os=%s host_release=%s host_arch=%s cpu=%s\n' \
     "$(uname -s)" "$(uname -r)" "$(uname -m)" "$cpu_name"
 printf '# rustc=%s cargo=%s\n' "$(rustc --version)" "$(cargo --version)"
-printf '# tenet_sha=%s dirty=%s lock=Cargo.lock lock_sha256=%s\n' \
-    "$tenet_sha" "$tenet_dirty" "$lock_sha256"
-printf '# cargo_package=tenet-rs cargo_features=%s gemm_backend=%s locked=true offline=true\n' \
+printf '# symtn_sha=%s dirty=%s lock=Cargo.lock lock_sha256=%s\n' \
+    "$symtn_sha" "$symtn_dirty" "$lock_sha256"
+printf '# cargo_package=symtn cargo_features=%s gemm_backend=%s locked=true offline=true\n' \
     "$OP_MATRIX_CARGO_FEATURES" "$OP_MATRIX_GEMM_BACKEND"
 printf '# racah_authority=%s\n' "$RACAH_AUTHORITY"
 
 for sample in 0 1 2; do
-    cargo run --locked --offline --release -p tenet-rs --example operation_matrix --quiet \
+    cargo run --locked --offline --release -p symtn --example operation_matrix --quiet \
         --no-default-features --features "$OP_MATRIX_CARGO_FEATURES" >"$sample_dir/$sample"
 done
 if [[ "$(sha256_file Cargo.lock)" != "$lock_sha256" ]]; then

@@ -1,0 +1,99 @@
+use crate::storage_scratch::SamePlacementScratchAllocator;
+use symtn_core::{HostReadableStorage, HostWritableStorage, Placement, TensorStorage};
+
+/// Host-owned scratch buffer used by current raw host-slice replay paths.
+///
+/// This keeps direct `Vec<T>` ownership out of categorical replay workspaces.
+#[derive(Clone, Debug)]
+pub struct HostScratchBuffer<T> {
+    data: Vec<T>,
+}
+
+impl<T> Default for HostScratchBuffer<T> {
+    fn default() -> Self {
+        Self { data: Vec::new() }
+    }
+}
+
+impl<T> HostScratchBuffer<T> {
+    #[inline]
+    pub fn filled(len: usize, value: T) -> Self
+    where
+        T: Clone,
+    {
+        let reference = Vec::<T>::new();
+        let allocator = SamePlacementScratchAllocator;
+        Self {
+            data: allocator.filled_like(&reference, len, value),
+        }
+    }
+
+    #[inline]
+    pub fn resize_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.data.resize(len, value);
+    }
+
+    #[inline]
+    pub fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        self.data.fill(value);
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Allocated element capacity retained by this buffer.
+    #[doc(hidden)]
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+impl<T> TensorStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}

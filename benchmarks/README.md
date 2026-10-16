@@ -3,6 +3,9 @@
 Benchmark harnesses are executable measurement tools. Recorded reports are
 revision-specific evidence, not current performance claims.
 
+Records in `history/`, `issue_*_results/`, and the dated `issue_*.md` files
+before #2273 use `tenet-<x>` / `TENET_*`; they are now `symtn-<x>` / `SYMTN_*`.
+
 ## Current harnesses
 
 - `operation_matrix.sh` and `operation_matrix.md`: Host operation matrix,
@@ -10,7 +13,7 @@ revision-specific evidence, not current performance claims.
 - `tensorkit_semantic_oracle.jl` and `tensorkit_tsvd_crosscheck.jl`: semantic
   and factorization oracle programs with pinned Julia environments.
 - `qspace_su2_oracle.m`: recorded SU(2) oracle source and output.
-- `eager_overhead_ledger.sh` (`tenet/examples/eager_overhead_ledger.rs`,
+- `eager_overhead_ledger.sh` (`symtn/examples/eager_overhead_ledger.rs`,
   `tensorkit_eager_overhead.jl`, `eager_overhead_phases.py`): per-call time,
   allocations, thread layouts, and sampled phase attribution of the eager
   primitives on small many-block tensors against TensorKit.

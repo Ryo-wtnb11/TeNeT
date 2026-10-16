@@ -27,21 +27,21 @@ runs:
       uses: actions/cache@v4
       with:
         path: |
-          tenet/target/*/.fingerprint
-          tenet/target/*/build
-          tenet/target/llvm-cov-target/*/.fingerprint
-          tenet/target/llvm-cov-target/*/build
-        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml') }}
+          symtn/target/*/.fingerprint
+          symtn/target/*/build
+          symtn/target/llvm-cov-target/*/.fingerprint
+          symtn/target/llvm-cov-target/*/build
+        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('symtn/**/Cargo.toml') }}
         restore-keys: |
           cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-
     - if: github.ref != 'refs/heads/main'
       uses: actions/cache/restore@v4
       with:
         path: |
-          tenet/target/*/.fingerprint
-          tenet/target/*/build
-          tenet/target/llvm-cov-target/*/.fingerprint
-          tenet/target/llvm-cov-target/*/build
-        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml') }}
+          symtn/target/*/.fingerprint
+          symtn/target/*/build
+          symtn/target/llvm-cov-target/*/.fingerprint
+          symtn/target/llvm-cov-target/*/build
+        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('symtn/**/Cargo.toml') }}
         restore-keys: |
           cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-

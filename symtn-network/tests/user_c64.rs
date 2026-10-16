@@ -1,0 +1,198 @@
+//! Complex user-level contracts not already owned by the typed operation and
+//! decomposition suites.
+
+use std::sync::Arc;
+use symtn::typed::ContractSpec;
+
+use symtn::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use symtn::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use symtn::typed::FusionAlgebraError;
+use symtn::typed::{Complex64, Runtime};
+use symtn::typed::{GradedSpace, TensorMap};
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
+
+fn i() -> Complex64 {
+    Complex64::new(0.0, 1.0)
+}
+
+fn one() -> Complex64 {
+    Complex64::new(1.0, 0.0)
+}
+
+fn complexify<R>(re: &TensorMap<R, f64>, im: &TensorMap<R, f64>) -> TensorMap<R, Complex64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    re.convert::<Complex64>()
+        .axpby(one(), &im.convert::<Complex64>(), i())
+        .unwrap()
+}
+
+fn assert_close(actual: &[Complex64], expected: &[Complex64], tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).norm() <= tolerance,
+            "element {index}: {actual} vs {expected}"
+        );
+    }
+}
+
+fn assert_complex_contract_identity<R>(runtime: &Runtime, space: &GradedSpace<R>)
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    let a =
+        TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 11).unwrap();
+    let b =
+        TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 12).unwrap();
+    let c =
+        TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 13).unwrap();
+    let d =
+        TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 14).unwrap();
+
+    let x = complexify(&a, &b);
+    let y = complexify(&c, &d);
+    let real = a
+        .compose(&c)
+        .unwrap()
+        .axpby(1.0, &b.compose(&d).unwrap(), -1.0)
+        .unwrap();
+    let imaginary = a
+        .compose(&d)
+        .unwrap()
+        .axpby(1.0, &b.compose(&c).unwrap(), 1.0)
+        .unwrap();
+    let expected = complexify(&real, &imaginary);
+
+    assert_close(
+        x.compose(&y).unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1.0e-12,
+    );
+    assert_close(
+        x.contract(
+            &y,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
+        expected.dense_data().unwrap(),
+        1.0e-12,
+    );
+}
+
+/// `(A + iB)(C + iD) = (AC - BD) + i(AD + BC)` through both typed
+/// composition and arbitrary-axis contraction.
+#[test]
+fn c64_contract_matches_real_imag_decomposition() {
+    let runtime = Runtime::builder().build().unwrap();
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 1),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 1),
+        ],
+    )
+    .unwrap();
+    assert_complex_contract_identity(&runtime, &u1);
+
+    let su2 = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    assert_complex_contract_identity(&runtime, &su2);
+}
+
+fn assert_typed_network_conj<R>(runtime: &Runtime, p: &GradedSpace<R>)
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send,
+{
+    let l = p.clone();
+    let r = p.try_dual().unwrap();
+    let psi = TensorMap::<R, Complex64>::rand_with_seed(runtime, [p], [&l, &r], 71).unwrap();
+    let h0 = TensorMap::<R, Complex64>::rand_with_seed(runtime, [p], [p], 72).unwrap();
+    let h = h0
+        .axpby(one() * 0.5, &h0.adjoint().unwrap(), one() * 0.5)
+        .unwrap();
+
+    let expectation = net(
+        &[
+            conj(op(&["p"], &["l", "r"])),
+            op(&["p"], &["q"]),
+            op(&["q"], &["l", "r"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &h, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
+    let norm = net(
+        &[conj(op(&["p"], &["l", "r"])), op(&["p"], &["l", "r"])],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
+    assert!(norm.re > 0.0);
+    assert!(norm.im.abs() <= 1.0e-12 * (1.0 + norm.re));
+    assert!(expectation.im.abs() <= 1.0e-10 * (1.0 + expectation.norm()));
+
+    let via_inner = psi.inner(&h.compose(&psi).unwrap()).unwrap();
+    assert!((via_inner - expectation).norm() <= 1.0e-10 * (1.0 + expectation.norm()));
+}
+
+/// The network layer lowers `conj` to typed adjoint, including complex
+/// conjugation: a Hermitian expectation value is real.
+#[test]
+fn network_conj_expectation_value_is_real() {
+    let runtime = Runtime::builder().build().unwrap();
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 1),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 1),
+        ],
+    )
+    .unwrap();
+    assert_typed_network_conj(&runtime, &u1);
+
+    let su2 = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    assert_typed_network_conj(&runtime, &su2);
+}

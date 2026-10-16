@@ -1,4 +1,4 @@
-//! Copy into tenet/examples/issue_1682_svd_full.rs, then run with --release.
+//! Copy into symtn/examples/issue_1682_svd_full.rs, then run with --release.
 //! Input setup is separate; factor publication and drop are inside every call.
 use num_complex::{Complex32, Complex64};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -6,11 +6,11 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Instant;
-use tenet::sector::{
+use symtn::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{GradedSpace, LinalgBackend, Runtime, SectorSpectrum, TensorMap};
+use symtn::typed::{GradedSpace, LinalgBackend, Runtime, SectorSpectrum, TensorMap};
 
 struct Allocator;
 static COUNT: AtomicBool = AtomicBool::new(false);

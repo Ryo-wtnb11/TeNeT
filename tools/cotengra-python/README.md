@@ -1,6 +1,6 @@
-# TeNeT cotengra Python environment
+# symtn cotengra Python environment
 
-This uv project is the reproducible Python environment for TeNeT's optional
+This uv project is the reproducible Python environment for symtn's optional
 `cotengra-python` planner backend.
 
 Create or update the environment:
@@ -24,10 +24,10 @@ uv run --project tools/cotengra-python python -c \
 Use it from Rust:
 
 ```rust
-use tenet_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use symtn_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python"),
+    CotengraPythonConfig::with_uv_project("/path/to/symtn-rs/tools/cotengra-python"),
 );
 configure_plan_cache(&runtime, PlanCacheConfig { optimizer, ..Default::default() });
 ```
@@ -36,8 +36,8 @@ The opt-in integration test takes the project path from its own environment
 (the library itself reads none):
 
 ```sh
-TENET_COTENGRA_UV_PROJECT=$PWD/tools/cotengra-python TENET_RUN_COTENGRA_PYTHON_TEST=1 \
-  cargo test -p tenet-network --features cotengra-python -- --ignored
+SYMTN_COTENGRA_UV_PROJECT=$PWD/tools/cotengra-python SYMTN_RUN_COTENGRA_PYTHON_TEST=1 \
+  cargo test -p symtn-network --features cotengra-python -- --ignored
 ```
 
 The project path is passed to `uv` unchanged and resolved against the process

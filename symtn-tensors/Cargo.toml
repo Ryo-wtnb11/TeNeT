@@ -1,0 +1,53 @@
+[package]
+name = "symtn-tensors"
+version = "0.1.1"
+description = "Symmetric-tensor operations for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn_tensors"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu-faer"]
+cpu-faer = ["symtn-operations/cpu-faer"]
+cpu-blas = ["symtn-operations/cpu-blas"]
+blas-accelerate = ["symtn-operations/blas-accelerate"]
+blas-openblas = ["symtn-operations/blas-openblas"]
+blas-mkl = ["symtn-operations/blas-mkl"]
+provider-inject = ["symtn-operations/provider-inject"]
+cuda = ["symtn-dense/cuda", "symtn-operations/cuda"]
+racah-generated = ["symtn-core/racah-generated"]
+# Unstable, internal: the infallible Generic entries (`*_generic` facade,
+# context and plan builders), test oracles only, since production Generic is
+# checked only (#1854); and the CUDA member workspace's failure seam
+# (`fail_next_before_output`). Only in-workspace tests may enable it.
+testing = ["symtn-core/testing"]
+
+[dependencies]
+symtn-core = { version = "0.1.1", path = "../symtn-core" }
+symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-features = false }
+symtn-dense = { version = "0.1.1", path = "../symtn-dense", default-features = false }
+strided-kernel.workspace = true
+# Fast non-cryptographic hasher for internal plan/structure/recoupling caches
+# keyed on fusion-tree structure (no untrusted input); std SipHash is slow here.
+rustc-hash = "2"
+# Parallel tree-transform plan compile runs inside the runtime's CPU pool
+# (`symtn_operations::host_pool`); rayon is already in every build through
+# strided-kernel's "parallel" feature, so this adds no dependency weight.
+rayon = "1.10"
+num-traits = "0.2"
+num-complex = "0.4"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+
+[dev-dependencies]
+# Reference-oracle replay driver for dtype cases the GEMM path does not admit (#1767).
+symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-features = false, features = ["testing"] }
+# Plan tests compare against symtn-core's one-shot tree-pair oracles (#1805).
+symtn-core = { version = "0.1.1", path = "../symtn-core", features = ["testing"] }
+symtn-sectors = { version = "0.1.1", path = "../symtn-sectors" }
+# Tests reset racah's process-global caches as an application would.
+racah = { version = "0.2.4" }

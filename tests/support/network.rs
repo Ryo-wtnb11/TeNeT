@@ -1,5 +1,5 @@
 //! Labeled networks for tests and examples, written with the explicit
-//! `tenet_network::Network` API (#2022).
+//! `symtn_network::Network` API (#2022).
 //!
 //! Include with `#[path = ".../tests/support/network.rs"] mod network;`.
 //! An operand is its codomain and domain labels, as `t[i, j; k]` writes them:
@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use tenet_network::Network;
+use symtn_network::Network;
 
 /// One operand's written labels, codomain then domain.
 #[derive(Clone, Copy)]

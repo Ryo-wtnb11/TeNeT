@@ -28,7 +28,7 @@ The migration can change:
 - the tensor produced by `TensorMap::rand_with_seed` for the same seed.
 
 `rand_with_seed` fills internal storage order. It is reproducible within a
-fixed TeNeT version and layout, not a cross-version semantic fixture. Use
+fixed symtn version and layout, not a cross-version semantic fixture. Use
 `TensorMap::from_subblock_fn` and inspect provider-labelled fusion trees plus local indices when an input
 must remain identical across codec or layout changes.
 
@@ -38,7 +38,7 @@ apply their own ordering rather than relying on the returned `Vec` order.
 
 ## Sector order where TensorKit's order is observable
 
-TeNeT sorts by `SectorId` for storage, but a result that depends on sector
+symtn sorts by `SectorId` for storage, but a result that depends on sector
 order must use TensorKit's. Today one result does: which sector a truncation
 keeps at an exact cross-sector tie. TensorKit 0.17.1
 `findtruncated(::SectorVector, ...)` (`src/factorizations/truncation.jl`)
@@ -70,15 +70,15 @@ TensorKit order must override the hook.
 
 ## Cache migration
 
-Codec types participate in fusion-rule identity, so in-process TeNeT caches do
+Codec types participate in fusion-rule identity, so in-process symtn caches do
 not reuse Cantor plans as packed plans. Complete tree-transform plans and
 structures are execution-context-local; source-column recoupling rows are
-compile-local and are not retained across plan misses. TeNeT no longer reads or writes the former
+compile-local and are not retained across plan misses. symtn no longer reads or writes the former
 `tree_transform_plans_v1.bin` and `tree_transform_plans_v2.bin` files. Existing
 files are ignored and may be deleted manually. Raw-ID-keyed application caches
 must likewise be rebuilt from semantic labels.
 
-This does not change `tenet-network::{save_plan_cache, load_plan_cache}`.
+This does not change `symtn-network::{save_plan_cache, load_plan_cache}`.
 Network contraction-order persistence remains an explicit application opt-in
 and stores topology-derived optimizer output, not lowered tree-transform
 execution plans.
@@ -109,5 +109,5 @@ The representable U(1) charge range is `i32::MIN + 1 ..= i32::MAX`.
 `U1Irrep::try_new(i32::MIN)` returns `None`, and `U1Irrep::new(i32::MIN)`
 panics because that charge has no representable dual. Addition outside that
 range, including a valid sum equal to `i32::MIN`, returns
-`FusionAlgebraError::U1FusionOverflow`. TeNeT does not wrap, saturate, or
+`FusionAlgebraError::U1FusionOverflow`. symtn does not wrap, saturate, or
 reinterpret these charges.

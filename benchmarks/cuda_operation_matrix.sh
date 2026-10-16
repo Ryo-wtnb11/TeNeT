@@ -38,16 +38,16 @@ lock_sha256="$(sha256_file Cargo.lock)"
 
 # A measurement host usually runs from a source copy without the git metadata,
 # so the pinned revision may be supplied explicitly instead.
-if tenet_sha="$(git rev-parse HEAD 2>/dev/null)"; then
-    tenet_dirty=false
+if symtn_sha="$(git rev-parse HEAD 2>/dev/null)"; then
+    symtn_dirty=false
     if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
-        tenet_dirty=true
+        symtn_dirty=true
     fi
 else
-    tenet_sha="${TENET_SHA:-unknown}"
-    tenet_dirty="${TENET_DIRTY:-unknown}"
+    symtn_sha="${SYMTN_SHA:-unknown}"
+    symtn_dirty="${SYMTN_DIRTY:-unknown}"
 fi
-export TENET_AUTHORITY="$tenet_sha dirty=$tenet_dirty"
+export SYMTN_AUTHORITY="$symtn_sha dirty=$symtn_dirty"
 
 # Resolved device-stack versions, read from the pinned lock rather than from
 # whatever happens to be newest on crates.io.
@@ -99,9 +99,9 @@ else
     printf '# nvcc=unavailable\n'
 fi
 printf '# rustc=%s cargo=%s\n' "$(rustc --version)" "$(cargo --version)"
-printf '# tenet_sha=%s dirty=%s lock=Cargo.lock lock_sha256=%s\n' \
-    "$tenet_sha" "$tenet_dirty" "$lock_sha256"
-printf '# cargo_package=tenet-network cargo_features=%s profile=release locked=true offline=true\n' \
+printf '# symtn_sha=%s dirty=%s lock=Cargo.lock lock_sha256=%s\n' \
+    "$symtn_sha" "$symtn_dirty" "$lock_sha256"
+printf '# cargo_package=symtn-network cargo_features=%s profile=release locked=true offline=true\n' \
     "$CUDA_OP_MATRIX_CARGO_FEATURES"
 printf '# cuda_paths TENFERRO_CUTENSOR_PATH=%s CUDA_PATH=%s CUDA_VISIBLE_DEVICES=%s\n' \
     "${TENFERRO_CUTENSOR_PATH:-unset}" "${CUDA_PATH:-unset}" "${CUDA_VISIBLE_DEVICES:-unset}"
@@ -117,10 +117,10 @@ printf '# cutensor_resolved=%s cutensor_version=%s\n' \
 printf '# threads=RAYON_NUM_THREADS:%s OPENBLAS_NUM_THREADS:%s OMP_NUM_THREADS:%s MKL_NUM_THREADS:%s\n' \
     "$RAYON_NUM_THREADS" "$OPENBLAS_NUM_THREADS" "$OMP_NUM_THREADS" "$MKL_NUM_THREADS"
 
-cargo build --locked --offline --release -p tenet-network --example cuda_operation_matrix \
+cargo build --locked --offline --release -p symtn-network --example cuda_operation_matrix \
     --no-default-features --features "$CUDA_OP_MATRIX_CARGO_FEATURES" >&2
 
-cargo run --locked --offline --release -p tenet-network --example cuda_operation_matrix --quiet \
+cargo run --locked --offline --release -p symtn-network --example cuda_operation_matrix --quiet \
     --no-default-features --features "$CUDA_OP_MATRIX_CARGO_FEATURES" -- "$@"
 
 if [[ "$(sha256_file Cargo.lock)" != "$lock_sha256" ]]; then

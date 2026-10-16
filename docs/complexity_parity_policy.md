@@ -1,6 +1,6 @@
 # Structured-complexity policy
 
-TeNeT's public storage forms and operations carry complexity contracts. An
+symtn's public storage forms and operations carry complexity contracts. An
 implementation must preserve the appropriate asymptotic FLOP count and
 working-set storage for the structure it accepts. Producing the right values by
 unnecessarily densifying a compact operand or materializing an avoidable
@@ -12,7 +12,7 @@ contract.
 
 ## The rule
 
-> For every operation and supported storage form, TeNeT must preserve the
+> For every operation and supported storage form, symtn must preserve the
 > asymptotic advantage of the structure it accepts. An implementation that
 > discards known structure and thereby adds a factor in a size parameter is a
 > bug to be fixed, not merely a different implementation.
@@ -22,9 +22,9 @@ order is not an implementation detail.
 
 ## Why this needs stating
 
-TeNeT deliberately exposes one provider-typed `TensorMap` while retaining
+symtn deliberately exposes one provider-typed `TensorMap` while retaining
 compact diagonal and lazy-adjoint storage internally. Generic dense lowering
-cannot infer every structured fast path. TeNeT therefore places a small number
+cannot infer every structured fast path. symtn therefore places a small number
 of explicit routes at the layer where the structure is still visible, with a
 numerically correct fallback for other geometry. A fallback whose structured
 complexity is not yet preserved must be classified as a gap; numerical support
@@ -35,7 +35,7 @@ alone is not a claim of complexity compliance.
 Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 `n` = the other operand's open-leg size.
 
-| Path | Required order | TeNeT status |
+| Path | Required order | symtn status |
 |------|----------------|--------------|
 | `compose` / `U*S*Vh` | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit block scaling (#72) |
 | single-axis composition-equivalent `contract` / network contraction with a diagonal | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit provider-typed block scaling (#584) and typed network execution (#750) |
@@ -54,14 +54,14 @@ composition on the contracted leg, in either order. Other accepted geometries
 decline to the dense route and are not classified as complexity-compliant by
 this document. Reach for `compose` when the shape allows it; the two proved
 routes are pinned to the same values and destination space in
-`tenet/tests/typed_facade.rs`.
+`symtn/tests/typed_facade.rs`.
 
 ## Checklist for an operation
 
 1. What FLOP and working-set orders follow from each supported storage form and
    operation geometry? Cite an external implementation only when it supplies
    relevant evidence.
-2. Does TeNeT match both orders? If a fallback densifies a structured operand
+2. Does symtn match both orders? If a fallback densifies a structured operand
    or materializes an avoidable intermediate, that is a violation.
 3. For a new geometry, add one explicit fast path at the paying layer, not
    scattered runtime branches or a combinatorial type zoo. If the correct order

@@ -1,4 +1,4 @@
-# Current TensorKit control for TeNeT's typed operation matrix.
+# Current TensorKit control for symtn's typed operation matrix.
 # Usage:
 #   julia --project=benchmarks/tensorkit_benchmark \
 #       benchmarks/tensorkit_microbench.jl [degeneracy] [min_ms]

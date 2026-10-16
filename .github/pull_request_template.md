@@ -1,6 +1,6 @@
 ## Why
 
-## TeNeT contract / behavior
+## symtn contract / behavior
 
 ## Evidence
 

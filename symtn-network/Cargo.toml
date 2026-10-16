@@ -1,0 +1,42 @@
+[package]
+name = "symtn-network"
+version = "0.1.1"
+description = "Tensor-network contraction planning and execution for symtn"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "symtn_network"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu-faer"]
+cpu-faer = ["symtn/cpu-faer"]
+cpu-blas = ["symtn/cpu-blas"]
+blas-accelerate = ["symtn/blas-accelerate"]
+blas-openblas = ["symtn/blas-openblas"]
+blas-mkl = ["symtn/blas-mkl"]
+provider-inject = ["symtn/provider-inject"]
+racah-generated = ["symtn/racah-generated"]
+cuda = ["symtn/cuda"]
+# Wraps the `opt-einsum-path` crate (Apache-2.0) as a
+# `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
+opt-path = ["dep:opt-einsum-path"]
+# Calls the installed Python `cotengra` package as an external path planner.
+cotengra-python = ["dep:command-group", "dep:libc", "dep:serde_json"]
+
+[dependencies]
+command-group = { version = "5.0.1", optional = true }
+symtn = { package = "symtn", version = "0.1.1", path = "../symtn", default-features = false }
+opt-einsum-path = { version = "0.2", optional = true }
+symtn-macros = { version = "0.1.1", path = "../symtn-macros" }
+serde_json = { version = "1", optional = true }
+# O(1) LRU (HashMap + intrusive linked list), the Rust analog of the
+# `LRUCache.jl` that TensorKit uses for its global caches. Replaces the
+# linear-scan `VecDeque` LRU whose touch was O(capacity) per plan-cache hit.
+lru = "0.12"
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }

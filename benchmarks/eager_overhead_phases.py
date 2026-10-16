@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 RULES = [
     ("gemm/qr kernel", r"^(faer|gemm_|gemm::|nano_gemm|pulp|dyn_stack)|householder|faer::linalg"),
     ("strided copy kernel", r"apply_fused_pair_slices|strided_kernel::|strided_perm::|copy_scale_strided|kernel_adapter::"),
-    ("backend session entry", r"^_?<?tenferro|tenferro_cpu|tenferro_runtime|tenferro_linalg|tenet_dense::"),
+    ("backend session entry", r"^_?<?tenferro|tenferro_cpu|tenferro_runtime|tenferro_linalg|symtn_dense::"),
     ("workspace lease", r"[Ww]orkspace|lease|Scratch|scratch"),
     ("eager error value drop", r"drop_in_place<[^>]*Error>"),
     ("drop", r"drop_in_place|drop_slow|<.* as core::ops::drop::Drop>::drop"),
@@ -108,7 +108,7 @@ def classify(frames):
     if best is None:
         leaf = body[-1] if body else ""
         phase = "output alloc+zeroing" if ALLOC_LEAF.search(leaf) else "facade+inlined loops"
-        owner = next((f for f in reversed(body) if f.startswith("tenet")), leaf)
+        owner = next((f for f in reversed(body) if f.startswith("symtn")), leaf)
         return phase, owner
     i, phase = best
     owner = body[i]

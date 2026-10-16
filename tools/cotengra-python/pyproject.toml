@@ -1,7 +1,7 @@
 [project]
-name = "tenet-cotengra-python"
+name = "symtn-cotengra-python"
 version = "0.1.0"
-description = "Python environment for TeNeT's optional cotengra planner backend."
+description = "Python environment for symtn's optional cotengra planner backend."
 requires-python = ">=3.10"
 dependencies = [
     "cotengra>=0.7,<0.8",

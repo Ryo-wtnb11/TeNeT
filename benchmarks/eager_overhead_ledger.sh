@@ -12,12 +12,12 @@ busy=$(ps -Ao comm | grep -E '(^|/)(cargo|rustc|julia)$' || true)
 
 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
     cargo build --manifest-path "$root/Cargo.toml" --release --locked --offline \
-    -p tenet-rs --example eager_overhead_ledger
+    -p symtn --example eager_overhead_ledger
 bin=${CARGO_TARGET_DIR:-$root/target}/release/examples/eager_overhead_ledger
 
 # A second one-thread and TensorKit pass measures run-to-run spread.
-for run in one default tenet1 dense1 one-run2; do
-    LEDGER_THREADS=${run%-run2} "$bin" > "$out/tenet-$run.csv"
+for run in one default symtn1 dense1 one-run2; do
+    LEDGER_THREADS=${run%-run2} "$bin" > "$out/symtn-$run.csv"
 done
 for run in tensorkit tensorkit-run2; do
     julia -t 1 --project="$root/benchmarks/tensorkit_benchmark" \
