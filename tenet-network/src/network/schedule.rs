@@ -180,11 +180,11 @@ fn label_positions(
 mod flow_tests {
     use super::*;
     use crate::cost::{DenseCostModel, DenseTensorInfo};
+    use crate::ir::test_ir;
     use crate::optimizer::{
         charge_dense_orientation_costs, ContractionStep, DenseContractionOptimizer,
         GreedyDenseOptimizer,
     };
-    use crate::parse::parse_einsum;
 
     /// The cost the real planner path (`charge_dense_orientation_costs`, run
     /// inside the optimizer) charges per step must equal the orientation work
@@ -193,7 +193,15 @@ mod flow_tests {
     /// final permute when the last result is not already in output order.
     #[test]
     fn planner_charges_match_schedule_orientation() {
-        let ir = parse_einsum("abx,xcy,ydz,zea->bcde").unwrap();
+        let ir = test_ir(
+            &[
+                &["a", "b", "x"],
+                &["x", "c", "y"],
+                &["y", "d", "z"],
+                &["z", "e", "a"],
+            ],
+            &["b", "c", "d", "e"],
+        );
         let infos = [(2, 3, 4), (4, 5, 6), (6, 7, 8), (8, 9, 2)]
             .map(|(p, q, r)| DenseTensorInfo::new(vec![p, q, r]))
             .to_vec();

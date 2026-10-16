@@ -1,6 +1,6 @@
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-use tenet_network::Network;
+use tenet_network::contract;
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
@@ -32,16 +32,11 @@ fn main() -> Result<(), Error> {
             }
         })?;
 
-    // The repeated j is contracted, leaving codomain i and domain k.
-    // Each operand's `;` split (1 and 1) is checked against its tensor.
-    let c = Network::new(
-        [["i", "j"], ["j", "k"]],
-        [false, false],
-        [1, 1],
-        ["i", "k"],
-        Some(1),
-    )?
-    .contract(&[&a, &b])?;
+    // The repeated j is contracted, leaving codomain i and domain k. Each
+    // operand's `;` split is checked against its tensor. `contract!` is
+    // `Network::new([["i", "j"], ["j", "k"]], [false, false], [1, 1],
+    // ["i", "k"], Some(1))?.contract(&[&a, &b])`, built once per call site.
+    let c = contract!([i; k] := a[i; j] * b[j; k])?;
     assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
     // A tensor's inner product with itself is its squared norm.
     let inner = c.inner(&c)?;

@@ -67,7 +67,8 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-For a runnable labeled contraction with `Network::contract`, use
+For a runnable labeled contraction with `contract!` (index notation over
+`Network::contract`), use
 [`tenet-network/examples/quickstart.rs`](tenet-network/examples/quickstart.rs):
 
 ```sh

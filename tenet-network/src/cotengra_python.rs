@@ -1015,12 +1015,12 @@ fn slicing_spec(slicing: &CotengraSlicingConfig) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_einsum;
+    use crate::ir::test_ir;
     use crate::DenseTensorInfo;
 
     #[test]
     fn spec_preserves_labels_and_dims() {
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn spec_encodes_reconfigure_slicing() {
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),
@@ -1097,7 +1097,7 @@ mod tests {
 
     #[test]
     fn unsupported_slice_outputs_are_typed() {
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let cost = DenseCostModel::from_network(
             &ir,
             &[
@@ -1460,7 +1460,7 @@ mod tests {
             return;
         }
 
-        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"]], &["a", "c"]);
         let infos = vec![
             DenseTensorInfo::new(vec![2, 3]),
             DenseTensorInfo::new(vec![3, 4]),

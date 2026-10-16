@@ -103,7 +103,8 @@ same values. [`mathematics`] gives their precise
 definitions.
 
 For a network, `tenet_network::Network` names legs instead of listing axis
-numbers, and `Network::contract` runs it through the Runtime's plan cache. Its
+numbers, and `Network::contract` runs it through the Runtime's plan cache;
+`tenet_network::contract!` writes the same network in index notation. Its
 [compiled quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs)
 shows the construction. The caller still decides the algorithm and may choose or
 reuse a network plan; TeNeT handles the symmetry-aware work inside each

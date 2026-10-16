@@ -22,9 +22,10 @@
 //! [`Network::contract`] runs the same pipeline eagerly through the
 //! Runtime's topology-keyed plan cache.
 //!
-//! There is **no public einsum-string parser**: labels are per-operand
+//! There is **no einsum-string parser**: labels are per-operand
 //! identifier lists given to [`Network::new`] and lower directly to
-//! [`NetworkIR`].
+//! [`NetworkIR`]. [`contract!`] writes the same network in index notation
+//! and checks its label structure at compile time.
 //!
 //! ## Path search and slicing
 //!
@@ -52,8 +53,6 @@ mod ir;
 mod labels;
 mod network;
 mod optimizer;
-#[cfg(test)]
-pub(crate) mod parse;
 #[cfg(feature = "opt-path")]
 mod pathopt;
 mod plan;
@@ -103,6 +102,66 @@ pub use slice::{
     SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
 };
 pub use tree::ContractionTree;
+
+/// Contracts a network written in index notation, like TensorOperations'
+/// `@tensor`: `contract!([i; k] := a[i; j] * b[j; k])?`.
+///
+/// It is [`Network::new`] plus [`Network::contract`], nothing more: each call
+/// site builds its `Network` once (in a `static`), and every call contracts
+/// the operands through the Runtime's plan cache, on Host and CUDA operands
+/// alike. Call [`Network::plan`] to choose the optimizer.
+///
+/// | Written | Meaning |
+/// |---|---|
+/// | `[i; k] := …` | a new tensor, codomain `i`, domain `k` (the output's `;` position) |
+/// | `[i, k] := …`, `[i k] := …` | a new tensor with every leg in the codomain |
+/// | `[] := …` | a rank-0 tensor |
+/// | no left-hand side | every label contracted; returns the scalar `D` ([`tenet::typed::TensorMap::scalar`], Host operands) |
+/// | `a[i, j; k]` | operand `a`, labels in its leg order; the `;` must sit at its codomain rank, checked at run time |
+/// | `a[i, j]` (no `;`) | every leg of `a` in the codomain: `a` must have domain rank 0 |
+/// | `conj(a)[i; j]` | the adjoint of `a`, labels in `a`'s own leg order (the [`Network::new`] `conj` convention) |
+/// | `svd.u[i; s]` | an identifier or a field chain, as written |
+/// | `(expr)[i; s]` | any other operand expression, in parentheses (`?` inside is the caller's) |
+/// | `*` | joins the operands |
+/// | a label twice | contracted; once plus once on the left-hand side: open |
+///
+/// Labels are identifiers, separated by `,` or spaces. Compile errors, each
+/// with a hint: a label repeated within one operand (an intra-operand trace,
+/// use `TensorMap::trace_pairs` first), a label on three legs (a
+/// hyperedge), a sum (`+`, `-`), a scalar factor, `=` and `+=` (a `Network`
+/// has no destination API), and an unpaired or unknown label.
+///
+/// The result is `Result<T, T::Error>` of [`Network::contract`] (or
+/// `Result<D, T::Error>` without a left-hand side): an operand whose tensor
+/// does not match its written labels or `;` split is a run-time error,
+/// decided before the plan lookup.
+///
+/// The expansion names `::tenet_network`, so the calling crate must depend
+/// on `tenet-network` under that name.
+///
+/// ```
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+/// use tenet_network::contract;
+///
+/// # fn main() -> Result<(), Error> {
+/// let runtime = Runtime::builder().build()?;
+/// let v = GradedSpace::try_new(
+///     Arc::new(U1FusionRule),
+///     [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+/// )?;
+/// let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&v], [&v], 1)?;
+/// let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&v], [&v], 2)?;
+/// let c = contract!([i; k] := a[i; j] * b[j; k])?;
+/// assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
+/// let trace: f64 = contract!(a[i; j] * b[j; i])?;
+/// let rank0 = contract!([] := a[i; j] * b[j; i])?;
+/// assert!((trace - rank0.scalar()?).abs() <= 1e-12 * trace.abs().max(1.0));
+/// # Ok(())
+/// # }
+/// ```
+pub use tenet_macros::contract;
 
 /// The workspace tolerance rule for arithmetic test comparisons
 /// (`docs/testing_numerics.md`).

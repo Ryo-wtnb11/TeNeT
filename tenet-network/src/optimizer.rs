@@ -132,7 +132,7 @@ fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<Contr
 /// ```text
 /// use tenet_contract::prelude::*;
 ///
-/// let ir = parse_einsum("ab,bc->ac")?;
+/// let ir = NetworkIR::from_labels(vec![vec!["a".into(), "b".into()], vec!["b".into(), "c".into()]], vec!["a".into(), "c".into()])?;
 /// let infos = vec![
 ///     DenseTensorInfo::new(vec![2, 3]),
 ///     DenseTensorInfo::new(vec![3, 4]),
@@ -176,7 +176,7 @@ impl DenseContractionOptimizer for GreedyDenseOptimizer {
 /// ```text
 /// use tenet_contract::prelude::*;
 ///
-/// let ir = parse_einsum("ab,bc,cd->ad")?;
+/// let ir = NetworkIR::from_labels(vec![vec!["a".into(), "b".into()], vec!["b".into(), "c".into()], vec!["c".into(), "d".into()]], vec!["a".into(), "d".into()])?;
 /// let infos = vec![
 ///     DenseTensorInfo::new(vec![2, 3]),
 ///     DenseTensorInfo::new(vec![3, 4]),

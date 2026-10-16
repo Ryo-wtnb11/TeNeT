@@ -1077,7 +1077,7 @@ fn find_sliced_line(lines: &[&str], needle: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_einsum;
+    use crate::ir::test_ir;
     use crate::plan::dense_steps_from_active_pair_path;
     use crate::{ActivePair, DenseTensorInfo};
 
@@ -1099,7 +1099,7 @@ mod tests {
         // "ab,bc,cd->ad" with the order fixed to create the intermediate "ac"
         // (= a*c). Internal index c lives in "ac", so slicing c shrinks the
         // peak intermediate; outputs a,d are not sliceable.
-        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let ir = test_ir(&[&["a", "b"], &["b", "c"], &["c", "d"]], &["a", "d"]);
         let infos = vec![
             DenseTensorInfo::new(vec![a, b]),
             DenseTensorInfo::new(vec![b, c]),
@@ -1187,7 +1187,16 @@ mod tests {
     /// independent scalar block; it shapes the step order but not the decision.)
     #[test]
     fn best_next_slice_index_uses_total_cost_not_per_slice() {
-        let ir = parse_einsum("dc,cd,ab,ae,be->").unwrap();
+        let ir = test_ir(
+            &[
+                &["d", "c"],
+                &["c", "d"],
+                &["a", "b"],
+                &["a", "e"],
+                &["b", "e"],
+            ],
+            &[],
+        );
         let infos = vec![
             DenseTensorInfo::new(vec![3, 8]), // dc: d=3, c=8
             DenseTensorInfo::new(vec![8, 3]), // cd: c=8, d=3
