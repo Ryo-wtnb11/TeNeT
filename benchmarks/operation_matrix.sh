@@ -60,6 +60,9 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 packages = {package["id"]: package for package in data["packages"]}
+# The symbol layer was published as `racah` and is `fusion-symbols` from
+# 0.3.0 on; historical benchmark locks still resolve `racah`.
+SYMBOL_PACKAGES = {"racah", "fusion-symbols"}
 built = {}
 for line in open(sys.argv[2]):
     record = json.loads(line)
@@ -67,10 +70,10 @@ for line in open(sys.argv[2]):
         continue
     package_id = record["package_id"]
     package = packages[package_id]
-    if package["name"].startswith("tenferro-") or package["name"] == "racah":
+    if package["name"].startswith("tenferro-") or package["name"] in SYMBOL_PACKAGES:
         built.setdefault(package_id, set()).add(tuple(sorted(record["features"])))
 if not built:
-    raise SystemExit("Cargo build reported no Tenferro or Racah compiler artifacts for symtn")
+    raise SystemExit("Cargo build reported no Tenferro or symbol-layer compiler artifacts for symtn")
 tenferro_records = []
 racah_records = []
 for package_id, feature_sets in sorted(
@@ -92,11 +95,11 @@ for package_id, feature_sets in sorted(
             f"{package['name']}@{package['version']} source={source} "
             f"features=[{features}] vcs={vcs}"
         )
-        (racah_records if package["name"] == "racah" else tenferro_records).append(record)
+        (racah_records if package["name"] in SYMBOL_PACKAGES else tenferro_records).append(record)
 if not tenferro_records:
     raise SystemExit("Cargo build reported no Tenferro compiler artifacts for symtn")
 if not racah_records:
-    raise SystemExit("Cargo build reported no Racah compiler artifact for symtn")
+    raise SystemExit("Cargo build reported no fusion-symbols/racah compiler artifact for symtn")
 print("tenferro=" + "; ".join(tenferro_records))
 print("racah=" + "; ".join(racah_records))
 PY

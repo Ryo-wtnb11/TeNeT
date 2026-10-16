@@ -26,7 +26,7 @@ mod fibonacci;
 pub use fibonacci::{FibonacciFusionRule, FibonacciSector};
 
 mod fibonacci_table;
-pub use fibonacci_table::FibonacciTableRule;
+pub use fibonacci_table::{FibonacciTableError, FibonacciTableRule};
 
 mod su2;
 pub use su2::{SU2CoefficientError, SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};

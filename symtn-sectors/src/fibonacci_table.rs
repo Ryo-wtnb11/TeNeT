@@ -46,11 +46,10 @@ impl FibonacciTableRule {
     ///
     /// # Errors
     ///
-    /// Returns the table's import [`TableError`] if the embedded data do not
-    /// parse or violate an exact `N` axiom; for the shipped data this cannot
-    /// happen.
-    pub fn try_new() -> Result<Self, TableError> {
-        let table = FibonacciTable::try_new()?;
+    /// Returns [`FibonacciTableError`] if the embedded data do not parse or
+    /// violate an exact `N` axiom; for the shipped data this cannot happen.
+    pub fn try_new() -> Result<Self, FibonacciTableError> {
+        let table = FibonacciTable::try_new().map_err(FibonacciTableError)?;
         let bytes = table.authority_fingerprint();
         let identity = RuleIdentity::from_canonical_bytes::<Self>(fnv1a64(bytes), Arc::from(bytes));
         Ok(Self { table, identity })
@@ -71,6 +70,25 @@ impl FibonacciTableRule {
 
     fn sector_id(object: TableObject) -> SectorId {
         SectorId::new(usize::from(object.label()) - 1)
+    }
+}
+
+/// Failure to load the embedded Fibonacci tables.
+///
+/// Opaque: the table's own error is reachable only through
+/// [`std::error::Error::source`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FibonacciTableError(TableError);
+
+impl std::fmt::Display for FibonacciTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Fibonacci table authority failed to load")
+    }
+}
+
+impl std::error::Error for FibonacciTableError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
     }
 }
 
@@ -276,6 +294,20 @@ mod tests {
             fib.rule_identity(),
             crate::FibonacciFusionRule.rule_identity()
         );
+    }
+
+    #[test]
+    fn table_error_is_opaque_with_the_authority_as_source() {
+        use std::error::Error;
+        let inner = TableError::UnknownObject {
+            object: TableObject(3),
+        };
+        let error = FibonacciTableError(inner.clone());
+        assert_eq!(
+            error.to_string(),
+            "Fibonacci table authority failed to load"
+        );
+        assert_eq!(error.source().unwrap().to_string(), inner.to_string());
     }
 
     #[test]
