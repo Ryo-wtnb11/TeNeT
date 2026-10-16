@@ -3,7 +3,8 @@
 //! The structure-level device suite in `tenet-operations` proves the executor's
 //! algebra on hand-written fixtures. This one proves it on the structures the
 //! categorical layer actually compiles — SU(2) and fZ2 x SU(2) F moves reached
-//! through `TreeTransformCache`, one level below the typed `TensorMap` API —
+//! through the provider's compiled tree-transform structures, one level below
+//! the typed `TensorMap` API —
 //! whose recoupling matrices carry irrational 6j entries, mixed signs, and, for
 //! the product rule, fermionic signs.
 //!

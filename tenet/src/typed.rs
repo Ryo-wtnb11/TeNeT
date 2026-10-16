@@ -114,18 +114,54 @@
 //!
 //! **Device execution** is a storage type, not a runtime switch:
 //! `TensorMap<R, D, CudaStorage<D>>` (feature `cuda`, created by an explicit
-//! `to_cuda` and left by `to_host`) has its own operation set in the CUDA
-//! impls of this module. The device surface is narrower than Host: an
-//! operation that is not implemented for `CudaStorage` does not exist for it
-//! rather than falling back to Host. See the crate-level documentation for the
-//! device synchronization model. [`TensorMap::placement`] is diagnostic
+//! `to_cuda` and left by `to_host`) shares the Host operation bodies and
+//! supplies only its own kernels (see "Operation dispatch" below). The device
+//! surface is narrower than Host: an operation whose kernel is not implemented
+//! for `CudaStorage` does not exist for it rather than falling back to Host.
+//! See the crate-level documentation for the device synchronization model. [`TensorMap::placement`] is diagnostic
 //! metadata; no `TensorMap` operation dispatches on it.
+//!
+//! # Operation dispatch
+//!
+//! Every operation has one typed body (in the family modules of this
+//! directory) and is selected on two independent axes:
+//!
+//! - **Admission mode**, from the rule: `R::Mode` is
+//!   [`MultiplicityFreeAdmissionMode`] or the checked `Generic` mode, and the
+//!   bound `R::Mode: Typed*Dispatch` (`TypedTensorModeDispatch` and its
+//!   subtraits `TypedTensorTransformDispatch`, `TypedTensorContractDispatch`,
+//!   `TypedTensorTraceDispatch`, `TypedTruncationDispatch`, and the other
+//!   `Typed*Dispatch` traits of `dispatch.rs`) supplies the mode-specific
+//!   admission, layout and error type (`FacadeError<R>`). The mode impls live
+//!   in `mode_dispatch.rs`.
+//! - **Storage**, from the third parameter of [`TensorMap`]: `S` is `Vec<D>`
+//!   (Host) or `CudaStorage<D>`, and the sealed family traits
+//!   `TransformExec`, `ContractExec`, `PreparedExec`, `TraceExec`,
+//!   `TwistExec`, `FactorExec`, `ReduceExec`, `ElementwiseExec`,
+//!   `MaterializeExec` and `StackExec` (all subtraits of `TypedStorage`
+//!   except `StackExec`, which is payload-only) supply only the storage kernels
+//!   the shared body calls.
+//!
+//! Each kernel takes an `ExecToken` (`storage.rs`), a value only this crate can
+//! construct, so a caller outside the crate can name a kernel but not skip the
+//! admission its body performs.
+//!
+//! **CUDA bounds** are stated per impl, not once: each rule-generic `CudaStorage`
+//! impl of a family trait (and each inherent CUDA
+//! `impl TensorMap<R, D, CudaStorage<D>>`) restates
+//! `R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec`
+//! and bounds `D` by the payload trait of its family
+//! (`CudaPayload`, `CudaFactorizationPayload`). A rule or payload outside those
+//! bounds therefore has no device method, which is how checked `Generic`
+//! providers are excluded from device factorizations.
 //!
 //! # Compact diagonal storage
 //!
 //! For Host providers, the `s` factor from `svd_compact` is compact (and stays
-//! compact through `restrict_leg` on both legs). Checked `Generic` EIGH/EIG
-//! likewise store their `d` factor compactly.
+//! compact through `restrict_leg` on both legs). The `d` factor of `eigh_full`
+//! and `eig_full`, for multiplicity-free and checked `Generic` providers
+//! alike, and the `s` factor of `svd_full` when every sector is square, are
+//! compact as well.
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
 //! block-diagonal buffer it would fill, which is what TensorKit's
 //! `DiagonalTensorMap` is. It is a storage property and not a type: no signature

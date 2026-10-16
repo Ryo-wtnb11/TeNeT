@@ -748,11 +748,11 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
 /// `(N(a,b,e), N(e,c,d), N(b,c,f), N(a,f,d))` — TensorKit `GenericFusion`
 /// convention (`sectors.jl` Fsymbol). Row-major over `[mu,nu,kappa,lambda]`.
 ///
-/// Deliberately a plain `Vec<Scalar>` + shape tuple, not an ndarray-style
-/// type: Stage A only needs this to type-check and hold toy-rule test data,
-/// nobody indexes it on a hot path yet (that lands with the Stage B recouple
-/// wrapper). Reaching for a real N-d array crate now would be solving a
-/// problem Stage A doesn't have.
+/// Production type: the F-symbol block returned by checked Generic providers,
+/// including the SU(N) rule. It is a plain `Vec<Scalar>` + shape tuple rather
+/// than an ndarray-style type because consumers only read it element-wise
+/// while assembling recoupling matrices, so an N-d array crate would add a
+/// dependency without removing any work.
 #[derive(Clone, Debug)]
 pub struct GenericFArray<Scalar> {
     data: Vec<Scalar>,

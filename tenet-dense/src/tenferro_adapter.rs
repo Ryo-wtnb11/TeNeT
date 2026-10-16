@@ -1786,7 +1786,7 @@ fn record_session_thread(key: usize, caller: std::thread::ThreadId) {
 fn linalg_unavailable(op: &'static str) -> DenseError {
     DenseError::Unsupported {
         op,
-        message: "provider-inject requires a registered BLAS/LAPACK provider".to_string(),
+        message: "provider-inject does not route factorizations or solves; they are unsupported in this configuration".to_string(),
     }
 }
 
