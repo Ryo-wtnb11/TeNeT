@@ -17,8 +17,9 @@ package is packaged and inspected before it is published.
 5. `tenet-tensors`
 6. `tenet-matrixalgebra`
 7. `tenet-rs`
-8. `tenet-network`
-9. `tenet-category-data`
+8. `tenet-macros` (no TeNeT dependencies; any time before `tenet-network`)
+9. `tenet-network`
+10. `tenet-category-data`
 
 ## Checks for each package
 

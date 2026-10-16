@@ -232,14 +232,6 @@ fn validate_unique_output_labels(labels: &[TemporaryLabel]) -> Result<()> {
 ///
 /// Standard pairwise einsums (`ij,jk->ik`, `ab,ba->`, `ij,ij->`, the `;`
 /// codomain/domain forms, conjugated operands) all pass unchanged.
-/// The network of written label lists, for planner unit tests.
-#[cfg(test)]
-pub(crate) fn test_ir(inputs: &[&[&str]], output: &[&str]) -> NetworkIR {
-    let labels = |labels: &[&str]| labels.iter().map(|&label| label.into()).collect();
-    NetworkIR::from_labels(inputs.iter().map(|l| labels(l)).collect(), labels(output))
-        .expect("valid test network")
-}
-
 fn validate_einsum_support(
     occurrences: &BTreeMap<TemporaryLabel, Vec<TensorAxis>>,
     output_set: &BTreeSet<&TemporaryLabel>,
@@ -289,4 +281,12 @@ fn validate_einsum_support(
         }
     }
     Ok(())
+}
+
+/// The network of written label lists, for planner unit tests.
+#[cfg(test)]
+pub(crate) fn test_ir(inputs: &[&[&str]], output: &[&str]) -> NetworkIR {
+    let labels = |labels: &[&str]| labels.iter().map(|&label| label.into()).collect();
+    NetworkIR::from_labels(inputs.iter().map(|l| labels(l)).collect(), labels(output))
+        .expect("valid test network")
 }

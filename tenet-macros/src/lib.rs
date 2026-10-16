@@ -10,7 +10,10 @@ use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens};
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
-use syn::{bracketed, parenthesized, token, Error, Expr, Ident, Lit, Member, Result, Token};
+use syn::{
+    bracketed, parenthesized, token, Error, Expr, Ident, Index, Lit, LitFloat, Member, Result,
+    Token,
+};
 
 /// Contracts a tensor network written in index notation; see
 /// `tenet_network::contract!`.
@@ -95,8 +98,32 @@ impl Parse for Operand {
             let mut tensor = input.call(Ident::parse_any)?.into_token_stream();
             while input.peek(Token![.]) {
                 let dot: Token![.] = input.parse()?;
-                let member: Member = input.parse()?;
-                tensor.extend(quote!(#dot #member));
+                if input.peek(LitFloat) {
+                    // `t.0.0` lexes as `t`, `.`, the float `0.0`: two tuple
+                    // indices, as rustc reads it.
+                    let float: LitFloat = input.parse()?;
+                    let indices = float
+                        .to_string()
+                        .split('.')
+                        .map(|index| index.parse::<u32>().ok())
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|indices| indices.len() == 2)
+                        .ok_or_else(|| Error::new_spanned(&float, "expected a tuple index"))?;
+                    let (first, second) = (
+                        Index {
+                            index: indices[0],
+                            span: float.span(),
+                        },
+                        Index {
+                            index: indices[1],
+                            span: float.span(),
+                        },
+                    );
+                    tensor.extend(quote!(#dot #first . #second));
+                } else {
+                    let member: Member = input.parse()?;
+                    tensor.extend(quote!(#dot #member));
+                }
             }
             if input.peek(token::Paren) || input.peek(Token![::]) {
                 return Err(input.error(
@@ -113,6 +140,15 @@ impl Parse for Operand {
         }
         let content;
         bracketed!(content in input);
+        if input.peek(token::Bracket) {
+            return Err(Error::new(
+                start,
+                format!(
+                    "an indexed expression is not an operand; hint: put it in \
+                     parentheses, `({tensor}[{content}])[i; j]`"
+                ),
+            ));
+        }
         Ok(Self {
             tensor,
             conj,
@@ -149,6 +185,15 @@ impl Parse for Contraction {
             None
         };
         let mut operands = vec![input.parse::<Operand>()?];
+        if output.is_none()
+            && (input.peek(Token![:]) || input.peek(Token![=]) || input.peek(Token![+=]))
+        {
+            let name = &operands[0].tensor;
+            return Err(input.error(format!(
+                "the output of contract! has no name; hint: write \
+                 `let {name} = contract!([i; k] := …)?`"
+            )));
+        }
         while !input.is_empty() {
             if input.peek(Token![*]) {
                 input.parse::<Token![*]>()?;
@@ -382,6 +427,11 @@ mod tests {
              (x.0.y).__contract_operand()])"
         ));
         assert!(network_args(quote!([r#in] := r#type[r#in])).contains("\"in\""));
+        let nested = expand(quote!([i, k] := tup.0.0[i; j] * pair.1.2.u[j; k]))
+            .unwrap()
+            .to_string()
+            .replace(' ', "");
+        assert!(nested.contains("(tup.0.0).__contract_operand(),(pair.1.2.u).__contract_operand()"));
     }
 
     #[test]
@@ -412,6 +462,12 @@ mod tests {
             (quote!([i] - a[i]), "expected `:=`"),
             (quote!([i] := a[i] / b[i]), "expected `*`"),
             (quote!([i] := * a[i]), "expected an operand"),
+            (quote!([i; j] := w[0][i; j]), "`(w[0])[i; j]`"),
+            (
+                quote!(c[i; k] := a[i; j] * b[j; k]),
+                "`let c = contract!([i; k] := …)?`",
+            ),
+            (quote!(c[i; k] = a[i; j] * b[j; k]), "has no name"),
         ];
         for (input, hint) in cases {
             let message = error(input.clone());

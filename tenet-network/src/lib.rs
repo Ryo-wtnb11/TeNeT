@@ -116,11 +116,11 @@ pub use tree::ContractionTree;
 /// | `[i; k] := …` | a new tensor, codomain `i`, domain `k` (the output's `;` position) |
 /// | `[i, k] := …`, `[i k] := …` | a new tensor with every leg in the codomain |
 /// | `[] := …` | a rank-0 tensor |
-/// | no left-hand side | every label contracted; returns the scalar `D` ([`tenet::typed::TensorMap::scalar`], Host operands) |
+/// | no left-hand side | every label contracted; returns the scalar `D` through [`tenet::typed::TensorMap::scalar`], so it needs a Host tensor over multiplicity-free sectors (as does `[] :=` followed by `.scalar()`); checked-generic operands (e.g. SU(N)) and CUDA operands write `[] :=` and keep the rank-0 tensor |
 /// | `a[i, j; k]` | operand `a`, labels in its leg order; the `;` must sit at its codomain rank, checked at run time |
 /// | `a[i, j]` (no `;`) | every leg of `a` in the codomain: `a` must have domain rank 0 |
 /// | `conj(a)[i; j]` | the adjoint of `a`, labels in `a`'s own leg order (the [`Network::new`] `conj` convention) |
-/// | `svd.u[i; s]` | an identifier or a field chain, as written |
+/// | `svd.u[i; s]`, `t.0.0[i; s]` | an identifier or a field chain, as written |
 /// | `(expr)[i; s]` | any other operand expression, in parentheses (`?` inside is the caller's) |
 /// | `*` | joins the operands |
 /// | a label twice | contracted; once plus once on the left-hand side: open |
@@ -129,7 +129,9 @@ pub use tree::ContractionTree;
 /// with a hint: a label repeated within one operand (an intra-operand trace,
 /// use `TensorMap::trace_pairs` first), a label on three legs (a
 /// hyperedge), a sum (`+`, `-`), a scalar factor, `=` and `+=` (a `Network`
-/// has no destination API), and an unpaired or unknown label.
+/// has no destination API), an unpaired or unknown label, an indexed
+/// operand such as `w[0][i; j]` (write `(w[0])[i; j]`), and a named output
+/// `c[i; k] := …` (write `let c = contract!([i; k] := …)?`).
 ///
 /// The result is `Result<T, T::Error>` of [`Network::contract`] (or
 /// `Result<D, T::Error>` without a left-hand side): an operand whose tensor

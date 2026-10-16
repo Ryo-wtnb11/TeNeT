@@ -78,6 +78,14 @@ macro_rules! forms {
             assert_eq!((c.codomain(), c.domain()), (expected.codomain(), expected.domain()));
             assert_eq!(c.dense_data().unwrap(), expected.dense_data().unwrap());
 
+            // A nested tuple field chain (`0.0` lexes as one float) is the
+            // same operand.
+            let tup = ((a.clone(),),);
+            let before = counts(&runtime);
+            let nested = contract!([i; k] := tup.0.0[i; j] * b[j; k]).unwrap();
+            assert_cache(&runtime, before, true);
+            assert_eq!(nested.dense_data().unwrap(), expected.dense_data().unwrap());
+
             // An output without `;`: every output leg in the codomain;
             // labels separated by spaces build the same network.
             let x = rand(&[&v], &[&v], 3);

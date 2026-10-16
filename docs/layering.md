@@ -126,6 +126,7 @@ consumer adapts every crate the same way.
 | `tenet-dense` | The only adapter onto tenferro: dense executors, sessions and device placement. |
 | `tenet` (`tenet-rs`) | Typed facade: `TensorMap`, the eager and prepared APIs, and `Runtime`. |
 | `tenet-network` | Labeled network contraction (`Network::contract`), planning and the plan cache. |
+| `tenet-macros` | The `contract!` index-notation proc macro, re-exported by `tenet-network`; syntax and compile-time label validation only. |
 
 **Target structure-layer caches.** Four caches, mirroring TensorKit's
 `@cached` set at cfaa073 (#2014):
