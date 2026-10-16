@@ -658,8 +658,8 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// is `0`; `SU2Irrep` does not gate and defers to `WignerSymbols.racahW`.
     /// The symtn providers differ off-shell as well: the Abelian rules return
     /// `1` for any labels, `CU1FusionRule` and `FibonacciFusionRule` return
-    /// `0` after an `nsymbol` gate, `SU2FusionRule` returns the `racah` value
-    /// (`0` for an inadmissible 6j), and `CategoryDataFibonacci` returns its
+    /// `0` after an `nsymbol` gate, `SU2FusionRule` returns the `fusion-symbols` value
+    /// (`0` for an inadmissible 6j), and `FibonacciTableRule` returns its
     /// table entry. A label outside a provider's sector domain panics for
     /// the `nsymbol`-gated, SU(2) and table-backed providers.
     /// `ProductFusionRule` multiplies its components' values, so it inherits
@@ -690,7 +690,7 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// `1` and `FermionParityFusionRule` returns `-1` for two odd legs and
     /// `1` otherwise, whatever `coupled` is; `CU1FusionRule`,
     /// `FibonacciFusionRule` and `SU2FusionRule` return `0`;
-    /// `CategoryDataFibonacci` returns its table entry. Out-of-domain labels
+    /// `FibonacciTableRule` returns its table entry. Out-of-domain labels
     /// panic for the CU(1), Fibonacci, SU(2) and table-backed providers, and
     /// `SU2FusionRule` also panics when the closure of `left x right` leaves
     /// its supported spin range, even for an admissible `coupled`.

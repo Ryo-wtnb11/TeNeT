@@ -823,7 +823,10 @@ mod channel_factor_tests {
     #[test]
     fn multiplicity_free_channel_factor_is_the_dimension_quotient() {
         let rule = FibonacciFusionRule;
-        let twist = Complex64::from_polar(1.0, std::f64::consts::PI * -4.0 / 5.0);
+        // `cispi(-4/5)` correctly rounded, as `fusion_symbols::fibonacci`
+        // returns it (#2016). Why not `from_polar(1, -4π/5)`: its bits depend
+        // on the platform libm (macOS gives (1, 1) ulp away from this value).
+        let twist = Complex64::new(-0.8090169943749475, -0.5877852522924731);
         let tree = |uncoupled: &[usize], coupled, dual: &[bool], vertices: &[usize]| {
             FusionTreeKey::try_from_sector_ids_for_rule(
                 &rule,

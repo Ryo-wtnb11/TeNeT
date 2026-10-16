@@ -226,7 +226,7 @@ fn measure_case(
         .map(|group| group.block_indices().len())
         .max()
         .unwrap_or(0);
-    // Warm racah's symbol caches; symtn keeps no cache on this path.
+    // Warm fusion-symbols' symbol caches; symtn keeps no cache on this path.
     build_checked_generic_tree_pair_transform_group_plan(&plain, operation.clone(), &structure)
         .unwrap();
     let build_ns = median(

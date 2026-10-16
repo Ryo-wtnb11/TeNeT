@@ -34,7 +34,7 @@ TensorMap operation and checked arguments
 
 The fusion-rule provider owns categorical labels and coefficients. symtn owns
 fusion-tree semantics, recoupling, signs, block layouts, structural pack and
-scatter decisions, and result validation. Racah generates SU(2) coefficient
+scatter decisions, and result validation. fusion-symbols generates SU(2) coefficient
 data; symtn does not mirror its tables. Tenferro owns dense kernels,
 factorizations, provider execution resources, and backend scheduling. Strided
 owns applicable strided traversal and movement primitives.

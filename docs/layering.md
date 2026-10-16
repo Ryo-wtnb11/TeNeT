@@ -10,7 +10,7 @@ The split follows TensorKit's ecosystem:
 
 | Concern | TensorKit ecosystem | This stack |
 | --- | --- | --- |
-| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | the [`fusion-symbols`](https://github.com/Ryo-wtnb11/fusion-symbols) crate (formerly `racah`; symtn still depends on the published racah 0.2.4 until fusion-symbols is published) |
+| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | the [`fusion-symbols`](https://github.com/Ryo-wtnb11/fusion-symbols) crate (formerly `racah`), 0.3.0 |
 | Symmetric tensors, fusion trees, structure, transforms | TensorKit.jl | symtn |
 | Dense arrays, linear algebra, devices | LinearAlgebra, TensorOperations.jl | tenferro |
 | Strided data movement | Strided.jl | strided-rs (`strided-kernel`) |
@@ -23,7 +23,7 @@ The split follows TensorKit's ecosystem:
 flowchart TB
     APP["Application<br/>MPS / PEPS / VMC algorithms"]
     SYMTN["<b>symtn</b><br/>tensor maps, fusion trees, structure, transforms"]
-    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd modules<br/>planned: fibonacci, category_data, abelian, product"]
+    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd / fibonacci / tables modules<br/>planned: abelian, product"]
     DENSE["<b>tenferro</b><br/>dense kernels, linalg, CPU/GPU providers"]
     STR["<b>strided-rs</b><br/>strided data-movement kernels"]
     PRIMS["tprims (planned)<br/>copy-free strided contraction"]
@@ -39,13 +39,13 @@ flowchart TB
 The arrows show dependency direction, and no layer depends upward.
 
 The symbol layer uses tenferro only for the dense linear algebra of CGC
-generation (`racah` `src/sun/linalg.rs` and `src/bcd/linalg.rs`, behind
+generation (`fusion-symbols` `src/sun/linalg.rs` and `src/bcd/linalg.rs`, behind
 `cgc-gen`). It uses no tensor or fusion-tree concept.
 
 ### 1. Symbol layer (`fusion-symbols` crate)
 
-The symbol layer is the `fusion-symbols` crate (formerly `racah`; symtn still
-depends on the published racah 0.2.4 until fusion-symbols is published).
+The symbol layer is the published `fusion-symbols` crate (formerly `racah`),
+which symtn depends on at 0.3.0.
 
 **Target ownership.** For each group or category, the symbol layer owns the
 elementary data a fusion category needs:
@@ -62,8 +62,9 @@ shaped around one consumer's call pattern.
 
 | Crate | Owns |
 | --- | --- |
-| `fusion-symbols` (formerly `racah`), modules `su2`, `sun`, `bcd` | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in racah's QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
-| `fusion-symbols`, planned modules `fibonacci`, `category_data`, `abelian`, `product` | Abelian groups, Fibonacci, tabulated categories and Deligne products (#2016); they stay in symtn until those modules ship. Fermion parity is still undecided. |
+| `fusion-symbols` (formerly `racah`), modules `su2`, `sun`, `bcd` | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in fusion-symbols' QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
+| `fusion-symbols`, modules `fibonacci`, `tables` | The closed-form Fibonacci category and the pinned AnyonWiki Fibonacci tables (#2016). |
+| `fusion-symbols`, planned modules `abelian`, `product` | Abelian groups, fermion parity, CU(1) and Deligne products; they stay in symtn until those modules ship. |
 
 **Target: one provider shape across crates.** Every crate should answer N,
 dims, dual, FS phase and indicator, twist, F and R in the same shape, so a
@@ -88,10 +89,10 @@ consumer adapts every crate the same way.
   derived F, and under `cgc-gen` the SU(N) product, CGC and F tiers and the
   B/C/D CGC and F tiers. Today each tier evicts FIFO under its own fixed byte
   cap, set as a static partition. Moving these tiers onto a shared weighted
-  cache is racah#117.
+  cache is fusion-symbols#117.
 - **R is uncached by design.** Each R is one sparse join of cached CGC.
-- **On-disk persistence** of expensive coefficients is a proposal (racah#106).
-  Current racah documents an in-memory-only cache.
+- **On-disk persistence** of expensive coefficients is a proposal (fusion-symbols#106).
+  Current fusion-symbols documents an in-memory-only cache.
 - **Cache control.** Only the **application** may reset, trim or re-budget
   these caches; a library never does (`src/cache.rs`).
 - **Reproducibility.** A documented gauge fixes the coefficients. Their
@@ -121,7 +122,6 @@ consumer adapts every crate the same way.
 | Crate | Owns |
 | --- | --- |
 | `symtn-sectors` | Fusion-rule providers and the adapter onto the symbol layer. **Rule (target):** codec and type conversion only, with no symbol math and no symbol-layer types or cache policy in its public API. Current gap: #2016. |
-| `symtn-category-data` | Pinned category tables. They are a later candidate for the `category_data` module of `fusion-symbols`. |
 | `symtn-core` | Spaces, HomSpaces, fusion trees, checked fusion algebra, block structure, and the HomSpace-level structure caches. |
 | `symtn-operations` | Tree-transform plans, replay, and stacked/direct dense-job descriptions, with strided data movement. |
 | `symtn-tensors` | Contraction, trace and transform planning and execution over reduced blocks, and the tree-transform caches. |
@@ -207,8 +207,7 @@ flowchart TB
         CORE["<b>symtn-core</b><br/>spaces, HomSpaces, fusion trees, checked fusion algebra,<br/>block structure, HomSpace-level caches"]
     end
     subgraph provider["Providers"]
-        SEC["<b>symtn-sectors</b><br/>fusion rules, racah adapter"]
-        CAT["<b>symtn-category-data</b><br/>pinned category tables"]
+        SEC["<b>symtn-sectors</b><br/>fusion rules, fusion-symbols adapter"]
     end
     subgraph backend["Backend adapter"]
         DENSE["<b>symtn-dense</b><br/>dense executors, sessions, placement"]
@@ -229,8 +228,7 @@ flowchart TB
     OP --> CORE
     OP --> DENSE
     CORE --> SEC
-    CAT --> SEC
-    SEC --> RACAH(["racah"])
+    SEC --> FSYM(["fusion-symbols"])
     DENSE --> TF(["tenferro"])
     OP --> STR(["strided-kernel"])
     TT --> STR
@@ -297,7 +295,7 @@ Outside the four, by design:
 | Network plan cache | `symtn-network` | execution level: keyed by network topology |
 | CUDA prepared tree-transform structures | `symtn-operations` | execution level: device copies of cached structures |
 | cuTENSOR plan ledger | `symtn-dense` | execution level: tenferro's plan cache |
-| Elementary symbols (F, R, CGC, ...) | racah, not symtn | symbol layer |
+| Elementary symbols (F, R, CGC, ...) | fusion-symbols, not symtn | symbol layer |
 
 ## Interfaces between layers
 
@@ -306,12 +304,12 @@ Outside the four, by design:
 | symtn → symbol layer | `symtn-sectors` | Mathematical queries (`N`, `dims`, `dual`, FS phase, `twist`, `F`, `R`), converted into symtn types. |
 | symtn → tenferro | `symtn-dense` | Grouped dense jobs and per-sector factorization requests, inside one execution context. |
 | symtn → strided-rs | `symtn-operations`, `symtn-tensors` | Strided data-movement kernels for structural permutation, pack and scatter. |
-| Symbol layer → tenferro | racah's CGC-generation modules only | Small dense SVD, QR, least squares and matmul. Errors are carried as strings. |
+| Symbol layer → tenferro | fusion-symbols' CGC-generation modules only | Small dense SVD, QR, least squares and matmul. Errors are carried as strings. |
 
 **Boundary rules (target).**
 - **Imports.** One crate per consumer imports a given dense or symbol
-  dependency. Today that holds for tenferro (only `symtn-dense`) and racah
-  (only `symtn-sectors`; `symtn-tensors` tests use racah as a
+  dependency. Today that holds for tenferro (only `symtn-dense`) and fusion-symbols
+  (only `symtn-sectors`; `symtn-tensors` tests use fusion-symbols as a
   dev-dependency to reset its caches as the application would). strided-rs is used where structural data movement
   happens.
 - **Public types.** A higher layer's public API exposes no type from a lower
@@ -324,9 +322,9 @@ Outside the four, by design:
 
 ## Current deviations (tracked)
 
-- **Category symbols generated in symtn.** Abelian groups, CU(1), Fibonacci,
-  products and `symtn-category-data` are still generated in symtn. The
-  abelian groups move first (#2016); the rest are later candidates.
+- **Category symbols generated in symtn.** Abelian groups, fermion parity,
+  CU(1) and products are still generated in symtn; they are later
+  fusion-symbols slices. Fibonacci and its tables moved in #2016.
 - **A tenferro type in symtn's public API.** `symtn-dense` re-exports
   `tenferro_cpu::CpuBackendKind`, and it reaches the facade through
   `symtn::expert` and the `Runtime` builder (`gemm_kind`).

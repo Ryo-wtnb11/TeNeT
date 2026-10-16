@@ -34,10 +34,12 @@ provider with outer multiplicity (`N_ab^c > 1`) uses the checked Generic traits;
 see [Outer multiplicity](#outer-multiplicity).
 
 `symtn-sectors/src/fibonacci.rs` is the smallest complete non-abelian
-categorical example;
+categorical example, an adapter over `fusion_symbols::fibonacci`;
 `symtn-sectors/src/abelian.rs` has the abelian ones;
 `symtn-sectors/src/su2.rs` shows a provider that delegates its coefficients to an
-external crate.
+external crate, and `symtn-sectors/src/fibonacci_table.rs` one that wraps a
+stateful table (`fusion_symbols::tables::FibonacciTable`) and builds its
+`RuleIdentity` from the table's authority fingerprint.
 
 ## 1. `FusionRule`
 
@@ -73,8 +75,8 @@ them, as TensorKit `blas_contract!` does, while `compose` admits every style.
 
 **`fusion_channels` order is part of your convention.** Keep it stable and match
 your reference. `FibonacciFusionRule` in `symtn-sectors/src/fibonacci.rs`, for
-example, documents that it lists the vacuum first to match TensorKitSectors'
-iteration order.
+example, lists the vacuum first, as `fusion_symbols::fibonacci` does to match
+TensorKitSectors' iteration order.
 
 ### `RuleIdentity`
 

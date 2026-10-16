@@ -501,7 +501,7 @@ fn group_admission_validates_each_member_once_in_block_order() {
 /// `SqrtDim(c)`, `InvSqrtDim(first)` (16 factors: 208/144/0 to 192/128/32
 /// SqrtDim/InvSqrtDim/Dim queries, same count); its 0–3 ulp term changes
 /// are below `portable`'s `f32` rounding. The ledger is exact; term values
-/// go through `portable` (racah SU(3) coefficients round their last bits
+/// go through `portable` (fusion-symbols SU(3) coefficients round their last bits
 /// differently on Linux and macOS).
 #[test]
 fn cold_compile_ledger_and_term_bits_match_pinned_revision() {

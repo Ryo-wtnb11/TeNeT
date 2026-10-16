@@ -223,7 +223,7 @@ fn multiplicity_free_exp_route_switches_at_the_predicate_boundary() {
     assert_matches_taylor("above", &above, &boundary_fill(2.0));
 }
 
-/// The same blocks through multiplicity-free SU(2) and checked SU(2) (racah
+/// The same blocks through multiplicity-free SU(2) and checked SU(2) (fusion-symbols
 /// `SU(N=2)`): both modes take the same route and agree to rounding.
 #[cfg(feature = "racah-generated")]
 #[test]

@@ -5,7 +5,7 @@
 //! They mirror TensorKit's `@cached` functions (cfaa073,
 //! `src/auxiliary/caches.jl`): each memoizes a pure function of its key, so a
 //! hit is interchangeable with a rebuild, and only the application clears or
-//! sizes them (as racah does for its symbol caches). The registry is
+//! sizes them (as fusion-symbols does for its symbol caches). The registry is
 //! TensorKit's `GLOBAL_CACHES` (`caches.jl:1-11`, `push!` at `:160-165`):
 //! [`structure_cache_infos`], [`set_structure_cache_byte_budget`] and
 //! [`clear_structure_caches`] cover every kind, including the

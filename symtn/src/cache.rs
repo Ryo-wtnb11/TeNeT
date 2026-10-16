@@ -46,7 +46,7 @@ pub fn stats() -> Vec<StructureCacheInfo> {
 
 /// Clears every process-global structure cache (sector, degeneracy,
 /// completed tree transformer, composed coefficients) for all Runtimes.
-/// Semantic data only: no device executor, scratch or racah symbol cache is
+/// Semantic data only: no device executor, scratch or fusion-symbols symbol cache is
 /// touched. Builds in flight across the clear return their result
 /// unpublished.
 ///

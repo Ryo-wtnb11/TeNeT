@@ -1315,7 +1315,7 @@ impl FusionTreeHomSpace {
     /// `try_nsymbol`): no Clebsch-Gordan solve, no linear algebra and no
     /// Rayon region, so a thread holding the placeholder never waits inside
     /// a pool where work-stealing could run another caller of the same key on
-    /// it. (racah 0.2.4's SU(N) multiplicities are Gelfand-Tsetlin pattern
+    /// it. (fusion-symbols 0.3.0's SU(N) multiplicities are Gelfand-Tsetlin pattern
     /// counts, `sun.rs:shared_directproduct`, with no tenferro call.) Keep it
     /// so: a build that parallelizes must use `publish` instead, as the
     /// completed-transformer cache does.

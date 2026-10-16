@@ -9,19 +9,16 @@
 //! independent bodies on purpose: its `FusionRule` impl accepts components
 //! that are not `CheckedFusionAlgebra`, so it cannot forward without
 //! restricting which providers compose — its infallible `nsymbol` validates
-//! indirectly, through whichever components do forward. `symtn-category-data`'s
-//! Fibonacci provider is converted but not swept here, because this test lives
-//! in `symtn-sectors` and that crate is not a dependency; a reintroduced
-//! recursion there would overflow the stack in that crate's own tests, and its
-//! out-of-domain sweep (including the F/R/dim/twist symbols, #1737) lives in
-//! `symtn-category-data/tests/reference.rs`.
+//! indirectly, through whichever components do forward. The out-of-domain
+//! sweep of the Fibonacci F/R/dim/twist symbols (#1737) lives in
+//! `tests/fibonacci_providers.rs`.
 
 use std::panic::{self, AssertUnwindSafe};
 
 use symtn_sectors::{
     CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FibonacciFusionRule,
-    FusionRule, SU2FusionRule, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
-    ZNFusionRule, CU1_MAX_TWICE_CHARGE,
+    FibonacciTableRule, FusionRule, SU2FusionRule, SectorId, U1FusionRule, U1Irrep, Z2FusionRule,
+    Z2Irrep, ZNFusionRule, CU1_MAX_TWICE_CHARGE,
 };
 
 fn assert_dual_forwards<R: FusionRule + CheckedFusionAlgebra>(rule: &R, ids: &[SectorId]) {
@@ -115,6 +112,11 @@ fn zn_infallible_entry_points_match_checked_domain() {
     assert_dual_forwards(&rule, &ids);
     assert_fusion_channels_forwards(&rule, &all_pairs(&ids));
     assert_nsymbol_forwards(&rule, &all_triples(&ids));
+
+    let table = FibonacciTableRule::try_new().unwrap();
+    assert_dual_forwards(&table, &ids);
+    assert_fusion_channels_forwards(&table, &all_pairs(&ids));
+    assert_nsymbol_forwards(&table, &all_triples(&ids));
 }
 
 #[test]
@@ -190,7 +192,7 @@ fn su2_infallible_entry_points_match_checked_domain() {
 
     assert_dual_forwards(&rule, &ids);
     assert_fusion_channels_forwards(&rule, &all_pairs(&ids));
-    // Full triples over `ids` are O(10^3) racah calls; keep it, this suite is
+    // Full triples over `ids` are O(10^3) fusion-symbols calls; keep it, this suite is
     // not a hot path.
     assert_nsymbol_forwards(&rule, &all_triples(&ids));
 }

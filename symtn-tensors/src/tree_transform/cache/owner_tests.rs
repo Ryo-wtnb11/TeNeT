@@ -564,7 +564,7 @@ fn core_and_racah_resets_have_separate_owners() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    racah::cache::reset();
+    fusion_symbols::cache::reset();
 
     let rule = SU2FusionRule;
     let identity = rule.rule_identity();
@@ -579,7 +579,7 @@ fn core_and_racah_resets_have_separate_owners() {
         sector(0),
         sector(0),
     );
-    racah::cache::reset();
+    fusion_symbols::cache::reset();
     assert_eq!(rule.rule_identity(), identity);
     let rebuilt = BlockStructure::trivial(&[700_000_001]).unwrap();
     assert_eq!(rebuilt, structure);
@@ -593,8 +593,8 @@ fn core_and_racah_resets_have_separate_owners() {
         sector(0),
         sector(0),
     );
-    let populated = racah::cache::base_cache_stats();
+    let populated = fusion_symbols::cache::base_cache_stats();
     assert_ne!(populated.total().entries, 0);
     symtn_core::clear_structure_caches();
-    assert_eq!(racah::cache::base_cache_stats(), populated);
+    assert_eq!(fusion_symbols::cache::base_cache_stats(), populated);
 }

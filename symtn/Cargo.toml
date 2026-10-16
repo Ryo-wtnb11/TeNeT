@@ -33,6 +33,8 @@ symtn-tensors = { version = "0.1.1", path = "../symtn-tensors", default-features
 
 [dev-dependencies]
 rayon = "1.10"
+# The table-backed Fibonacci provider of the planar workflow test (#2016).
+symtn-sectors = { version = "0.1.1", path = "../symtn-sectors" }
 # Reference-oracle replay driver (#1767).
 symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-features = false, features = ["testing"] }
 # The CUDA member workspace's failure seam (#1859).

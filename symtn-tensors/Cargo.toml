@@ -49,5 +49,5 @@ symtn-operations = { version = "0.1.1", path = "../symtn-operations", default-fe
 # Plan tests compare against symtn-core's one-shot tree-pair oracles (#1805).
 symtn-core = { version = "0.1.1", path = "../symtn-core", features = ["testing"] }
 symtn-sectors = { version = "0.1.1", path = "../symtn-sectors" }
-# Tests reset racah's process-global caches as an application would.
-racah = { version = "0.2.4" }
+# Tests reset fusion-symbols' process-global caches as an application would.
+fusion-symbols = { version = "0.3.0" }

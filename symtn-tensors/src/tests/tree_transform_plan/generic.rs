@@ -1348,7 +1348,7 @@ fn measure_checked_generic_transform_case(
 ) {
     use symtn_sectors::SUNFusionRule;
 
-    racah::cache::reset();
+    fusion_symbols::cache::reset();
     let inner = SUNFusionRule::new(n).unwrap();
     let adjoint = inner.encode_dynkin(adjoint_labels).unwrap();
     let provider = Arc::new(MeasurementProvider::new(inner));

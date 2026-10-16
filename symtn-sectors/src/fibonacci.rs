@@ -1,5 +1,5 @@
+use fusion_symbols::fibonacci::{fibonacci_f_symbol, fibonacci_r_symbol, FibonacciObject};
 use num_complex::Complex64;
-use smallvec::smallvec;
 
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
@@ -7,18 +7,22 @@ use crate::{
     MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
 };
 
-// FibonacciAnyon: the simplest genuinely non-abelian anyon model (Simple
-// fusion + Anyonic braiding + complex F/R symbols) — SectorId 0 = vacuum
-// `𝟙`, SectorId 1 = `τ`, with `τ⊗τ = 𝟙 ⊕ τ`. All numeric F/R/dim/twist
-// values below are copied verbatim from TensorKitSectors.jl's
-// `FibonacciAnyon` (`~/.julia/packages/TensorKitSectors/tugbK/src/anyons.jl`,
-// lines 82-146) — never "simplify" a sign or phase here without rereading
-// that source (project convention: don't derive anyon conventions from
-// "should be").
+/// The Fibonacci category in closed form, `τ ⊗ τ = 𝟙 ⊕ τ`, as a symtn fusion
+/// rule: `SectorId` 0 is the vacuum `𝟙`, `SectorId` 1 is `τ`.
+///
+/// Every value comes from [`fusion_symbols::fibonacci`], which follows
+/// TensorKitSectors' `FibonacciAnyon`; this type only maps `SectorId`s to
+/// `FibonacciObject`s and widens the real F, dimension and
+/// Frobenius–Schur values to `Complex64` (symtn's one `Scalar`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct FibonacciFusionRule;
 
-/// A simple object of the Fibonacci fusion category.
+/// A simple object of the Fibonacci fusion category, the semantic label of
+/// both [`FibonacciFusionRule`] and [`crate::FibonacciTableRule`].
+///
+/// Why not re-export `fusion_symbols::fibonacci::FibonacciObject`: symtn's
+/// public label types stay symtn's own (as `SU2Irrep` does), so a
+/// symbol-layer release cannot change symtn's API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum FibonacciSector {
     /// The tensor unit `𝟙`.
@@ -27,21 +31,45 @@ pub enum FibonacciSector {
     Tau,
 }
 
-impl FibonacciFusionRule {
-    /// `false` for the vacuum (`𝟙`, SectorId 0), `true` for `τ` (SectorId 1).
-    fn is_tau(sector: SectorId) -> bool {
-        sector.id() != 0
+impl FibonacciSector {
+    pub(crate) fn from_sector_id(sector: SectorId) -> Result<Self, FusionAlgebraError> {
+        match sector.id() {
+            0 => Ok(Self::Vacuum),
+            1 => Ok(Self::Tau),
+            _ => Err(FusionAlgebraError::InvalidSector { sector }),
+        }
+    }
+
+    pub(crate) fn sector_id(self) -> SectorId {
+        SectorId::new(match self {
+            Self::Vacuum => 0,
+            Self::Tau => 1,
+        })
     }
 }
 
-/// `dim(FibonacciAnyon)` (anyons.jl:82-83): `𝟙 -> 1`, `τ -> φ = (1+√5)/2`
-/// (`Float64(MathConstants.golden)`).
-fn fibonacci_quantum_dim(sector: SectorId) -> f64 {
-    if FibonacciFusionRule::is_tau(sector) {
-        (1.0 + 5.0_f64.sqrt()) / 2.0
-    } else {
-        1.0
-    }
+fn checked_object(sector: SectorId) -> Result<FibonacciObject, FusionAlgebraError> {
+    Ok(match FibonacciSector::from_sector_id(sector)? {
+        FibonacciSector::Vacuum => FibonacciObject::Vacuum,
+        FibonacciSector::Tau => FibonacciObject::Tau,
+    })
+}
+
+/// The infallible symbols' domain check (#1737): an out-of-domain id panics
+/// with the typed error instead of aliasing `τ`.
+fn object(method: &str, sector: SectorId) -> FibonacciObject {
+    checked_object(sector).unwrap_or_else(|error| panic!("{method} precondition violated: {error}"))
+}
+
+fn sector_id(object: FibonacciObject) -> SectorId {
+    SectorId::new(match object {
+        FibonacciObject::Vacuum => 0,
+        FibonacciObject::Tau => 1,
+    })
+}
+
+fn real(value: f64) -> Complex64 {
+    Complex64::new(value, 0.0)
 }
 
 impl FusionRule for FibonacciFusionRule {
@@ -74,32 +102,9 @@ impl FusionRule for FibonacciFusionRule {
     }
 }
 
-/// `𝟙 ⊗ τ = τ`, `τ ⊗ 𝟙 = τ`, `τ ⊗ τ = 𝟙 ⊕ τ` (vacuum-first to match
-/// TensorKitSectors' `FibonacciAnyonProdIterator` iteration order,
-/// anyons.jl:96-109). Shared by [`FusionRule::fusion_channels`] and
-/// [`CheckedFusionAlgebra::try_fusion_channels`] so the two entry points
-/// state this once.
-fn fibonacci_channels(left: SectorId, right: SectorId) -> SectorVec {
-    match (
-        FibonacciFusionRule::is_tau(left),
-        FibonacciFusionRule::is_tau(right),
-    ) {
-        (false, _) => smallvec![right],
-        (true, false) => smallvec![left],
-        (true, true) => smallvec![SectorId::new(0), SectorId::new(1)],
-    }
-}
-
-fn checked_fibonacci_sector(sector: SectorId) -> Result<(), FusionAlgebraError> {
-    (sector.id() <= 1)
-        .then_some(())
-        .ok_or(FusionAlgebraError::InvalidSector { sector })
-}
-
 impl CheckedFusionAlgebra for FibonacciFusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        checked_fibonacci_sector(sector)?;
-        Ok(sector)
+        Ok(sector_id(checked_object(sector)?.dual()))
     }
 
     fn try_fusion_channels(
@@ -107,9 +112,8 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, FusionAlgebraError> {
-        checked_fibonacci_sector(left)?;
-        checked_fibonacci_sector(right)?;
-        Ok(fibonacci_channels(left, right))
+        let channels = checked_object(left)?.fusion(checked_object(right)?);
+        Ok(channels.iter().copied().map(sector_id).collect())
     }
 
     fn try_nsymbol(
@@ -118,12 +122,8 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError> {
-        checked_fibonacci_sector(left)?;
-        checked_fibonacci_sector(right)?;
-        checked_fibonacci_sector(coupled)?;
-        Ok(usize::from(
-            fibonacci_channels(left, right).contains(&coupled),
-        ))
+        let channels = checked_object(left)?.fusion(checked_object(right)?);
+        Ok(usize::from(channels.contains(&checked_object(coupled)?)))
     }
 }
 
@@ -131,18 +131,11 @@ impl SectorCodec for FibonacciFusionRule {
     type Sector = FibonacciSector;
 
     fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
-        Ok(match value {
-            FibonacciSector::Vacuum => SectorId::new(0),
-            FibonacciSector::Tau => SectorId::new(1),
-        })
+        Ok(value.sector_id())
     }
 
     fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
-        match id.id() {
-            0 => Ok(FibonacciSector::Vacuum),
-            1 => Ok(FibonacciSector::Tau),
-            _ => Err(FusionAlgebraError::InvalidSector { sector: id }),
-        }
+        FibonacciSector::from_sector_id(id)
     }
 }
 
@@ -153,9 +146,6 @@ impl CanonicalUnitFusionRule for FibonacciFusionRule {}
 impl MultiplicityFreeFusionSymbols for FibonacciFusionRule {
     type Scalar = Complex64;
 
-    // Verbatim port of `Fsymbol` (anyons.jl:115-137): four `Nsymbol` gates,
-    // then the single non-trivial 2x2 block `F^{τττ}_τ` (entries ±1/φ,
-    // ±1/√φ); every other allowed configuration is 1.
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -165,87 +155,46 @@ impl MultiplicityFreeFusionSymbols for FibonacciFusionRule {
         left_coupled: SectorId,
         right_coupled: SectorId,
     ) -> Self::Scalar {
-        if self.nsymbol(left, middle, left_coupled) == 0
-            || self.nsymbol(left_coupled, right, coupled) == 0
-            || self.nsymbol(middle, right, right_coupled) == 0
-            || self.nsymbol(left, right_coupled, coupled) == 0
-        {
-            return Complex64::new(0.0, 0.0);
-        }
-        if Self::is_tau(left)
-            && Self::is_tau(middle)
-            && Self::is_tau(right)
-            && Self::is_tau(coupled)
-        {
-            let phi = fibonacci_quantum_dim(SectorId::new(1));
-            if !Self::is_tau(left_coupled) && !Self::is_tau(right_coupled) {
-                Complex64::new(1.0 / phi, 0.0)
-            } else if Self::is_tau(left_coupled) && Self::is_tau(right_coupled) {
-                Complex64::new(-1.0 / phi, 0.0)
-            } else {
-                Complex64::new(1.0 / phi.sqrt(), 0.0)
-            }
-        } else {
-            Complex64::new(1.0, 0.0)
-        }
+        let o = |sector| object("f_symbol_scalar", sector);
+        real(fibonacci_f_symbol(
+            o(left),
+            o(middle),
+            o(right),
+            o(coupled),
+            o(left_coupled),
+            o(right_coupled),
+        ))
     }
 
-    // Verbatim port of `Rsymbol` (anyons.jl:139-146): trivial braiding with
-    // the vacuum, and the two complex phases `cispi(4/5)` / `cispi(-3/5)`
-    // for `R^{ττ}_𝟙` / `R^{ττ}_τ`.
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
-        if self.nsymbol(left, right, coupled) == 0 {
-            return Complex64::new(0.0, 0.0);
-        }
-        if !Self::is_tau(left) || !Self::is_tau(right) {
-            Complex64::new(1.0, 0.0)
-        } else if !Self::is_tau(coupled) {
-            Complex64::from_polar(1.0, std::f64::consts::PI * 4.0 / 5.0)
-        } else {
-            Complex64::from_polar(1.0, std::f64::consts::PI * -3.0 / 5.0)
-        }
+        let o = |sector| object("r_symbol_scalar", sector);
+        fibonacci_r_symbol(o(left), o(right), o(coupled))
     }
 }
 
 impl MultiplicityFreeRigidSymbols for FibonacciFusionRule {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(fibonacci_quantum_dim(sector), 0.0)
+        real(object("dim_scalar", sector).dim())
     }
 
     fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0 / fibonacci_quantum_dim(sector), 0.0)
+        real(1.0 / object("inv_dim_scalar", sector).dim())
     }
 
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(fibonacci_quantum_dim(sector).sqrt(), 0.0)
+        real(object("sqrt_dim_scalar", sector).dim().sqrt())
     }
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0 / fibonacci_quantum_dim(sector).sqrt(), 0.0)
+        real(1.0 / object("inv_sqrt_dim_scalar", sector).dim().sqrt())
     }
 
-    // TensorKitSectors has no `FibonacciAnyon`-specific `twist` override, so
-    // it falls back to the generic `twist_from_Rsymbol` (sectors.jl:646-647):
-    // `twist(a) = Σ_{b ∈ a⊗a} dim(b)/dim(a) * Rsymbol(a,a,b)`. Verified
-    // numerically against that formula (not guessed):
-    //   twist(𝟙) = 1
-    //   twist(τ) = (1/φ)·cispi(4/5) + (φ/φ)·cispi(-3/5) = cispi(-4/5)
     fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
-        if Self::is_tau(sector) {
-            Complex64::from_polar(1.0, std::f64::consts::PI * -4.0 / 5.0)
-        } else {
-            Complex64::new(1.0, 0.0)
-        }
+        object("twist_scalar", sector).twist()
     }
 
-    // TensorKitSectors has no override either, so this is the generic
-    // `frobenius_schur_phase_from_Fsymbol` (sectors.jl:461-469):
-    // `sign(Fsymbol(a, dual(a), a, a, leftunit(a), rightunit(a)))`, with
-    // `leftunit`/`rightunit` defaulting to `unit(a)` = vacuum (sectors.jl:
-    // 139-154). For `a = τ` (self-dual) that is `Fsymbol(τ,τ,τ,τ,𝟙,𝟙) =
-    // +1/φ`, whose sign is `+1`; for `a = 𝟙` it is trivially `+1`.
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        real(object("frobenius_schur_phase_scalar", sector).frobenius_schur())
     }
 }
 
