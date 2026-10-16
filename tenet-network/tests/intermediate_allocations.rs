@@ -623,9 +623,7 @@ fn temporary_contracted_order_worker() {
         let network = Network::new(
             input_labels.clone(),
             vec![false; count],
-            refs.iter()
-                .map(|tensor| Some(tensor.codomain_rank()))
-                .collect(),
+            refs.iter().map(|tensor| tensor.codomain_rank()),
             output.clone(),
             Some(1),
         )
@@ -847,7 +845,7 @@ fn overwrite_network() -> (Network, ContractionPlan) {
         vec![label("a"), label("d")],
     ];
     let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
-    let network = Network::new(inputs, vec![false; 3], vec![Some(1); 3], output, Some(1)).unwrap();
+    let network = Network::new(inputs, vec![false; 3], vec![1; 3], output, Some(1)).unwrap();
     let plan = ContractionPlan::from_steps(
         &ir,
         vec![
@@ -1148,7 +1146,7 @@ fn lazy_conj_worker() {
     let network = Network::new(
         vec![vec![label("x"), label("k")], vec![label("x"), label("r")]],
         vec![true, false],
-        vec![Some(1), Some(1)],
+        vec![1, 1],
         vec![label("k"), label("r")],
         Some(1),
     )
@@ -1192,7 +1190,7 @@ fn lazy_conj_worker() {
     let compact_network = Network::new(
         vec![vec![label("i"), label("j")]],
         vec![false],
-        vec![Some(1)],
+        vec![1],
         vec![label("i"), label("j")],
         Some(1),
     )

@@ -47,7 +47,7 @@ pub(super) fn network_operand_preflight<R, D, S, L, C>(
     tensors: &[&TensorMap<R, D, S>],
     inputs: &[impl AsRef<[L]>],
     conj: &[bool],
-    splits: &[Option<usize>],
+    splits: &[usize],
     contracted: &[C],
 ) -> Result<(), FacadeError<R>>
 where
@@ -69,14 +69,13 @@ where
             ))
             .into());
         }
-        if let Some(split) = splits[index] {
-            if split != tensor.codomain_rank() {
-                return Err(invalid(format!(
-                    "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
-                    tensor.codomain_rank()
-                ))
-                .into());
-            }
+        let split = splits[index];
+        if split != tensor.codomain_rank() {
+            return Err(invalid(format!(
+                "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
+                tensor.codomain_rank()
+            ))
+            .into());
         }
     }
     let Some(first) = tensors.first() else {

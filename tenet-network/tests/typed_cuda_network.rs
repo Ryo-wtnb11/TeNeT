@@ -26,16 +26,12 @@ use network_support::{conj, net, op};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 fn pair_network() -> Network {
     Network::new(
-        vec![labels(&["a", "k"]), labels(&["k", "b"])],
+        vec![vec!["a", "k"], vec!["k", "b"]],
         vec![false, false],
-        vec![Some(1), Some(1)],
-        labels(&["a", "b"]),
+        vec![1, 1],
+        vec!["a", "b"],
         Some(1),
     )
     .unwrap()
@@ -221,25 +217,19 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         })
         .collect::<Vec<_>>();
     let chain = Network::new(
-        vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-        ],
+        vec![vec!["a", "b"], vec!["b", "c"], vec!["c", "d"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["a", "d"]),
+        vec![1; 3],
+        vec!["a", "d"],
         Some(1),
     )
     .unwrap();
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
     let ir = NetworkIR::from_labels(
-        vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-        ],
-        labels(&["a", "d"]),
+        [["a", "b"], ["b", "c"], ["c", "d"]]
+            .map(|labels| labels.map(TemporaryLabel::from).to_vec())
+            .to_vec(),
+        ["a", "d"].map(TemporaryLabel::from).to_vec(),
     )
     .unwrap();
     let chain_order = ContractionPlan::from_steps(
@@ -250,14 +240,14 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
                 TensorId::new(1),
                 TensorId::new(3),
                 0,
-                labels(&["a", "c"]),
+                ["a", "c"].map(TemporaryLabel::from).to_vec(),
             ),
             ContractionStep::new(
                 TensorId::new(3),
                 TensorId::new(2),
                 TensorId::new(4),
                 0,
-                labels(&["a", "d"]),
+                ["a", "d"].map(TemporaryLabel::from).to_vec(),
             ),
         ],
     )
@@ -314,10 +304,10 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     assert_eq!(chain_cached.placement(), tensors[0].placement());
 
     let conj_network = Network::new(
-        vec![labels(&["k", "i"]), labels(&["k", "j"])],
+        vec![vec!["k", "i"], vec!["k", "j"]],
         vec![true, false],
-        vec![Some(1), Some(1)],
-        labels(&["i", "j"]),
+        vec![1, 1],
+        vec!["i", "j"],
         Some(1),
     )
     .unwrap();
@@ -363,10 +353,10 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     );
 
     let single = Network::new(
-        vec![labels(&["k", "i"])],
+        vec![vec!["k", "i"]],
         vec![true],
-        vec![Some(1)],
-        labels(&["i", "k"]),
+        vec![1],
+        vec!["i", "k"],
         Some(1),
     )
     .unwrap();
@@ -437,9 +427,9 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     .to_cuda()
     .unwrap();
     let scalar_network = Network::new(
-        vec![labels(&["k"]), labels(&["k"])],
+        vec![vec!["k"], vec!["k"]],
         vec![false; 2],
-        vec![Some(0), Some(1)],
+        vec![0, 1],
         vec![],
         Some(0),
     )
@@ -2319,14 +2309,10 @@ fn cuda_execution_reuses_a_caller_owned_workspace_and_network_contract_caches() 
         .collect::<Vec<_>>();
     let device_refs = device.iter().collect::<Vec<_>>();
     let network = Network::new(
-        vec![
-            labels(&["i", "j"]),
-            labels(&["j", "k"]),
-            labels(&["k", "m"]),
-        ],
+        vec![vec!["i", "j"], vec!["j", "k"], vec!["k", "m"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["i", "m"]),
+        vec![1; 3],
+        vec!["i", "m"],
         Some(1),
     )
     .unwrap();

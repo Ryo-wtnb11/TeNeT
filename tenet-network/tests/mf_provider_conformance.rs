@@ -18,9 +18,7 @@ use tenet::sector::{
 use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::{
-    plan_cache_stats, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel,
-};
+use tenet_network::{plan_cache_stats, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace};
 
 #[path = "../../tests/support/network.rs"]
 mod network_support;
@@ -28,10 +26,6 @@ use network_support::{net, op};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
-
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
 
 /// The planned and cached network paths may group the contraction differently from the
 /// direct typed call, so payloads agree within the workspace tolerance rule
@@ -93,10 +87,10 @@ where
         .permute(&[1], &[0])
         .unwrap();
     let network = Network::new(
-        vec![labels(&["i", "j"]), labels(&["j", "k"])],
+        vec![vec!["i", "j"], vec!["j", "k"]],
         vec![false, false],
-        vec![Some(1), Some(1)],
-        labels(&["k", "i"]),
+        vec![1, 1],
+        vec!["k", "i"],
         Some(1),
     )
     .unwrap();

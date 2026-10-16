@@ -1,11 +1,6 @@
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-use tenet_network::{Network, TemporaryLabel};
-
-/// One operand's or the output's written labels.
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
+use tenet_network::Network;
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
@@ -38,11 +33,12 @@ fn main() -> Result<(), Error> {
         })?;
 
     // The repeated j is contracted, leaving codomain i and domain k.
+    // Each operand's `;` split (1 and 1) is checked against its tensor.
     let c = Network::new(
-        vec![labels(&["i", "j"]), labels(&["j", "k"])],
-        vec![false, false],
-        vec![Some(1), Some(1)],
-        labels(&["i", "k"]),
+        [["i", "j"], ["j", "k"]],
+        [false, false],
+        [1, 1],
+        ["i", "k"],
         Some(1),
     )?
     .contract(&[&a, &b])?;

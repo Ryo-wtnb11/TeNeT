@@ -26,17 +26,33 @@ impl Network {
     ///
     /// `inputs[i]` are operand `i`'s labels in flat leg order (codomain
     /// then domain of the tensor as passed, i.e. *before* any conj
-    /// lowering), `conj[i]` marks adjoint operands, `codomain_splits[i]`
-    /// is the written `;` position (validated against the tensor later).
+    /// lowering), `conj[i]` marks adjoint operands, and `codomain_splits[i]`
+    /// is the written `;` position, which every contraction and plan checks
+    /// against the tensor's codomain rank before any plan lookup.
+    /// `output_codomain_rank` is the output's `;` position (`None` for an
+    /// all-codomain output). Labels are anything converting into
+    /// [`TemporaryLabel`], such as `&str`, `char` or `TemporaryLabel`.
     /// Label structure (each label open-once or contracted-twice, output
     /// labels present and unique) is validated here.
-    pub fn new(
-        inputs: Vec<Vec<TemporaryLabel>>,
-        conj: Vec<bool>,
-        codomain_splits: Vec<Option<usize>>,
-        output: Vec<TemporaryLabel>,
+    pub fn new<I, L>(
+        inputs: I,
+        conj: impl IntoIterator<Item = bool>,
+        codomain_splits: impl IntoIterator<Item = usize>,
+        output: impl IntoIterator<Item = L>,
         output_codomain_rank: Option<usize>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        I: IntoIterator,
+        I::Item: IntoIterator<Item = L>,
+        L: Into<TemporaryLabel>,
+    {
+        let inputs: Vec<Vec<TemporaryLabel>> = inputs
+            .into_iter()
+            .map(|labels| labels.into_iter().map(Into::into).collect())
+            .collect();
+        let conj: Vec<bool> = conj.into_iter().collect();
+        let codomain_splits: Vec<usize> = codomain_splits.into_iter().collect();
+        let output: Vec<TemporaryLabel> = output.into_iter().map(Into::into).collect();
         if conj.len() != inputs.len() || codomain_splits.len() != inputs.len() {
             return Err(invalid("operand marker lists must match operand count"));
         }

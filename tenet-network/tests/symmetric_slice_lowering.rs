@@ -42,14 +42,8 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
             &labels,
         ),
     );
-    let network = Network::new(
-        vec![labels.clone()],
-        vec![false],
-        vec![Some(3)],
-        labels,
-        Some(3),
-    )
-    .unwrap();
+    let network =
+        Network::new(vec![labels.clone()], vec![false], vec![3], labels, Some(3)).unwrap();
 
     let lowered = network
         .lower_symmetric_sliced_plan(&[&tensor], dense.clone())
@@ -130,7 +124,7 @@ fn reconstruction_preserves_two_step_order_and_output_metadata() {
         slice_plan_for(&ir, &order, &cost, &[label("b")]),
     );
     let restored = SlicedPlan::from_text(&dense.to_text()).unwrap();
-    let network = Network::new(inputs, vec![false; 3], vec![Some(1); 3], output, Some(1)).unwrap();
+    let network = Network::new(inputs, vec![false; 3], vec![1; 3], output, Some(1)).unwrap();
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
 
     let original = network.lower_symmetric_sliced_plan(&refs, dense).unwrap();

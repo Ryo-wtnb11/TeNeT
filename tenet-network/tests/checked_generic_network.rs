@@ -31,10 +31,6 @@ use tenet_network::{
 mod network_support;
 use network_support::{net, op};
 
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 trait OracleScalar: TensorScalar + Copy + Debug {
     fn value(marker: usize) -> Self;
     fn distance(self, other: Self) -> f64;
@@ -181,14 +177,10 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
         .unwrap();
     let expected = chain.permute(&[1, 0], &[2]).unwrap();
     let network = Network::new(
-        vec![
-            labels(&["a", "b", "c"]),
-            labels(&["c", "d"]),
-            labels(&["d", "e"]),
-        ],
+        vec![vec!["a", "b", "c"], vec!["c", "d"], vec!["d", "e"]],
         vec![false; 3],
-        vec![Some(2), Some(1), Some(1)],
-        labels(&["b", "a", "e"]),
+        vec![2, 1, 1],
+        vec!["b", "a", "e"],
         Some(2),
     )
     .unwrap();
@@ -196,7 +188,7 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     let explicit = network
         .plan(
             &tensors,
-            &LabelOrderDenseOptimizer::new(labels(&["c", "d"])),
+            &LabelOrderDenseOptimizer::new(vec!["c".into(), "d".into()]),
         )
         .unwrap();
     let greedy = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
@@ -353,12 +345,15 @@ fn sun_checked_generic_mixed_slice_preserves_outer_multiplicity_keys() {
             Complex64::value(30_000 + marker(trees, indices))
         })
         .unwrap();
-    let inputs = vec![labels(&["a", "b", "x"]), labels(&["x", "d"])];
-    let output = labels(&["a", "b", "d"]);
+    let inputs = vec![
+        ["a", "b", "x"].map(TemporaryLabel::from).to_vec(),
+        ["x", "d"].map(TemporaryLabel::from).to_vec(),
+    ];
+    let output = ["a", "b", "d"].map(TemporaryLabel::from).to_vec();
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(2), Some(1)],
+        vec![2, 1],
         output.clone(),
         Some(2),
     )
@@ -377,7 +372,12 @@ fn sun_checked_generic_mixed_slice_preserves_outer_multiplicity_keys() {
     .unwrap();
     let dense = SlicedPlan::new(
         planned.plan().clone(),
-        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["a", "x"])),
+        slice_plan_for(
+            &ir,
+            planned.plan(),
+            &cost,
+            &["a", "x"].map(TemporaryLabel::from),
+        ),
     );
     let sliced = network
         .lower_symmetric_sliced_plan(&tensors, dense)
@@ -713,22 +713,20 @@ fn injected_chain(
 
 fn injected_network(operands: usize, permute_output: bool) -> Network {
     let all_inputs = vec![
-        labels(&["a", "b", "c"]),
-        labels(&["c", "d"]),
-        labels(&["d", "e"]),
-        labels(&["e", "f"]),
+        vec!["a", "b", "c"],
+        vec!["c", "d"],
+        vec!["d", "e"],
+        vec!["e", "f"],
     ];
     let tail = ["c", "d", "e", "f"][operands - 1];
     Network::new(
-        all_inputs.into_iter().take(operands).collect(),
+        all_inputs.into_iter().take(operands),
         vec![false; operands],
-        std::iter::once(Some(2))
-            .chain(std::iter::repeat_n(Some(1), operands - 1))
-            .collect(),
+        std::iter::once(2).chain(std::iter::repeat_n(1, operands - 1)),
         if permute_output {
-            labels(&["b", "a", tail])
+            vec!["b", "a", tail]
         } else {
-            labels(&["a", "b", tail])
+            vec!["a", "b", tail]
         },
         Some(2),
     )
@@ -780,7 +778,12 @@ fn injected_plan_case(
     let planned = injected_network(operands, permute_output)
         .plan(
             &refs,
-            &LabelOrderDenseOptimizer::new(labels(&["c", "d", "e"])[..operands - 1].to_vec()),
+            &LabelOrderDenseOptimizer::new(
+                ["c", "d", "e"][..operands - 1]
+                    .iter()
+                    .map(|&label| label.into())
+                    .collect(),
+            ),
         )
         .unwrap();
     (provider, tensors, planned)
@@ -869,10 +872,13 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
         (2 + 2 * ij[0] + ij[1]) as f64
     })
     .unwrap();
-    let inputs = vec![labels(&["a", "x"]), labels(&["x", "c"])];
-    let output = labels(&["a", "c"]);
+    let inputs = vec![
+        ["a", "x"].map(TemporaryLabel::from).to_vec(),
+        ["x", "c"].map(TemporaryLabel::from).to_vec(),
+    ];
+    let output = ["a", "c"].map(TemporaryLabel::from).to_vec();
     let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
-    let network = Network::new(inputs, vec![false; 2], vec![Some(1); 2], output, Some(1)).unwrap();
+    let network = Network::new(inputs, vec![false; 2], vec![1; 2], output, Some(1)).unwrap();
     let tensors = [&lhs, &rhs];
     let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
     let cost = DenseCostModel::from_network(
@@ -885,7 +891,7 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     .unwrap();
     let dense = SlicedPlan::new(
         planned.plan().clone(),
-        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["a"])),
+        slice_plan_for(&ir, planned.plan(), &cost, &[TemporaryLabel::from("a")]),
     );
     let multi = network
         .lower_symmetric_sliced_plan(&tensors, dense)
@@ -1001,7 +1007,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
             },
         )
         .unwrap();
-    let scalar_plan = Network::new(vec![vec![]], vec![false], vec![Some(0)], vec![], Some(0))
+    let scalar_plan = Network::new([Vec::<&str>::new()], [false], [0], [], Some(0))
         .unwrap()
         .plan(&[&scalar], &GreedyDenseOptimizer)
         .unwrap();
@@ -1014,10 +1020,10 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         scalar.dense_data().unwrap()
     );
     let outer = Network::new(
-        vec![labels(&["a"]), labels(&["b"])],
+        vec![vec!["a"], vec!["b"]],
         vec![false; 2],
-        vec![Some(1), Some(0)],
-        labels(&["a", "b"]),
+        vec![1, 0],
+        vec!["a", "b"],
         Some(1),
     )
     .unwrap()
@@ -1047,10 +1053,10 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         })
         .unwrap();
     let permuted = Network::new(
-        vec![labels(&["a", "b", "c"])],
+        vec![vec!["a", "b", "c"]],
         vec![false],
-        vec![Some(2)],
-        labels(&["b", "a", "c"]),
+        vec![2],
+        vec!["b", "a", "c"],
         Some(2),
     )
     .unwrap()
@@ -1074,10 +1080,10 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap();
     let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], []).unwrap();
     let zero_outer = Network::new(
-        vec![labels(&["a"]), labels(&["b"])],
+        vec![vec!["a"], vec!["b"]],
         vec![false; 2],
-        vec![Some(1); 2],
-        labels(&["a", "b"]),
+        vec![1; 2],
+        vec!["a", "b"],
         Some(1),
     )
     .unwrap()
@@ -1147,10 +1153,10 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_operands_match_direct_author
 
     let lazy = a64.adjoint().unwrap();
     let network = Network::new(
-        vec![labels(&["i", "j"]), labels(&["j", "k"])],
+        vec![vec!["i", "j"], vec!["j", "k"]],
         vec![false; 2],
-        vec![Some(1); 2],
-        labels(&["i", "k"]),
+        vec![1; 2],
+        vec!["i", "k"],
         Some(1),
     )
     .unwrap();
@@ -1193,10 +1199,10 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_operands_match_direct_author
     ));
 
     let conjugated = Network::new(
-        vec![labels(&["j", "i"]), labels(&["j", "k"])],
+        vec![vec!["j", "i"], vec!["j", "k"]],
         vec![true, false],
-        vec![Some(1); 2],
-        labels(&["i", "k"]),
+        vec![1; 2],
+        vec!["i", "k"],
         Some(1),
     )
     .unwrap()
