@@ -20,8 +20,7 @@ use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace, PlannedNetwork, TemporaryLabel,
-    TensorId,
+    LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace, PlannedNetwork, TensorId,
 };
 
 struct CountingAllocator;
@@ -236,20 +235,12 @@ fn measure<T>(
     }
 }
 
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 fn chain_network() -> Network {
     Network::new(
-        vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-        ],
+        vec![vec!["a", "b"], vec!["b", "c"], vec!["c", "d"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["a", "d"]),
+        vec![1; 3],
+        vec!["a", "d"],
         Some(1),
     )
     .unwrap()
@@ -265,7 +256,10 @@ where
 {
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
     let planned = chain_network()
-        .plan(&refs, &LabelOrderDenseOptimizer::new(labels(&["b", "c"])))
+        .plan(
+            &refs,
+            &LabelOrderDenseOptimizer::new(vec!["b".into(), "c".into()]),
+        )
         .unwrap();
     assert_eq!(
         planned

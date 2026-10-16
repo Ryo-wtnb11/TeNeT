@@ -36,21 +36,16 @@ use tenet::typed::ContractSpec;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::{Network, TemporaryLabel};
-
-/// One operand's or the output's written labels.
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
+use tenet_network::Network;
 
 /// `[i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]`, built once per measured
 /// loop so the loop times only the cached contraction.
 fn pair_network() -> Network {
     Network::new(
-        vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+        vec![vec!["i", "j", "k", "l"], vec!["k", "l", "m", "n"]],
         vec![false, false],
-        vec![Some(2), Some(2)],
-        labels(&["i", "j", "m", "n"]),
+        vec![2, 2],
+        vec!["i", "j", "m", "n"],
         Some(2),
     )
     .expect("network")

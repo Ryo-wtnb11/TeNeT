@@ -53,12 +53,7 @@ mod device {
         ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd,
         TensorMap, Truncation,
     };
-    use tenet_network::{Network, TemporaryLabel};
-
-    /// One operand's or the output's written labels.
-    fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-        names.iter().copied().map(TemporaryLabel::from).collect()
-    }
+    use tenet_network::Network;
 
     /// Fixture families. The parameters are explicit CLI inputs; nothing in
     /// TeNeT or in this harness dispatches on them.
@@ -1371,14 +1366,10 @@ mod device {
         // canonical three-tensor network chain
         {
             let chain = Network::new(
-                vec![
-                    labels(&["p", "q"]),
-                    labels(&["q", "r"]),
-                    labels(&["r", "s"]),
-                ],
+                vec![vec!["p", "q"], vec!["q", "r"], vec!["r", "s"]],
                 vec![false, false, false],
-                vec![Some(1), Some(1), Some(1)],
-                labels(&["p", "s"]),
+                vec![1, 1, 1],
+                vec!["p", "s"],
                 Some(1),
             )
             .expect("chain network");

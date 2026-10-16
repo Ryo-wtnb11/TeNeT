@@ -117,7 +117,7 @@ fn rank_four_orientation_network() -> Network {
             vec![label("a"), label("f"), label("d"), label("e")],
         ],
         vec![false; 3],
-        vec![Some(2), Some(1), Some(3)],
+        vec![2, 1, 3],
         vec![label("e"), label("b")],
         Some(1),
     )
@@ -164,16 +164,15 @@ fn assert_rank_four_orientation_replay<D>(
         (&[2][..], &[0, 1, 3][..])
     );
 
-    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
     let cached = Network::new(
-        vec![
-            labels(&["a", "f", "c"]),
-            labels(&["c", "b", "d"]),
-            labels(&["a", "f", "d", "e"]),
+        [
+            vec!["a", "f", "c"],
+            vec!["c", "b", "d"],
+            vec!["a", "f", "d", "e"],
         ],
-        vec![false; 3],
-        vec![Some(2), Some(1), Some(3)],
-        labels(&["e", "b"]),
+        [false; 3],
+        [2, 1, 3],
+        ["e", "b"],
         Some(1),
     )
     .unwrap();
@@ -233,7 +232,7 @@ fn ordinary_workspace_replay_skips_payload_meter_snapshots() {
             vec![label("y"), label("c")],
         ],
         vec![false; 3],
-        vec![Some(1); 3],
+        vec![1; 3],
         vec![label("a"), label("c")],
         Some(1),
     )
@@ -272,7 +271,7 @@ fn symmetric_slice_binding_checks_adjoint_orientation_leg_and_rule() {
     let network = Network::new(
         vec![written],
         vec![true],
-        vec![Some(1)],
+        vec![1],
         effective.clone(),
         Some(1),
     )
@@ -371,7 +370,7 @@ fn internal_symmetric_slices_match_unsliced_multisector_and_meter_cold_warm() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 3],
-        vec![Some(1); 3],
+        vec![1; 3],
         output.clone(),
         Some(1),
     )
@@ -477,7 +476,7 @@ fn output_and_mixed_slices_scatter_by_output_position() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -548,7 +547,7 @@ fn mixed_output_slice_keeps_structural_zero_jobs() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -605,7 +604,7 @@ fn greedy_output_slice_plan_executes_end_to_end() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 3],
-        vec![Some(1); 3],
+        vec![1; 3],
         output.clone(),
         Some(1),
     )
@@ -674,7 +673,7 @@ fn mixed_slice_accumulator_uses_final_contraction_authority() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 3],
-        vec![Some(1); 3],
+        vec![1; 3],
         output.clone(),
         Some(1),
     )
@@ -745,7 +744,7 @@ fn mixed_symmetric_slice_legal_empty_returns_unsliced_zero_layout() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -819,7 +818,7 @@ fn internal_slice_maps_nonselfdual_partner_from_authority_leg() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -867,7 +866,7 @@ fn output_slice_scatter_uses_domain_side_nonselfdual_logical_leg() {
     let network = Network::new(
         vec![labels.clone()],
         vec![false],
-        vec![Some(1)],
+        vec![1],
         labels.clone(),
         Some(1),
     )
@@ -912,7 +911,7 @@ fn zero_step_conjugated_output_slice_scatter_reads_lazy_adjoint() {
     let network = Network::new(
         vec![written],
         vec![true],
-        vec![Some(1)],
+        vec![1],
         effective.clone(),
         Some(1),
     )
@@ -964,7 +963,7 @@ fn compact_input_preflight_applies_to_output_slices() {
     let network = Network::new(
         vec![labels.clone()],
         vec![false],
-        vec![Some(1)],
+        vec![1],
         labels.clone(),
         Some(1),
     )
@@ -1028,7 +1027,7 @@ where
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -1094,7 +1093,7 @@ fn fermionic_complex_conjugated_operand_mixed_slice_matches_unsliced() {
     let network = Network::new(
         written_inputs,
         vec![true, false],
-        vec![Some(1); 2],
+        vec![1; 2],
         output.clone(),
         Some(1),
     )
@@ -1276,7 +1275,7 @@ fn assert_asymmetric_cuda_plan_parity<R>(
             vec![label("i1"), label("k0"), label("k1")],
         ],
         vec![true, false],
-        vec![Some(2), Some(1)],
+        vec![2, 1],
         vec![label("j"), label("i0"), label("k0"), label("k1")],
         Some(2),
     )
@@ -1397,7 +1396,7 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
             labels(&["c", "d"]),
         ],
         vec![false; 3],
-        vec![Some(1); 3],
+        vec![1; 3],
         labels(&["a", "d"]),
         Some(1),
     )
@@ -1523,7 +1522,7 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     let pair = Network::new(
         vec![labels(&["a", "b"]), labels(&["b", "c"])],
         vec![false; 2],
-        vec![Some(1); 2],
+        vec![1; 2],
         labels(&["a", "c"]),
         Some(1),
     )
@@ -1812,7 +1811,7 @@ fn typed_split_moving_step_is_one_contract_equal_to_contract_then_permute() {
             vec![label("b"), label("d"), label("e")],
         ],
         vec![false; 3],
-        vec![Some(1), Some(1), Some(2)],
+        vec![1, 1, 2],
         vec![label("e"), label("a")],
         Some(1),
     )
@@ -1975,26 +1974,16 @@ fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
             vec![TemporaryLabel::from("y"), TemporaryLabel::from("x")],
         ],
         vec![false, false],
-        vec![Some(1), Some(1)],
+        vec![1, 1],
         Vec::new(),
         Some(0),
     )
     .unwrap()
     .contract(&[&c, &d])
     .unwrap();
-    let network = |inputs: Vec<Vec<&str>>, splits: Vec<Option<usize>>| {
+    let network = |inputs: Vec<Vec<&str>>, splits: Vec<usize>| {
         let n = inputs.len();
-        Network::new(
-            inputs
-                .into_iter()
-                .map(|names| names.into_iter().map(label).collect())
-                .collect(),
-            vec![false; n],
-            splits,
-            vec![label("i"), label("k")],
-            Some(1),
-        )
-        .unwrap()
+        Network::new(inputs, vec![false; n], splits, ["i", "k"], Some(1)).unwrap()
     };
     let ab = matrix_product_plan(false, &["i", "k"]);
     let rejects = |result: Result<PlannedNetwork, Error>| {
@@ -2003,10 +1992,7 @@ fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
 
     // A rank-0 operand is a closed scalar subnetwork: a 2-tensor A*B plan
     // would otherwise drop it and return A*B.
-    let with_scalar = network(
-        vec![vec!["i", "j"], vec!["j", "k"], vec![]],
-        vec![Some(1), Some(1), Some(0)],
-    );
+    let with_scalar = network(vec![vec!["i", "j"], vec!["j", "k"], vec![]], vec![1, 1, 0]);
     rejects(with_scalar.plan_with(&[&a, &b, &s], ab.clone()));
 
     // A pair contracted only with each other is the same closed subnetwork.
@@ -2017,13 +2003,13 @@ fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
             vec!["x", "y"],
             vec!["y", "x"],
         ],
-        vec![Some(1); 4],
+        vec![1; 4],
     );
     let abcd = [&a, &b, &c, &d];
     rejects(with_pair.plan_with(&abcd, ab.clone()));
 
     // A plan for more tensors than the network has is rejected up front.
-    let product = network(vec![vec!["i", "j"], vec!["j", "k"]], vec![Some(1); 2]);
+    let product = network(vec![vec!["i", "j"], vec!["j", "k"]], vec![1; 2]);
     rejects(product.plan_with(&[&a, &b], matrix_product_plan(true, &["i", "k"])));
 
     // A plan for the same tensor count but another output is rejected.

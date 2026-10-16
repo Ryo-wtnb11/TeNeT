@@ -102,7 +102,7 @@ pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 /// use std::sync::Arc;
 /// use tenet::sector::{U1FusionRule, U1Irrep};
 /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
-/// use tenet_network::{Network, TemporaryLabel};
+/// use tenet_network::Network;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let runtime = Runtime::builder().build()?;
@@ -112,14 +112,7 @@ pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 /// let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 1)?;
 /// let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v], [&v], 2)?;
 /// let traced = a.trace_pairs(&[(0, 2)])?; // legs [k; l]
-/// let label = |name: &str| TemporaryLabel::new(name);
-/// let network = Network::new(
-///     vec![vec![label("k"), label("l")], vec![label("l"), label("m")]],
-///     vec![false, false],
-///     vec![Some(1), Some(1)],
-///     vec![label("k"), label("m")],
-///     Some(1),
-/// )?;
+/// let network = Network::new([["k", "l"], ["l", "m"]], [false, false], [1, 1], ["k", "m"], Some(1))?;
 /// let result = network.contract(&[&traced, &b])?;
 /// assert_eq!(result.rank(), 2);
 /// # Ok(())
@@ -128,7 +121,7 @@ pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 pub struct Network {
     pub(crate) inputs: Vec<Vec<TemporaryLabel>>,
     pub(crate) conj: Vec<bool>,
-    pub(crate) codomain_splits: Vec<Option<usize>>,
+    pub(crate) codomain_splits: Vec<usize>,
     pub(crate) output: Vec<TemporaryLabel>,
     /// Number of output labels on the codomain side (`;` position);
     /// `None` = all-codomain output.

@@ -50,12 +50,11 @@ fn u1_operands(runtime: &Runtime) -> [TensorMap<U1FusionRule, f64>; 3] {
 }
 
 fn pair_network() -> Network {
-    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
     Network::new(
-        vec![labels(&["i", "j", "m"]), labels(&["m", "k", "l"])],
-        vec![false, false],
-        vec![Some(2), Some(1)],
-        labels(&["i", "j", "k", "l"]),
+        [vec!["i", "j", "m"], vec!["m", "k", "l"]],
+        [false, false],
+        vec![2, 1],
+        ["i", "j", "k", "l"],
         Some(2),
     )
     .unwrap()
@@ -88,12 +87,11 @@ fn a_warm_network_contract_allocates_no_more_than_its_replay() {
     // A `conj` operand: the preflight reads its legs through the reversed
     // written/lowered axis map, still without allocating. `conj(b)` is
     // `[v, v; w]`, so it contracts with `b` over all three legs.
-    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
     let conj_pair = Network::new(
-        vec![labels(&["m", "i", "j"]), labels(&["m", "i", "j"])],
-        vec![true, false],
-        vec![Some(1), Some(1)],
-        Vec::new(),
+        [["m", "i", "j"], ["m", "i", "j"]],
+        [true, false],
+        [1, 1],
+        [],
         Some(0),
     )
     .unwrap();
@@ -148,7 +146,7 @@ fn planned_and_sliced_executions_reject_non_symmetric_braiding_first() {
     let network = Network::new(
         inputs.clone(),
         vec![false; 2],
-        vec![Some(1), Some(1)],
+        vec![1, 1],
         output.clone(),
         Some(1),
     )

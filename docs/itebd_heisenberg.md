@@ -97,23 +97,24 @@ two-site tensor. This is the complete network from the example:
 ```rust
 let theta = Network::new(
     vec![
-        labels(&["l", "x"]),              // l_out[l; x]
-        labels(&["x", "qa", "y"]),        // g1[x, qa; y]
-        labels(&["y", "z"]),              // l_mid[y; z]
-        labels(&["z", "qb", "w"]),        // g2[z, qb; w]
-        labels(&["w", "r"]),              // l_out[w; r]
-        labels(&["pa", "pb", "qa", "qb"]), // gate[pa, pb; qa, qb]
+        vec!["l", "x"],               // l_out[l; x]
+        vec!["x", "qa", "y"],         // g1[x, qa; y]
+        vec!["y", "z"],               // l_mid[y; z]
+        vec!["z", "qb", "w"],         // g2[z, qb; w]
+        vec!["w", "r"],               // l_out[w; r]
+        vec!["pa", "pb", "qa", "qb"], // gate[pa, pb; qa, qb]
     ],
     vec![false; 6],
-    vec![Some(1), Some(2), Some(1), Some(2), Some(1), Some(2)],
-    labels(&["l", "pa", "pb", "r"]),
+    vec![1, 2, 1, 2, 1, 2],
+    vec!["l", "pa", "pb", "r"],
     Some(2),
 )?
 .contract(&[l_out, g1, l_mid, g2, l_out, gate])?;
 ```
 
 Each operand's labels list its codomain legs then its domain legs, and the
-`Some(k)` beside it is how many of them are codomain legs. The output
+matching entry of `[1, 2, 1, 2, 1, 2]` is how many of them are codomain legs;
+`Network::contract` checks it against the tensor before planning. The output
 `[l, pa; pb, r]` (two codomain legs) sets the bipartition for the following
 SVD: the first site and left bond are separated from the second site and right
 bond. Labels that appear twice are summed; labels that remain once become

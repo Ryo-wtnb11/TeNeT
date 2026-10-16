@@ -57,7 +57,7 @@ struct OperandTopology {
     /// Codomain rank of the operand tensor: it fixes the conj label
     /// rotation, so it is structural even though it is not a label.
     codomain_rank: usize,
-    written_split: Option<usize>,
+    written_split: usize,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -748,10 +748,7 @@ fn topology_text(topology: &NetworkTopology) -> String {
         text.push(':');
         text.push_str(&operand.codomain_rank.to_string());
         text.push(':');
-        match operand.written_split {
-            Some(split) => text.push_str(&split.to_string()),
-            None => text.push('-'),
-        }
+        text.push_str(&operand.written_split.to_string());
         text.push(':');
         for (i, label) in operand.labels.iter().enumerate() {
             if i > 0 {
@@ -1547,10 +1544,6 @@ mod tests {
         error
     }
 
-    fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-        names.iter().copied().map(TemporaryLabel::from).collect()
-    }
-
     /// The two networks of the #1371 tests: `[i; k] = a[i; j] * b[j; k]`, and
     /// a contraction of two codomain legs, neither read as a dual,
     /// `[i; k] = a[i, j;] * b[j, k;]`. Each is one topology for every
@@ -1562,10 +1555,10 @@ mod tests {
         T::Error: std::fmt::Display,
     {
         Network::new(
-            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![vec!["i", "j"], vec!["j", "k"]],
             vec![false, false],
-            vec![Some(1), Some(1)],
-            labels(&["i", "k"]),
+            vec![1, 1],
+            vec!["i", "k"],
             Some(1),
         )
         .unwrap()
@@ -1580,10 +1573,10 @@ mod tests {
         T::Error: std::fmt::Display,
     {
         Network::new(
-            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![vec!["i", "j"], vec!["j", "k"]],
             vec![false, false],
-            vec![Some(2), Some(2)],
-            labels(&["i", "k"]),
+            vec![2, 2],
+            vec!["i", "k"],
             Some(1),
         )
         .unwrap()
@@ -1690,10 +1683,10 @@ mod tests {
         let o = rejections(&runtime);
         let tensors = [&o.a, &o.b];
         let network = Network::new(
-            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![vec!["i", "j"], vec!["j", "k"]],
             vec![false, false],
-            vec![Some(1), Some(1)],
-            labels(&["i", "k"]),
+            vec![1, 1],
+            vec!["i", "k"],
             Some(1),
         )
         .unwrap();
@@ -1718,6 +1711,42 @@ mod tests {
             after.workspaces_created + 1,
             "the quarantined workspace is replaced, not resurrected"
         );
+    }
+
+    /// #2269: a written `;` split that is not the tensor's codomain rank is
+    /// rejected before the plan-cache lookup on the miss, topology-hit and
+    /// alias-hit paths of the same `Network`, so the alias the accepted call
+    /// installed (keyed by the network, not the tensors) is never reached.
+    #[test]
+    fn a_mismatched_written_split_leaves_the_plan_cache_untouched_on_every_path() {
+        let runtime = tenet::typed::Runtime::builder().build().unwrap();
+        let o = rejections(&runtime);
+        let none = || ();
+        for (what, accept, reject, split, rank) in [
+            (
+                "split 1 on codomain rank 2",
+                &(|| pair(&o.a, &o.b)) as Call<'_>,
+                &(|| pair(&o.cc_a, &o.cc_b)) as Call<'_>,
+                1,
+                2,
+            ),
+            (
+                "split 2 on codomain rank 1",
+                &|| codomain_pair(&o.cc_a, &o.cc_b),
+                &|| codomain_pair(&o.a, &o.b),
+                2,
+                1,
+            ),
+        ] {
+            let error = assert_rejected_before_the_lookup(&runtime, what, accept, reject, &none);
+            assert_eq!(
+                error,
+                format!(
+                    "invalid argument: operand 0 puts {split} label(s) before `;` but the tensor's codomain rank is {rank}"
+                ),
+                "{what}"
+            );
+        }
     }
 
     /// #1371: a Host `Network::contract` whose operands are
@@ -1865,7 +1894,7 @@ mod tests {
                 labels: labels.iter().copied().map(TemporaryLabel::from).collect(),
                 conj: false,
                 codomain_rank: 1,
-                written_split: Some(1),
+                written_split: 1,
             }],
             output: Vec::new(),
             output_codomain_rank: Some(0),

@@ -1,5 +1,4 @@
 mod u1 {
-    use super::labels;
     use std::{hint::black_box, sync::Arc, time::Instant};
     use tenet::sector::{U1FusionRule, U1Irrep};
     use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
@@ -53,10 +52,10 @@ mod u1 {
         }
         let (a, b) = fixture(&runtime);
         let network = Network::new(
-            vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+            vec![vec!["i", "j", "k", "l"], vec!["k", "l", "m", "n"]],
             vec![false, false],
-            vec![Some(2), Some(2)],
-            labels(&["i", "j", "m", "n"]),
+            vec![2, 2],
+            vec!["i", "j", "m", "n"],
             Some(2),
         )
         .unwrap();
@@ -121,13 +120,6 @@ mod u1 {
     }
 }
 
-use tenet_network::TemporaryLabel;
-
-/// One operand's or the output's written labels.
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 #[cfg(not(feature = "racah-generated"))]
 fn run_u1_medians() {
     let mut rows = std::collections::BTreeMap::<(String, String), Vec<(f64, Vec<String>)>>::new();
@@ -163,7 +155,6 @@ fn run_u1_medians() {
 
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
-    use super::labels;
     use std::hint::black_box;
     use std::process::Command;
     use std::sync::Arc;
@@ -257,10 +248,10 @@ mod checked_generic {
         }
         let (a, b) = fixture(&runtime, Arc::clone(&provider), label.clone());
         let network = Network::new(
-            vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+            vec![vec!["i", "j", "k", "l"], vec!["k", "l", "m", "n"]],
             vec![false, false],
-            vec![Some(2), Some(2)],
-            labels(&["i", "j", "m", "n"]),
+            vec![2, 2],
+            vec!["i", "j", "m", "n"],
             Some(2),
         )
         .unwrap();

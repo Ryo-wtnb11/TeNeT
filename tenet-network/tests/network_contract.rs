@@ -11,28 +11,20 @@ use tenet::sector::{
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
-    GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, PlanCacheConfig, TemporaryLabel,
+    GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, PlanCacheConfig,
 };
 
 #[path = "../../tests/support/network.rs"]
 mod network_support;
 use network_support::{conj, net, op};
 
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 /// `[i; m] = a[i; j] * b[j; k] * c[k; m]`.
 fn chain() -> Network {
     Network::new(
-        vec![
-            labels(&["i", "j"]),
-            labels(&["j", "k"]),
-            labels(&["k", "m"]),
-        ],
+        vec![vec!["i", "j"], vec!["j", "k"], vec!["k", "m"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["i", "m"]),
+        vec![1; 3],
+        vec!["i", "m"],
         Some(1),
     )
     .unwrap()
@@ -41,14 +33,10 @@ fn chain() -> Network {
 /// `[] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r]`.
 fn expectation() -> Network {
     Network::new(
-        vec![
-            labels(&["p", "l", "r"]),
-            labels(&["p", "q"]),
-            labels(&["q", "l", "r"]),
-        ],
+        vec![vec!["p", "l", "r"], vec!["p", "q"], vec!["q", "l", "r"]],
         vec![true, false, false],
-        vec![Some(1); 3],
-        labels(&[]),
+        vec![1; 3],
+        vec![],
         Some(0),
     )
     .unwrap()
@@ -259,14 +247,10 @@ fn contract_shares_the_topology_cache_and_counts_hits() {
 
     // Another topology is another entry.
     let other = Network::new(
-        vec![
-            labels(&["i", "j"]),
-            labels(&["j", "k"]),
-            labels(&["k", "m"]),
-        ],
+        vec![vec!["i", "j"], vec!["j", "k"], vec!["k", "m"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["m", "i"]),
+        vec![1; 3],
+        vec!["m", "i"],
         Some(1),
     )
     .unwrap();

@@ -22,16 +22,12 @@ use tenet_network::{
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
-    names.iter().copied().map(TemporaryLabel::from).collect()
-}
-
 fn pair_network() -> Network {
     Network::new(
-        vec![labels(&["a", "k"]), labels(&["k", "b"])],
+        vec![vec!["a", "k"], vec!["k", "b"]],
         vec![false, false],
-        vec![Some(1), Some(1)],
-        labels(&["a", "b"]),
+        vec![1, 1],
+        vec!["a", "b"],
         Some(1),
     )
     .unwrap()
@@ -282,14 +278,10 @@ fn run_shape_reuse_sequence<R, D>(
         matrix(&runtime, &initial, &initial, 3.0, &sector_tag),
     ];
     let network = Network::new(
-        vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-        ],
+        vec![vec!["a", "b"], vec!["b", "c"], vec!["c", "d"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["a", "d"]),
+        vec![1; 3],
+        vec!["a", "d"],
         Some(1),
     )
     .unwrap();
@@ -301,7 +293,7 @@ fn run_shape_reuse_sequence<R, D>(
     let plan = network
         .plan(
             &initial_refs,
-            &LabelOrderDenseOptimizer::new(labels(&["b", "c"])),
+            &LabelOrderDenseOptimizer::new(vec!["b".into(), "c".into()]),
         )
         .unwrap();
     assert_eq!(
@@ -660,10 +652,10 @@ fn planning_conjugation_uses_checked_effective_duals_without_reading_storage() {
         assert_eq!(adjoint.codomain(), vec![y.clone()]);
         assert_eq!(adjoint.domain(), vec![x0.clone(), x1.clone()]);
         let network = Network::new(
-            vec![labels(&["i0", "i1", "j"]), labels(&["i1", "k0", "k1"])],
+            vec![vec!["i0", "i1", "j"], vec!["i1", "k0", "k1"]],
             vec![true, false],
-            vec![Some(2), Some(1)],
-            labels(&["j", "i0", "k0", "k1"]),
+            vec![2, 1],
+            vec!["j", "i0", "k0", "k1"],
             Some(2),
         )
         .unwrap();
@@ -754,10 +746,10 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&v], [&v], 10).unwrap();
 
     let single = Network::new(
-        vec![labels(&["i", "j"])],
+        vec![vec!["i", "j"]],
         vec![false],
-        vec![Some(1)],
-        labels(&["j", "i"]),
+        vec![1],
+        vec!["j", "i"],
         Some(1),
     )
     .unwrap();
@@ -770,9 +762,9 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     );
 
     let scalar = Network::new(
-        vec![labels(&["i", "j"]), labels(&["i", "j"])],
+        vec![vec!["i", "j"], vec!["i", "j"]],
         vec![true, false],
-        vec![Some(1), Some(1)],
+        vec![1, 1],
         vec![],
         Some(0),
     )
@@ -809,10 +801,10 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let rhs =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&bond], [&c, &d], 12).unwrap();
     let crossed = Network::new(
-        vec![labels(&["a", "b", "k"]), labels(&["k", "c", "d"])],
+        vec![vec!["a", "b", "k"], vec!["k", "c", "d"]],
         vec![false, false],
-        vec![Some(2), Some(1)],
-        labels(&["d", "a", "b", "c"]),
+        vec![2, 1],
+        vec!["d", "a", "b", "c"],
         Some(2),
     )
     .unwrap();
@@ -842,10 +834,10 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let dense = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&v], [&v], 20).unwrap();
     let identity = Network::new(
-        vec![labels(&["i", "j"])],
+        vec![vec!["i", "j"]],
         vec![false],
-        vec![Some(1)],
-        labels(&["i", "j"]),
+        vec![1],
+        vec!["i", "j"],
         Some(1),
     )
     .unwrap();
@@ -855,10 +847,10 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     let lazy = dense.adjoint().unwrap();
     assert_same(&plan.execute(&[&lazy], &mut workspace).unwrap(), &lazy);
     let conjugate = Network::new(
-        vec![labels(&["i", "j"])],
+        vec![vec!["i", "j"]],
         vec![true],
-        vec![Some(1)],
-        labels(&["j", "i"]),
+        vec![1],
+        vec!["j", "i"],
         Some(1),
     )
     .unwrap();
@@ -1029,14 +1021,10 @@ fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
         .collect::<Vec<_>>();
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
     let network = Network::new(
-        vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-        ],
+        vec![vec!["a", "b"], vec!["b", "c"], vec!["c", "d"]],
         vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["a", "d"]),
+        vec![1; 3],
+        vec!["a", "d"],
         Some(1),
     )
     .unwrap();
@@ -1091,14 +1079,14 @@ fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
     let refs = [&a, &b, &c, &d];
     let network = Network::new(
         vec![
-            labels(&["a", "x"]),
-            labels(&["b", "y"]),
-            labels(&["x", "c"]),
-            labels(&["y", "d"]),
+            vec!["a", "x"],
+            vec!["b", "y"],
+            vec!["x", "c"],
+            vec!["y", "d"],
         ],
         vec![false; 4],
-        vec![Some(1); 4],
-        labels(&["a", "b", "c", "d"]),
+        vec![1; 4],
+        vec!["a", "b", "c", "d"],
         Some(2),
     )
     .unwrap();
@@ -1116,7 +1104,10 @@ fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
         (steps[2].lhs(), steps[2].rhs()),
         (TensorId::new(5), TensorId::new(4))
     );
-    assert_eq!(steps[2].result_labels(), labels(&["a", "b", "c", "d"]));
+    assert_eq!(
+        steps[2].result_labels(),
+        ["a", "b", "c", "d"].map(TemporaryLabel::from)
+    );
 
     let ac = a
         .contract(
@@ -1172,14 +1163,14 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     let chain_refs = [&chain[0], &chain[1], &chain[2], &chain[3]];
     let chain_network = Network::new(
         vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-            labels(&["d", "e"]),
+            vec!["a", "b"],
+            vec!["b", "c"],
+            vec!["c", "d"],
+            vec!["d", "e"],
         ],
         vec![false; 4],
-        vec![Some(1); 4],
-        labels(&["a", "e"]),
+        vec![1; 4],
+        vec!["a", "e"],
         Some(1),
     )
     .unwrap();
@@ -1189,7 +1180,7 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     let naive = chain_network
         .plan(
             &chain_refs,
-            &LabelOrderDenseOptimizer::new(labels(&["b", "c", "d"])),
+            &LabelOrderDenseOptimizer::new(vec!["b".into(), "c".into(), "d".into()]),
         )
         .unwrap();
     assert_eq!(
@@ -1221,13 +1212,13 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     let ring_refs = [&ring[0], &ring[1], &ring[2], &ring[3]];
     let ring_network = Network::new(
         vec![
-            labels(&["a", "b"]),
-            labels(&["b", "c"]),
-            labels(&["c", "d"]),
-            labels(&["d", "a"]),
+            vec!["a", "b"],
+            vec!["b", "c"],
+            vec!["c", "d"],
+            vec!["d", "a"],
         ],
         vec![false; 4],
-        vec![Some(1); 4],
+        vec![1; 4],
         vec![],
         Some(0),
     )
