@@ -10,7 +10,7 @@ mod numerics;
 
 use std::hint::black_box;
 use std::sync::Arc;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn::typed::HermitianTol;
 
 use symtn::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
@@ -30,7 +30,7 @@ static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAl
 
 #[derive(Debug)]
 #[cfg_attr(
-    not(feature = "racah-generated"),
+    not(feature = "cgc-gen"),
     expect(
         dead_code,
         reason = "only the checked-Generic contracts read total bytes"
@@ -184,7 +184,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use symtn::sector::SUNFusionRule;

@@ -145,7 +145,7 @@ fn expert_storage_admission_is_symmetry_independent() {
     assert_expert_storage_admission_for_rule(&triple, vacuum);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_coupled_storage_is_admitted_by_witness() {
     // What: checked-Generic SU(3) destinations with outer multiplicity use

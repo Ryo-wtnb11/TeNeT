@@ -318,7 +318,7 @@ fn first_mismatch_names_each_field_alone() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_rule_instance_alone_separates_signatures() {
     // What: SU(3) and SU(4) trivial legs give the same hom space and

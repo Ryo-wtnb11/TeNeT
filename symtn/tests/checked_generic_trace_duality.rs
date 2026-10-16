@@ -1,4 +1,4 @@
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 //! A checked Generic trace pairs only mutually dual legs (#1856 F1), as
 //! TensorKit `trace_permute!` requires `space(tsrc, q₁) == dual(space(tsrc, q₂))`.
 //! The fixtures share their first sector, which the former first-sector

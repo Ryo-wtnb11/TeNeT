@@ -373,7 +373,7 @@ base_suite!(complex32_payload, Complex32, Complex64);
 /// SU(3) with the adjoint irrep produces fusion trees that differ only by
 /// their multiplicity vertex, which the multiplicity-free fixtures above
 /// cannot reach.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use std::sync::Arc;
 

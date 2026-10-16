@@ -308,7 +308,7 @@ fn fermionic_z2_times_u1_view_matches_owned_lazy_adjoint() {
     mf_case!(v(), w(), Complex64, CX.0, CX.1, "fZ2xU1 c64");
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_view_matches_owned_lazy_adjoint() {
     use symtn_core::SUNFusionRule;

@@ -2577,7 +2577,7 @@ thread_local! {
     static TRACE_TEST_FAIL_TWIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRACE_TEST_TWIST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_whole_basis;
 mod staged_publication;
 mod trace_cache4;

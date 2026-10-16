@@ -782,7 +782,7 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
     // What (#1520): checked Generic compose on SU(3), where `8 ⊗ 8 → 8` has

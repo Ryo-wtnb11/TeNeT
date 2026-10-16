@@ -102,7 +102,7 @@ fn checked_generic_compose_and_inv_powers_match_explicit_real_and_complex_oracle
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_inverse_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
 where
     D: symtn::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
@@ -161,7 +161,7 @@ where
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_inv_sun_outer_multiplicity_satisfies_inverse_laws() {
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -170,7 +170,7 @@ fn checked_generic_inv_sun_outer_multiplicity_satisfies_inverse_laws() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_inv<D>(n: usize, label: Vec<i64>)
 where
     D: symtn::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
@@ -229,7 +229,7 @@ where
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_laws() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -238,7 +238,7 @@ fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_law
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
     use symtn::sector::SUNFusionRule;
 
@@ -365,7 +365,7 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
     assert_eq!(moved.dense_data().unwrap(), composed.dense_data().unwrap());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_left_solve_preserves_outer_multiplicity() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -373,7 +373,7 @@ fn sun_checked_generic_left_solve_preserves_outer_multiplicity() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
     use symtn::sector::SUNFusionRule;
@@ -563,7 +563,7 @@ fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publicat
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>) {
     use symtn::sector::SUNFusionRule;
 
@@ -676,7 +676,7 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_exp_sun_outer_multiplicity_preserves_layout() {
     assert_sun_checked_generic_exp_outer_multiplicity(3, vec![1, 1]);

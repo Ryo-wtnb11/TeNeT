@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_endomorphism_row_and_column_tree_stacking_is_identical() {
     use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ fn sun_endomorphism_row_and_column_tree_stacking_is_identical() {
 /// #1449: like TensorKit `adjoint(::DiagonalTensorMap)` and the
 /// multiplicity-free path, the checked-Generic adjoint of a compact diagonal is
 /// the owned conjugated diagonal, and its unstored zeros stay `+0 + 0i`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     use symtn::sector::SUNFusionRule;
@@ -370,7 +370,7 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     ));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
     use symtn::sector::SUNFusionRule;
@@ -1130,7 +1130,7 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     assert_eq!(valid_rhs.dense_data().unwrap(), rhs_before);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn sun_cat_marker(trees: &symtn::typed::BlockFusionTrees<Vec<i64>>) -> usize {
     trees
         .codomain_vertices()
@@ -1147,7 +1147,7 @@ fn sun_cat_marker(trees: &symtn::typed::BlockFusionTrees<Vec<i64>>) -> usize {
         .sum()
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_cat_values<D>(
     output: &TensorMap<symtn::sector::SUNFusionRule, D>,
     lhs: &TensorMap<symtn::sector::SUNFusionRule, D>,
@@ -1202,7 +1202,7 @@ fn assert_sun_cat_values<D>(
     assert!(saw_mu_two, "SU(N) cat fixture must carry a μ=2 full key");
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_cat_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D + Copy)
 where
     D: Copy + fmt::Debug + PartialEq + symtn::typed::TensorScalar,
@@ -1301,7 +1301,7 @@ where
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
     // What: exact TensorKit direct-sum slab values, μ=2 full-key matching,
@@ -1314,7 +1314,7 @@ fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() {
     use symtn::sector::SUNFusionRule;
@@ -1484,7 +1484,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
     use symtn::sector::SUNFusionRule;
@@ -1747,7 +1747,7 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
 
 /// Real SU(3) multiplicity: all five transforms on a lazy adjoint against the
 /// literal-payload Owned twin.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
     use symtn::sector::SUNFusionRule;

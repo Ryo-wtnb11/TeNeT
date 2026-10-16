@@ -76,7 +76,7 @@ fn equal_uncached_structures_are_semantic_but_keep_monotonic_ids() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn uncached_generic_preview_keeps_its_coupled_region_geometry() {
     if test_support::run_isolated_or_return(

@@ -1,7 +1,7 @@
 //! `SUNFusionRule::rule_identity` returns the identity stored at construction:
 //! no allocation per call (#1750).
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;

@@ -161,7 +161,7 @@ fn fermionic_u1_lazy_adjoint_lq_matches_the_materialized_adjoint() {
 
 /// Checked Generic: SU(3) with outer multiplicity (`8 ⊗ 8 ∋ 8` twice) and
 /// non-self-dual `3`, `3̄` legs.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su3_lazy_adjoint_lq_matches_the_materialized_adjoint() {
     use symtn::sector::SUNFusionRule;

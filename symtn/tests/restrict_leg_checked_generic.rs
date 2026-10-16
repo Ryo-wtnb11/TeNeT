@@ -7,7 +7,7 @@
 //! driven by the public fusion-tree keys and block geometry, which shares no
 //! code with the restriction kernel.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 use symtn::typed::HermitianTol;

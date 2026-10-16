@@ -249,7 +249,7 @@ fn multiplicity_free_su2_lazy_adjoint_factorizations_match_the_materialized_adjo
     assert_all_ops!("MF SU(2)", runtime, a, b);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su2_lazy_adjoint_factorizations_match_the_materialized_adjoint() {
     use symtn::sector::SUNFusionRule;
@@ -268,7 +268,7 @@ fn checked_su2_lazy_adjoint_factorizations_match_the_materialized_adjoint() {
 /// SU(3) `8 ⊗ 8 ∋ 8` twice: blocks that differ only by their vertex label
 /// carry their own entries, so the swapped factor spaces of a lazy adjoint
 /// must keep the multiplicity index on the right side.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su3_multiplicity_lazy_adjoint_factorizations_match_the_materialized_adjoint() {
     use symtn::sector::SUNFusionRule;
@@ -294,7 +294,7 @@ fn checked_su3_multiplicity_lazy_adjoint_factorizations_match_the_materialized_a
 /// The checked parent-reading seams (compact and full SVD, pinv) on
 /// non-self-dual SU(3) sectors `3`, `3̄` and on dual legs: the swapped hom
 /// space of the adjoint must keep each leg's sector and duality.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su3_seams_keep_non_self_dual_sectors_and_dual_legs() {
     use symtn::sector::SUNFusionRule;

@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
     use symtn::sector::SUNFusionRule;
@@ -617,7 +617,7 @@ fn checked_compact_diagonal_svd_full_is_its_compact_svd_under_a_provider_bond_mi
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
     // Checked compact SVD publishes `s` as a compact diagonal on its bond.
@@ -721,7 +721,7 @@ fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_sourc
     assert_eq!(root.diagview().unwrap()[0].values, [2.0, 3.0]);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_accepts_lazy() {
     use symtn::sector::SUNFusionRule;
@@ -794,7 +794,7 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_accepts_lazy
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
     use symtn::sector::SUNFusionRule;

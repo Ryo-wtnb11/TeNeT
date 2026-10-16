@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     use symtn_core::SUNFusionRule;
@@ -125,7 +125,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
 /// #1729: an admitted checked-Generic dual diagonal (non-self-dual SU(3)
 /// labels) runs all four QR/LQ methods on `W = V` without materializing the
 /// input or calling the dense QR kernel (the polar spy panics on QR).
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
     use symtn_core::SUNFusionRule;
@@ -171,7 +171,7 @@ fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     use symtn_core::SUNFusionRule;
@@ -366,7 +366,7 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work() {
     use symtn_core::SUNFusionRule;
@@ -467,7 +467,7 @@ fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_null_is_empty_by_shape_without_dense_work() {
     // What: an SU(3) checked compact diagonal is square in every sector, so
@@ -532,7 +532,7 @@ fn checked_compact_diagonal_null_is_empty_by_shape_without_dense_work() {
     check!(Complex64);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
     use symtn_core::SUNFusionRule;
@@ -610,7 +610,7 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
     use symtn_core::SUNFusionRule;
@@ -672,7 +672,7 @@ fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
 /// #1735: checked `inv`/`exp`/`solve` of a compact diagonal map the spectrum
 /// elementwise (TensorKit `inv`/`exp`/`\` on `DiagonalTensorMap`) and never
 /// densify it; hand-computed values and a dense LU oracle are independent.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
     use num_complex::Complex64;
@@ -835,7 +835,7 @@ fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
 
 /// #1735: checked and multiplicity-free compact arms share one spectrum map,
 /// so the same spectrum gives bitwise-equal values and equal errors.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_spectrum_maps_match_multiplicity_free() {
     use symtn_core::SUNFusionRule;

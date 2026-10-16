@@ -109,7 +109,7 @@ fn generic_wrappers_print_each_message_once() {
 fn facade_error_is_nameable_per_rule() {
     let error: FacadeError<U1FusionRule> = Error::RuleMismatch;
     assert_eq!(error, Error::RuleMismatch);
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         use symtn::sector::{SUNFusionRule, SUNFusionRuleError};
         let _: FacadeError<SUNFusionRule> =

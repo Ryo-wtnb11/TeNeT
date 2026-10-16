@@ -843,7 +843,7 @@ where
     (bits, bytes)
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn su3_checked_input<D: FactorScalar>(
     provider: &Arc<symtn_core::SUNFusionRule>,
     nin: usize,
@@ -893,7 +893,7 @@ fn su3_checked_input<D: FactorScalar>(
     (space, data)
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn hermitian_regions_copy<D: FactorScalar>(
     space: &BoundDynamicFusionMapSpace<symtn_core::SUNFusionRule>,
     data: &[D],
@@ -922,7 +922,7 @@ fn hermitian_regions_copy<D: FactorScalar>(
     hermitian
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_checked_su3_full_family_borrows_input<D: FactorScalar>() {
     let provider = Arc::new(symtn_core::SUNFusionRule::new(3).unwrap());
     let (square, general) = su3_checked_input::<D>(&provider, 2, 3);
@@ -935,7 +935,7 @@ fn assert_checked_su3_full_family_borrows_input<D: FactorScalar>() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_full_null_eigen_ops_borrow_canonical_su3_input() {
     // Vertex multiplicity: 8 ⊗ 8 contains 8 twice.

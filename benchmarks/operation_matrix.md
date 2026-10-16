@@ -23,7 +23,7 @@ cover both direct tensors and pre-built lazy adjoints.
 The contraction rows distinguish canonical input order, contracted-input
 swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
-With the default `racah-generated` feature it also runs exact checked-Generic
+With the default `cgc-gen` feature it also runs exact checked-Generic
 SU3 `[1,1]` and SU4 `[1,0,1]` fixtures for public owned transforms, reductions,
 compose, and contract, plus compact QR for those fixtures and a one-sector SU3
 vacuum control. Compact QR coverage is limited to these checked-SUN owned rows;
@@ -185,7 +185,7 @@ MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 \
 OP_MATRIX_OPERATION=oriented_uniform_run \
 OP_MATRIX_MIN_MS=200 \
 OP_MATRIX_GEMM_BACKEND=faer \
-OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,cgc-gen \
 CARGO_TARGET_DIR=/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet/target \
 benchmarks/operation_matrix.sh
 ```
@@ -240,7 +240,7 @@ OP_MATRIX_OPERATION=eig_source_geometry \
 OP_MATRIX_FORM=owned \
 OP_MATRIX_DEGENERACY=32 \
 OP_MATRIX_MIN_MS=100 \
-OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,cgc-gen \
 benchmarks/operation_matrix.sh
 ```
 
@@ -275,7 +275,7 @@ OP_MATRIX_OPERATION=eig_output_placement \
 OP_MATRIX_FORM=owned \
 OP_MATRIX_DEGENERACY=32 \
 OP_MATRIX_MIN_MS=100 \
-OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,cgc-gen \
 benchmarks/operation_matrix.sh
 ```
 
@@ -298,7 +298,7 @@ not establish general rank or symmetry speed. Pure solver time, peak memory,
 and retained idle storage remain unavailable in this runner.
 
 These checked rows construct `DefaultDenseExecutor` directly. The prescribed
-comparison builds only `cpu-faer,racah-generated` and uses the wrapper's
+comparison builds only `cpu-faer,cgc-gen` and uses the wrapper's
 `RAYON_NUM_THREADS=1` and BLAS thread limits. `OP_MATRIX_GEMM_BACKEND` configures
 tensor-operation GEMM and does not select the factorization provider.
 
@@ -307,7 +307,7 @@ OP_MATRIX_OPERATION=full_qr_lowering \
 OP_MATRIX_FORM=owned \
 OP_MATRIX_DEGENERACY=32 \
 OP_MATRIX_MIN_MS=100 \
-OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,cgc-gen \
 benchmarks/operation_matrix.sh
 ```
 

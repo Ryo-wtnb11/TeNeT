@@ -191,7 +191,7 @@ fn fermion_u1_degeneracy_change_rebuilds_without_the_coefficient_cache() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_degeneracy_change_reuses_the_composed_coefficients() {
     let _serial = serial();

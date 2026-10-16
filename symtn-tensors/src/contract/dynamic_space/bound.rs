@@ -2,7 +2,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(all(test, feature = "racah-generated"))]
+#[cfg(all(test, feature = "cgc-gen"))]
 use symtn_core::BlockStructure;
 use symtn_core::{
     CheckedFusionAlgebra, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
@@ -123,7 +123,7 @@ impl<R> fmt::Debug for BoundDynamicFusionMapSpace<R> {
     }
 }
 
-#[cfg(all(test, feature = "racah-generated"))]
+#[cfg(all(test, feature = "cgc-gen"))]
 impl<R> BoundDynamicFusionMapSpace<R> {
     /// The same binding over a caller-restacked layout of the same trees:
     /// the only way a test obtains a non-canonical checked Generic operand,

@@ -398,7 +398,7 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_fz2_u1_legs() {
 /// Checked-Generic `add` (`host_add_impl`) and materialization on SU(3):
 /// `adj ⊗ adj → adj` has outer multiplicity two, so blocks that differ only
 /// by their vertex label must each keep their own entries.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn lazy_adjoint_materialization_and_add_are_exact_on_su3_multiplicity_legs() {
     use symtn::sector::SUNFusionRule;

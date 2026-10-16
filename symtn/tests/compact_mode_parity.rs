@@ -440,7 +440,7 @@ fn checked_compact_twist_queries_the_provider_like_the_dense_route() {
     assert_eq!(compact_queries, dense_queries);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn bosonic_su2_compact_twist_is_the_identity_in_both_modes() {
     // What: SU(2) is bosonic, so twist returns the compact receiver as is in
@@ -1007,7 +1007,7 @@ fn fibonacci_complex_symbol_compact_compose_takes_the_arms() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn su2_compact_compose_and_contract_agree_across_modes() {
     // What: the non-Abelian row. The bent outputs carry SU(2) bending
@@ -1539,7 +1539,7 @@ fn multiplicity_free_u1_compact_swap_moves_each_spectrum_to_the_dual_sector() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn su2_compact_swap_and_braid_agree_across_modes() {
     // What: the non-Abelian row. TensorKit's swap coefficient is 1 on
@@ -1611,7 +1611,7 @@ fn su2_compact_swap_and_braid_agree_across_modes() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn su3_dual_leg_checked_compact_swap_and_braid_match_the_dense_route() {
     // What: non-self-dual SU(3) irreps on a dual leg (`[1,0]^2 + [0,1]`
@@ -1896,7 +1896,7 @@ fn checked_anyonic_compact_full_trace_matches_the_dense_route() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn su2_compact_full_trace_agrees_across_modes() {
     // What: the non-Abelian row; SU(2) is bosonic, so the hand trace is

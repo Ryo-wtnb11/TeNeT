@@ -9,7 +9,7 @@
 //! codomain–codomain pairs, two pairs at once, and a lazy adjoint source
 //! (its oracle contracts the materialized adjoint).
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 

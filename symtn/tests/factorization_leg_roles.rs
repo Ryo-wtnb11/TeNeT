@@ -310,7 +310,7 @@ fn leg_roles_equal_the_permute_composition() {
     check_fixture!(runtime, fz2_u1_legs(), Complex64, 1553, "fz2u1 c64");
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_leg_roles_equal_the_permute_composition() {
     let _serial = counting_alloc::serial();

@@ -185,7 +185,7 @@ fn restrict_leg_rejects_what_eager_rejects() {
     for_each_symmetry!(malformed);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
     let runtime = host_runtime();

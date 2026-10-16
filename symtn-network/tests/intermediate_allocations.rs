@@ -972,7 +972,7 @@ where
 
 /// The checked-Generic twin over SU(2): one self-dual spin-½ sector per leg
 /// keeps every step output a single `(chi + 1)²` block, as in the U(1) worker.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn checked_overwrite_worker<D>(chi: usize, reuse: bool)
 where
     D: AllocationScalar,
@@ -1024,7 +1024,7 @@ where
 /// previous call; the control disables the cache, so every call allocates.
 /// Every leg has dimension `chi + 1`, so each step output is one `(chi + 1)²`
 /// block whatever order the planner picks.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn checked_cached_worker<D>(chi: usize, cached: bool)
 where
     D: AllocationScalar,
@@ -1258,13 +1258,13 @@ fn measured_typed_overwrite_witness() {
         match (rule.as_str(), dtype.as_str()) {
             ("u1", "f64") => typed_overwrite_worker::<f64>(chi, reuse),
             ("u1", "c64") => typed_overwrite_worker::<Complex64>(chi, reuse),
-            #[cfg(feature = "racah-generated")]
+            #[cfg(feature = "cgc-gen")]
             ("sun2", "f64") => checked_overwrite_worker::<f64>(chi, reuse),
-            #[cfg(feature = "racah-generated")]
+            #[cfg(feature = "cgc-gen")]
             ("sun2", "c64") => checked_overwrite_worker::<Complex64>(chi, reuse),
-            #[cfg(feature = "racah-generated")]
+            #[cfg(feature = "cgc-gen")]
             ("sun2-cached", "f64") => checked_cached_worker::<f64>(chi, reuse),
-            #[cfg(feature = "racah-generated")]
+            #[cfg(feature = "cgc-gen")]
             ("sun2-cached", "c64") => checked_cached_worker::<Complex64>(chi, reuse),
             _ => panic!("unknown typed allocator worker {rule:?}/{dtype:?}"),
         }
@@ -1322,7 +1322,7 @@ fn measured_typed_overwrite_witness() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_replay_overwrites_the_retained_step_destination() {
     // What: a checked Generic replay through a kept workspace writes the

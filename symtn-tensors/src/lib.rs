@@ -108,7 +108,7 @@ pub use symtn_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
-#[cfg(all(test, feature = "racah-generated"))]
+#[cfg(all(test, feature = "cgc-gen"))]
 pub(crate) use tensortrace::{
     tensortrace_checked_generic_in, tensortrace_fusion_dyn_owned_generic_checked,
 };

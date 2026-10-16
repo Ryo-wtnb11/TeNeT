@@ -363,7 +363,7 @@ fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
     use symtn::sector::SUNFusionRule;

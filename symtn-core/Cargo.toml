@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-racah-generated = ["symtn-sectors/racah-generated"]
+cgc-gen = ["symtn-sectors/cgc-gen"]
 # Unstable test oracles (`symtn_core::testing`) for sibling crates' tests; not
 # part of the public API.
 testing = ["symtn-sectors/testing"]

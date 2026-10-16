@@ -170,7 +170,7 @@ fn multiplicity_free_lazy_adjoint_factorizations_add_no_payload_allocation() {
     assert_excess_is_metadata!("MF SU(2)", runtime, leg);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_lazy_adjoint_factorizations_add_no_payload_allocation() {
     if !backend::faer_is_default_backend() {

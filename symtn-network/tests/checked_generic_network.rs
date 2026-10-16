@@ -1,4 +1,4 @@
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::collections::HashMap;
 use std::fmt::{self, Debug};

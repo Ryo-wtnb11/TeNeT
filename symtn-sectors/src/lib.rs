@@ -31,9 +31,9 @@ pub use fibonacci_table::{FibonacciTableError, FibonacciTableRule};
 mod su2;
 pub use su2::{SU2CoefficientError, SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod sun;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 pub use sun::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};
 
 mod product_rule;

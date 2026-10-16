@@ -28,4 +28,4 @@ blas-accelerate = ["symtn-tensors/blas-accelerate"]
 blas-openblas = ["symtn-tensors/blas-openblas"]
 blas-mkl = ["symtn-tensors/blas-mkl"]
 # Test-only: admits `SUNFusionRule` so checked-Generic SU(3) fixtures run here.
-racah-generated = ["symtn-tensors/racah-generated"]
+cgc-gen = ["symtn-tensors/cgc-gen"]

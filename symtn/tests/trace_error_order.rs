@@ -140,7 +140,7 @@ fn multiplicity_free_device_trace_reports_the_host_error_per_misuse() {
         .unwrap());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_trace_reports_the_multiplicity_free_error_per_misuse() {
     use symtn::sector::SUNFusionRule;

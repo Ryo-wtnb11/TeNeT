@@ -83,7 +83,7 @@ macro_rules! members {
 }
 
 /// Calls `$check!(label, leg)` for U(1), SU(2), fZ2xU(1) and, with
-/// `racah-generated`, checked Generic SU(3). `leg(0)` is the base leg and
+/// `cgc-gen`, checked Generic SU(3). `leg(0)` is the base leg and
 /// `leg(1)` changes one degeneracy. Every base leg has a sector of
 /// degeneracy at least three, so [`selections`] can keep a non-contiguous
 /// set.
@@ -114,7 +114,7 @@ macro_rules! for_each_symmetry {
             let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
             GradedSpace::try_new(rule, [(even(0), 3), (odd(1), 1 + variant), (odd(-1), 2)]).unwrap()
         });
-        #[cfg(feature = "racah-generated")]
+        #[cfg(feature = "cgc-gen")]
         $check!("SU3 checked Generic", |variant: usize| {
             let rule = Arc::new(symtn::sector::SUNFusionRule::new(3).unwrap());
             GradedSpace::try_new(rule, [(vec![0i64, 0], 1), (vec![1, 1], 3 + variant)]).unwrap()

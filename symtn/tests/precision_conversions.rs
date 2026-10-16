@@ -827,7 +827,7 @@ fn converted_lazy_adjoints_are_owned() {
 }
 
 /// Checked-Generic provider: SU(3) with an outer-multiplicity vertex.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     use symtn::sector::SUNFusionRule;
@@ -861,7 +861,7 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
 /// Checked-Generic compact diagonal adjoint (#1446 review, #1449): the
 /// conversion must come out as the owned compact diagonal, keep the
 /// structural zeros `+0 + 0i`, and stay factorizable.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     use symtn::sector::SUNFusionRule;

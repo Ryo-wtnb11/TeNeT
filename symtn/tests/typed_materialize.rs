@@ -545,7 +545,7 @@ fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
     assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use symtn::sector::SUNFusionRule;

@@ -792,7 +792,7 @@ fn checked_compact_null_is_direct_and_agrees_with_dense() {
     assert!(expected.dense_data().unwrap().is_empty());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_null_spaces<D>(
     n: usize,
     label: Vec<i64>,
@@ -907,7 +907,7 @@ fn assert_sun_checked_generic_null_spaces<D>(
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_null_spaces_resolve_cross_mu_for_both_dtypes() {
     // What: SU(3)/SU(4) multiplicity blocks keep `rows - cols` orthonormal
@@ -930,7 +930,7 @@ fn sun_checked_generic_null_spaces_resolve_cross_mu_for_both_dtypes() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_polar_qh<D>(
     n: usize,
     label: Vec<i64>,
@@ -1000,7 +1000,7 @@ fn assert_sun_checked_generic_polar_qh<D>(
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_polar_cross_mu_qh_oracles_for_both_dtypes() {
     let s = std::f64::consts::FRAC_1_SQRT_2;

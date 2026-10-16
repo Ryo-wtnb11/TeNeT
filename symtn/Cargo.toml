@@ -20,7 +20,7 @@ blas-openblas = ["symtn-tensors/blas-openblas", "symtn-matrixalgebra/blas-openbl
 blas-mkl = ["symtn-tensors/blas-mkl", "symtn-matrixalgebra/blas-mkl"]
 provider-inject = ["symtn-tensors/provider-inject"]
 cuda = ["symtn-dense/cuda", "symtn-tensors/cuda"]
-racah-generated = ["symtn-core/racah-generated", "symtn-tensors/racah-generated"]
+cgc-gen = ["symtn-core/cgc-gen", "symtn-tensors/cgc-gen"]
 
 [dependencies]
 num-complex = "0.4"

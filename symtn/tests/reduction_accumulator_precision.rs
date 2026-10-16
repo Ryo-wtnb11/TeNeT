@@ -21,7 +21,7 @@
 //!    `dim(c) == 1` and a non-abelian one where `dim(c) == 2`, so the
 //!    quantum-dimension weight is a real factor rather than a no-op.
 //!    `checked_generic` adds the Checked-Generic admission mode behind
-//!    `racah-generated`.
+//!    `cgc-gen`.
 //!
 //!    One micro-difference is *not* observable here and is worth recording:
 //!    applying the weight componentwise (`re * w`, `im * w`) rather than as
@@ -655,7 +655,7 @@ fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
 /// The Checked-Generic admission mode reaches the same reductions through its
 /// own dispatch and its own fallible weight lookup, so it needs its own checks.
 /// SU(3) with the adjoint irrep also carries outer multiplicity.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use symtn::sector::SUNFusionRule;

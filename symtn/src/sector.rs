@@ -40,5 +40,5 @@ pub use symtn_core::{
     PhysicalBasisError, ProductSectorComponent, PromoteCoefficientScalar, SU2CoefficientError,
     SymbolShapeError,
 };
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 pub use symtn_core::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};

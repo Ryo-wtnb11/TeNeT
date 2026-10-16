@@ -397,7 +397,7 @@ where
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[derive(Clone, Copy, Debug)]
 enum MeasurementProviderCall {
     Channels,
@@ -411,7 +411,7 @@ enum MeasurementProviderCall {
     Dim,
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl MeasurementProviderCall {
     const COUNT: usize = 9;
 
@@ -420,13 +420,13 @@ impl MeasurementProviderCall {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 struct MeasurementProvider<P> {
     inner: P,
     calls: std::cell::Cell<[usize; MeasurementProviderCall::COUNT]>,
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl<P> MeasurementProvider<P> {
     fn new(inner: P) -> Self {
         Self {
@@ -446,7 +446,7 @@ impl<P> MeasurementProvider<P> {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl<P: CheckedGenericFusion> CheckedGenericFusion for MeasurementProvider<P> {
     type Error = P::Error;
 
@@ -500,7 +500,7 @@ impl<P: CheckedGenericFusion> CheckedGenericFusion for MeasurementProvider<P> {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl<P: CheckedGenericRigidSymbols> CheckedGenericRigidSymbols for MeasurementProvider<P> {
     type Scalar = P::Scalar;
 
@@ -1174,7 +1174,7 @@ fn generic_dense_block_plan_matches_per_source_oracle_matrix() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn racah_generated_sun_adjoint_checked_bound_round_trips() {
     use symtn_sectors::SUNFusionRule;
@@ -1276,7 +1276,7 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
 /// #2233: a checked SU(3) source admits its trees once. A warm transform
 /// whose source outlived its structure-cache entry derives its destination
 /// again, yet asks the provider no admission query (channels or N).
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
 fn warm_checked_generic_transform_of_an_evicted_source_makes_no_admission_query() {
@@ -1320,7 +1320,7 @@ fn warm_checked_generic_transform_of_an_evicted_source_makes_no_admission_query(
     assert_eq!(admission_queries, Some(0));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn measured_provider_phase<T>(
     provider: &MeasurementProvider<symtn_sectors::SUNFusionRule>,
     case: &str,
@@ -1338,7 +1338,7 @@ fn measured_provider_phase<T>(
     output
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[allow(clippy::arc_with_non_send_sync)]
 fn measure_checked_generic_transform_case(
     n: usize,
@@ -1551,7 +1551,7 @@ fn measure_checked_generic_transform_case(
 /// counts for these private phases are unavailable under `forbid(unsafe_code)`;
 /// the companion integration measurement covers public owned calls with its
 /// existing counting allocator.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 #[ignore = "benchmark: run via benchmarks.yml"]
 fn measure_checked_generic_transform_phases() {

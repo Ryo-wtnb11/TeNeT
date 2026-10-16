@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_eigh<D>(
     n: usize,
     label: Vec<i64>,
@@ -154,7 +154,7 @@ fn assert_sun_checked_generic_eigh<D>(
     assert_same_checked_generic_layout_and_close(&projector, &expected, close);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_eigh_cross_mu_projectors_for_both_dtypes() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -179,7 +179,7 @@ fn sun_checked_generic_eigh_cross_mu_projectors_for_both_dtypes() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_eig<D>(n: usize, label: Vec<i64>)
 where
     D: SunEigInput,
@@ -306,7 +306,7 @@ where
     });
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_eig_nonnormal_cross_mu_projectors_for_both_dtypes() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {

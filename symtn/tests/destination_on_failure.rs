@@ -818,7 +818,7 @@ fn host_capability_and_representation_rejections_leave_the_destination_bit_ident
 /// in the multiplicity-free order — runtime, rule, then (for the destination
 /// kind, alias and space) the same `Error` in [`GenericTensorError::Facade`],
 /// space before sharing.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_transform_into_leaves_a_rejected_destination_bit_identical() {
     use symtn::sector::SUNFusionRule;
@@ -967,7 +967,7 @@ fn checked_transform_into_leaves_a_rejected_destination_bit_identical() {
 /// in the multiplicity-free order (runtime, rule, destination kind, alias
 /// including a lazy operand's parent, the contraction's own errors, space
 /// before sharing), the same `Error` in [`GenericTensorError::Facade`].
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_contract_into_leaves_a_rejected_destination_bit_identical() {
     use symtn::sector::SUNFusionRule;
@@ -1089,7 +1089,7 @@ fn checked_contract_into_leaves_a_rejected_destination_bit_identical() {
 /// `space(tdst)` before the pair duality, space before sharing), the same
 /// `Error` in [`GenericTensorError::Facade`]; the duality is eager's own
 /// staging error.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_trace_pairs_into_leaves_a_rejected_destination_bit_identical() {
     use symtn::sector::SUNFusionRule;

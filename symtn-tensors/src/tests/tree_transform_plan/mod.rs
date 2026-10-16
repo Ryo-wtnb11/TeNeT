@@ -86,11 +86,11 @@ fn expert_copy(structure: &BlockStructure) -> Arc<BlockStructure> {
 }
 
 mod admission;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_composer_measurement;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_composer_oracles;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_failure_order;
 mod checked_generic;
 mod context_cache;

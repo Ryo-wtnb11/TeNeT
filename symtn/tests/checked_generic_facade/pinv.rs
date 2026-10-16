@@ -133,7 +133,7 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 macro_rules! assert_sun_polar_laws {
     ($runtime:expr, $source:expr, $codomain:expr, $domain:expr, $left:expr) => {{
         let source = $source;
@@ -250,7 +250,7 @@ macro_rules! assert_sun_polar_laws {
     }};
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_four() {
     // What: polar and pinv are defined for every TensorMap (TensorKit
@@ -785,7 +785,7 @@ fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
     assert_eq!(gemm_calls.total(), 0);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_checked_generic_pinv<D>(
     n: usize,
     label: Vec<i64>,
@@ -933,7 +933,7 @@ fn assert_sun_checked_generic_pinv<D>(
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
