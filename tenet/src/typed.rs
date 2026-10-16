@@ -117,8 +117,8 @@
 //! `to_cuda` and left by `to_host`) shares the Host operation bodies and
 //! supplies only its own kernels (see "Operation dispatch" below). The device
 //! surface is narrower than Host: an operation whose kernel is not implemented
-//! for `CudaStorage` does not exist for it rather than falling back to Host. See the crate-level documentation for the
-//! device synchronization model. [`TensorMap::placement`] is diagnostic
+//! for `CudaStorage` does not exist for it rather than falling back to Host.
+//! See the crate-level documentation for the device synchronization model. [`TensorMap::placement`] is diagnostic
 //! metadata; no `TensorMap` operation dispatches on it.
 //!
 //! # Operation dispatch
@@ -148,8 +148,9 @@
 //!
 //! **CUDA bounds** are stated per impl, not once: each rule-generic `CudaStorage`
 //! impl of a family trait (and each inherent CUDA
-//! `impl TensorMap<R, D, CudaStorage<D>>`) restates `R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra
-//! + SectorCodec` and bounds `D` by the payload trait of its family
+//! `impl TensorMap<R, D, CudaStorage<D>>`) restates
+//! `R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec`
+//! and bounds `D` by the payload trait of its family
 //! (`CudaPayload`, `CudaFactorizationPayload`). A rule or payload outside those
 //! bounds therefore has no device method, which is how checked `Generic`
 //! providers are excluded from device factorizations.
