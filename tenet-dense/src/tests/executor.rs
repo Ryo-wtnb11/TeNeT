@@ -16,7 +16,7 @@ fn provider_inject_rejects_linalg_before_backend_work() {
     assert_eq!(op, "svd");
     assert_eq!(
         message,
-        "provider-inject requires a registered BLAS/LAPACK provider"
+        "provider-inject does not route factorizations or solves; they are unsupported in this configuration"
     );
 }
 #[cfg(feature = "provider-inject")]
@@ -36,7 +36,7 @@ fn provider_inject_rejects_values_only_before_backend_work() {
     assert_eq!(op, "svd_vals");
     assert_eq!(
         message,
-        "provider-inject requires a registered BLAS/LAPACK provider"
+        "provider-inject does not route factorizations or solves; they are unsupported in this configuration"
     );
 
     let error = executor
@@ -50,7 +50,7 @@ fn provider_inject_rejects_values_only_before_backend_work() {
     assert_eq!(op, "eigh_vals");
     assert_eq!(
         message,
-        "provider-inject requires a registered BLAS/LAPACK provider"
+        "provider-inject does not route factorizations or solves; they are unsupported in this configuration"
     );
 }
 #[cfg(feature = "tenferro")]

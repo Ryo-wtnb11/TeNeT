@@ -117,7 +117,7 @@ consumer adapts every crate the same way.
 
 | Crate | Owns |
 | --- | --- |
-| `tenet-sectors` | Fusion-rule providers and the adapter onto the symbol layer. **Rule (target):** codec and type conversion only, with no symbol math and no symbol-layer types or cache policy in its public API. Current gaps: #2015, #2016. |
+| `tenet-sectors` | Fusion-rule providers and the adapter onto the symbol layer. **Rule (target):** codec and type conversion only, with no symbol math and no symbol-layer types or cache policy in its public API. Current gap: #2016. |
 | `tenet-category-data` | Pinned category tables. They are a later candidate for the symbol layer's sibling crate. |
 | `tenet-core` | Spaces, HomSpaces, fusion trees, checked fusion algebra, block structure, and the HomSpace-level structure caches. |
 | `tenet-operations` | Tree-transform plans, replay, and stacked/direct dense-job descriptions, with strided data movement. |
@@ -128,7 +128,7 @@ consumer adapts every crate the same way.
 | `tenet-network` | Labeled network contraction (`Network::contract`), planning and the plan cache. |
 | `tenet-macros` | The `contract!` index-notation proc macro, re-exported by `tenet-network`; syntax and compile-time label validation only. |
 
-**Target structure-layer caches.** Four caches, mirroring TensorKit's
+**Structure-layer caches.** Four caches, mirroring TensorKit's
 `@cached` set at cfaa073 (#2014):
 1. sector structure per HomSpace (`sectorstructure`);
 2. degeneracy structure per HomSpace (`degeneracystructure`);
@@ -259,9 +259,13 @@ svd / qr / eigh (tenet-rs facade, one body over FusionMode)
   -> factor spaces published through the mode's FactorSpaceAuthority (tenet-matrixalgebra, tenet-core)
 ```
 
+How a facade body is selected by admission mode (`R::Mode: Typed*Dispatch`) and
+by storage (`S: *Exec`, `ExecToken`) is described in the "Operation dispatch"
+section of the `tenet::typed` module documentation (`tenet/src/typed.rs`).
+
 **Who owns which cache**
 
-The target is four structure caches behind one `quick_cache` wrapper
+There are four structure caches behind one `quick_cache` wrapper
 (`tenet-core/src/cache.rs`, #2014), mirroring TensorKit's `@cached`
 functions. Clearing and sizing them belongs to the application
 (`tenet::cache::clear`, `tenet::cache::configure_budgets`), never to library
@@ -320,12 +324,6 @@ Outside the four, by design:
 - **Category symbols generated in TeNeT.** Abelian groups, CU(1), Fibonacci,
   products and `tenet-category-data` are still generated in TeNeT. The
   abelian groups move first (#2016); the rest are later candidates.
-- **racah leaking through `tenet-sectors`.** It re-exports racah's cache
-  module and embeds racah error types (#2015 items 2–3). The A/B default
-  derivations also live there.
-- **Structure caches** are more than four, have no shared wrapper or stats
-  API, and the transform stores are per-`Runtime` (#2014). Their per-block
-  metadata is about 2× TensorKit's (#2011).
 - **A tenferro type in TeNeT's public API.** `tenet-dense` re-exports
   `tenferro_cpu::CpuBackendKind`, and it reaches the facade through
   `tenet::expert` and the `Runtime` builder (`gemm_kind`).

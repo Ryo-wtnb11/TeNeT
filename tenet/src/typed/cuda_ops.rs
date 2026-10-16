@@ -43,7 +43,7 @@ use super::*;
 /// complex-symmetric non-Hermitian block is rejected before any
 /// factorization.
 ///
-/// Compact QR is not here: it is `f64`-only and lives in its own impl below.
+/// Compact QR is not here: it lives in its own impl below.
 ///
 /// Checked Generic providers deliberately have no device factorizations, and
 /// compact SVD has the same deliberately narrow typed CUDA surface:

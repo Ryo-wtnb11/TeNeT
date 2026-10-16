@@ -24,9 +24,11 @@ impl<D> sealed::Sealed for Vec<D> {}
 
 /// One storage's placement and capability set for rule `R`, payload `D`.
 ///
-/// The family execution traits (e.g. [`ReduceExec`]) are its subtraits. The
-/// CUDA impl's bounds state today's device capability once; a rule or payload
-/// outside them has no device method at all.
+/// The family execution traits (e.g. [`ReduceExec`]) are its subtraits. Each
+/// CUDA impl restates the device capability bounds for its family; a rule or
+/// payload outside them has no device method at all. The dispatch pattern is
+/// described in the "Operation dispatch" section of the `tenet::typed` module
+/// documentation.
 ///
 /// Every method of the family takes an `ExecToken` that only this crate can
 /// construct, so external code can name a kernel but not call it:
