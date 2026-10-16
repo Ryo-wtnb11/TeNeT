@@ -99,7 +99,7 @@ fn warm_multiplicity_free_trace_compile_is_bounded_by_its_terms() {
     assert_bounded("MF SU(2)", &sizes);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warm_checked_generic_trace_compile_is_bounded_by_its_terms() {
     use symtn_core::{CheckedGenericAdmissionMode, SUNFusionRule};

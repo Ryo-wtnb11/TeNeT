@@ -69,11 +69,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --locked --release -p symtn-operations --lib -- --ignored --exact transform_replay::member::tests::member_batch_measurement --nocapture
         working-directory: symtn
-      - name: checked-Generic public transform measurement (racah-generated)
+      - name: checked-Generic public transform measurement (cgc-gen)
         if: ${{ !cancelled() }}
-        run: cargo test --locked --release -p symtn --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
+        run: cargo test --locked --release -p symtn --no-default-features --features cgc-gen,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
         working-directory: symtn
-      - name: checked-Generic transform phase measurement (racah-generated)
+      - name: checked-Generic transform phase measurement (cgc-gen)
         if: ${{ !cancelled() }}
-        run: cargo test --locked --release -p symtn-tensors --no-default-features --features racah-generated,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
+        run: cargo test --locked --release -p symtn-tensors --no-default-features --features cgc-gen,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
         working-directory: symtn

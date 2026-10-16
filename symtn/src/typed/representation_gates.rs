@@ -4,7 +4,7 @@ use crate::typed::probe::{self, Event};
 include!("../../tests/common/predicate_chains.rs");
 include!("../../tests/support/report.rs");
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod compact_admission;
 mod compact_transforms;
 mod contract;
@@ -12,9 +12,9 @@ mod contract;
 mod cuda;
 mod cuda_factorize;
 mod dense_lease;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod factorize_checked;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod factorize_checked_eig;
 mod factorize_mf_eig;
 mod factorize_mf_qr_lq_polar;

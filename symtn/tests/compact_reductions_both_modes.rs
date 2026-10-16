@@ -19,7 +19,7 @@
 //! with `dim(j) = 2j + 1` and every entry written out from the tables here,
 //! never read back from a symtn result.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 

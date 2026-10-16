@@ -509,7 +509,7 @@ fn compact_complex32_reciprocal_does_not_underflow() {
 }
 
 /// Checked-Generic provider: SU(3), outer multiplicity, the checked dispatch.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use symtn::sector::SUNFusionRule;

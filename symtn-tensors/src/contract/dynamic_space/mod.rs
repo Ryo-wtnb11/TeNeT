@@ -696,7 +696,7 @@ impl DynamicFusionMapSpace {
         Ok(expected)
     }
 
-    #[cfg(all(test, feature = "racah-generated"))]
+    #[cfg(all(test, feature = "cgc-gen"))]
     pub(crate) fn prepare_transformed_generic_checked<R>(
         &self,
         rule: &R,

@@ -147,7 +147,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
         };
         GradedSpace::try_new(rule, pairs).unwrap()
     });
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     check_fixture!("SU3 checked Generic", |variant| {
         let rule = Arc::new(symtn::sector::SUNFusionRule::new(3).unwrap());
         let pairs = match variant {
@@ -159,7 +159,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
     });
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_rule_instance_separates_signatures() {
     // What: SU(3) and SU(4) trivial legs share hom space and block structure

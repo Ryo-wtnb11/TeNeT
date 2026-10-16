@@ -8,7 +8,7 @@
 //! (`SU2FusionRule`) and a checked Generic (`SUNFusionRule::new(2)`) provider:
 //! the same spectra must take the same decision in either mode.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 

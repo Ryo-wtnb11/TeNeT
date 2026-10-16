@@ -1,7 +1,7 @@
 use super::*;
 
 /// Solve only; every solve fails with `failure` when one is given.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn solve_spy(counts: &Arc<SpyCounts>, failure: Option<&'static str>) -> SpyExecutor {
     let spy = SpyExecutor::counting(counts).only(&[Kernel::Solve], "test only exercises solve");
     match failure {
@@ -892,7 +892,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_checked_generic_solve_acceptance<D>()
 where
     D: AdvancedLinalgScalar + core::fmt::Debug,
@@ -978,7 +978,7 @@ where
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_solves_are_owned_uncached_and_one_call_per_route() {
     // What: the solve keeps all four lazy input pairs cold on
@@ -987,7 +987,7 @@ fn checked_generic_solves_are_owned_uncached_and_one_call_per_route() {
     assert_checked_generic_solve_acceptance::<num_complex::Complex64>();
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_left_solve_preserves_injected_backend_provenance() {
     use symtn_core::SUNFusionRule;

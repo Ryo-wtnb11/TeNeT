@@ -20,7 +20,7 @@ blas-openblas = ["symtn-operations/blas-openblas"]
 blas-mkl = ["symtn-operations/blas-mkl"]
 provider-inject = ["symtn-operations/provider-inject"]
 cuda = ["symtn-dense/cuda", "symtn-operations/cuda"]
-racah-generated = ["symtn-core/racah-generated"]
+cgc-gen = ["symtn-core/cgc-gen"]
 # Unstable, internal: the infallible Generic entries (`*_generic` facade,
 # context and plan builders), test oracles only, since production Generic is
 # checked only (#1854); and the CUDA member workspace's failure seam

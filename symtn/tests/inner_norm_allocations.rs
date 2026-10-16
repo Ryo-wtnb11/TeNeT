@@ -6,7 +6,7 @@ use symtn::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn::sector::{CheckedGenericRigidSymbols, TypedSectorAdmission};
 use symtn::sector::{
     Fz2SectorLayout, PackedProductCodec, ProductSectorLayout, Su2SectorLayout, U1SectorLayout,
@@ -313,7 +313,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
 /// reductions still pay the provider's cost once per coupled sector; the
 /// reduction owners themselves add none (before #1219: one map allocation on
 /// top of the G provider queries).
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
     use symtn::sector::SUNFusionRule;

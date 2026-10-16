@@ -661,7 +661,7 @@ fn materialize_allocates_one_fresh_payload_per_call() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warm_checked_generic_adjoint_does_not_scale_with_fusion_trees() {
     let _measurement = counting_alloc::serial();

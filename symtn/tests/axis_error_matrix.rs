@@ -222,7 +222,7 @@ fn multiplicity_free_device_axis_errors_match_the_host() {
         .unwrap());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_axis_errors_are_the_multiplicity_free_facade_errors() {
     use symtn::sector::SUNFusionRule;

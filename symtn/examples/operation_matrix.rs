@@ -2942,7 +2942,7 @@ macro_rules! run_provider {
     }};
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn run_checked_sun(
     symmetry: &str,
     provider: std::sync::Arc<symtn::sector::SUNFusionRule>,
@@ -3591,10 +3591,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))));
         }
     }
-    #[cfg(not(feature = "racah-generated"))]
+    #[cfg(not(feature = "cgc-gen"))]
     if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("qr_compact") {
         return Err(Box::new(Error::InvalidArgument(
-            "operation-matrix qr_compact requires the racah-generated feature".into(),
+            "operation-matrix qr_compact requires the cgc-gen feature".into(),
         )));
     }
     let min_ms = std::env::var("OP_MATRIX_MIN_MS")
@@ -3707,7 +3707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         min_time
     );
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         use std::sync::Arc;
         use symtn::sector::SUNFusionRule;

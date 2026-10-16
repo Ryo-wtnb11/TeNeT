@@ -8,7 +8,7 @@
 
 use super::*;
 use num_complex::Complex64;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn_core::SUNFusionRule;
 
 /// What `f` did on this thread: whether it succeeded, its dense leases,
@@ -251,7 +251,7 @@ fn factorizations_lease_once_on_the_dense_route_in_both_modes() {
         );
         let (v, w) = (su2_leg(&[(0, 2), (1, 2)]), su2_leg(&[(0, 2)]));
         check(&format!("SU2 f64 {arm}"), lease_rows!(runtime, v, w, f64));
-        #[cfg(feature = "racah-generated")]
+        #[cfg(feature = "cgc-gen")]
         {
             let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
             let leg = |pairs: &[(&[i64], usize)]| {
@@ -274,7 +274,7 @@ fn factorizations_lease_once_on_the_dense_route_in_both_modes() {
 /// #1866: a checked Generic compact full trace reads the spectrum, as the
 /// multiplicity-free one does, so it materializes nothing (#2142 pinned the
 /// former densify inside the Host pool here).
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_trace_reads_the_spectrum_without_materializing() {
     let su3 = Arc::new(SUNFusionRule::new(3).unwrap());

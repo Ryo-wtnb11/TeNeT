@@ -694,7 +694,7 @@ fn a_degeneracy_only_change_reuses_the_sector_structure() {
         &checked_large.content_key().sector
     ));
 
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         let checked = crate::SUNFusionRule::new(3).unwrap();
         let vacuum = checked.encode_dynkin(&[0, 0]).unwrap();
@@ -768,7 +768,7 @@ fn repeated_fusion_channels_are_a_typed_error_not_a_duplicate_block() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
     if test_support::run_isolated_or_return(

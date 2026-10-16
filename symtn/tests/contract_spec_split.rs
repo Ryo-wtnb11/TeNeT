@@ -283,7 +283,7 @@ fn non_symmetric_braiding_is_unsupported_for_every_split() {
 
 /// Checked Generic providers take the same split through their own
 /// destination derivation: SU(3) adjoint legs carry fusion multiplicity.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_split_matches_contract_then_permute() {
     use symtn::sector::SUNFusionRule;

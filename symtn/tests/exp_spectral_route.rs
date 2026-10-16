@@ -225,7 +225,7 @@ fn multiplicity_free_exp_route_switches_at_the_predicate_boundary() {
 
 /// The same blocks through multiplicity-free SU(2) and checked SU(2) (fusion-symbols
 /// `SU(N=2)`): both modes take the same route and agree to rounding.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_and_multiplicity_free_exp_take_the_same_route() {
     use symtn::sector::{SU2FusionRule, SU2Irrep, SUNFusionRule};

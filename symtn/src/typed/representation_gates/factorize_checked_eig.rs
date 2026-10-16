@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     use symtn_core::SUNFusionRule;
@@ -151,7 +151,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     assert_eq!(calls.total(), 0);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() {
     use symtn_core::SUNFusionRule;
@@ -199,7 +199,7 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
     assert!(admit(&wrong_size).is_err());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     use symtn_core::SUNFusionRule;
@@ -250,7 +250,7 @@ fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_direct
         .contains("eigh input components must be finite"));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_same_complex_multisets<S: PartialEq + std::fmt::Debug>(
     actual: &[SectorSpectrum<S, Complex64>],
     expected: &[SectorSpectrum<S, Complex64>],
@@ -277,7 +277,7 @@ fn assert_same_complex_multisets<S: PartialEq + std::fmt::Debug>(
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
     use symtn_core::SUNFusionRule;
@@ -359,7 +359,7 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
     assert!(matches!(lazy.repr, TypedTensorRepr::Adjoint(_)));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
     use symtn_core::SUNFusionRule;
@@ -475,7 +475,7 @@ fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
     assert_eq!(calls.total(), 6);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
     use symtn_core::SUNFusionRule;
@@ -548,7 +548,7 @@ fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
     use symtn_core::SUNFusionRule;
@@ -595,7 +595,7 @@ fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
     assert!(admit(&wrong_size).is_err());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_vals_refuses_nonfinite_values() {
     use symtn_core::SUNFusionRule;
@@ -654,7 +654,7 @@ fn checked_compact_diagonal_eig_vals_refuses_nonfinite_values() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() {
     use symtn_core::SUNFusionRule;
@@ -731,7 +731,7 @@ fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() 
     check!(Complex64, |x| Complex64::new(x, 0.0));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
     use symtn_core::SUNFusionRule;
@@ -914,7 +914,7 @@ fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
     check!(Complex64, |x| Complex64::new(x, 0.0), 1e-12);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
     use symtn_core::SUNFusionRule;
@@ -1022,7 +1022,7 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
     use symtn_core::SUNFusionRule;
@@ -1257,7 +1257,7 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
     check!(Complex64, Complex64, Complex64::new, true, 1e-12);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_full_refuses_nonfinite_values() {
     use symtn_core::SUNFusionRule;
@@ -1333,7 +1333,7 @@ fn checked_compact_diagonal_eig_full_refuses_nonfinite_values() {
     assert_eq!(format!("{compact_error:?}"), format!("{dense_error:?}"));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
     use symtn_core::SUNFusionRule;
@@ -1392,7 +1392,7 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_directly() {
     use symtn_core::SUNFusionRule;
@@ -1469,7 +1469,7 @@ fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_direct
         .contains("eigh input components must be finite"));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_diagonal_eigh_full_rejects_inconsistent_spectrum_admission() {
     use symtn_core::SUNFusionRule;

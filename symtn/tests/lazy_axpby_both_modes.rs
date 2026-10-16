@@ -20,7 +20,7 @@
 //! The device rows (multiplicity-free only) are `storage_parity_matrix.rs`
 //! `mixed_lazy_axpby_cuda_rows_match_host`.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

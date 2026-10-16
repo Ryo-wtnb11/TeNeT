@@ -295,7 +295,7 @@ fn named_results_match_the_tuple_results() {
         &FZ2U1_C64_STRUCTURE,
         &FZ2U1_C64,
     );
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         // The lazy-adjoint rows were `Err` until checked Generic accepted
         // lazy adjoints (#1755).
@@ -609,7 +609,7 @@ const FZ2U1_C64: [u64; 20] = [
     0x4cd5a7c2087fdc5d,
     0x079c5e9fd6a08602,
 ];
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 const SU3_F64_STRUCTURE: [u64; 20] = [
     0xbc495a3228b0b522,
     0x8cc387613de843c4,
@@ -632,7 +632,7 @@ const SU3_F64_STRUCTURE: [u64; 20] = [
     0x907f9ed0987ba813,
     0x907f9ed0987ba813,
 ];
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 const SU3_F64: [u64; 20] = [
     0x443844ebdff05a81,
     0x2dd2146f4d494ed3,
@@ -655,7 +655,7 @@ const SU3_F64: [u64; 20] = [
     0xc6a21cbc83be0d8f,
     0x34356c817af9385f,
 ];
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 const SU3_C64_STRUCTURE: [u64; 20] = [
     0xbc495a3228b0b522,
     0x8cc387613de843c4,
@@ -678,7 +678,7 @@ const SU3_C64_STRUCTURE: [u64; 20] = [
     0x907f9ed0987ba813,
     0x907f9ed0987ba813,
 ];
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 const SU3_C64: [u64; 20] = [
     0x4ac8bb9aba11c1e9,
     0x6ce7c0fa70bc3f2a,

@@ -26,7 +26,7 @@
 //! Host only: checked Generic has no device API (#1756); the multiplicity-free
 //! device lazy-adjoint gates live in `representation_gates/cuda.rs`.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

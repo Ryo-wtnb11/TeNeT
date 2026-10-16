@@ -6,4 +6,4 @@ block layouts, with no tensor type of its own. Entry points are
 keys, `BlockStructure`, block views, and storage traits. It validates spaces and layouts but
 does not provide high-level execution.
 
-Enable `racah-generated` to pass generated SUN support through to sectors.
+Enable `cgc-gen` to pass generated SUN support through to sectors.

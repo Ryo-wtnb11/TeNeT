@@ -246,7 +246,7 @@ fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence
     ));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
     use symtn::sector::SUNFusionRule;
@@ -544,7 +544,7 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
 /// reconstruction, isometry against an explicit tree-basis identity, `S`
 /// against `svd_vals`, and `eigh_vals`/`eig_vals` of `A Aᴴ` against the
 /// squared singular values.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 macro_rules! assert_sun_compact_laws {
     ($runtime:expr, $source:expr) => {{
         let source = $source;
@@ -670,7 +670,7 @@ macro_rules! assert_sun_compact_laws {
     }};
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_compact_factors_and_spectra_on_facade_layouts() {
     use symtn::sector::SUNFusionRule;
@@ -917,7 +917,7 @@ fn checked_generic_isomorphism_is_the_equal_tree_identity_with_multiplicity() {
     });
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn su3_isomorphism_is_the_equal_tree_identity_with_multiplicity() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

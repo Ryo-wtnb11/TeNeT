@@ -807,7 +807,7 @@ factorization_suite!(complex32_payload, Complex32, Complex64);
 /// read through `diagview` plus a pointwise comparison against the widened
 /// oracle, which is gauge-independent because the factor's own gauge cancels in
 /// `q† ∘ q`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use std::sync::Arc;

@@ -672,7 +672,7 @@ fn absent_coupled_sector_is_tensorkits_empty_view() {
     assert!(matches!(block.payload(), CoupledBlockPayload::Diagonal(values) if values.is_empty()));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod su3 {
 
     use super::*;
@@ -843,7 +843,7 @@ mod cuda {
         run::<_, Complex64>("fZ2xU(1) c64", &rt, &v, &w);
     }
 
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     #[test]
     #[ignore]
     fn checked_generic_su3_device_block_views_address_the_host_block_entries() {

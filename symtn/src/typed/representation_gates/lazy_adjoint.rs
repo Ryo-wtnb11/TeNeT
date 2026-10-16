@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
     use symtn_core::SUNFusionRule;
@@ -230,7 +230,7 @@ fn lazy_adjoint_metadata_is_logical_and_cold() {
     };
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_inv_lazy_is_detached_and_keeps_receiver_cold() {
     use symtn_core::SUNFusionRule;
@@ -258,7 +258,7 @@ fn checked_generic_inv_lazy_is_detached_and_keeps_receiver_cold() {
         .all(|value| (*value - 0.5).abs() < 1.0e-12));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
     // What: both null directions use the opposite operation on the owned
@@ -323,7 +323,7 @@ fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
 /// materializes for a lazy adjoint. `Parent` and `AdjointSeam` read the parent
 /// in place (no materialization), `Materialize` copies the input once, and
 /// `Redirect` detaches its adjointed output (one copy).
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_lazy_adjoint_factorizations_follow_the_rule_table() {
     use symtn_core::SUNFusionRule;
@@ -392,7 +392,7 @@ fn checked_generic_lazy_adjoint_factorizations_follow_the_rule_table() {
     };
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
     use symtn_core::SUNFusionRule;
@@ -417,7 +417,7 @@ fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
     assert_eq!(actual.domain(), lazy.domain());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
     use symtn_core::SUNFusionRule;
@@ -750,7 +750,7 @@ fn nonidentity_adjoint_transforms_stay_parent_native_for_unique_simple_and_both_
     assert_parent_native_transform_suite(&su2_c64, &eager_adjoint_oracle(&su2_c64));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn nonidentity_adjoint_transforms_stay_parent_native_for_checked_generic_and_both_dtypes() {
     use symtn_core::SUNFusionRule;
@@ -1168,7 +1168,7 @@ fn adjoint_contract_and_compose_stay_parent_native() {
 /// contraction of `copy(t')` and, for `t'∘t`, (iii) the coupled-block
 /// product `B_c(t)ᴴ B_c(t)` over every block, the `8 ⊗ 8 → 8` rows of outer
 /// multiplicity two included.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_checked_adjoint_contract_and_compose<D>(source: &TensorMap<symtn_core::SUNFusionRule, D>)
 where
     D: TensorScalar + core::fmt::Debug,
@@ -1244,7 +1244,7 @@ where
     assert!(multiplicity_rows);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_adjoint_contract_and_compose_read_the_parent() {
     use symtn_core::SUNFusionRule;
@@ -1774,7 +1774,7 @@ fn lazy_cat_reads_parent_storage_without_publishing_adjoint_caches() {
     upper.cat(&lower, Side::Codomain).unwrap();
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_trace_nonselfdual_multiblock_lazy_matches_hand_weighted_trace() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -1811,7 +1811,7 @@ fn checked_trace_nonselfdual_multiblock_lazy_matches_hand_weighted_trace() {
     assert!(Arc::ptr_eq(&view.parent, &parent));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_trace_nonselfdual_multiblock_real_matches_hand_weighted_trace() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

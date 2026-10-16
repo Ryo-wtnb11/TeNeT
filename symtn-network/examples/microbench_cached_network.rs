@@ -120,7 +120,7 @@ mod u1 {
     }
 }
 
-#[cfg(not(feature = "racah-generated"))]
+#[cfg(not(feature = "cgc-gen"))]
 fn run_u1_medians() {
     let mut rows = std::collections::BTreeMap::<(String, String), Vec<(f64, Vec<String>)>>::new();
     for cache in ["enabled", "disabled"] {
@@ -153,7 +153,7 @@ fn run_u1_medians() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use std::hint::black_box;
     use std::process::Command;
@@ -365,12 +365,12 @@ mod checked_generic {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn main() {
     checked_generic::main();
 }
 
-#[cfg(not(feature = "racah-generated"))]
+#[cfg(not(feature = "cgc-gen"))]
 fn main() {
     println!("symmetry,cache,phase,iterations,us_per_iter,entries,hits,misses,workspaces_created,workspace_reuses,idle_workspaces,retained_workspace_bytes,peak_retained_workspace_bytes,workspace_byte_admissions,workspace_byte_rejections,workspace_byte_evictions");
     if let Ok(cache) = std::env::var("U1_NETWORK_CHILD") {

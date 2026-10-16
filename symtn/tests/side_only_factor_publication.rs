@@ -5,7 +5,7 @@
 //! complementary on the complete fused spaces.
 
 use std::sync::Arc;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn::typed::HermitianTol;
 
 use num_complex::Complex64;
@@ -18,13 +18,13 @@ use symtn::typed::{GradedSpace, Runtime, TensorMap};
 use symtn::typed::{Lq, Qr, Svd};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn codomain_axes<R, D, S>(t: &symtn::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (0..t.codomain_rank()).collect()
 }
 
 /// The receiver's own split as leg roles: `cols = nout..rank`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn domain_axes<R, D, S>(t: &symtn::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (t.codomain_rank()..t.rank()).collect()
 }
@@ -186,7 +186,7 @@ fn side_only_full_and_null_factors_are_complete_complex() {
 /// `fuse(domain)`, so every side-only sector is identity-completed (#1524).
 /// `$qr_bond`/`$lq_bond` are those fused spaces built by `GradedSpace::fuse`,
 /// independently of the factorization.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 macro_rules! full_qr_lq_bond_case {
     ($rt:expr, $scalar:ty, $codomain:expr, $domain:expr, $qr_bond:expr, $lq_bond:expr, $seed:expr) => {{
         let rt = $rt;
@@ -254,7 +254,7 @@ macro_rules! full_qr_lq_bond_case {
 
 /// The multiplicity-free comparison fixture: U(1) with codomain-only charge
 /// 2 and domain-only charge 3 obeys the same output-space rule.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 macro_rules! multiplicity_free_full_qr_lq_bonds {
     ($d:ty) => {{
         let rt = Runtime::builder().dense_threads(1).build().unwrap();
@@ -272,7 +272,7 @@ macro_rules! multiplicity_free_full_qr_lq_bonds {
     }};
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked_generic {
     use super::*;
     use symtn::sector::SUNFusionRule;

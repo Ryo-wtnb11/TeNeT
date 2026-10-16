@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-racah-generated = ["fusion-symbols/cgc-gen", "dep:num-traits"]
+cgc-gen = ["fusion-symbols/cgc-gen", "dep:num-traits"]
 # The infallible Generic symbol tier (`GenericFusionSymbols`,
 # `GenericRigidSymbols`): test oracles for this and sibling crates only;
 # production Generic is checked only (#1854).

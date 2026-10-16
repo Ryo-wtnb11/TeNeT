@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_contract_reuses_one_runtime_generic_lane() {
     use symtn_core::SUNFusionRule;

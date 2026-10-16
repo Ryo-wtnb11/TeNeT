@@ -3,10 +3,10 @@
 //! destination layout and plan are compiled, then executed) across sharing
 //! regimes. Provider calls and coefficient arithmetic of the plan build are
 //! measured by the unit test `checked_composer_measurement`. Run with
-//! `cargo test --release -p symtn-tensors --features racah-generated --test
+//! `cargo test --release -p symtn-tensors --features cgc-gen --test
 //! checked_generic_composer_measurement -- --ignored --nocapture --test-threads=1`.
 //! Wall-clock values are observations, never a gate.
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 

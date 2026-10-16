@@ -2,14 +2,14 @@
 //! misuse in both fusion modes, in one order — runtime, rule, operand shape
 //! (codomain equality, isomorphism, endomorphism), borrowed-view admission,
 //! then representation — on multiplicity-free U(1) and SU(2) and on the
-//! checked SU(3) rule (fusion-symbols; those rows need `racah-generated`). The expected first error of every row is the
+//! checked SU(3) rule (fusion-symbols; those rows need `cgc-gen`). The expected first error of every row is the
 //! one TensorKit's precedence implies (`src/tensors/linalg.jl` `inv`, `\`,
 //! `exp!`; `src/tensors/diagonal.jl` `D \ t`), written out below rather than
 //! derived from either mode.
 
 use super::*;
 use num_complex::Complex64;
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn_core::SUNFusionRule;
 use symtn_core::ZNFusionRule;
 
@@ -231,9 +231,9 @@ fn misuse_reports_one_first_error_in_both_modes() {
         )
         .unwrap()
     };
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     let su3_leg = |pairs: &[(&[i64], usize)]| {
         GradedSpace::try_new(
             Arc::clone(&su3),
@@ -284,7 +284,7 @@ fn misuse_reports_one_first_error_in_both_modes() {
         ),
         &expected,
     );
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     assert_rows(
         "SU3 checked f64",
         &misuse!(
@@ -295,7 +295,7 @@ fn misuse_reports_one_first_error_in_both_modes() {
         ),
         &expected,
     );
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     assert_rows(
         "SU3 checked c64",
         &misuse!(
@@ -343,7 +343,7 @@ fn rule_mismatch_is_the_first_error_in_both_modes() {
     expected.push(RUNTIME.to_string());
     assert_eq!(rule_rows!(za, zb, f64), expected, "Z2/Z3 f64");
     assert_eq!(rule_rows!(za, zb, Complex64), expected, "Z2/Z3 c64");
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         let su3 = Arc::new(SUNFusionRule::new(3).unwrap());
         let su4 = Arc::new(SUNFusionRule::new(4).unwrap());

@@ -200,7 +200,7 @@ fn generic_toy_core_composition_matches_block_products() {
     assert!(block_product_case("GenericToy", &a, &b, false) >= 2);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod racah {
     use super::*;
     use std::collections::BTreeMap;

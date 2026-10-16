@@ -197,7 +197,7 @@ fn complex_symbol_zeros_like_keeps_space_and_form() {
     });
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod checked {
     use super::*;
     use symtn::sector::SUNFusionRule;

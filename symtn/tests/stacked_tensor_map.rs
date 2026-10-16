@@ -103,7 +103,7 @@ fn runtime_drift_names_the_member_and_field() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn rule_instance_drift_names_the_member_and_field() {
     let runtime = host_runtime();

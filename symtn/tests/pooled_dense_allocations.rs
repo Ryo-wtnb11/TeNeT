@@ -151,7 +151,7 @@ fn pooled_lease_adds_no_allocation_calls_at_any_block_count() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su3_pooled_lease_adds_no_allocation_calls_at_any_block_count() {
     use symtn::sector::SUNFusionRule;

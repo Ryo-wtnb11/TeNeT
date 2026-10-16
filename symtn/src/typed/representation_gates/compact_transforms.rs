@@ -712,7 +712,7 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     assert_eq!(densified.get(Event::DiagonalMaterialization), 0);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_arms_never_densify_their_spectrum_operand() {
     // What (#1866): checked Generic takes the same compose, contract,
@@ -1169,7 +1169,7 @@ fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
     assert_eq!(values[offset(1, 0)].to_bits(), 0.0f64.to_bits());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_compact_trace_reads_the_spectrum_after_admission() {
     // What (#1866): an inadmissible pair is rejected without touching the
@@ -1210,5 +1210,5 @@ fn checked_compact_trace_reads_the_spectrum_after_admission() {
     ));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 mod late_trace;

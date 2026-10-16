@@ -309,7 +309,7 @@ fn su2_chains_match_the_removed_methods() {
 /// multiplicity. The identity is `isomorphism(V, V)`, and checked-Generic
 /// `compose` rejects a lazy adjoint operand, so `t†` enters the Gram map
 /// materialized.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_chains_decide_true_and_false_cases() {
     use std::cell::Cell;

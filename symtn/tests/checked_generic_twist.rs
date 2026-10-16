@@ -810,7 +810,7 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
     assert_eq!(roundtrip.domain(), source.domain());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_identity_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D)
 where
     D: TensorScalar + fmt::Debug + PartialEq,
@@ -851,7 +851,7 @@ where
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_twist_identity_shares_exact_provider_and_layout() {
     // What: the checked SU(3)/SU(4) pivotal implementation is θ=1, so all four
@@ -866,7 +866,7 @@ fn sun_checked_generic_twist_identity_shares_exact_provider_and_layout() {
     });
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_sun_flip_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D)
 where
     D: TensorScalar + fmt::Debug + PartialEq,
@@ -916,7 +916,7 @@ where
     assert_eq!(roundtrip.codomain(), source.codomain());
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn sun_checked_generic_flip_preserves_full_key_layout_and_inverse_roundtrip() {
     assert_sun_flip_case(3, vec![2, 2], |value| value as f64);

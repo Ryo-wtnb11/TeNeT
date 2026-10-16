@@ -184,7 +184,7 @@ fn u1_spaces(scale: usize) -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRu
     (space([2, 3, 2]), space([1, 1, 3]))
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn checked_su2_spaces(
     scale: usize,
 ) -> (
@@ -214,7 +214,7 @@ fn u1_identity_adjoint_is_borrowed_on_the_dynamic_tree_route() {
     assert_borrowed!("U(1)", permuted, u1_spaces);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su2_identity_adjoint_is_borrowed_on_the_dynamic_tree_route() {
     assert_borrowed!("checked SU(2)", permuted, checked_su2_spaces);
@@ -230,7 +230,7 @@ fn u1_selection_prices_a_borrowable_identity_adjoint_as_free() {
     assert_borrowed!("U(1)", reversed, u1_spaces);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_su2_selection_prices_a_borrowable_identity_adjoint_as_free() {
     assert_borrowed!("checked SU(2)", reversed, checked_su2_spaces);

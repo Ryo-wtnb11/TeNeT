@@ -224,7 +224,7 @@ fn warm_staged_checked_plans_lend_the_canonical_structure() {
 /// The same permute and contraction bounds for the fusion-symbols SU(N) providers
 /// (SU(2) and SU(3), whose adjoint carries outer multiplicity). SU(3) stops
 /// at rank 4: its rank-6 cold build exceeds ten minutes in a debug test.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warm_racah_checked_contraction_is_bounded_by_sectors_and_groups() {
     use symtn::sector::SUNFusionRule;

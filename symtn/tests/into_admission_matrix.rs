@@ -160,7 +160,7 @@ fn su2_spin(sector: &SU2Irrep) -> usize {
     sector.twice_spin()
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[expect(clippy::ptr_arg, reason = "the SU(N) sector label is a `Vec<i64>`")]
 fn sun_spin(sector: &Vec<i64>) -> usize {
     sector[0] as usize
@@ -517,7 +517,7 @@ fn su2_leg() -> GradedSpace<SU2FusionRule> {
     .unwrap()
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn sun2_leg() -> GradedSpace<symtn::sector::SUNFusionRule> {
     GradedSpace::try_new(
         Arc::new(symtn::sector::SUNFusionRule::new(2).unwrap()),
@@ -746,7 +746,7 @@ fn multiplicity_free_complex_symbol_transform_into_is_alpha_eager_plus_beta_dest
     assert_eq!(dense(&destination), before);
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_transform_into_is_alpha_eager_plus_beta_destination_and_matches_multiplicity_free(
 ) {
@@ -824,7 +824,7 @@ fn checked_generic_transform_into_is_alpha_eager_plus_beta_destination_and_match
 /// A warm checked `_into` allocates no `n_C` result: it costs the eager
 /// op's staging minus the payload, and makes no allocation of the payload's
 /// size.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_warm_transform_into_allocates_no_result_payload() {
     let _serial = counting_alloc::serial();
@@ -895,7 +895,7 @@ fn lazy_adjoint_transform_into_allocates_no_parent_sized_buffer() {
     )
     .unwrap();
     lazy_into_allocations!(source!(&runtime, v, v, debug_key::<U1Irrep>));
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         let v = sun2_leg();
         lazy_into_allocations!(source!(&runtime, v, v, |t: &BlockFusionTrees<Vec<i64>>| {
@@ -1035,7 +1035,7 @@ fn multiplicity_free_real_symbol_trace_pairs_into_is_alpha_eager_plus_beta_desti
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_trace_pairs_into_is_alpha_eager_plus_beta_destination_and_matches_multiplicity_free(
 ) {
@@ -1169,7 +1169,7 @@ fn trace_pairs_into_allocates_no_result_parent_or_dense_compact_buffer() {
     });
     assert!(control.matched_calls >= 1, "{control:?}");
 
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         let v = sun2_leg();
         let key = |t: &BlockFusionTrees<Vec<i64>>| twice(t, sun_spin);
@@ -1539,7 +1539,7 @@ fn multiplicity_free_real_symbol_contract_into_is_alpha_eager_plus_beta_destinat
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_contract_into_is_alpha_eager_plus_beta_destination_and_matches_multiplicity_free(
 ) {
@@ -1789,7 +1789,7 @@ fn compact_contract_into_allocates_no_dense_compact_operand_in_both_modes() {
     let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 4)]).unwrap();
     let b = GradedSpace::try_new(rule, [(U1Irrep::new(0), 128)]).unwrap();
     compact_contract_allocations!(&runtime, v, b, U1Irrep::new(0));
-    #[cfg(feature = "racah-generated")]
+    #[cfg(feature = "cgc-gen")]
     {
         let rule = Arc::new(symtn::sector::SUNFusionRule::new(2).unwrap());
         let v = GradedSpace::try_new(Arc::clone(&rule), [(vec![0i64], 4)]).unwrap();

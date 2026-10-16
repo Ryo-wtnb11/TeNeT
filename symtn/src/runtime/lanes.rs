@@ -295,7 +295,7 @@ macro_rules! define_tensor_execution_context {
         pub(crate) struct TensorExecutionContext {
             $(pub(crate) $field: Ctxs<$key>,)+
             pub(super) mf_c64_coeff_c64: CoefficientCtx<Complex64, RuleIdentity, Complex64>,
-            #[cfg(all(test, feature = "racah-generated"))]
+            #[cfg(all(test, feature = "cgc-gen"))]
             generic_lane_uses: usize,
         }
 
@@ -309,7 +309,7 @@ macro_rules! define_tensor_execution_context {
                         &config.shared_ctx,
                         config.gemm_kind,
                     )?,
-                    #[cfg(all(test, feature = "racah-generated"))]
+                    #[cfg(all(test, feature = "cgc-gen"))]
                     generic_lane_uses: 0,
                 };
                 if let Some(threads) = config.recoupling_threads {
@@ -351,14 +351,14 @@ macro_rules! define_tensor_execution_context {
             pub(crate) fn generic_lane<D: ScalarOps>(
                 &mut self,
             ) -> Result<&mut Ctx<D, symtn_core::RuleIdentity>, Error> {
-                #[cfg(all(test, feature = "racah-generated"))]
+                #[cfg(all(test, feature = "cgc-gen"))]
                 {
                     self.generic_lane_uses += 1;
                 }
                 D::ctx_of(&mut self.generic)
             }
 
-            #[cfg(all(test, feature = "racah-generated"))]
+            #[cfg(all(test, feature = "cgc-gen"))]
             pub(crate) fn generic_lane_uses(&self) -> usize {
                 self.generic_lane_uses
             }

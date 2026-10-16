@@ -169,7 +169,7 @@ fn su2_sector_change_rebuilds_only_changed_groups() {
     );
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
     let _serial = serial();

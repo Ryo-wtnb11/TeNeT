@@ -7,7 +7,7 @@ use symtn::sector::{
 use symtn::typed::Runtime;
 use symtn::typed::{GradedSpace, TensorMap};
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 use symtn::sector::SUNFusionRule;
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -21,7 +21,7 @@ fn measure(f: impl FnOnce()) -> (usize, usize) {
     (allocs.calls as usize, allocs.bytes as usize)
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn measure_value<T>(f: impl FnOnce() -> T) -> (T, usize, usize, u128) {
     let ((output, elapsed), allocs) = counting_alloc::measure(|| {
         let started = std::time::Instant::now();
@@ -167,7 +167,7 @@ fn warm_recoupling_permute_into_allocations_do_not_grow_with_block_count() {
 
 /// The checked Generic counterpart of the multiplicity-free relation above:
 /// SU(3) with fusion multiplicity.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warm_checked_generic_permute_into_allocations_do_not_grow_with_block_count() {
     let _measurement = counting_alloc::serial();
@@ -201,7 +201,7 @@ fn warm_checked_generic_permute_into_allocations_do_not_grow_with_block_count() 
 /// destination; its trees were admitted once and are not re-admitted per
 /// call (#2233). Each SU(3) admission query allocates in Racah, so per-block
 /// re-admission would make the large case allocate more.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 fn warm_checked_generic_permute_of_an_evicted_source_does_not_readmit_its_trees() {
     let _measurement = counting_alloc::serial();
@@ -287,7 +287,7 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
     assert!(std::ptr::eq(repartitioned.provider(), provider.as_ref()));
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn assert_same_checked_tensor(
     actual: &TensorMap<SUNFusionRule, f64>,
     expected: &TensorMap<SUNFusionRule, f64>,
@@ -316,7 +316,7 @@ fn assert_same_checked_tensor(
 /// Measurement only: each child process starts with cold provider and Runtime
 /// state. Allocation counts cover requested bytes on the caller thread, which
 /// is the same scope as the established overwrite allocation gates above.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 #[test]
 #[ignore = "benchmark: run via benchmarks.yml"]
 fn checked_generic_public_transform_measurement() {
@@ -460,7 +460,7 @@ fn checked_generic_public_transform_measurement() {
 }
 
 /// The process-global completed-transformer cache (`symtn::cache`).
-#[cfg_attr(not(feature = "racah-generated"), allow(dead_code))]
+#[cfg_attr(not(feature = "cgc-gen"), allow(dead_code))]
 fn completed_transformers() -> symtn::cache::StructureCacheInfo {
     symtn::cache::stats()
         .into_iter()

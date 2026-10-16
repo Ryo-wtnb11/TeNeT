@@ -83,13 +83,13 @@ fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
 }
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn codomain_axes<R, D, S>(t: &symtn::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (0..t.codomain_rank()).collect()
 }
 
 /// The receiver's own split as leg roles: `cols = nout..rank`.
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 fn domain_axes<R, D, S>(t: &symtn::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (t.codomain_rank()..t.rank()).collect()
 }
@@ -111,14 +111,14 @@ fn endomorphism_terms(payload_len: usize) -> usize {
     (payload_len as f64).sqrt().ceil() as usize
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 trait SunEigInput: symtn::typed::AdvancedLinalgScalar<Eig = Complex64> + fmt::Debug {
     fn to_complex(
         source: &TensorMap<symtn::sector::SUNFusionRule, Self>,
     ) -> TensorMap<symtn::sector::SUNFusionRule, Complex64>;
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl SunEigInput for f64 {
     fn to_complex(
         source: &TensorMap<symtn::sector::SUNFusionRule, Self>,
@@ -127,7 +127,7 @@ impl SunEigInput for f64 {
     }
 }
 
-#[cfg(feature = "racah-generated")]
+#[cfg(feature = "cgc-gen")]
 impl SunEigInput for Complex64 {
     fn to_complex(
         source: &TensorMap<symtn::sector::SUNFusionRule, Self>,
@@ -742,7 +742,7 @@ mod transforms;
 mod transforms_into;
 
 /// The process-global completed-transformer cache (`symtn::cache`).
-#[cfg_attr(not(feature = "racah-generated"), allow(dead_code))]
+#[cfg_attr(not(feature = "cgc-gen"), allow(dead_code))]
 fn completed_transformers() -> symtn::cache::StructureCacheInfo {
     symtn::cache::stats()
         .into_iter()

@@ -8,7 +8,7 @@
 //! differ across platforms and dependency builds; only run-to-run variation is
 //! the defect.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::process::Command;
 

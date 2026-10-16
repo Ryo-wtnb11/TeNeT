@@ -17,7 +17,7 @@
 //! under the workspace tolerance rule (`docs/testing_numerics.md`), all
 //! against the symtn-independent expectation of `truncation_oracle`.
 
-#![cfg(feature = "racah-generated")]
+#![cfg(feature = "cgc-gen")]
 
 use std::sync::Arc;
 use symtn::typed::HermitianTol;
