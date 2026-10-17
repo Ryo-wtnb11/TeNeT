@@ -11,14 +11,15 @@
 //! restricting which providers compose — its infallible `nsymbol` validates
 //! indirectly, through whichever components do forward. The out-of-domain
 //! sweep of the Fibonacci F/R/dim/twist symbols (#1737) lives in
-//! `tests/fibonacci_providers.rs`.
+//! `tests/fibonacci_providers.rs`; the abelian and CU(1) one (#2278) is
+//! `infallible_symbols_reject_out_of_domain_ids` below.
 
 use std::panic::{self, AssertUnwindSafe};
 
 use symtn_sectors::{
     CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionRule,
-    SU2FusionRule, SectorId, TableRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
-    CU1_MAX_TWICE_CHARGE,
+    MultiplicityFreeRigidSymbols, SU2FusionRule, SectorId, TableRule, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep, ZNFusionRule, CU1_MAX_TWICE_CHARGE,
 };
 
 fn assert_dual_forwards<R: FusionRule + CheckedFusionAlgebra>(rule: &R, ids: &[SectorId]) {
@@ -238,4 +239,63 @@ fn fibonacci_infallible_entry_points_match_checked_domain() {
     assert_dual_forwards(&rule, &ids);
     assert_fusion_channels_forwards(&rule, &all_pairs(&ids));
     assert_nsymbol_forwards(&rule, &all_triples(&ids));
+}
+
+/// Every infallible symbol panics when any one of its labels is outside the
+/// rule's sector domain: the symbols have no checked twin, so a value there
+/// would be a silent wrong answer.
+fn assert_symbols_reject<R>(rule: &R, valid: SectorId, invalid: SectorId)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let panics = |what: &str, call: &dyn Fn() -> f64| {
+        assert!(
+            panic::catch_unwind(AssertUnwindSafe(call)).is_err(),
+            "{what} must panic on the out-of-domain id {invalid:?}"
+        );
+    };
+    for slot in 0..6 {
+        let mut f = [valid; 6];
+        f[slot] = invalid;
+        panics("F", &|| {
+            rule.f_symbol_scalar(f[0], f[1], f[2], f[3], f[4], f[5])
+        });
+    }
+    for slot in 0..3 {
+        let mut r = [valid; 3];
+        r[slot] = invalid;
+        panics("R", &|| rule.r_symbol_scalar(r[0], r[1], r[2]));
+    }
+    panics("dim", &|| rule.dim_scalar(invalid));
+    panics("inv_dim", &|| rule.inv_dim_scalar(invalid));
+    panics("sqrt_dim", &|| rule.sqrt_dim_scalar(invalid));
+    panics("inv_sqrt_dim", &|| rule.inv_sqrt_dim_scalar(invalid));
+    panics("twist", &|| rule.twist_scalar(invalid));
+    panics("frobenius_schur", &|| {
+        rule.frobenius_schur_phase_scalar(invalid)
+    });
+}
+
+#[test]
+fn infallible_symbols_reject_out_of_domain_ids() {
+    let zn = ZNFusionRule::new(5).unwrap();
+    let vacuum = zn.vacuum();
+    assert_symbols_reject(&zn, vacuum, SectorId::new(5));
+    assert_symbols_reject(&Z2FusionRule, Z2Irrep::EVEN.sector_id(), SectorId::new(2));
+    assert_symbols_reject(
+        &FermionParityFusionRule,
+        Z2Irrep::EVEN.sector_id(),
+        SectorId::new(2),
+    );
+    // The excluded charge i32::MIN.
+    assert_symbols_reject(
+        &U1FusionRule,
+        U1Irrep::new(0).sector_id(),
+        SectorId::new(u32::MAX as usize),
+    );
+    assert_symbols_reject(
+        &CU1FusionRule,
+        CU1Irrep::VACUUM.sector_id(),
+        SectorId::new(CU1_MAX_TWICE_CHARGE as usize + 2),
+    );
 }

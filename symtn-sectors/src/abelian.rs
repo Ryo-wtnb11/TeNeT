@@ -1,9 +1,53 @@
+//! Z2, Z_N, U(1) and fermion parity as symtn fusion rules.
+//!
+//! Every symbol (dual, fusion, N, F, R, dim, twist, Frobenius–Schur phase)
+//! comes from [`fusion_symbols::abelian`], which follows TensorKitSectors
+//! 0.3.9; this module owns only symtn's labels, `SectorId` codecs, styles,
+//! identities and checked error contracts. An inadmissible F or R is `0.0`,
+//! as in TensorKitSectors. A `SectorId` outside the rule's domain panics in
+//! the infallible symbols, as in the other providers.
+
+use fusion_symbols::abelian as fs;
+
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, PhysicalBasisError, PhysicalFusionBasis, RuleIdentity,
     SectorCodec, SectorId, SectorOrderKey, SectorVec,
 };
+
+/// Decodes a label for an infallible symbol; out of domain is a caller bug.
+fn or_panic<T>(label: Result<T, FusionAlgebraError>) -> T {
+    label.unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// The rigid symbols of a rule whose `fn label(&self, SectorId)` returns a
+/// fusion-symbols label. The inverse and square-root forms are derived from
+/// `dim` exactly as the fusion-symbols golden records them.
+macro_rules! rigid_symbols_from_labels {
+    ($rule:ty) => {
+        impl MultiplicityFreeRigidSymbols for $rule {
+            fn dim_scalar(&self, sector: SectorId) -> f64 {
+                self.label(sector).dim()
+            }
+            fn inv_dim_scalar(&self, sector: SectorId) -> f64 {
+                1.0 / self.dim_scalar(sector)
+            }
+            fn sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
+                self.dim_scalar(sector).sqrt()
+            }
+            fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
+                1.0 / self.sqrt_dim_scalar(sector)
+            }
+            fn twist_scalar(&self, sector: SectorId) -> f64 {
+                self.label(sector).twist()
+            }
+            fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> f64 {
+                self.label(sector).frobenius_schur()
+            }
+        }
+    };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Z2Irrep {
@@ -71,18 +115,30 @@ impl ZNFusionRule {
     }
 
     pub fn irrep(&self, charge: i64) -> ZNIrrep {
-        let n = self.modulus() as i64;
         ZNIrrep {
-            charge: charge.rem_euclid(n) as u32,
+            charge: self.fs_irrep(charge).charge(),
         }
     }
 
-    fn checked(&self, sector: SectorId) -> Result<ZNIrrep, FusionAlgebraError> {
+    fn fs_irrep(&self, charge: i64) -> fs::ZNIrrep {
+        fs::ZNIrrep::new(charge, self.modulus())
+            .expect("the modulus is a NonZeroU32, so ZeroModulus cannot occur")
+    }
+
+    fn checked(&self, sector: SectorId) -> Result<fs::ZNIrrep, FusionAlgebraError> {
         let charge = u32::try_from(sector.id()).ok();
         match charge.filter(|&charge| charge < self.modulus()) {
-            Some(charge) => Ok(ZNIrrep { charge }),
+            Some(charge) => Ok(self.fs_irrep(i64::from(charge))),
             None => Err(FusionAlgebraError::InvalidSector { sector }),
         }
+    }
+
+    fn label(&self, sector: SectorId) -> fs::ZNIrrep {
+        or_panic(self.checked(sector))
+    }
+
+    fn sector(label: fs::ZNIrrep) -> SectorId {
+        SectorId::new(label.charge() as usize)
     }
 }
 
@@ -115,8 +171,7 @@ impl FusionRule for ZNFusionRule {
 
 impl CheckedFusionAlgebra for ZNFusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        let sector = self.checked(sector)?;
-        Ok(self.irrep(-(sector.charge as i64)).into())
+        Ok(Self::sector(self.checked(sector)?.dual()))
     }
     fn try_fusion_channels(
         &self,
@@ -125,11 +180,10 @@ impl CheckedFusionAlgebra for ZNFusionRule {
     ) -> Result<SectorVec, FusionAlgebraError> {
         let left = self.checked(left)?;
         let right = self.checked(right)?;
-        Ok(core::iter::once(
-            self.irrep((left.charge as u64 + right.charge as u64) as i64)
-                .into(),
-        )
-        .collect())
+        let fused = left
+            .fusion(right)
+            .expect("both labels carry this rule's modulus");
+        Ok(core::iter::once(Self::sector(fused)).collect())
     }
     fn try_nsymbol(
         &self,
@@ -137,10 +191,10 @@ impl CheckedFusionAlgebra for ZNFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError> {
-        self.checked(coupled)?;
-        Ok(usize::from(
-            coupled == self.try_fusion_channels(left, right)?[0],
-        ))
+        let coupled = self.checked(coupled)?;
+        let left = self.checked(left)?;
+        let right = self.checked(right)?;
+        Ok(fs::zn_nsymbol(left, right, coupled) as usize)
     }
 }
 
@@ -156,7 +210,9 @@ impl SectorCodec for ZNFusionRule {
         }
     }
     fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
-        self.checked(id)
+        self.checked(id).map(|label| ZNIrrep {
+            charge: label.charge(),
+        })
     }
 }
 
@@ -169,39 +225,21 @@ impl MultiplicityFreeFusionSymbols for ZNFusionRule {
     }
     fn f_symbol_scalar(
         &self,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> Self::Scalar {
-        1.0
+        let [a, b, c, d, e, f] = [a, b, c, d, e, f].map(|sector| self.label(sector));
+        fs::zn_f_symbol(a, b, c, d, e, f)
     }
-    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-}
-impl MultiplicityFreeRigidSymbols for ZNFusionRule {
-    fn dim_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-    fn inv_dim_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-    fn sqrt_dim_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-    fn twist_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
-    }
-    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> Self::Scalar {
-        1.0
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar {
+        fs::zn_r_symbol(self.label(a), self.label(b), self.label(c))
     }
 }
+rigid_symbols_from_labels!(ZNFusionRule);
 
 impl Z2Irrep {
     pub const EVEN: Self = Self { parity: 0 };
@@ -228,6 +266,10 @@ impl Z2Irrep {
             _ => None,
         }
     }
+
+    const fn is_odd(self) -> bool {
+        self.parity == 1
+    }
 }
 
 impl From<Z2Irrep> for SectorId {
@@ -236,8 +278,33 @@ impl From<Z2Irrep> for SectorId {
     }
 }
 
+fn checked_z2_irrep(sector: SectorId) -> Result<Z2Irrep, FusionAlgebraError> {
+    match Z2Irrep::from_sector_id(sector) {
+        Some(irrep) => Ok(irrep),
+        None => Err(FusionAlgebraError::InvalidSector { sector }),
+    }
+}
+
+fn checked_z2(sector: SectorId) -> Result<fs::Z2Irrep, FusionAlgebraError> {
+    checked_z2_irrep(sector).map(|irrep| fs::Z2Irrep::new(irrep.is_odd()))
+}
+
+fn checked_fermion(sector: SectorId) -> Result<fs::FermionParity, FusionAlgebraError> {
+    checked_z2_irrep(sector).map(|irrep| fs::FermionParity::new(irrep.is_odd()))
+}
+
+fn parity_sector(odd: bool) -> SectorId {
+    Z2Irrep::new(u8::from(odd)).sector_id()
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Z2FusionRule;
+
+impl Z2FusionRule {
+    fn label(&self, sector: SectorId) -> fs::Z2Irrep {
+        or_panic(checked_z2(sector))
+    }
+}
 
 impl FusionRule for Z2FusionRule {
     fn rule_identity(&self) -> RuleIdentity {
@@ -273,17 +340,9 @@ impl FusionRule for Z2FusionRule {
     }
 }
 
-fn checked_z2_irrep(sector: SectorId) -> Result<Z2Irrep, FusionAlgebraError> {
-    match Z2Irrep::from_sector_id(sector) {
-        Some(irrep) => Ok(irrep),
-        None => Err(FusionAlgebraError::InvalidSector { sector }),
-    }
-}
-
 impl CheckedFusionAlgebra for Z2FusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        checked_z2_irrep(sector)?;
-        Ok(sector)
+        Ok(parity_sector(checked_z2(sector)?.dual().is_odd()))
     }
 
     fn try_fusion_channels(
@@ -291,9 +350,8 @@ impl CheckedFusionAlgebra for Z2FusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, FusionAlgebraError> {
-        let left = checked_z2_irrep(left)?;
-        let right = checked_z2_irrep(right)?;
-        Ok(core::iter::once(Z2Irrep::new(left.parity() ^ right.parity()).into()).collect())
+        let fused = checked_z2(left)?.fusion(checked_z2(right)?);
+        Ok(core::iter::once(parity_sector(fused.is_odd())).collect())
     }
 
     fn try_nsymbol(
@@ -302,12 +360,8 @@ impl CheckedFusionAlgebra for Z2FusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError> {
-        let left = checked_z2_irrep(left)?;
-        let right = checked_z2_irrep(right)?;
-        let coupled = checked_z2_irrep(coupled)?;
-        Ok(usize::from(
-            coupled.parity() == (left.parity() ^ right.parity()),
-        ))
+        let (left, right) = (checked_z2(left)?, checked_z2(right)?);
+        Ok(fs::z2_nsymbol(left, right, checked_z2(coupled)?) as usize)
     }
 }
 
@@ -336,54 +390,32 @@ impl MultiplicityFreeFusionSymbols for Z2FusionRule {
 
     fn f_symbol_scalar(
         &self,
-        _left: SectorId,
-        _middle: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-        _left_coupled: SectorId,
-        _right_coupled: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> Self::Scalar {
-        1.0
+        let [a, b, c, d, e, f] = [a, b, c, d, e, f].map(|sector| self.label(sector));
+        fs::z2_f_symbol(a, b, c, d, e, f)
     }
 
-    fn r_symbol_scalar(
-        &self,
-        _left: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-    ) -> Self::Scalar {
-        1.0
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar {
+        fs::z2_r_symbol(self.label(a), self.label(b), self.label(c))
     }
 }
 
-impl MultiplicityFreeRigidSymbols for Z2FusionRule {
-    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-}
+rigid_symbols_from_labels!(Z2FusionRule);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct FermionParityFusionRule;
+
+impl FermionParityFusionRule {
+    fn label(&self, sector: SectorId) -> fs::FermionParity {
+        or_panic(checked_fermion(sector))
+    }
+}
 
 impl FusionRule for FermionParityFusionRule {
     fn rule_identity(&self) -> RuleIdentity {
@@ -421,7 +453,7 @@ impl FusionRule for FermionParityFusionRule {
 
 impl CheckedFusionAlgebra for FermionParityFusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        Z2FusionRule.try_dual_sector(sector)
+        Ok(parity_sector(checked_fermion(sector)?.dual().is_odd()))
     }
 
     fn try_fusion_channels(
@@ -429,7 +461,8 @@ impl CheckedFusionAlgebra for FermionParityFusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, FusionAlgebraError> {
-        Z2FusionRule.try_fusion_channels(left, right)
+        let fused = checked_fermion(left)?.fusion(checked_fermion(right)?);
+        Ok(core::iter::once(parity_sector(fused.is_odd())).collect())
     }
 
     fn try_nsymbol(
@@ -438,7 +471,8 @@ impl CheckedFusionAlgebra for FermionParityFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError> {
-        Z2FusionRule.try_nsymbol(left, right, coupled)
+        let (left, right) = (checked_fermion(left)?, checked_fermion(right)?);
+        Ok(fs::fermion_parity_nsymbol(left, right, checked_fermion(coupled)?) as usize)
     }
 }
 
@@ -467,54 +501,23 @@ impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
 
     fn f_symbol_scalar(
         &self,
-        _left: SectorId,
-        _middle: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-        _left_coupled: SectorId,
-        _right_coupled: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> Self::Scalar {
-        1.0
+        let [a, b, c, d, e, f] = [a, b, c, d, e, f].map(|sector| self.label(sector));
+        fs::fermion_parity_f_symbol(a, b, c, d, e, f)
     }
 
-    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
-        if left == Z2Irrep::ODD.into() && right == Z2Irrep::ODD.into() {
-            -1.0
-        } else {
-            1.0
-        }
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar {
+        fs::fermion_parity_r_symbol(self.label(a), self.label(b), self.label(c))
     }
 }
 
-impl MultiplicityFreeRigidSymbols for FermionParityFusionRule {
-    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
-        if sector == Z2Irrep::ODD.into() {
-            -1.0
-        } else {
-            1.0
-        }
-    }
-
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-}
+rigid_symbols_from_labels!(FermionParityFusionRule);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct U1Irrep {
@@ -560,16 +563,22 @@ impl U1Irrep {
     }
 
     pub fn checked_fuse(self, other: Self) -> Result<Self, FusionAlgebraError> {
-        match self
-            .charge
-            .checked_add(other.charge)
-            .and_then(Self::try_new)
-        {
-            Some(fused) => Ok(fused),
-            None => Err(FusionAlgebraError::U1FusionOverflow {
+        match self.fs().fusion(other.fs()) {
+            Ok(fused) => Ok(Self::from_fs(fused)),
+            Err(_) => Err(FusionAlgebraError::U1FusionOverflow {
                 left: self.charge,
                 right: other.charge,
             }),
+        }
+    }
+
+    fn fs(self) -> fs::U1Irrep {
+        fs::U1Irrep::new(self.charge).expect("both encodings exclude only i32::MIN")
+    }
+
+    const fn from_fs(label: fs::U1Irrep) -> Self {
+        Self {
+            charge: label.charge(),
         }
     }
 }
@@ -597,6 +606,12 @@ impl From<U1Irrep> for SectorId {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct U1FusionRule;
+
+impl U1FusionRule {
+    fn label(&self, sector: SectorId) -> fs::U1Irrep {
+        or_panic(checked_u1_irrep(sector)).fs()
+    }
+}
 
 impl FusionRule for U1FusionRule {
     fn rule_identity(&self) -> RuleIdentity {
@@ -649,7 +664,7 @@ impl FusionRule for U1FusionRule {
 impl CheckedFusionAlgebra for U1FusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         let irrep = checked_u1_irrep(sector)?;
-        Ok(U1Irrep::new(-irrep.charge()).into())
+        Ok(U1Irrep::from_fs(irrep.fs().dual()).into())
     }
 
     fn try_fusion_channels(
@@ -662,6 +677,10 @@ impl CheckedFusionAlgebra for U1FusionRule {
         Ok(core::iter::once(left.checked_fuse(right)?.into()).collect())
     }
 
+    /// Why not fusion-symbols' exact `u1_nsymbol` alone: symtn's checked
+    /// algebra reports a sum outside the label range as
+    /// `U1FusionOverflow` (stricter than TensorKitSectors' `0`), so a caller
+    /// that enumerates channels and one that asks for `N` fail alike.
     fn try_nsymbol(
         &self,
         left: SectorId,
@@ -671,7 +690,8 @@ impl CheckedFusionAlgebra for U1FusionRule {
         let left = checked_u1_irrep(left)?;
         let right = checked_u1_irrep(right)?;
         let coupled = checked_u1_irrep(coupled)?;
-        Ok(usize::from(coupled == left.checked_fuse(right)?))
+        left.checked_fuse(right)?;
+        Ok(fs::u1_nsymbol(left.fs(), right.fs(), coupled.fs()) as usize)
     }
 }
 
@@ -753,69 +773,23 @@ impl MultiplicityFreeFusionSymbols for U1FusionRule {
 
     fn f_symbol_scalar(
         &self,
-        _left: SectorId,
-        _middle: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-        _left_coupled: SectorId,
-        _right_coupled: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> Self::Scalar {
-        1.0
+        let [a, b, c, d, e, f] = [a, b, c, d, e, f].map(|sector| self.label(sector));
+        fs::u1_f_symbol(a, b, c, d, e, f)
     }
 
-    fn r_symbol_scalar(
-        &self,
-        _left: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-    ) -> Self::Scalar {
-        1.0
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar {
+        fs::u1_r_symbol(self.label(a), self.label(b), self.label(c))
     }
 }
 
-impl MultiplicityFreeRigidSymbols for U1FusionRule {
-    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
-    }
-
-    fn a_symbol_scalar(
-        &self,
-        _left: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-    ) -> Self::Scalar {
-        1.0
-    }
-
-    fn b_symbol_scalar(
-        &self,
-        _left: SectorId,
-        _right: SectorId,
-        _coupled: SectorId,
-    ) -> Self::Scalar {
-        1.0
-    }
-}
+rigid_symbols_from_labels!(U1FusionRule);
 
 #[cfg(test)]
 mod tests {
@@ -1040,7 +1014,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                rule.f_symbol_scalar(a.into(), b.into(), rule.vacuum(), fused, a.into(), b.into()),
+                rule.f_symbol_scalar(a.into(), b.into(), rule.vacuum(), fused, fused, b.into()),
                 1.0
             );
             assert_eq!(rule.r_symbol_scalar(a.into(), b.into(), fused), 1.0);

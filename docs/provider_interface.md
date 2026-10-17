@@ -176,9 +176,9 @@ configuration is nonzero (for `R`, `N(a,b,c)`; for `F`, `N(a,b,e)`,
 tree. Off-shell values are unspecified — a provider may return any scalar, `0`,
 or panic — and callers gate with `nsymbol`, as the engine does. Do not rely on
 a zero. TensorKitSectors multiplies by or gates on the `Nsymbol`s, so its
-off-shell value is `0`; the symtn providers do not all agree (Abelian rules
-return `1`, `FermionParity` `R` returns `-1` for two odd legs, CU(1),
-table and SU(2) `R` return `0`). `ProductFusionRule` multiplies its components' values, so it inherits each
+off-shell value is `0`, and so is that of every shipped symtn provider (the
+Abelian, CU(1) and SU(2) rules through fusion-symbols, `TableRule` from its
+table); a custom provider need not follow. `ProductFusionRule` multiplies its components' values, so it inherits each
 component's off-shell value and panics. `a_symbol_scalar`, `b_symbol_scalar`
 inherit the contract: they are defined for `N(left,right,coupled) != 0`.
 
