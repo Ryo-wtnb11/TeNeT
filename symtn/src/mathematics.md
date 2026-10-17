@@ -672,7 +672,7 @@ endomorphism `H`, an imaginary-time gate uses
 This page describes the model implemented by symtn today, not the full
 generality of category-theoretic tensor calculus. Host ordinary operations are
 multiplicity-free plus the checked Generic operations that state their own
-bounds. `FibonacciFusionRule` has `Complex64` categorical coefficients and is
+bounds. `TableRule` has `Complex64` categorical coefficients and is
 tested for construction, transformations including explicit planar braids,
 tensor products, and composition. Ordinary arbitrary-axis contraction,
 factorization, and general network execution are not supported or claimed.

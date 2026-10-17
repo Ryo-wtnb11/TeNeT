@@ -9,8 +9,8 @@
 /// Built-in fusion rules, their sector labels, and product constructors.
 pub use symtn_core::{
     product_fusion_rule, product_fusion_rule_with_codec, product_sector, CU1FusionRule, CU1Irrep,
-    FermionParityFusionRule, FibonacciFusionRule, FibonacciSector, ProductFusionRule,
-    ProductFusionRuleExt, ProductSector, SU2FusionRule, SU2Irrep, SectorId, U1FusionRule, U1Irrep,
+    FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt, ProductSector, SU2FusionRule,
+    SU2Irrep, SectorId, TableRule, TableRuleError, TableSector, U1FusionRule, U1Irrep,
     Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
 };
 pub use symtn_core::{

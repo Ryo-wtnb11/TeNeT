@@ -26,10 +26,10 @@ use super::*;
 /// ```
 ///
 /// ```compile_fail
-/// use symtn::sector::FibonacciFusionRule;
+/// use symtn::sector::TableRule;
 /// use symtn::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_generic_cuda_permute(tensor: &TensorMap<FibonacciFusionRule, f64, CudaStorage>) {
+/// fn no_generic_cuda_permute(tensor: &TensorMap<TableRule, f64, CudaStorage>) {
 ///     let _ = tensor.permute(&[1], &[0]);
 /// }
 /// ```

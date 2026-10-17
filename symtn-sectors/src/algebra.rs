@@ -657,10 +657,9 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// gate on them (`FibonacciAnyon`, `IsingAnyon`), so their off-shell value
     /// is `0`; `SU2Irrep` does not gate and defers to `WignerSymbols.racahW`.
     /// The symtn providers differ off-shell as well: the Abelian rules return
-    /// `1` for any labels, `CU1FusionRule` and `FibonacciFusionRule` return
-    /// `0` after an `nsymbol` gate, `SU2FusionRule` returns the `fusion-symbols` value
-    /// (`0` for an inadmissible 6j), and `FibonacciTableRule` returns its
-    /// table entry. A label outside a provider's sector domain panics for
+    /// `1` for any labels, `CU1FusionRule` returns `0` after an `nsymbol`
+    /// gate, `SU2FusionRule` returns the `fusion-symbols` value (`0` for an
+    /// inadmissible 6j), and `TableRule` returns its table entry (`0`). A label outside a provider's sector domain panics for
     /// the `nsymbol`-gated, SU(2) and table-backed providers.
     /// `ProductFusionRule` multiplies its components' values, so it inherits
     /// each component's off-shell value and panics if a component panics or
@@ -688,14 +687,21 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// `su2irrep.jl`, `anyons.jl`), so its off-shell value is `0`. Of the
     /// symtn providers, `ZNFusionRule`/`Z2FusionRule`/`U1FusionRule` return
     /// `1` and `FermionParityFusionRule` returns `-1` for two odd legs and
-    /// `1` otherwise, whatever `coupled` is; `CU1FusionRule`,
-    /// `FibonacciFusionRule` and `SU2FusionRule` return `0`;
-    /// `FibonacciTableRule` returns its table entry. Out-of-domain labels
-    /// panic for the CU(1), Fibonacci, SU(2) and table-backed providers, and
+    /// `1` otherwise, whatever `coupled` is; `CU1FusionRule` and
+    /// `SU2FusionRule` return `0`; `TableRule` returns its table entry
+    /// (`0`). Out-of-domain labels panic for the CU(1), SU(2) and
+    /// table-backed providers, and
     /// `SU2FusionRule` also panics when the closure of `left x right` leaves
     /// its supported spin range, even for an admissible `coupled`.
     /// `ProductFusionRule` multiplies its components' values and inherits
     /// their off-shell behaviour and panics.
+    ///
+    /// # Braided rules only
+    ///
+    /// Defined only when [`FusionRule::braiding_style`] has a braiding.
+    /// Callers gate on it before asking (TensorKit's `artin_braid` and
+    /// `braid` do the same); a `NoBraiding` provider may panic here
+    /// (`TableRule` does for a fusion-only category).
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar;
 }
 
@@ -712,6 +718,11 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
 
+    /// The twist `θ`. Defined only for a braided rule, as
+    /// [`MultiplicityFreeFusionSymbols::r_symbol_scalar`]: callers gate on
+    /// [`FusionRule::braiding_style`] first, and a `NoBraiding` provider may
+    /// panic (TensorKit's twist of a unit leg of a `NoBraiding` sector is
+    /// the identity and never asks for `θ`).
     fn twist_scalar(&self, sector: SectorId) -> Self::Scalar;
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar;

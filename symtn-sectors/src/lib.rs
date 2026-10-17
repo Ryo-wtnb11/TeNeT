@@ -22,11 +22,8 @@ pub use abelian::{
 mod cu1;
 pub use cu1::{CU1FusionRule, CU1Irrep, CU1_MAX_TWICE_CHARGE};
 
-mod fibonacci;
-pub use fibonacci::{FibonacciFusionRule, FibonacciSector};
-
-mod fibonacci_table;
-pub use fibonacci_table::{FibonacciTableError, FibonacciTableRule};
+mod table_rule;
+pub use table_rule::{TableRule, TableRuleError, TableSector};
 
 mod su2;
 pub use su2::{SU2CoefficientError, SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};

@@ -367,7 +367,7 @@ fn checked_tensorcontract_matches_all_closed_rules_and_leg_orientations() {
         &[(SectorId::new(0), 1), (SectorId::new(1), 3)],
     );
     assert_checked_contract_all_orientations(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         fibonacci,
         fibonacci_bad,
         SectorLeg::new([(SectorId::new(0), 1)], false),

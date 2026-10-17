@@ -85,15 +85,15 @@ where
     ///
     /// ```compile_fail
     /// use std::sync::Arc;
-    /// use symtn::sector::{FibonacciFusionRule, FibonacciSector};
+    /// use symtn::sector::{TableRule, TableSector};
     /// use symtn::typed::{GradedSpace, Runtime, TensorMap};
     /// let runtime = Runtime::builder().build().unwrap();
     /// let tau = GradedSpace::try_new(
-    ///     Arc::new(FibonacciFusionRule),
-    ///     [(FibonacciSector::Tau, 1)],
+    ///     Arc::new(TableRule::fibonacci()),
+    ///     [(TableSector::new(2), 1)],
     /// ).unwrap();
     /// // A complex categorical coefficient cannot act on a real payload.
-    /// let _: TensorMap<FibonacciFusionRule, f64> =
+    /// let _: TensorMap<TableRule, f64> =
     ///     TensorMap::zeros(&runtime, [&tau], [&tau]).unwrap();
     /// ```
     pub fn zeros<'a, Codomain, Domain>(

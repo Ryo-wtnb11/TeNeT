@@ -9,9 +9,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use symtn::cache::{StructureCacheInfo, StructureCacheKind};
-use symtn::sector::{
-    FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
-};
+use symtn::sector::{SU2FusionRule, SU2Irrep, TableRule, TableSector, U1FusionRule, U1Irrep};
 use symtn::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
@@ -325,15 +323,15 @@ fn shared_runtime_distinguishes_operations_on_the_same_groups() {
 
     // Levels only matter for non-symmetric braiding.
     let fib = GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 2)],
+        Arc::new(TableRule::fibonacci()),
+        [(TableSector::new(1), 2), (TableSector::new(2), 2)],
     )
     .unwrap();
     let fib_tensor = |runtime: &Runtime| {
         let dual = fib.try_dual().unwrap();
         TensorMap::<_, Complex64>::rand_with_seed(runtime, [&fib, &dual], [&fib, &dual], 5).unwrap()
     };
-    let complex_bits = |t: &TensorMap<FibonacciFusionRule, Complex64>| {
+    let complex_bits = |t: &TensorMap<TableRule, Complex64>| {
         t.materialize()
             .unwrap()
             .dense_data()

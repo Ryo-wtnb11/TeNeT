@@ -69,8 +69,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use symtn::sector::{
-    FermionParityFusionRule, FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep,
-    U1FusionRule, U1Irrep, Z2Irrep,
+    FermionParityFusionRule, SU2FusionRule, SU2Irrep, TableRule, TableSector, U1FusionRule,
+    U1Irrep, Z2Irrep,
 };
 use symtn::typed::{
     BlockFusionTrees, Complex64, ContractSpec, GradedSpace, SectorSpectrum, TensorMap,
@@ -637,11 +637,11 @@ fn multiplicity_free_real_symbol_compact_transform_into_is_alpha_eager_plus_beta
 fn multiplicity_free_complex_symbol_transform_into_is_alpha_eager_plus_beta_destination() {
     let runtime = host_runtime();
     let leg = GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+        Arc::new(TableRule::fibonacci()),
+        [(TableSector::new(1), 2), (TableSector::new(2), 3)],
     )
     .unwrap();
-    let key = debug_key::<FibonacciSector>;
+    let key = debug_key::<TableSector>;
     let source: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             Complex64::new(
@@ -687,8 +687,8 @@ fn multiplicity_free_complex_symbol_transform_into_is_alpha_eager_plus_beta_dest
     let bond = bond!(
         &runtime,
         leg,
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
-        |s: &FibonacciSector| format!("{s:?}"),
+        [(TableSector::new(1), 2), (TableSector::new(2), 3)],
+        |s: &TableSector| format!("{s:?}"),
         Complex64,
         |x: f64| Complex64::new(x, 0.5 - x)
     );
@@ -2384,11 +2384,11 @@ fn anyonic_complex_symbol_contract_into_is_refused_like_eager() {
     // with eager's error, before touching the destination.
     let runtime = host_runtime();
     let leg = GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+        Arc::new(TableRule::fibonacci()),
+        [(TableSector::new(1), 2), (TableSector::new(2), 3)],
     )
     .unwrap();
-    let key = debug_key::<FibonacciSector>;
+    let key = debug_key::<TableSector>;
     let a: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index| {
             complex_value(&key(trees), index)

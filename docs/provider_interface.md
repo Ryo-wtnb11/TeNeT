@@ -33,13 +33,13 @@ rigidity traits supply F/R coefficients, dimensions, twists, and bends. A
 provider with outer multiplicity (`N_ab^c > 1`) uses the checked Generic traits;
 see [Outer multiplicity](#outer-multiplicity).
 
-`symtn-sectors/src/fibonacci.rs` is the smallest complete non-abelian
-categorical example, an adapter over `fusion_symbols::fibonacci`;
-`symtn-sectors/src/abelian.rs` has the abelian ones;
-`symtn-sectors/src/su2.rs` shows a provider that delegates its coefficients to an
-external crate, and `symtn-sectors/src/fibonacci_table.rs` one that wraps a
-stateful table (`fusion_symbols::tables::FibonacciTable`) and builds its
-`RuleIdentity` from the table's authority fingerprint.
+`symtn-sectors/src/table_rule.rs` is the smallest complete non-abelian
+categorical example: one provider over every pinned AnyonWiki table of
+`fusion_symbols::tables::TableCategory` (Fibonacci, Ising, and fusion-only
+categories such as Rep(S₃)), whose `RuleIdentity` is built from the table's
+authority fingerprint. `symtn-sectors/src/abelian.rs` has the abelian ones;
+`symtn-sectors/src/su2.rs` shows a provider that delegates its coefficients to
+an external crate.
 
 ## 1. `FusionRule`
 
@@ -74,8 +74,8 @@ symmetric braiding (`R` squares to the identity up to signs); `Anyonic` and
 them, as TensorKit `blas_contract!` does, while `compose` admits every style.
 
 **`fusion_channels` order is part of your convention.** Keep it stable and match
-your reference. `FibonacciFusionRule` in `symtn-sectors/src/fibonacci.rs`, for
-example, lists the vacuum first, as `fusion_symbols::fibonacci` does to match
+your reference. `TableRule` in `symtn-sectors/src/table_rule.rs`, for
+example, lists channels in the table's object order, which for Fibonacci is
 TensorKitSectors' iteration order.
 
 ### `RuleIdentity`
@@ -127,9 +127,10 @@ methods to the `dual_or_panic`, `fusion_channels_or_panic`, and
 `SectorCodec` in `symtn-sectors/src/algebra.rs` defines the public label type
 and its translation to `SectorId`. Without it the provider can still work at
 the expert layer but is not reachable through `GradedSpace`/`TensorMap`,
-because those return labels, never ids. `FibonacciFusionRule` implements this
-boundary with its closed `FibonacciSector` enum; its separate typed-tensor
-restriction is the complex coefficient scalar described below.
+because those return labels, never ids. `TableRule` implements this boundary
+with `TableSector`, the table's one-based object label, rejecting labels outside
+the rule's rank; its separate typed-tensor restriction is the complex
+coefficient scalar described below.
 
 Four laws:
 
@@ -177,7 +178,7 @@ or panic — and callers gate with `nsymbol`, as the engine does. Do not rely on
 a zero. TensorKitSectors multiplies by or gates on the `Nsymbol`s, so its
 off-shell value is `0`; the symtn providers do not all agree (Abelian rules
 return `1`, `FermionParity` `R` returns `-1` for two odd legs, CU(1),
-Fibonacci and SU(2) `R` return `0`). `ProductFusionRule` multiplies its components' values, so it inherits each
+table and SU(2) `R` return `0`). `ProductFusionRule` multiplies its components' values, so it inherits each
 component's off-shell value and panics. `a_symbol_scalar`, `b_symbol_scalar`
 inherit the contract: they are defined for `N(left,right,coupled) != 0`.
 
@@ -196,8 +197,8 @@ Two capability flags, both defaulting to the conservative answer:
 
 `CanonicalUnitFusionRule` asserts the vacuum is self-dual,
 that `1 ⊗ a -> a` and `a ⊗ 1 -> a` are the only channels involved, and that
-unitors and associators act as the identity there. `FibonacciFusionRule` shows a
-`Simple` provider that still qualifies (`symtn-sectors/src/fibonacci.rs`).
+unitors and associators act as the identity there. `TableRule` shows `Simple`
+providers that still qualify (`symtn-sectors/src/table_rule.rs`).
 
 ## Outer multiplicity
 
@@ -243,11 +244,14 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
 
 - The multiplicity-free root uses operation-specific coefficient and payload
   bounds; there is no blanket `Scalar = f64` requirement.
-- `FibonacciFusionRule` has `Complex64` categorical coefficients. Its tested
-  typed scope is construction, transformations including explicit planar
-  braids, tensor products, and composition. Ordinary arbitrary-axis
-  contraction, factorization, and general network execution are not supported
-  or claimed.
+- `TableRule` has `Complex64` categorical coefficients. Its tested typed
+  scope is construction, transformations including explicit planar braids,
+  tensor products, and composition. Ordinary arbitrary-axis contraction,
+  factorization, and general network execution are not supported or claimed.
+  A fusion-only table reports `NoBraiding`: every operation that needs an
+  R-symbol or a twist is rejected with its typed error before any provider
+  call, and `r_symbol_scalar`/`twist_scalar` are defined only for a braided
+  rule.
 - Checked Generic typed execution is Host-only. Representative tested scope
   includes construction, transforms, tensor products, contraction and
   composition (a lazy adjoint operand read through its parent's payload, as
@@ -269,8 +273,8 @@ categorical coherence laws such as the pentagon and hexagon identities.
 
 - validate F/R/dimension/twist coefficients against an independent reference,
   and record the source, gauge, and convention used;
-- pin exact values where the reference is exact (the Fibonacci tests compare
-  bit patterns, not tolerances);
+- pin exact values where the reference is exact (the Fibonacci golden
+  compares bit patterns, not tolerances);
 - cover the boundary: an unrepresentable id must produce
   `FusionAlgebraError::InvalidSector` from every checked entry point;
 - cover the unit laws if you claim `CanonicalUnitFusionRule`, and the associator

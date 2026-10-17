@@ -555,8 +555,8 @@ mod tests {
 
     use crate::{
         BraidingStyleKind, CanonicalUnitFusionRule, CategoricalScalar, FermionParityFusionRule,
-        FibonacciFusionRule, FusionStyleKind, MultiplicityFreeFusionSymbols,
-        MultiplicityFreeRigidSymbols, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+        FusionStyleKind, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorId,
+        TableRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
     };
 
     #[test]
@@ -669,7 +669,7 @@ mod tests {
         // What: a multiplicity-free product whose components disagree on the
         // coefficient scalar is representable, and its topological data is the
         // componentwise product promoted to the wider scalar.
-        let rule = product_fusion_rule(FibonacciFusionRule, Z2FusionRule);
+        let rule = product_fusion_rule(TableRule::fibonacci(), Z2FusionRule);
         let tau = SectorId::new(1);
         let vacuum_fib = SectorId::new(0);
         let t1 = rule.encode_component_ids(tau, Z2Irrep::ODD.into());
@@ -729,8 +729,8 @@ mod tests {
     fn product_promotion_is_component_order_independent() {
         // What: promotion does not depend on which side carries the wider
         // scalar; TensorKitSectors promotes rather than taking the left type.
-        let forward = product_fusion_rule(FibonacciFusionRule, Z2FusionRule);
-        let reversed = product_fusion_rule(Z2FusionRule, FibonacciFusionRule);
+        let forward = product_fusion_rule(TableRule::fibonacci(), Z2FusionRule);
+        let reversed = product_fusion_rule(Z2FusionRule, TableRule::fibonacci());
         let tau = SectorId::new(1);
         let vacuum_fib = SectorId::new(0);
 

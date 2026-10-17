@@ -24,11 +24,10 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 use symtn_core::{
-    BlockKey, BlockStructure, BraidingStyleKind, CoreError, FibonacciFusionRule,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTreeGroupKey, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreePairKey, FusionTreeRef, RuleIdentity, SU2FusionRule, SU2Irrep,
-    SectorId, SectorLeg, SectorStructure, SectorVec, StructureCacheEquivalent, U1FusionRule,
-    U1Irrep, Z2FusionRule, Z2Irrep,
+    BlockKey, BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace, FusionRule,
+    FusionStyleKind, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    FusionTreeRef, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure,
+    SectorVec, StructureCacheEquivalent, TableRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 const FIXTURE: &str = "tests/golden/key_corpus.txt";
@@ -467,7 +466,7 @@ fn real_structures() -> Vec<(&'static str, Arc<BlockStructure>)> {
                     ],
                     &[(fib, false)],
                 )
-                .coupled_subblock_structure_from_leg_degeneracies(&FibonacciFusionRule),
+                .coupled_subblock_structure_from_leg_degeneracies(&TableRule::fibonacci()),
             ),
         ),
         (

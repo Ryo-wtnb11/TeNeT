@@ -1,17 +1,16 @@
-//! The two Fibonacci providers, `FibonacciFusionRule` (closed form) and
-//! `FibonacciTableRule` (pinned tables), are adapters over `fusion-symbols`.
-//! These tests hold what the adapters own: the values they expose through
-//! symtn's traits, the trait-default A/B symbols, the codec and the domain
-//! checks. The tables' own coherence tests (pentagon, hexagon, unitarity,
-//! ribbon) live in `fusion-symbols`.
+//! Fibonacci is `TableRule::fibonacci()`, symtn's one Fibonacci provider.
+//! These tests hold its values through symtn's traits against the values
+//! symtn exposed before (the removed closed form and table adapters), the
+//! trait-default A/B symbols, the codec and the domain checks. The tables'
+//! own coherence tests (pentagon, hexagon, unitarity, ribbon) live in
+//! `fusion-symbols`.
 
 use std::panic::{self, AssertUnwindSafe};
 
 use num_complex::{Complex32, Complex64};
 use symtn_sectors::{
-    CheckedFusionAlgebra, FibonacciFusionRule, FibonacciSector, FibonacciTableRule,
-    FusionAlgebraError, FusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    SectorCodec, SectorId,
+    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, SectorCodec, SectorId, TableRule, TableSector,
 };
 
 #[path = "../../tests/support/numerics.rs"]
@@ -29,8 +28,8 @@ const VALUES_957CCC05: &str = include_str!("fixtures/symtn-957ccc05-fibonacci-va
 /// (`fixtures/generate_fib_categorydata_fixture.jl`).
 const CATEGORYDATA: &str = include_str!("fixtures/fib-categorydata-v0.1.3.txt");
 
-fn table() -> FibonacciTableRule {
-    FibonacciTableRule::try_new().expect("the shipped tables load")
+fn table() -> TableRule {
+    TableRule::fibonacci()
 }
 
 fn bits(z: Complex64) -> String {
@@ -122,51 +121,65 @@ fn ulps(actual: &str, recorded: &str) -> u64 {
     key(actual).abs_diff(key(recorded))
 }
 
-/// Every value both adapters expose equals symtn 957ccc05 bit for bit, except
-/// three closed-form phases. symtn computed `R^{ττ}_𝟙`, `R^{ττ}_τ` and `θ_τ`
-/// as `Complex64::from_polar(1.0, PI * k / 5.0)`, whose bits depend on the
-/// platform libm; `fusion-symbols` returns their correctly rounded values.
-/// Each is pinned at its exact (re, im) ulp distance from the recorded macOS
-/// libm bits, so any other change still fails. The new values use no libm and
-/// are the same on every platform.
+/// The Fibonacci golden. symtn's previous table adapter is the same tables
+/// (byte-identical F/R text in fusion-symbols 0.3.0 and 0.4.0) and the same
+/// derivations, so `TableRule::fibonacci()` reproduces its 98 rows of
+/// `VALUES_957CCC05` bit for bit.
 #[test]
-fn every_value_matches_symtn_957ccc05_except_three_correctly_rounded_phases() {
-    const CORRECTLY_ROUNDED: [(&str, (u64, u64)); 3] = [
-        ("closed R 1 1 0", (1, 1)),
-        ("closed R 1 1 1", (2, 1)),
-        ("closed twist 1", (1, 1)),
-    ];
-    let mut actual = dump("closed", &FibonacciFusionRule);
-    actual.extend(dump("table", &table()));
+fn every_value_matches_the_previous_table_provider_bit_for_bit() {
+    let actual = dump("table", &table());
     let recorded: Vec<&str> = VALUES_957CCC05
         .lines()
-        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.starts_with("table "))
         .collect();
-    assert_eq!(actual.len(), 196);
+    assert_eq!(recorded.len(), 98);
+    assert_eq!(actual, recorded);
+}
+
+/// The removed closed form's 98 rows remain an oracle for the table: every
+/// row is equal, except the entries pinned here at their exact (re, im) ulp
+/// distance from the recorded closed-form bits. The closed form evaluated
+/// `1/φ`, `1/√φ`, `φ` and `cispi` in f64; the table is correctly rounded.
+#[test]
+fn every_value_matches_the_removed_closed_form_up_to_pinned_ulps() {
+    const MOVED: [(&str, (u64, u64)); 7] = [
+        ("closed dim 1", (1, 0)),
+        ("closed inv_dim 1", (1, 0)),
+        ("closed twist 1", (2, 2)),
+        ("closed R 1 1 0", (1, 1)),
+        ("closed R 1 1 1", (2, 1)),
+        ("closed F 1 1 1 1 0 0", (1, 0)),
+        ("closed F 1 1 1 1 1 1", (1, 0)),
+    ];
+    let actual = dump("closed", &table());
+    let recorded: Vec<&str> = VALUES_957CCC05
+        .lines()
+        .filter(|line| line.starts_with("closed "))
+        .collect();
+    assert_eq!(actual.len(), 98);
     assert_eq!(actual.len(), recorded.len());
 
-    let mut moved = 0;
+    let mut moved = Vec::new();
     for (actual, recorded) in actual.iter().zip(&recorded) {
-        let expected = CORRECTLY_ROUNDED
-            .iter()
-            .find(|(prefix, _)| recorded.starts_with(&format!("{prefix} ")));
-        let Some((_, (re, im))) = expected else {
-            assert_eq!(actual, recorded);
+        if actual == recorded {
             continue;
-        };
+        }
         let fields =
             |row: &str| -> Vec<String> { row.split_whitespace().map(str::to_owned).collect() };
         let (a, r) = (fields(actual), fields(recorded));
         let n = a.len();
-        assert_eq!(a[..n - 2], r[..n - 2]);
-        assert_eq!(
+        assert_eq!(a[..n - 2], r[..n - 2], "{actual} vs recorded {recorded}");
+        let prefix = r[..n - 2].join(" ");
+        moved.push((
+            prefix,
             (ulps(&a[n - 2], &r[n - 2]), ulps(&a[n - 1], &r[n - 1])),
-            (*re, *im),
-            "{actual} vs recorded {recorded}"
-        );
-        moved += 1;
+        ));
     }
-    assert_eq!(moved, 3);
+    let expected: Vec<(String, (u64, u64))> = MOVED
+        .iter()
+        .map(|(prefix, distance)| (prefix.to_string(), *distance))
+        .collect();
+    assert_eq!(moved, expected);
 }
 
 /// `tag` and one-based labels -> value, as emitted by the Julia generator.
@@ -226,8 +239,8 @@ fn derived_and_ab_symbols_match_categorydata_and_tensorkitsectors() {
     }
 }
 
-/// `CanonicalUnitFusionRule` promises exact identity unitors, so both
-/// adapters' unit-associated F symbols are asserted bitwise `1 + 0i`.
+/// `CanonicalUnitFusionRule` promises exact identity unitors, so the
+/// unit-associated F symbols are asserted bitwise `1 + 0i`.
 #[test]
 fn unit_associators_are_bitwise_one() {
     fn check<R: MultiplicityFreeFusionSymbols<Scalar = Complex64>>(fib: &R) {
@@ -246,20 +259,16 @@ fn unit_associators_are_bitwise_one() {
             }
         }
     }
-    check(&FibonacciFusionRule);
     check(&table());
 }
 
 #[test]
-fn table_codec_round_trips_every_object_with_the_closed_form_ids() {
+fn table_codec_round_trips_every_object_with_the_previous_ids() {
     let fib = table();
-    for (id, label) in [(0, FibonacciSector::Vacuum), (1, FibonacciSector::Tau)] {
+    for id in [0, 1] {
+        let label = TableSector::new(id as u16 + 1);
         assert_eq!(fib.encode_sector(&label), Ok(SectorId::new(id)));
         assert_eq!(fib.decode_sector(SectorId::new(id)), Ok(label));
-        assert_eq!(
-            FibonacciFusionRule.encode_sector(&label),
-            Ok(SectorId::new(id))
-        );
     }
     for a in SECTORS {
         for b in SECTORS {
@@ -278,7 +287,7 @@ fn table_codec_round_trips_every_object_with_the_closed_form_ids() {
 }
 
 /// Issue #1737: the infallible symbols have no checked twin, so an
-/// out-of-domain id panics with the typed domain error in both adapters,
+/// out-of-domain id panics with the typed domain error,
 /// never aliasing another entry.
 #[test]
 fn infallible_symbols_panic_with_the_domain_error_on_out_of_domain_ids() {
@@ -330,7 +339,6 @@ fn infallible_symbols_panic_with_the_domain_error_on_out_of_domain_ids() {
             });
         }
     }
-    check(&FibonacciFusionRule);
     check(&table());
 }
 

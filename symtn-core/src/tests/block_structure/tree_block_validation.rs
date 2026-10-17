@@ -219,7 +219,7 @@ fn checked_rank_one_validates_ids_by_unit_fusion() {
         FusionAlgebraError::InvalidSector { sector: invalid },
     );
     assert_invalid_rank_one_checked(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         invalid,
         FusionAlgebraError::InvalidSector { sector: invalid },
     );
@@ -1391,7 +1391,7 @@ fn block_validation_is_source_major_and_runs_once_per_source() {
         FusionTreeKey::new([tau; 2], vacuum, [false; 2], [], [MultiplicityIndex::ONE]);
     assert_eq!(
         multiplicity_free_braid_tree_block(
-            &FibonacciFusionRule,
+            &TableRule::fibonacci(),
             &[invalid_first, different_group.clone()],
             &[0, 1, 2],
             &[0, 1, 2],
@@ -1403,7 +1403,7 @@ fn block_validation_is_source_major_and_runs_once_per_source() {
     );
     assert_eq!(
         multiplicity_free_braid_tree_block(
-            &FibonacciFusionRule,
+            &TableRule::fibonacci(),
             &[valid_first, different_group],
             &[0, 1, 2],
             &[0, 1, 2],

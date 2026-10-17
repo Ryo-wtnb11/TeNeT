@@ -16,9 +16,9 @@
 use std::panic::{self, AssertUnwindSafe};
 
 use symtn_sectors::{
-    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FibonacciFusionRule,
-    FibonacciTableRule, FusionRule, SU2FusionRule, SectorId, U1FusionRule, U1Irrep, Z2FusionRule,
-    Z2Irrep, ZNFusionRule, CU1_MAX_TWICE_CHARGE,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionRule,
+    SU2FusionRule, SectorId, TableRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+    CU1_MAX_TWICE_CHARGE,
 };
 
 fn assert_dual_forwards<R: FusionRule + CheckedFusionAlgebra>(rule: &R, ids: &[SectorId]) {
@@ -113,7 +113,7 @@ fn zn_infallible_entry_points_match_checked_domain() {
     assert_fusion_channels_forwards(&rule, &all_pairs(&ids));
     assert_nsymbol_forwards(&rule, &all_triples(&ids));
 
-    let table = FibonacciTableRule::try_new().unwrap();
+    let table = TableRule::fibonacci();
     assert_dual_forwards(&table, &ids);
     assert_fusion_channels_forwards(&table, &all_pairs(&ids));
     assert_nsymbol_forwards(&table, &all_triples(&ids));
@@ -227,7 +227,7 @@ fn cu1_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn fibonacci_infallible_entry_points_match_checked_domain() {
-    let rule = FibonacciFusionRule;
+    let rule = TableRule::fibonacci();
     let ids = [
         SectorId::new(0),
         SectorId::new(1),

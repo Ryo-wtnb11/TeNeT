@@ -814,7 +814,7 @@ where
 mod channel_factor_tests {
     use super::*;
     use num_complex::Complex64;
-    use symtn_core::{FibonacciFusionRule, FusionTreeKey};
+    use symtn_core::{FusionTreeKey, TableRule};
 
     /// Fibonacci `(τ) → τ` and `(τ, τ) → τ` trace trees, where TensorKit's
     /// `dim(τ)/dim(τ)` is exactly 1 and a non-dual second `τ` contributes
@@ -822,11 +822,16 @@ mod channel_factor_tests {
     /// factor gave `1 - 2⁻⁵³`.
     #[test]
     fn multiplicity_free_channel_factor_is_the_dimension_quotient() {
-        let rule = FibonacciFusionRule;
-        // `cispi(-4/5)` correctly rounded, as `fusion_symbols::fibonacci`
-        // returns it (#2016). Why not `from_polar(1, -4π/5)`: its bits depend
-        // on the platform libm (macOS gives (1, 1) ulp away from this value).
-        let twist = Complex64::new(-0.8090169943749475, -0.5877852522924731);
+        let rule = TableRule::fibonacci();
+        // The table's derived twist (Σ_b d_b/d_τ R^{ττ}_b), which is within
+        // (1, 1) ulp of the correctly rounded hand value `cispi(-4/5)`; the
+        // factor multiplies it by an exact 1, so it is pinned bitwise.
+        let twist = rule.twist_scalar(symtn_core::SectorId::new(1));
+        let hand = Complex64::new(-0.8090169943749475, -0.5877852522924731);
+        assert!(
+            (twist - hand).norm() <= 2.0 * f64::EPSILON,
+            "{twist} != {hand}"
+        );
         let tree = |uncoupled: &[usize], coupled, dual: &[bool], vertices: &[usize]| {
             FusionTreeKey::try_from_sector_ids_for_rule(
                 &rule,

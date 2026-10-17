@@ -1,20 +1,17 @@
 use super::*;
 
+const VACUUM: TableSector = TableSector::new(1);
+const TAU: TableSector = TableSector::new(2);
+
 #[test]
 fn fibonacci_codec_reaches_public_graded_space_construction() {
-    // What: the closed-form provider's public labels cross the ordinary typed
+    // What: the table provider's public labels cross the ordinary typed
     // codec boundary and return in engine-sector order. Tensor execution has a
     // separate complex-coefficient admission boundary and is not claimed here.
-    let space = GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Tau, 3), (FibonacciSector::Vacuum, 2)],
-    )
-    .unwrap();
+    let space =
+        GradedSpace::try_new(Arc::new(TableRule::fibonacci()), [(TAU, 3), (VACUUM, 2)]).unwrap();
 
-    assert_eq!(
-        space.sectors().unwrap(),
-        vec![FibonacciSector::Vacuum, FibonacciSector::Tau]
-    );
+    assert_eq!(space.sectors().unwrap(), vec![VACUUM, TAU]);
     assert_eq!(space.degeneracies(), &[2, 3]);
     assert!(!space.is_dual());
 }
@@ -22,11 +19,8 @@ fn fibonacci_codec_reaches_public_graded_space_construction() {
 #[test]
 fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
     let runtime = runtime();
-    let space = GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 1)],
-    )
-    .unwrap();
+    let space =
+        GradedSpace::try_new(Arc::new(TableRule::fibonacci()), [(VACUUM, 1), (TAU, 1)]).unwrap();
 
     let zeros: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&space], [&space]).unwrap();
     assert!(zeros
@@ -39,11 +33,7 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
         TensorMap::from_subblock_fn(&runtime, [&space], [&space], |trees, indices| {
             Complex64::new(
                 (indices.iter().sum::<usize>() + 1) as f64,
-                if trees.coupled() == &FibonacciSector::Tau {
-                    1.0
-                } else {
-                    -1.0
-                },
+                if trees.coupled() == &TAU { 1.0 } else { -1.0 },
             )
         })
         .unwrap();
@@ -72,28 +62,27 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
         .any(|value| value.im != 0.0));
 }
 
-fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<FibonacciFusionRule, Complex64> {
-    let tau =
-        GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)]).unwrap();
+fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<TableRule, Complex64> {
+    let tau = GradedSpace::try_new(Arc::new(TableRule::fibonacci()), [(TAU, 1)]).unwrap();
     TensorMap::from_subblock_fn(runtime, [&tau, &tau, &tau], [&tau], |trees, _| match trees
         .codomain_innerlines()
     {
-        [FibonacciSector::Vacuum] => Complex64::new(1.0, 0.0),
-        [FibonacciSector::Tau] => Complex64::new(0.0, 0.0),
+        [VACUUM] => Complex64::new(1.0, 0.0),
+        [TAU] => Complex64::new(0.0, 0.0),
         inner => panic!("unexpected Fibonacci fusion path {inner:?}"),
     })
     .unwrap()
 }
 
-fn fibonacci_tau_channel(tensor: &TensorMap<FibonacciFusionRule, Complex64>) -> [Complex64; 2] {
+fn fibonacci_tau_channel(tensor: &TensorMap<TableRule, Complex64>) -> [Complex64; 2] {
     let mut values = [Complex64::new(0.0, 0.0); 2];
     for (trees, block) in tensor.subblocks().unwrap() {
-        if trees.coupled() != &FibonacciSector::Tau {
+        if trees.coupled() != &TAU {
             continue;
         }
         let slot = match trees.codomain_innerlines() {
-            [FibonacciSector::Vacuum] => 0,
-            [FibonacciSector::Tau] => 1,
+            [VACUUM] => 0,
+            [TAU] => 1,
             inner => panic!("unexpected Fibonacci fusion path {inner:?}"),
         };
         values[slot] = *block.get(&[0, 0, 0, 0]).unwrap();
@@ -194,14 +183,8 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
         (repartitioned.codomain_rank(), repartitioned.domain_rank()),
         (2, 2)
     );
-    assert_eq!(
-        repartitioned.codomain()[0].sectors().unwrap(),
-        [FibonacciSector::Tau]
-    );
-    assert_eq!(
-        repartitioned.domain()[1].sectors().unwrap(),
-        [FibonacciSector::Tau]
-    );
+    assert_eq!(repartitioned.codomain()[0].sectors().unwrap(), [TAU]);
+    assert_eq!(repartitioned.domain()[1].sectors().unwrap(), [TAU]);
     assert_eq!(
         repartitioned
             .codomain()
@@ -264,16 +247,15 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
         transposed.dense_data().unwrap(),
     );
     for (trees, _) in explicit.subblocks().unwrap() {
-        assert_eq!(trees.codomain_uncoupled(), &[FibonacciSector::Tau]);
-        assert_eq!(trees.domain_uncoupled(), &[FibonacciSector::Tau; 3]);
+        assert_eq!(trees.codomain_uncoupled(), &[TAU]);
+        assert_eq!(trees.domain_uncoupled(), &[TAU; 3]);
     }
 }
 
 #[test]
 fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     let runtime = runtime();
-    let tau =
-        GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)]).unwrap();
+    let tau = GradedSpace::try_new(Arc::new(TableRule::fibonacci()), [(TAU, 1)]).unwrap();
     let dual_tau = tau.try_dual().unwrap();
     let alpha = Complex64::new(2.0, 3.0);
     let beta = Complex64::new(-1.0, 2.0);
@@ -287,7 +269,7 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
         [&dual_tau, &tau],
         [&dual_tau, &tau],
         |trees, _| {
-            if trees.coupled() == &FibonacciSector::Tau {
+            if trees.coupled() == &TAU {
                 beta
             } else {
                 Complex64::new(0.0, 0.0)
@@ -323,14 +305,14 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     let mut vacuum = 0;
     for (trees, block) in product.subblocks().unwrap() {
         let value = *block.get(&[0; 6]).unwrap();
-        if trees.coupled() == &FibonacciSector::Vacuum {
+        if trees.coupled() == &VACUUM {
             vacuum += 1;
             assert_data_close_c64(&[value], &[gamma]);
             continue;
         }
-        let slot = |innerlines: &[FibonacciSector]| match innerlines {
-            [FibonacciSector::Vacuum] => 0,
-            [FibonacciSector::Tau] => 1,
+        let slot = |innerlines: &[TableSector]| match innerlines {
+            [VACUUM] => 0,
+            [TAU] => 1,
             innerlines => panic!("unexpected Fibonacci innerlines {innerlines:?}"),
         };
         let (row, column) = (
@@ -344,15 +326,11 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     assert_eq!(seen, [[true; 2]; 2]);
 }
 
-fn fibonacci_matrix_entry(
-    seed: f64,
-    sector: &FibonacciSector,
-    row: usize,
-    column: usize,
-) -> Complex64 {
-    let channel = match sector {
-        FibonacciSector::Vacuum => 0.0,
-        FibonacciSector::Tau => 7.0,
+fn fibonacci_matrix_entry(seed: f64, sector: &TableSector, row: usize, column: usize) -> Complex64 {
+    let channel = match *sector {
+        VACUUM => 0.0,
+        TAU => 7.0,
+        other => panic!("not a Fibonacci sector: {other:?}"),
     };
     Complex64::new(
         seed + channel + 2.0 * row as f64 - column as f64,
@@ -373,22 +351,10 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     // sector block, preserves left authority, and is identical cold and warm.
     let _guard = cache_lock();
     let runtime = runtime();
-    let provider = Arc::new(FibonacciFusionRule);
-    let rows = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 2)],
-    )
-    .unwrap();
-    let shared = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
-    )
-    .unwrap();
-    let columns = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 1)],
-    )
-    .unwrap();
+    let provider = Arc::new(TableRule::fibonacci());
+    let rows = GradedSpace::try_new(Arc::clone(&provider), [(VACUUM, 1), (TAU, 2)]).unwrap();
+    let shared = GradedSpace::try_new(Arc::clone(&provider), [(VACUUM, 2), (TAU, 3)]).unwrap();
+    let columns = GradedSpace::try_new(Arc::clone(&provider), [(VACUUM, 2), (TAU, 1)]).unwrap();
     let lhs: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&rows], [&shared], |trees, indices| {
             fibonacci_matrix_entry(1.0, trees.coupled(), indices[0], indices[1])
@@ -406,9 +372,10 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     let warm = lhs.compose(&rhs).unwrap();
     let expected: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&rows], [&columns], |trees, indices| {
-            let inner = match trees.coupled() {
-                FibonacciSector::Vacuum => 2,
-                FibonacciSector::Tau => 3,
+            let inner = match *trees.coupled() {
+                VACUUM => 2,
+                TAU => 3,
+                other => panic!("not a Fibonacci sector: {other:?}"),
             };
             (0..inner)
                 .map(|k| {

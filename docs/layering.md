@@ -23,7 +23,7 @@ The split follows TensorKit's ecosystem:
 flowchart TB
     APP["Application<br/>MPS / PEPS / VMC algorithms"]
     SYMTN["<b>symtn</b><br/>tensor maps, fusion trees, structure, transforms"]
-    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd / fibonacci / tables modules<br/>planned: abelian, product"]
+    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd / tables modules<br/>planned: abelian, product"]
     DENSE["<b>tenferro</b><br/>dense kernels, linalg, CPU/GPU providers"]
     STR["<b>strided-rs</b><br/>strided data-movement kernels"]
     PRIMS["tprims (planned)<br/>copy-free strided contraction"]
@@ -63,7 +63,7 @@ shaped around one consumer's call pattern.
 | Crate | Owns |
 | --- | --- |
 | `fusion-symbols` (formerly `racah`), modules `su2`, `sun`, `bcd` | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in fusion-symbols' QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
-| `fusion-symbols`, modules `fibonacci`, `tables` | The closed-form Fibonacci category and the pinned AnyonWiki Fibonacci tables (#2016). |
+| `fusion-symbols`, module `tables` | The pinned AnyonWiki tables (unitary, rank ≤ 4) behind `TableRule`, Fibonacci included (#2016, #2277). |
 | `fusion-symbols`, planned modules `abelian`, `product` | Abelian groups, fermion parity, CU(1) and Deligne products; they stay in symtn until those modules ship. |
 
 **Target: one provider shape across crates.** Every crate should answer N,
@@ -324,7 +324,8 @@ Outside the four, by design:
 
 - **Category symbols generated in symtn.** Abelian groups, fermion parity,
   CU(1) and products are still generated in symtn; they are later
-  fusion-symbols slices. Fibonacci and its tables moved in #2016.
+  fusion-symbols slices. Fibonacci and its tables moved in #2016; the generic
+  `TableRule` replaced both Fibonacci providers in #2277.
 - **A tenferro type in symtn's public API.** `symtn-dense` re-exports
   `tenferro_cpu::CpuBackendKind`, and it reaches the facade through
   `symtn::expert` and the `Runtime` builder (`gemm_kind`).

@@ -275,7 +275,7 @@ fn checked_tree_matches_closed_builtin_and_nested_product_rules() {
         ),
     );
     assert_checked_tree_matches_infallible(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         FusionTreeKey::new(
             [SectorId::new(1); 2],
             SectorId::new(1),
@@ -490,9 +490,9 @@ fn rule_validation_preserves_builtin_multiplicity_free_keys() {
         .unwrap(),
     );
     assert_preserved(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         FusionTreeKey::try_new_for_rule(
-            &FibonacciFusionRule,
+            &TableRule::fibonacci(),
             [SectorId::new(1); 3],
             SectorId::new(1),
             [false; 3],
@@ -547,14 +547,15 @@ fn public_operation_errors_precede_categorical_source_errors() {
         [MultiplicityIndex::ONE; 2],
     );
     assert_eq!(
-        multiplicity_free_braid_tree(&FibonacciFusionRule, &invalid, &[0, 1, 2], &[],).unwrap_err(),
+        multiplicity_free_braid_tree(&TableRule::fibonacci(), &invalid, &[0, 1, 2], &[],)
+            .unwrap_err(),
         CoreError::DimensionMismatch {
             expected: 3,
             actual: 0,
         }
     );
     assert!(matches!(
-        multiplicity_free_braid_tree(&FibonacciFusionRule, &invalid, &[0, 0, 2], &[0, 1, 2],),
+        multiplicity_free_braid_tree(&TableRule::fibonacci(), &invalid, &[0, 0, 2], &[0, 1, 2],),
         Err(CoreError::InvalidPermutation { .. })
     ));
     // Not asserted here: `unique_braid_tree`'s own rejection of a Simple
@@ -564,12 +565,12 @@ fn public_operation_errors_precede_categorical_source_errors() {
     // route and is asserted elsewhere — `execute_unique_rigid` at
     // `fusion_tree.rs`, exercised with a Simple rule below in this file.
     assert!(matches!(
-        multiplicity_free_permute_tree(&FibonacciFusionRule, &invalid, &[0, 1, 2],),
+        multiplicity_free_permute_tree(&TableRule::fibonacci(), &invalid, &[0, 1, 2],),
         Err(CoreError::UnsupportedBraidingStyle { .. })
     ));
     assert_eq!(
         multiplicity_free_braid_tree_block(
-            &FibonacciFusionRule,
+            &TableRule::fibonacci(),
             std::slice::from_ref(&invalid),
             &[0, 1, 2],
             &[],
@@ -583,7 +584,7 @@ fn public_operation_errors_precede_categorical_source_errors() {
 
     let pair = FusionTreePairKey::pair(invalid, FusionTreeKey::new([], vacuum, [], [], []));
     let wrong_rank = PreparedTreePairOperation::prepare_braid(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         2,
         0,
         &[0, 1],
@@ -594,7 +595,7 @@ fn public_operation_errors_precede_categorical_source_errors() {
     .unwrap();
     assert_eq!(
         wrong_rank
-            .execute_multiplicity_free(&FibonacciFusionRule, &pair)
+            .execute_multiplicity_free(&TableRule::fibonacci(), &pair)
             .unwrap_err(),
         CoreError::DimensionMismatch {
             expected: 2,

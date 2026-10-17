@@ -12,13 +12,13 @@ fn fusion_context_explicit_backend_arguments_remain_source_compatible() {
 
 #[test]
 fn fibonacci_complex_provider_replays_crossing_free_prepared_contraction() {
-    use symtn_core::{FibonacciFusionRule, FibonacciSector, SectorCodec};
+    use symtn_core::{SectorCodec, TableRule, TableSector};
 
     // What: PR1 carries the provider's Complex64 coefficient type through the
     // public prepare/replay contraction lane. Anyonic crossings are intentionally
     // absent: ordinary contraction must not infer them; #633 owns explicit planar lowering.
-    let rule = FibonacciFusionRule;
-    let tau = rule.encode_sector(&FibonacciSector::Tau).unwrap();
+    let rule = TableRule::fibonacci();
+    let tau = rule.encode_sector(&TableSector::new(2)).unwrap();
     let leg = || SectorLeg::new([(tau, 1)], false);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg()]),

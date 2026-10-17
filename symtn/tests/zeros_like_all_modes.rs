@@ -17,9 +17,7 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use symtn::sector::{
-    FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
-};
+use symtn::sector::{SU2FusionRule, SU2Irrep, TableRule, TableSector, U1FusionRule, U1Irrep};
 use symtn::typed::__network::NetworkReuseClass;
 use symtn::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
@@ -165,10 +163,10 @@ fn su2_leg() -> GradedSpace<SU2FusionRule> {
     .unwrap()
 }
 
-fn fibonacci_leg() -> GradedSpace<FibonacciFusionRule> {
+fn fibonacci_leg() -> GradedSpace<TableRule> {
     GradedSpace::try_new(
-        Arc::new(FibonacciFusionRule),
-        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+        Arc::new(TableRule::fibonacci()),
+        [(TableSector::new(1), 2), (TableSector::new(2), 3)],
     )
     .unwrap()
 }
@@ -190,10 +188,10 @@ fn complex_symbol_zeros_like_keeps_space_and_form() {
     // is complex and it has no `adjoint` (both compile-time absent), so the
     // lane has the dense and compact rows.
     zeros_rows!(fibonacci_leg(), Complex64, COMPLEX, |_: &TensorMap<
-        FibonacciFusionRule,
+        TableRule,
         Complex64,
     >| {
-        None::<TensorMap<FibonacciFusionRule, Complex64>>
+        None::<TensorMap<TableRule, Complex64>>
     });
 }
 

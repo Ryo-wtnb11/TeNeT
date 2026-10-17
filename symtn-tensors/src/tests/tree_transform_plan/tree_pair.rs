@@ -1617,7 +1617,7 @@ fn rank5_compact_transpose_with_trailing_bend_replays_like_per_pair() {
         |x: f64| x
     );
     assert_rank5_compact_transpose_replays_like_per_pair!(
-        symtn_core::FibonacciFusionRule,
+        symtn_core::TableRule::fibonacci(),
         Complex64,
         [SectorId::new(0), SectorId::new(1)],
         |x: f64| Complex64::new(x, 0.5 - x / 3.0)
