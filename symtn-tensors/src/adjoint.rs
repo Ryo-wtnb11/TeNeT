@@ -62,7 +62,7 @@ pub(crate) fn adjoint_space_dyn<R>(
     space: &DynamicFusionMapSpace,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     adjoint_space_dyn_with_primer(rule, space, encoded_layout_primer::<R>)
 }
@@ -73,7 +73,7 @@ fn adjoint_space_dyn_with_primer<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     space.validate_rule(rule)?;
     build_adjoint_space_dyn_with_primer(rule, space, primer)
@@ -85,7 +85,7 @@ fn build_adjoint_space_dyn_with_primer<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     let homspace = space.homspace();
     let adjoint_hom =
@@ -106,7 +106,7 @@ fn build_adjoint_target_space_with_primer<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     let adjoint_hom = FusionTreeHomSpace::new(
         source_homspace.domain().clone(),
@@ -123,7 +123,7 @@ fn build_adjoint_space_dyn_legacy_oracle<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     let nout = space.nout();
     let homspace = space.homspace();
@@ -179,7 +179,7 @@ fn validate_adjoint_source_structure<R>(
     source: &BlockStructure,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     let expected = homspace
         .coupled_subblock_structure_from_leg_degeneracies(rule)
@@ -268,7 +268,7 @@ pub(crate) fn adjoint_dyn<R, D>(
     data: &[D],
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
     D: AdjointScalar,
 {
     adjoint_dyn_with_primer(rule, space, data, encoded_layout_primer::<R>)
@@ -281,7 +281,7 @@ fn adjoint_dyn_with_primer<R, D>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
     D: AdjointScalar,
 {
     space.validate_rule(rule)?;
@@ -421,7 +421,7 @@ pub fn adjoint_bound_dyn<R, D>(
     data: &[D],
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
     D: AdjointScalar,
 {
     let (output, data) =
@@ -453,7 +453,7 @@ pub fn adjoint_bound_space_dyn<R>(
     space: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     let output =
         adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
@@ -710,7 +710,7 @@ mod cache_tests {
 
     fn rank_one_source<R>(rule: &R, sector: SectorId, deg: usize) -> DynamicFusionMapSpace
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let leg = || FusionProductSpace::new([SectorLeg::new([(sector, deg)], false)]);
         let hom = FusionTreeHomSpace::new(leg(), leg());
@@ -788,7 +788,7 @@ mod cache_tests {
 
     fn canonical_dynamic_source<R>(rule: &R, homspace: FusionTreeHomSpace) -> DynamicFusionMapSpace
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let structure = homspace
             .coupled_subblock_structure_from_leg_degeneracies(rule)
@@ -885,7 +885,7 @@ mod cache_tests {
         codomain_dual: bool,
         domain_dual: bool,
     ) where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new(

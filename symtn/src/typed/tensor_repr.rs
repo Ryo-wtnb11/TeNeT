@@ -131,8 +131,8 @@ impl<R, D, S> TypedAdjointView<R, D, S> {
 pub struct TensorRef<'a, R, D, S = Vec<D>> {
     pub(super) base: &'a TensorMap<R, D, S>,
     /// The base's own `adjoint`, captured where it exists; `None` for the
-    /// plain view. Why a `fn` pointer and not a bound on each operation: the
-    /// multiplicity-free `adjoint` needs a real coefficient scalar, which
+    /// plain view. Why a `fn` pointer and not a bound on each operation:
+    /// `adjoint` needs the mode's adjoint space (`TypedAdjointSpace`), which
     /// `contract` and `compose` do not.
     pub(super) adjoint: Option<ViewAdjoint<R, D, S>>,
 }
