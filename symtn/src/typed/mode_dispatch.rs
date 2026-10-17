@@ -3,9 +3,11 @@ use super::*;
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
+    MultiplicityFreeAdmissionMode: symtn_tensors::RigidCoefficientAlgebra<R>
+        + symtn_tensors::CoefficientAlgebra<R, Error = symtn_tensors::OperationError>,
 {
     fn vacuum(provider: &R) -> SectorId {
         provider.vacuum()
@@ -189,7 +191,7 @@ where
 impl<R> TypedTensorRootDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
 {

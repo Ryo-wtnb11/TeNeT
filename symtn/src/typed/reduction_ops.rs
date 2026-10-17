@@ -2,7 +2,7 @@ use super::*;
 
 impl<R, D> TensorMap<R, D>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of
@@ -200,6 +200,14 @@ where
     /// - If a checked provider cannot supply a quantum dimension, its original
     ///   error is available as the source. An invalid coupled-sector layout
     ///   returns [`Error::Core`].
+    /// - A multiplicity-free provider whose `Complex64` quantum dimension has
+    ///   a nonzero imaginary part (no unitary category has one) is refused
+    ///   with [`Error::Operation`] wrapping
+    ///   [`OperationError::InvalidArgument`](crate::typed::OperationError::InvalidArgument).
+    ///   Unique-fusion providers never read the dimension here, as TensorKit's
+    ///   `norm` and `inner` do not.
+    ///   [`Self::inner`] and [`Self::tr`] report the same refusal (`tr` also
+    ///   for Unique fusion).
     ///
     /// ```
     /// use std::sync::Arc;
@@ -570,6 +578,26 @@ where
     /// Compact diagonal input is summed directly in `O(sum_c k_c)`. A
     /// lazy adjoint returns the conjugate of its parent's trace without
     /// materializing. See [`Self::norm`] for a runnable example.
+    ///
+    /// The weight is the real quantum dimension also for a rule with
+    /// complex categorical coefficients (TensorKit's real `dimscalartype`):
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use symtn::sector::{TableRule, TableSector};
+    /// use symtn::typed::{Complex64, GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let tau = GradedSpace::try_new(
+    ///     Arc::new(TableRule::fibonacci()),
+    ///     [(TableSector::new(2), 1)],
+    /// )?;
+    /// let id: TensorMap<TableRule, Complex64> =
+    ///     TensorMap::isomorphism(&runtime, [&tau], [&tau])?;
+    /// let golden_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    /// assert!((id.tr()? - Complex64::new(golden_ratio, 0.0)).norm() < 1e-15);
+    /// # Ok::<(), symtn::typed::Error>(())
+    /// ```
     pub fn tr(&self) -> Result<D, FacadeError<R>> {
         let hom = self.logical_space().space().homspace();
         // The weighted trace below indexes codomain axis `i` together with

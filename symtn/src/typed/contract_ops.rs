@@ -72,15 +72,6 @@ where
     /// use symtn::typed::Complex64;
     /// use symtn::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<TableRule, Complex64>) {
-    ///     let _ = tensor.tr();
-    /// }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// use symtn::sector::TableRule;
-    /// use symtn::typed::Complex64;
-    /// use symtn::typed::TensorMap;
-    /// fn unavailable(tensor: &TensorMap<TableRule, Complex64>) {
     ///     let _ = tensor.svd_full(&[0], &[1]);
     /// }
     /// ```

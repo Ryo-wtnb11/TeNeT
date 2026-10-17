@@ -21,12 +21,12 @@
 //! [`PlanningAlgebra`] holds the two planning steps (#2024). Why a sibling
 //! rather than methods of `RigidCoefficientAlgebra`: the multiplicity-free
 //! planner runs for any `R::Scalar` (for example `Complex64` rules), while
-//! the multiplicity-free `RigidCoefficientAlgebra` and
-//! `PivotalCoefficientAlgebra` impls above are `Scalar = f64`. Relaxing those
-//! would widen the facade dispatch that forwards to them
-//! (`TypedSpaceModeDispatch`, trace) to complex-scalar rules (#2281).
-//! `CoefficientAlgebra` itself is scalar-generic: the adjoint space is
-//! metadata only.
+//! the multiplicity-free `PivotalCoefficientAlgebra` impl above is
+//! `Scalar = f64`. Relaxing it would widen the trace dispatch that forwards
+//! to it to complex-scalar rules, which have no symmetric braiding (#2281).
+//! `CoefficientAlgebra` is scalar-generic (the adjoint space is metadata
+//! only), and `RigidCoefficientAlgebra` needs only a
+//! [`QuantumDimensionWeight`].
 
 use core::ops::{Add, Mul};
 use std::sync::Arc;
@@ -130,12 +130,63 @@ where
     }
 }
 
+/// The real quantum dimension a categorical scalar carries: TensorKit
+/// keeps `dim` in its own real `dimscalartype` (TensorKitSectors 0.3.9
+/// `sectors.jl:449`; `tr` seeds its sum with it, TensorKit 0.17.1
+/// `linalg.jl:319`) even when F and R are complex, so the weights of
+/// `tr`/`norm`/`inner` and truncation stay real.
+///
+/// Why an exact `im == 0` test rather than a tolerance: a unitary category's
+/// quantum dimension is real by definition, and the providers that carry it
+/// in `Complex64` store it as `Complex64::new(d, 0.0)`. A nonzero imaginary
+/// part (a non-spherical, non-unitary category) is refused rather than
+/// silently weighted by its real part.
+///
+/// Why not a crate-root export: callers bound on
+/// `RigidCoefficientAlgebra<R>`, which this trait only conditions.
+#[doc(hidden)]
+pub trait QuantumDimensionWeight: dimension_weight_sealed::Sealed {
+    /// The real quantum dimension, or `None` if `self` is not real.
+    fn real_dimension(&self) -> Option<f64>;
+}
+
+mod dimension_weight_sealed {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+    impl Sealed for num_complex::Complex64 {}
+}
+
+impl QuantumDimensionWeight for f64 {
+    #[inline]
+    fn real_dimension(&self) -> Option<f64> {
+        Some(*self)
+    }
+}
+
+impl QuantumDimensionWeight for num_complex::Complex64 {
+    #[inline]
+    fn real_dimension(&self) -> Option<f64> {
+        (self.im == 0.0).then_some(self.re)
+    }
+}
+
+/// The error of a quantum dimension that is not real.
+const NON_REAL_QUANTUM_DIMENSION: &str =
+    "quantum dimension is not real: dimension-weighted reductions and truncation \
+     require a unitary category";
+
 impl<R> RigidCoefficientAlgebra<R> for MultiplicityFreeAdmissionMode
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: QuantumDimensionWeight,
 {
     fn dim(provider: &R, sector: SectorId) -> Result<f64, Self::Error> {
-        Ok(provider.dim_scalar(sector))
+        provider
+            .dim_scalar(sector)
+            .real_dimension()
+            .ok_or(OperationError::InvalidArgument {
+                message: NON_REAL_QUANTUM_DIMENSION,
+            })
     }
 }
 

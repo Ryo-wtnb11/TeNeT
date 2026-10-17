@@ -77,7 +77,7 @@ where
 /// [`FactorizationScalar`](crate::typed::FactorizationScalar) describes.
 pub fn is_diagonal<R, D>(tensor: &TensorMap<R, D>, tol: f64) -> Result<bool, Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
     tensor.is_diagonal(tol)

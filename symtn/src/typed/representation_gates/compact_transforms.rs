@@ -906,9 +906,8 @@ fn compact_fermionic_braid_matches_hand_diagonal_and_complex_sign() {
         ],
     )
     .unwrap();
-    // Fibonacci has complex categorical coefficients, but its public compact
-    // constructor is unavailable: TypedTensorRootDispatch requires R::Scalar=f64.
-    // This Complex64 payload still exercises the supported real-coefficient lane.
+    // A Complex64 payload on a real-coefficient rule: the complex sign comes
+    // from the payload, not from a categorical coefficient.
     let complex = real
         .convert::<Complex64>()
         .map_diagonal(|value| Complex64::new(value.re, value.re / 4.0))

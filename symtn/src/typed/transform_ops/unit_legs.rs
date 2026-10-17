@@ -2,7 +2,7 @@ use super::*;
 
 impl<R, D> TensorMap<R, D>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
     pub(in crate::typed) fn insert_unit_multiplicity_free(

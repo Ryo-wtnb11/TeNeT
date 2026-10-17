@@ -251,6 +251,13 @@ where
 {
     /// Returns the quantum-dimension-weighted total dimension
     /// `sum_c degeneracy(c) * quantum_dimension(c)` without integer rounding.
+    ///
+    /// # Errors
+    ///
+    /// A checked provider's dimension error, or, for a multiplicity-free
+    /// provider whose `Complex64` quantum dimension has a nonzero imaginary
+    /// part, [`Error::Operation`](crate::typed::Error::Operation) wrapping
+    /// [`OperationError::InvalidArgument`](crate::typed::OperationError::InvalidArgument).
     pub fn dim(&self) -> Result<f64, FacadeError<R>> {
         let mut total = 0.0;
         for (&sector, &degeneracy) in self.leg.sectors().iter().zip(self.leg.degeneracies()) {

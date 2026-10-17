@@ -518,3 +518,41 @@ fn warmed_checked_generic_compact_reductions_do_not_densify() {
         assert_eq!(allocations, 0, "{row}");
     }
 }
+
+#[test]
+fn warmed_complex_symbol_reductions_do_not_allocate() {
+    // What: the complex-symbol lane (#2281) reads the real quantum dimension
+    // through the same seam, so warm Ising `inner`, `norm` and `tr` stay
+    // allocation-free on the caller thread, owned and lazy.
+    use symtn::sector::{TableRule, TableSector};
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = GradedSpace::try_new(
+        Arc::new(TableRule::ising()),
+        [
+            (TableSector::new(1), 3),
+            (TableSector::new(2), 2),
+            (TableSector::new(3), 4),
+        ],
+    )
+    .unwrap();
+    let lhs: TensorMap<TableRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 228_101).unwrap();
+    let rhs: TensorMap<TableRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 228_102).unwrap();
+    let lazy = lhs.adjoint().unwrap();
+
+    black_box(lhs.inner(&rhs).unwrap());
+    black_box(lhs.norm(2.0).unwrap());
+    black_box(lhs.tr().unwrap());
+    black_box(lazy.tr().unwrap());
+    black_box(lazy.norm(2.0).unwrap());
+    for (row, allocations) in [
+        ("inner", measured(|| lhs.inner(&rhs).unwrap()).1),
+        ("norm", measured(|| lhs.norm(2.0).unwrap()).1),
+        ("tr", measured(|| lhs.tr().unwrap()).1),
+        ("lazy tr", measured(|| lazy.tr().unwrap()).1),
+        ("lazy norm", measured(|| lazy.norm(2.0).unwrap()).1),
+    ] {
+        assert_eq!(allocations, 0, "{row}");
+    }
+}
