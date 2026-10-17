@@ -263,3 +263,46 @@ fn ising_axpby_with_lazy_adjoints_equals_the_materialized_combination() {
     let one = eager_t.axpby(alpha, s.adjoint_view(), beta).unwrap();
     assert_close("axpby(t^H, s^H view)", &entries(&one), &want);
 }
+
+#[test]
+fn ising_lazy_adjoint_into_transforms_equal_the_materialized_update() {
+    let fixture = fixture();
+    let lazy = parent(&fixture, 6).adjoint().unwrap();
+    let eager = lazy.materialize().unwrap();
+    // A second payload in each output space seeds the destination.
+    let seed = parent(&fixture, 7)
+        .adjoint()
+        .unwrap()
+        .materialize()
+        .unwrap();
+    let (alpha, beta) = (Complex64::new(0.75, -0.5), Complex64::new(-1.25, 0.375));
+    type TransformInto<'a> =
+        &'a dyn Fn(&Ising, &mut Ising, Complex64, Complex64) -> Result<(), symtn::typed::Error>;
+    let check = |what: String, op: Transform<'_>, op_into: TransformInto<'_>| {
+        let start = op(&seed).unwrap();
+        let want = entries(&op(&eager).unwrap().axpby(alpha, &start, beta).unwrap());
+        // A fresh, unshared destination (a clone shares its payload).
+        let mut destination = op(&seed).unwrap();
+        op_into(&lazy, &mut destination, alpha, beta).unwrap();
+        assert_close(&what, &entries(&destination), &want);
+    };
+    for levels in [[0usize, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2]] {
+        check(
+            format!("braid_into levels {levels:?}"),
+            &|x| x.braid(&[2, 0], &[3, 1], &levels),
+            &|x, d, a, b| x.braid_into(&[2, 0], &[3, 1], &levels, d, a, b),
+        );
+    }
+    check(
+        "transpose_into".to_string(),
+        &|x| x.transpose(&[3, 2], &[0, 1]),
+        &|x, d, a, b| x.transpose_into(&[3, 2], &[0, 1], d, a, b),
+    );
+    for split in [0, 2, 3] {
+        check(
+            format!("repartition_into {split}"),
+            &|x| x.repartition(split),
+            &|x, d, a, b| x.repartition_into(d, a, b),
+        );
+    }
+}
