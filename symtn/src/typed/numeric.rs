@@ -336,7 +336,8 @@ where
 /// dimension.
 pub(crate) fn multiplicity_free_dim<R>(rule: &R, sector: SectorId) -> Result<f64, Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: symtn_tensors::QuantumDimensionWeight,
 {
     <symtn_core::MultiplicityFreeAdmissionMode as symtn_tensors::RigidCoefficientAlgebra<R>>::dim(
         rule, sector,

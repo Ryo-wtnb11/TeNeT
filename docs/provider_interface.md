@@ -246,11 +246,15 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
 - `TableRule` has `Complex64` categorical coefficients. Its tested typed
   scope is construction, transformations including explicit planar braids,
   tensor products, composition, `scale`, `scale_assign`, `axpby`,
-  `axpby_into`, and the adjoint (eager, lazy, and as a
-  `compose` operand; a transform of a lazy adjoint reads the parent through
-  the dagger operation, as for real coefficients). Ordinary arbitrary-axis
-  contraction, factorization, and general network execution are not
-  supported or claimed.
+  `axpby_into`, the adjoint (eager, lazy, and as a `compose` operand; a
+  transform of a lazy adjoint reads the parent through the dagger
+  operation, as for real coefficients), the quantum-dimension-weighted
+  reductions `scalar`, `norm`, `inner`, `tr` and `GradedSpace::dim`, unit
+  legs, `restrict_leg`, and `is_diagonal`. Those weights read the real
+  quantum dimension: a `Complex64` dimension with a nonzero imaginary part
+  is refused with `InvalidArgument`, since no unitary category has one.
+  Ordinary arbitrary-axis contraction, factorization, and general network
+  execution are not supported or claimed.
   A fusion-only table reports `NoBraiding`: every operation that needs an
   R-symbol or a twist is rejected with its typed error before any provider
   call, and `r_symbol_scalar`/`twist_scalar` are defined only for a braided

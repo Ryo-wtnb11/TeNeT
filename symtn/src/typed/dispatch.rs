@@ -473,7 +473,7 @@ where
 impl<R, D> TypedTensorUnitDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec
         + CanonicalUnitFusionRule,
