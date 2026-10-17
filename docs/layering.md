@@ -10,7 +10,7 @@ The split follows TensorKit's ecosystem:
 
 | Concern | TensorKit ecosystem | This stack |
 | --- | --- | --- |
-| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | the [`fusion-symbols`](https://github.com/Ryo-wtnb11/fusion-symbols) crate (formerly `racah`), 0.3.0 |
+| Elementary categorical data | WignerSymbols.jl, SUNRepresentations.jl, TensorKitSectors.jl, CategoryData.jl | the [`fusion-symbols`](https://github.com/Ryo-wtnb11/fusion-symbols) crate (formerly `racah`), 0.4.0 |
 | Symmetric tensors, fusion trees, structure, transforms | TensorKit.jl | symtn |
 | Dense arrays, linear algebra, devices | LinearAlgebra, TensorOperations.jl | tenferro |
 | Strided data movement | Strided.jl | strided-rs (`strided-kernel`) |
@@ -23,7 +23,7 @@ The split follows TensorKit's ecosystem:
 flowchart TB
     APP["Application<br/>MPS / PEPS / VMC algorithms"]
     SYMTN["<b>symtn</b><br/>tensor maps, fusion trees, structure, transforms"]
-    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd / tables modules<br/>planned: abelian, product"]
+    SYM["<b>Symbol layer</b> (fusion-symbols crate, formerly racah)<br/>su2 / sun / bcd / tables / abelian / cu1 modules<br/>planned: product"]
     DENSE["<b>tenferro</b><br/>dense kernels, linalg, CPU/GPU providers"]
     STR["<b>strided-rs</b><br/>strided data-movement kernels"]
     PRIMS["tprims (planned)<br/>copy-free strided contraction"]
@@ -45,7 +45,7 @@ generation (`fusion-symbols` `src/sun/linalg.rs` and `src/bcd/linalg.rs`, behind
 ### 1. Symbol layer (`fusion-symbols` crate)
 
 The symbol layer is the published `fusion-symbols` crate (formerly `racah`),
-which symtn depends on at 0.3.0.
+which symtn depends on at 0.4.0.
 
 **Target ownership.** For each group or category, the symbol layer owns the
 elementary data a fusion category needs:
@@ -64,7 +64,8 @@ shaped around one consumer's call pattern.
 | --- | --- |
 | `fusion-symbols` (formerly `racah`), modules `su2`, `sun`, `bcd` | Lie-group coefficients. SU(2) symbols are exact. Behind `cgc-gen` it generates CGC, F and R: SU(N) in the SUNRepresentations gauge, and B/C/D (SO(N)/Sp(2N)) in fusion-symbols' QSpace-derived sweep gauge (`docs/gauge_soN.md`). |
 | `fusion-symbols`, module `tables` | The pinned AnyonWiki tables (unitary, rank ≤ 4) behind `TableRule`, Fibonacci included (#2016, #2277). |
-| `fusion-symbols`, planned modules `abelian`, `product` | Abelian groups, fermion parity, CU(1) and Deligne products; they stay in symtn until those modules ship. |
+| `fusion-symbols`, modules `abelian`, `cu1` | Z2, Z_N, U(1), fermion parity and CU(1): every symbol behind `Z2FusionRule`, `ZNFusionRule`, `U1FusionRule`, `FermionParityFusionRule` and `CU1FusionRule` (#2278). symtn keeps their labels, codecs, identities and checked errors. |
+| `fusion-symbols`, planned module `product` | Deligne products; they stay in symtn (`ProductFusionRule`) until that module ships. |
 
 **Target: one provider shape across crates.** Every crate should answer N,
 dims, dual, FS phase and indicator, twist, F and R in the same shape, so a

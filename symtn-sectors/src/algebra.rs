@@ -656,11 +656,11 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// by the `Nsymbol`s (Abelian irreps, `FermionParity`, `CU1Irrep`) or
     /// gate on them (`FibonacciAnyon`, `IsingAnyon`), so their off-shell value
     /// is `0`; `SU2Irrep` does not gate and defers to `WignerSymbols.racahW`.
-    /// The symtn providers differ off-shell as well: the Abelian rules return
-    /// `1` for any labels, `CU1FusionRule` returns `0` after an `nsymbol`
-    /// gate, `SU2FusionRule` returns the `fusion-symbols` value (`0` for an
-    /// inadmissible 6j), and `TableRule` returns its table entry (`0`). A label outside a provider's sector domain panics for
-    /// the `nsymbol`-gated, SU(2) and table-backed providers.
+    /// Every shipped symtn provider returns `0` off-shell as well: the
+    /// Abelian rules and `CU1FusionRule` return the `fusion-symbols` value,
+    /// `SU2FusionRule` too (`0` for an inadmissible 6j), and `TableRule`
+    /// its table entry (`0`). A label outside a provider's sector domain
+    /// panics for every shipped provider.
     /// `ProductFusionRule` multiplies its components' values, so it inherits
     /// each component's off-shell value and panics if a component panics or
     /// an id does not decode into the product domain.
@@ -684,13 +684,10 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// any scalar, `0`, or panic, and callers must gate with
     /// [`FusionRule::nsymbol`]. TensorKitSectors multiplies by or gates on
     /// `Nsymbol(a, b, c)` (`irreps.jl` `Rsymbol`, `fermions.jl`, `cu1irrep.jl`,
-    /// `su2irrep.jl`, `anyons.jl`), so its off-shell value is `0`. Of the
-    /// symtn providers, `ZNFusionRule`/`Z2FusionRule`/`U1FusionRule` return
-    /// `1` and `FermionParityFusionRule` returns `-1` for two odd legs and
-    /// `1` otherwise, whatever `coupled` is; `CU1FusionRule` and
-    /// `SU2FusionRule` return `0`; `TableRule` returns its table entry
-    /// (`0`). Out-of-domain labels panic for the CU(1), SU(2) and
-    /// table-backed providers, and
+    /// `su2irrep.jl`, `anyons.jl`), so its off-shell value is `0`. Every
+    /// shipped symtn provider returns `0` as well (the Abelian, CU(1) and
+    /// SU(2) rules through `fusion-symbols`, `TableRule` from its table).
+    /// Out-of-domain labels panic for every shipped provider, and
     /// `SU2FusionRule` also panics when the closure of `left x right` leaves
     /// its supported spin range, even for an admissible `coupled`.
     /// `ProductFusionRule` multiplies its components' values and inherits

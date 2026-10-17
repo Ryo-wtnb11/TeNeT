@@ -1,3 +1,5 @@
+use fusion_symbols::cu1 as fs;
+
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
@@ -75,8 +77,21 @@ impl CU1Irrep {
         }
     }
 
-    fn is_charged(self) -> bool {
-        matches!(self.0, CU1Kind::Charged(_))
+    const fn fs(self) -> fs::CU1Irrep {
+        match self.0 {
+            CU1Kind::Vacuum => fs::CU1Irrep::VACUUM,
+            CU1Kind::Pseudoscalar => fs::CU1Irrep::PSEUDOSCALAR,
+            CU1Kind::Charged(charge) => fs::CU1Irrep::from_twice_charge(charge),
+        }
+    }
+
+    /// `None` above symtn's codec bound [`CU1_MAX_TWICE_CHARGE`].
+    const fn from_fs(label: fs::CU1Irrep) -> Option<Self> {
+        match (label.twice_charge(), label.s()) {
+            (0, 0) => Some(Self::VACUUM),
+            (0, _) => Some(Self::PSEUDOSCALAR),
+            (charge, _) => Self::try_from_twice_charge(charge),
+        }
     }
 }
 
@@ -86,6 +101,10 @@ impl From<CU1Irrep> for SectorId {
     }
 }
 
+/// TensorKit's `CU1Irrep` fusion rule. Every symbol (fusion, N, F, R, dim,
+/// twist, Frobenius–Schur phase) comes from [`fusion_symbols::cu1`], in
+/// TensorKitSectors 0.3.9's gauge; this type owns symtn's label codec, its
+/// [`CU1_MAX_TWICE_CHARGE`] bound and the checked error contract.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct CU1FusionRule;
 
@@ -100,50 +119,32 @@ fn checked_irreps(
     Ok((checked_irrep(left)?, checked_irrep(right)?))
 }
 
+/// fusion-symbols' channels in TensorKitSectors order; a channel above
+/// symtn's codec bound is `FusionNotRepresentable`, as fusion-symbols takes
+/// the whole `u32` twice charge.
 fn channels(left: CU1Irrep, right: CU1Irrep) -> Result<SectorVec, FusionAlgebraError> {
-    match (left.0, right.0) {
-        (CU1Kind::Vacuum, _) => Ok(core::iter::once(right.into()).collect()),
-        (_, CU1Kind::Vacuum) => Ok(core::iter::once(left.into()).collect()),
-        (CU1Kind::Pseudoscalar, CU1Kind::Pseudoscalar) => {
-            Ok(core::iter::once(CU1Irrep::VACUUM.into()).collect())
-        }
-        (CU1Kind::Pseudoscalar, CU1Kind::Charged(_))
-        | (CU1Kind::Charged(_), CU1Kind::Pseudoscalar) => {
-            Ok(core::iter::once(left.max(right).into()).collect())
-        }
-        (CU1Kind::Charged(a), CU1Kind::Charged(b)) if a == b => {
-            let doubled = a.checked_mul(2).filter(|&q| q <= CU1_MAX_TWICE_CHARGE);
-            let Some(doubled) = doubled else {
-                return Err(FusionAlgebraError::FusionNotRepresentable {
-                    left: left.into(),
-                    right: right.into(),
-                });
-            };
-            Ok([
-                CU1Irrep::VACUUM,
-                CU1Irrep::PSEUDOSCALAR,
-                CU1Irrep::from_twice_charge(doubled),
-            ]
-            .into_iter()
-            .map(Into::into)
-            .collect())
-        }
-        (CU1Kind::Charged(a), CU1Kind::Charged(b)) => {
-            let sum = a.checked_add(b).filter(|&q| q <= CU1_MAX_TWICE_CHARGE);
-            let Some(sum) = sum else {
-                return Err(FusionAlgebraError::FusionNotRepresentable {
-                    left: left.into(),
-                    right: right.into(),
-                });
-            };
-            Ok([
-                CU1Irrep::from_twice_charge(a.abs_diff(b)),
-                CU1Irrep::from_twice_charge(sum),
-            ]
-            .into_iter()
-            .map(Into::into)
-            .collect())
-        }
+    let not_representable = || FusionAlgebraError::FusionNotRepresentable {
+        left: left.into(),
+        right: right.into(),
+    };
+    let fusion = left
+        .fs()
+        .fusion(right.fs())
+        .map_err(|_| not_representable())?;
+    fusion
+        .map(|channel| {
+            CU1Irrep::from_fs(channel)
+                .map(SectorId::from)
+                .ok_or_else(not_representable)
+        })
+        .collect()
+}
+
+impl CU1FusionRule {
+    fn label(&self, sector: SectorId) -> fs::CU1Irrep {
+        checked_irrep(sector)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .fs()
     }
 }
 
@@ -180,7 +181,10 @@ impl FusionRule for CU1FusionRule {
 
 impl CheckedFusionAlgebra for CU1FusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        Ok(checked_irrep(sector)?.into())
+        let dual = checked_irrep(sector)?.fs().dual();
+        Ok(CU1Irrep::from_fs(dual)
+            .expect("the dual keeps the twice charge")
+            .into())
     }
 
     fn try_fusion_channels(
@@ -224,7 +228,6 @@ impl CanonicalUnitFusionRule for CU1FusionRule {}
 impl MultiplicityFreeFusionSymbols for CU1FusionRule {
     type Scalar = f64;
 
-    // TensorKitSectors 0.3.4 `cu1irrep.jl:123-196`, including its gauge.
     fn f_symbol_scalar(
         &self,
         a: SectorId,
@@ -234,141 +237,18 @@ impl MultiplicityFreeFusionSymbols for CU1FusionRule {
         e: SectorId,
         f: SectorId,
     ) -> f64 {
-        if self.nsymbol(a, b, e) == 0
-            || self.nsymbol(e, c, d) == 0
-            || self.nsymbol(b, c, f) == 0
-            || self.nsymbol(a, f, d) == 0
-        {
-            return 0.0;
-        }
-        let (a, b, c, d, e, f) = (
-            CU1Irrep::try_from_sector_id(a).unwrap(),
-            CU1Irrep::try_from_sector_id(b).unwrap(),
-            CU1Irrep::try_from_sector_id(c).unwrap(),
-            CU1Irrep::try_from_sector_id(d).unwrap(),
-            CU1Irrep::try_from_sector_id(e).unwrap(),
-            CU1Irrep::try_from_sector_id(f).unwrap(),
-        );
-        let op = CU1Irrep::VACUUM;
-        let om = CU1Irrep::PSEUDOSCALAR;
-        if a == op
-            || b == op
-            || c == op
-            || (a == b && b == om)
-            || (a == c && c == om)
-            || (b == c && c == om)
-        {
-            return 1.0;
-        }
-        if a == om {
-            return if d.twice_charge() == 0
-                || d.twice_charge() as i64 != c.twice_charge() as i64 - b.twice_charge() as i64
-            {
-                1.0
-            } else {
-                -1.0
-            };
-        }
-        if b == om {
-            return if d.twice_charge() == a.twice_charge().abs_diff(c.twice_charge()) {
-                -1.0
-            } else {
-                1.0
-            };
-        }
-        if c == om {
-            return if d.twice_charge() as i64 == a.twice_charge() as i64 - b.twice_charge() as i64 {
-                -1.0
-            } else {
-                1.0
-            };
-        }
-        let s = 2.0_f64.sqrt() / 2.0;
-        if a == b && b == c {
-            if d == a {
-                if e.twice_charge() == 0 {
-                    if f.twice_charge() == 0 {
-                        return if f == om { -0.5 } else { 0.5 };
-                    }
-                    return if e == om { -s } else { s };
-                }
-                return if f.twice_charge() == 0 { s } else { 0.0 };
-            }
-            return 1.0;
-        }
-        if a == b {
-            return if d == c {
-                if f.twice_charge() as u64 == b.twice_charge() as u64 + c.twice_charge() as u64 {
-                    if e == om {
-                        -s
-                    } else {
-                        s
-                    }
-                } else {
-                    s
-                }
-            } else {
-                1.0
-            };
-        }
-        if b == c {
-            return if d == a {
-                if e.twice_charge() as u64 == a.twice_charge() as u64 + b.twice_charge() as u64 {
-                    s
-                } else if f == om {
-                    -s
-                } else {
-                    s
-                }
-            } else {
-                1.0
-            };
-        }
-        if a == c {
-            return if d == b {
-                if e.twice_charge() == f.twice_charge() {
-                    0.0
-                } else {
-                    1.0
-                }
-            } else if d == om {
-                -1.0
-            } else {
-                1.0
-            };
-        }
-        if d == om && b.twice_charge() as u64 == a.twice_charge() as u64 + c.twice_charge() as u64 {
-            -1.0
-        } else {
-            1.0
-        }
+        let [a, b, c, d, e, f] = [a, b, c, d, e, f].map(|sector| self.label(sector));
+        fs::cu1_f_symbol(a, b, c, d, e, f)
     }
 
-    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> f64 {
-        let left = CU1Irrep::try_from_sector_id(left).expect("CU(1) R received an invalid sector");
-        if self.nsymbol(left.into(), right, coupled) == 0 {
-            return 0.0;
-        }
-        let coupled =
-            CU1Irrep::try_from_sector_id(coupled).expect("CU(1) R received an invalid sector");
-        if coupled == CU1Irrep::PSEUDOSCALAR && left.is_charged() {
-            -1.0
-        } else {
-            1.0
-        }
+    fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> f64 {
+        fs::cu1_r_symbol(self.label(a), self.label(b), self.label(c))
     }
 }
 
 impl MultiplicityFreeRigidSymbols for CU1FusionRule {
     fn dim_scalar(&self, sector: SectorId) -> f64 {
-        if checked_irrep(sector)
-            .expect("CU(1) dimension received an invalid sector")
-            .is_charged()
-        {
-            2.0
-        } else {
-            1.0
-        }
+        self.label(sector).dim()
     }
     fn inv_dim_scalar(&self, sector: SectorId) -> f64 {
         1.0 / self.dim_scalar(sector)
@@ -379,10 +259,10 @@ impl MultiplicityFreeRigidSymbols for CU1FusionRule {
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
         1.0 / self.sqrt_dim_scalar(sector)
     }
-    fn twist_scalar(&self, _sector: SectorId) -> f64 {
-        1.0
+    fn twist_scalar(&self, sector: SectorId) -> f64 {
+        self.label(sector).twist()
     }
-    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> f64 {
-        1.0
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> f64 {
+        self.label(sector).frobenius_schur()
     }
 }
