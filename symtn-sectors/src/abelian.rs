@@ -158,9 +158,6 @@ impl FusionRule for ZNFusionRule {
     fn dual(&self, sector: SectorId) -> SectorId {
         self.dual_or_panic(sector)
     }
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         self.fusion_channels_or_panic(left, right)
     }
@@ -323,10 +320,6 @@ impl FusionRule for Z2FusionRule {
         Z2Irrep::EVEN.into()
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         self.dual_or_panic(sector)
     }
@@ -432,10 +425,6 @@ impl FusionRule for FermionParityFusionRule {
 
     fn vacuum(&self) -> SectorId {
         Z2Irrep::EVEN.into()
-    }
-
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
     }
 
     fn dual(&self, sector: SectorId) -> SectorId {
@@ -628,10 +617,6 @@ impl FusionRule for U1FusionRule {
 
     fn vacuum(&self) -> SectorId {
         U1Irrep::new(0).into()
-    }
-
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
     }
 
     fn dual(&self, sector: SectorId) -> SectorId {

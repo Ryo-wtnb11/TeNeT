@@ -162,10 +162,6 @@ impl FusionRule for CU1FusionRule {
     fn vacuum(&self) -> SectorId {
         CU1Irrep::VACUUM.into()
     }
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         self.dual_or_panic(sector)
     }

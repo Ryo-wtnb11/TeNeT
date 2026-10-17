@@ -188,12 +188,11 @@ inherit the contract: they are defined for `N(left,right,coupled) != 0`.
 and `b_symbol_scalar` have correct default bodies derived from F; override only with a
 reference to justify it.
 
-Two capability flags, both defaulting to the conservative answer:
+One capability flag, defaulting to the conservative answer:
 
 - `has_trivial_associator_gauge()` — return `true` only if
   *every* allowed F coefficient in your gauge is exactly the scalar unit. It
   selects a direct permutation lowering. Symmetric braiding alone is not enough.
-- `supports_unitary_braid_dagger()`.
 
 `CanonicalUnitFusionRule` asserts the vacuum is self-dual,
 that `1 ⊗ a -> a` and `a ⊗ 1 -> a` are the only channels involved, and that

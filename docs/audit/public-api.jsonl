@@ -2096,7 +2096,6 @@
 {"record":"public_item","crate":"tenet_sectors","name":"fusion_style","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":54,"deprecated":false}
 {"record":"public_item","crate":"tenet_sectors","name":"braiding_style","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":56,"deprecated":false}
 {"record":"public_item","crate":"tenet_sectors","name":"vacuum","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":58,"deprecated":false}
-{"record":"public_item","crate":"tenet_sectors","name":"supports_unitary_braid_dagger","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":60,"deprecated":false}
 {"record":"public_item","crate":"tenet_sectors","name":"dual","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":64,"deprecated":false}
 {"record":"public_item","crate":"tenet_sectors","name":"fusion_channels","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":72,"deprecated":false}
 {"record":"public_item","crate":"tenet_sectors","name":"nsymbol","kind":"function","owner":"FusionRule","visibility":"default","file":"tenet-sectors/src/algebra.rs","line":74,"deprecated":false}

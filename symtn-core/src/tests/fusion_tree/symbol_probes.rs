@@ -232,10 +232,6 @@ impl FusionRule for UniqueFAdmissibilityProbe {
         Z2FusionRule.vacuum()
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        Z2FusionRule.supports_unitary_braid_dagger()
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         Z2FusionRule.dual(sector)
     }

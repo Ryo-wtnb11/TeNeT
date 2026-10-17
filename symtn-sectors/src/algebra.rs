@@ -179,10 +179,6 @@ pub trait FusionRule: 'static {
 
     fn vacuum(&self) -> SectorId;
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        false
-    }
-
     /// The default is the identity, which is correct only for a provider whose
     /// every sector is self-dual.
     ///
