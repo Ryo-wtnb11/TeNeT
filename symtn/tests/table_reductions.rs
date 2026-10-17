@@ -480,3 +480,98 @@ fn ising_unit_legs_restriction_and_diagonality_follow_the_hand_oracle() {
         .unwrap();
     assert!(!symtn::expert::is_diagonal(&full, 0.0).unwrap());
 }
+
+#[test]
+fn ising_compact_diagonal_agrees_with_its_dense_twin() {
+    use symtn::typed::SectorSpectrum;
+    let runtime = Runtime::builder().build().unwrap();
+    let (unit, psi, sigma) = (
+        TableSector::new(1),
+        TableSector::new(2),
+        TableSector::new(3),
+    );
+    let v = GradedSpace::try_new(
+        Arc::new(TableRule::ising()),
+        [(unit, 1), (psi, 1), (sigma, 2)],
+    )
+    .unwrap();
+    let compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &v,
+        [
+            SectorSpectrum {
+                sector: unit,
+                values: vec![Complex64::new(0.5, -0.25)],
+            },
+            SectorSpectrum {
+                sector: psi,
+                values: vec![Complex64::new(-1.5, 0.75)],
+            },
+            SectorSpectrum {
+                sector: sigma,
+                values: vec![Complex64::new(2.0, 0.5), Complex64::new(-0.25, -1.0)],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(
+        compact.dense_data().is_err(),
+        "the diagonal is stored compact"
+    );
+    let dense = compact.materialize().unwrap();
+    let x: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&v], [&v], |trees, index| {
+            entry("x", trees, index)
+        })
+        .unwrap();
+
+    assert_close("tr", compact.tr().unwrap(), dense.tr().unwrap());
+    let real = |value: f64| Complex64::new(value, 0.0);
+    for p in [1.0, 2.0, f64::INFINITY] {
+        assert_close(
+            &format!("norm({p})"),
+            real(compact.norm(p).unwrap()),
+            real(dense.norm(p).unwrap()),
+        );
+    }
+    assert_close(
+        "inner",
+        compact.inner(&x).unwrap(),
+        dense.inner(&x).unwrap(),
+    );
+    let flat = |t: TensorMap<TableRule, Complex64>| -> Vec<Complex64> {
+        t.materialize().unwrap().dense_data().unwrap().to_vec()
+    };
+    for (what, got, want) in [
+        (
+            "compose D x",
+            flat(compact.compose(&x).unwrap()),
+            flat(dense.compose(&x).unwrap()),
+        ),
+        (
+            "compose x D",
+            flat(x.compose(&compact).unwrap()),
+            flat(x.compose(&dense).unwrap()),
+        ),
+        (
+            "transpose",
+            flat(compact.transpose(&[1], &[0]).unwrap()),
+            flat(dense.transpose(&[1], &[0]).unwrap()),
+        ),
+        (
+            "braid",
+            flat(compact.braid(&[1], &[0], &[0, 1]).unwrap()),
+            flat(dense.braid(&[1], &[0], &[0, 1]).unwrap()),
+        ),
+        (
+            "inverse braid",
+            flat(compact.braid(&[1], &[0], &[1, 0]).unwrap()),
+            flat(dense.braid(&[1], &[0], &[1, 0]).unwrap()),
+        ),
+    ] {
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (g, w) in got.iter().zip(&want) {
+            assert_close(what, *g, *w);
+        }
+    }
+}

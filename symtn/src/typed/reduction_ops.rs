@@ -200,6 +200,14 @@ where
     /// - If a checked provider cannot supply a quantum dimension, its original
     ///   error is available as the source. An invalid coupled-sector layout
     ///   returns [`Error::Core`].
+    /// - A multiplicity-free provider whose `Complex64` quantum dimension has
+    ///   a nonzero imaginary part (no unitary category has one) is refused
+    ///   with [`Error::Operation`] wrapping
+    ///   [`OperationError::InvalidArgument`](crate::typed::OperationError::InvalidArgument).
+    ///   Unique-fusion providers never read the dimension here, as TensorKit's
+    ///   `norm` and `inner` do not.
+    ///   [`Self::inner`] and [`Self::tr`] report the same refusal (`tr` also
+    ///   for Unique fusion).
     ///
     /// ```
     /// use std::sync::Arc;

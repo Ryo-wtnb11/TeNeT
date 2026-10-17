@@ -250,7 +250,11 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
   transform of a lazy adjoint reads the parent through the dagger
   operation, as for real coefficients), the quantum-dimension-weighted
   reductions `scalar`, `norm`, `inner`, `tr` and `GradedSpace::dim`, unit
-  legs, `restrict_leg`, and `is_diagonal`. Those weights read the real
+  legs, `restrict_leg` (also batched), `is_diagonal`, and the structural
+  degeneracy operations behind the same bounds: compact
+  `TensorMap::diagonal` and `expert::diagonal_spectrum`, `embed_leg`, `cat`
+  along either side, and serialization decode (`from_bytes_with`). Those
+  weights read the real
   quantum dimension: a `Complex64` dimension with a nonzero imaginary part
   is refused with `InvalidArgument`, since no unitary category has one.
   Ordinary arbitrary-axis contraction, factorization, and general network
