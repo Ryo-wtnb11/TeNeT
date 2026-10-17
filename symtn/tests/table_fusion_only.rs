@@ -128,6 +128,20 @@ fn crossing_free_operations_work_without_braiding() {
                 .unwrap()[0];
         }
     }
+    // Moduli plus unitarity fix the matrix up to row and column phases, and a
+    // vertex gauge acts by exactly such diagonal phases; the cross ratio
+    // M00·M12 / (M02·M10) is invariant under them and pins the one remaining
+    // relative phase (−1 in TensorKit's real gauge).
+    let cross = |m: &dyn Fn(usize, usize) -> Complex64| m(0, 0) * m(1, 2) / (m(0, 2) * m(1, 0));
+    let (ours, tensorkit) = (cross(&|r, c| f[r][c]), cross(&tensorkit_rep_s3_f));
+    assert!(
+        (tensorkit + 1.0).norm() <= BOUND,
+        "TensorKit cross ratio {tensorkit}"
+    );
+    assert!(
+        (ours - tensorkit).norm() <= BOUND,
+        "cross ratio {ours} != TensorKit {tensorkit}"
+    );
     for row in 0..3 {
         for column in 0..3 {
             let tensorkit = tensorkit_rep_s3_f(row, column);
@@ -213,4 +227,41 @@ fn braiding_operations_are_rejected_before_any_work() {
         format!("{error:?}").contains("UnsupportedTensorContractScope"),
         "{error:?}"
     );
+}
+
+#[test]
+fn product_with_a_fusion_only_factor_rejects_braid_into_untouched() {
+    use symtn_sectors::{product_sector, Z2Irrep};
+    let runtime = Runtime::builder().build().unwrap();
+    let product = Arc::new(TableRule::by_uuid(REP_S3).unwrap().product(Z2FusionRule));
+    assert_eq!(product.braiding_style(), BraidingStyleKind::NoBraiding);
+    let leg = GradedSpace::try_new(
+        product,
+        [
+            (product_sector(TableSector::new(1), Z2Irrep::EVEN), 1),
+            (product_sector(TableSector::new(3), Z2Irrep::ODD), 1),
+        ],
+    )
+    .unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 15).unwrap();
+    let mut destination: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 16).unwrap();
+    let before = destination.dense_data().unwrap().to_vec();
+    let error = source
+        .braid_into(
+            &[1, 0],
+            &[2],
+            &[0, 1, 2],
+            &mut destination,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap_err();
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("UnsupportedSectorBraid") && text.contains("NoBraiding"),
+        "{text}"
+    );
+    assert_eq!(destination.dense_data().unwrap(), &before[..]);
 }
