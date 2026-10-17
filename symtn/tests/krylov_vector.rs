@@ -52,6 +52,24 @@ impl Sample for f64 {
     }
 }
 
+impl Sample for f32 {
+    fn sample(k: usize, salt: usize) -> Self {
+        f64::sample(k, salt) as f32
+    }
+    fn real(v: f64) -> Self {
+        v as f32
+    }
+}
+
+impl Sample for Complex32 {
+    fn sample(k: usize, salt: usize) -> Self {
+        Complex32::new(f32::sample(k, salt), f32::sample(k + 3, salt + 1))
+    }
+    fn real(v: f64) -> Self {
+        Complex32::new(v as f32, 0.0)
+    }
+}
+
 impl Sample for Complex64 {
     fn sample(k: usize, salt: usize) -> Self {
         Complex64::new(f64::sample(k, salt), f64::sample(k + 3, salt + 1))
@@ -96,6 +114,25 @@ fn is_space_mismatch(error: &Error) -> bool {
     matches!(error, Error::Operation(op) if matches!(**op, OperationError::SpaceMismatch { .. }))
 }
 
+/// `|got - want| <= tolerance` in the precision of the payload `D`, for
+/// values widened to `Complex64`.
+#[track_caller]
+fn close<D: Numeric>(what: &str, got: Complex64, want: Complex64, terms: usize) {
+    let bound = numerics::tolerance::<D>(terms, want.norm());
+    assert!(
+        (got - want).norm() <= bound,
+        "{what}: {got} vs {want} (bound {bound:e})"
+    );
+}
+
+#[track_caller]
+fn slices_close<D: Numeric>(what: &str, got: &[Complex64], want: &[Complex64], terms: usize) {
+    assert_eq!(got.len(), want.len(), "{what}");
+    for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+        close::<D>(&format!("{what}[{i}]"), g, w, terms);
+    }
+}
+
 fn wide<D: Numeric>(v: &[D]) -> Vec<Complex64> {
     v.iter().map(|x| x.wide()).collect()
 }
@@ -113,9 +150,10 @@ macro_rules! vector_contract {
         let n = xd.len();
         let inner: Complex64 = xd.iter().zip(&yd).map(|(p, q)| p.conj() * q).sum();
         let got = Vector::inner(&x, &y).unwrap().wide();
-        numerics::assert_close(&format!("{what} inner"), got, inner, n);
+        close::<$d>(&format!("{what} inner"), got, inner, n);
         let norm = xd.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
-        numerics::assert_close(&format!("{what} norm"), Vector::norm(&x).unwrap(), norm, n);
+        let got = Vector::norm(&x).unwrap().wide();
+        close::<$d>(&format!("{what} norm"), got, Complex64::new(norm, 0.0), n);
 
         // `similar` is a fresh exact zero that accepts writes: no payload
         // shared with `x` (a clone would be `DestinationShared`).
@@ -148,7 +186,7 @@ macro_rules! vector_contract {
             got.iter().all(|v| v.re.is_finite() && v.im.is_finite()),
             "{what}: NaN leaked"
         );
-        numerics::assert_slices_close(&format!("{what} axpby b=0"), &got, &want, 1);
+        slices_close::<$d>(&format!("{what} axpby b=0"), &got, &want, 1);
 
         // General `a·x + b·self`.
         let mut d = x.similar().unwrap();
@@ -160,7 +198,7 @@ macro_rules! vector_contract {
             .map(|(p, q)| a.wide() * p + b.wide() * q)
             .collect();
         let got = wide(&d.to_physical_dense().unwrap().data);
-        numerics::assert_slices_close(&format!("{what} axpby"), &got, &want, 2);
+        slices_close::<$d>(&format!("{what} axpby"), &got, &want, 2);
 
         // A tensor on another space is refused before any write.
         let other = filled!($rt, [&v], [&v], $d, 3);
@@ -179,6 +217,11 @@ fn vector_operations_match_the_dense_expansion() {
     vector_contract!("u1 c64", &rt, u1_legs(), Complex64, ca, cb);
     vector_contract!("su2 f64", &rt, su2_legs(), f64, a, b);
     vector_contract!("su2 c64", &rt, su2_legs(), Complex64, ca, cb);
+    let (a32, b32) = (0.75f32, -2.5f32);
+    let (ca32, cb32) = (Complex32::new(0.5, -2.0), Complex32::new(-1.5, 0.25));
+    vector_contract!("u1 f32", &rt, u1_legs(), f32, a32, b32);
+    vector_contract!("su2 f32", &rt, su2_legs(), f32, a32, b32);
+    vector_contract!("su2 c32", &rt, su2_legs(), Complex32, ca32, cb32);
 }
 
 #[test]
@@ -316,25 +359,52 @@ const APPLY: ContractSpec<'static> = ContractSpec {
 /// Distinct eigenvalues of the operator found by Lanczos on `x0`, plus the
 /// eigen-residuals and the eigenvector norms in the dense expansion.
 macro_rules! eigsolve_case {
-    ($what:expr, $rt:expr, $h:expr, $x0:expr, $want:expr) => {{
+    ($what:expr, $rt:expr, $h:expr, $x0:expr, $want:expr, $alg:expr, $tol:expr) => {{
         let (h, x0, want): (_, _, Vec<f64>) = (&$h, &$x0, $want);
         let mut op =
             |x: &_, y: &mut _| h.contract_into(x, &APPLY, y, Sample::real(1.0), Sample::real(0.0));
-        let alg = Lanczos::new().krylovdim(10);
+        let (alg, tol): (Lanczos, f64) = ($alg, $tol);
         let mut ws = Workspace::with_capacity(x0, 10).unwrap();
         let (vals, vecs, info) =
             krylov::eigsolve(&mut op, x0, want.len(), Which::SmallestReal, &alg, &mut ws).unwrap();
         assert_eq!(info.converged, want.len(), "{}: {info:?}", $what);
         for ((&got, &want), x) in vals.iter().zip(&want).zip(&vecs) {
-            assert!((got - want).abs() < 1e-10, "{}: {got} vs {want}", $what);
+            let got: f64 = got.into();
+            assert!((got - want).abs() < tol, "{}: {got} vs {want}", $what);
             let dense = wide(&x.to_physical_dense().unwrap().data);
             let n = dense.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
-            assert!((n - 1.0).abs() < 1e-12, "{}: |x| = {n}", $what);
+            assert!((n - 1.0).abs() < tol, "{}: |x| = {n}", $what);
             let hx = h.contract(x, &APPLY).unwrap();
             let r = hx.axpby(Sample::real(1.0), x, Sample::real(-got)).unwrap();
-            assert!(r.norm(2.0).unwrap() < 1e-9, "{}: residual", $what);
+            assert!(r.norm(2.0).unwrap() < 10.0 * tol, "{}: residual", $what);
         }
     }};
+}
+
+fn f64_alg() -> Lanczos {
+    Lanczos::new().krylovdim(10)
+}
+
+#[test]
+fn eigsolve_in_single_precision() {
+    // SU(2) spin 1: [-2, -1, 1], to single precision (Lanczos tolerance
+    // above the f32 rounding of the residual).
+    let rt = Runtime::builder().build().unwrap();
+    let v =
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(2), 2)]).unwrap();
+    let w = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        (0..=2).map(|big| (SU2Irrep::from_twice_spin(2 * big), 1 + big % 2)),
+    )
+    .unwrap();
+    let want = heisenberg_eigenvalues(2);
+    let alg = || Lanczos::new().krylovdim(10).tol(1e-5);
+    let h = su2_heisenberg::<f32>(&rt, &v, 2);
+    let x0 = filled!(&rt, [&v, &v], [&w], f32, 7);
+    eigsolve_case!("su2 2s=2 f32", &rt, h, x0, want.clone(), alg(), 1e-5);
+    let h = su2_heisenberg::<Complex32>(&rt, &v, 2);
+    let x0 = filled!(&rt, [&v, &v], [&w], Complex32, 7);
+    eigsolve_case!("su2 2s=2 c32", &rt, h, x0, want, alg(), 1e-5);
 }
 
 #[test]
@@ -355,10 +425,26 @@ fn eigsolve_finds_the_two_site_heisenberg_spectrum() {
         .unwrap();
         let h = su2_heisenberg::<f64>(&rt, &v, twice);
         let x0 = filled!(&rt, [&v, &v], [&w], f64, 7);
-        eigsolve_case!(format!("su2 2s={twice} f64"), &rt, h, x0, want.clone());
+        eigsolve_case!(
+            format!("su2 2s={twice} f64"),
+            &rt,
+            h,
+            x0,
+            want.clone(),
+            f64_alg(),
+            1e-10
+        );
         let h = su2_heisenberg::<Complex64>(&rt, &v, twice);
         let x0 = filled!(&rt, [&v, &v], [&w], Complex64, 7);
-        eigsolve_case!(format!("su2 2s={twice} c64"), &rt, h, x0, want.clone());
+        eigsolve_case!(
+            format!("su2 2s={twice} c64"),
+            &rt,
+            h,
+            x0,
+            want.clone(),
+            f64_alg(),
+            1e-10
+        );
 
         // U(1): the same model in the Sz basis, W carrying every charge.
         let v = GradedSpace::try_new(
@@ -373,10 +459,26 @@ fn eigsolve_finds_the_two_site_heisenberg_spectrum() {
         .unwrap();
         let h = u1_heisenberg::<f64>(&rt, &v, twice);
         let x0 = filled!(&rt, [&v, &v], [&w], f64, 8);
-        eigsolve_case!(format!("u1 2s={twice} f64"), &rt, h, x0, want.clone());
+        eigsolve_case!(
+            format!("u1 2s={twice} f64"),
+            &rt,
+            h,
+            x0,
+            want.clone(),
+            f64_alg(),
+            1e-10
+        );
         let h = u1_heisenberg::<Complex64>(&rt, &v, twice);
         let x0 = filled!(&rt, [&v, &v], [&w], Complex64, 8);
-        eigsolve_case!(format!("u1 2s={twice} c64"), &rt, h, x0, want);
+        eigsolve_case!(
+            format!("u1 2s={twice} c64"),
+            &rt,
+            h,
+            x0,
+            want,
+            f64_alg(),
+            1e-10
+        );
     }
 }
 

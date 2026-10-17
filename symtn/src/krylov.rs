@@ -2,9 +2,12 @@
 //!
 //! The [krylov](https://docs.rs/krylov) crate, re-exported so that an
 //! application names exactly the krylov version whose [`Vector`] trait Host
-//! [`TensorMap`] implements. `eigsolve`, `exponentiate`, `linsolve`, … then
-//! run directly on tensors; a linear map is any closure
-//! `FnMut(&TensorMap<R, D>, &mut TensorMap<R, D>) -> Result<(), FacadeError<R>>`.
+//! [`TensorMap`] implements. Every krylov solver then runs directly on
+//! tensors. For `eigsolve`, `exponentiate`, `linsolve` and the Arnoldi
+//! solvers a linear map is any closure
+//! `FnMut(&TensorMap<R, D>, &mut TensorMap<R, D>) -> Result<(), FacadeError<R>>`;
+//! `svdsolve` also needs the adjoint, so its map is a type of your own
+//! implementing [`AdjointMap`].
 //!
 //! # The vector operations
 //!

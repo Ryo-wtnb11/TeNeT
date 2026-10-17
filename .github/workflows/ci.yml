@@ -209,8 +209,6 @@ jobs:
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
-  # cgc-gen: one job so the fusion-symbols dependency chain compiles once for
-  # all packages instead of once per matrix row.
   # The `krylov` feature's only coverage: the default `lint` job does not
   # compile the module (#1450). krylov declares LAPACK, so the feature needs a
   # provider; OpenBLAS here. The test step runs only the krylov targets, so
@@ -248,6 +246,8 @@ jobs:
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
+  # cgc-gen: one job so the fusion-symbols dependency chain compiles once for
+  # all packages instead of once per matrix row.
   feature-contract-cgc-gen:
     name: feature contract (cgc-gen, all crates)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

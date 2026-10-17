@@ -4,9 +4,12 @@ With the `krylov` feature, Host `TensorMap<R, D>` (`D` = `f64`, `f32`,
 `Complex64`, `Complex32`) implements `krylov::Vector`, and the krylov crate
 is re-exported as `symtn::krylov`. Use that path: a second krylov version in
 the dependency graph has its own `Vector` trait, which symtn does not
-implement. A linear map is a closure
+implement. For `eigsolve`, `exponentiate`, `linsolve` and the Arnoldi
+solvers a linear map is a closure
 `FnMut(&TensorMap<R, D>, &mut TensorMap<R, D>) -> Result<(), FacadeError<R>>`;
-`contract_into` writes `H·x` into `y` without a temporary.
+`contract_into` writes `H·x` into `y` without a temporary. `svdsolve` also
+applies the adjoint, so its map is a user type implementing
+`krylov::AdjointMap`.
 
 Pinned references: TensorKit 0.17.1 (git-tree-sha1
 `cd7e7b7d1137c08ba8b17e393b79fb9c858d610f`), KrylovKit 0.10.4, VectorInterface
