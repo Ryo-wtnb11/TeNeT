@@ -21,9 +21,12 @@
 //! [`PlanningAlgebra`] holds the two planning steps (#2024). Why a sibling
 //! rather than methods of `RigidCoefficientAlgebra`: the multiplicity-free
 //! planner runs for any `R::Scalar` (for example `Complex64` rules), while
-//! the multiplicity-free impls above are `Scalar = f64`. Relaxing those would
-//! widen the facade dispatch that forwards to them (`TypedAdjointSpace`,
-//! `TypedSpaceModeDispatch`) to complex-scalar rules.
+//! the multiplicity-free `RigidCoefficientAlgebra` and
+//! `PivotalCoefficientAlgebra` impls above are `Scalar = f64`. Relaxing those
+//! would widen the facade dispatch that forwards to them
+//! (`TypedSpaceModeDispatch`, trace) to complex-scalar rules (#2281).
+//! `CoefficientAlgebra` itself is scalar-generic: the adjoint space is
+//! metadata only.
 
 use core::ops::{Add, Mul};
 use std::sync::Arc;
@@ -115,9 +118,9 @@ pub trait PivotalCoefficientAlgebra<R>: RigidCoefficientAlgebra<R> {
 
 impl<R> CoefficientAlgebra<R> for MultiplicityFreeAdmissionMode
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
-    type Coeff = f64;
+    type Coeff = R::Scalar;
     type Error = OperationError;
 
     fn adjoint_space(

@@ -165,8 +165,8 @@ where
     // Leasing rather than locking: independent operations on one runtime
     // must not serialize behind each other.
     let mut lease = tensor.runtime.lease_context()?;
-    // Why owned: a lazy adjoint takes the lane's lazy arm, and a
-    // complex-coefficient rule cannot hold one.
+    // Why owned: a lazy adjoint input already took the mode's lazy-adjoint
+    // arm (`try_lazy_adjoint`), for every coefficient scalar.
     let body = tensor
         .owned_body()
         .ok_or_else(|| internal_layout_error("multiplicity-free transform input is owned"))?;
@@ -269,13 +269,18 @@ where
     .map(Some)
 }
 
-impl<R, D> MultiplicityFreeTransformExecution<R, f64> for D
+impl<R, D> MultiplicityFreeTransformExecution<R> for D
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + symtn_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + crate::runtime::MultiplicityFreeCoefficientLane<
+            <R as MultiplicityFreeFusionSymbols>::Scalar,
+        >,
 {
     fn transform_bond_spectrum(
         tensor: &TensorMap<R, Self>,
@@ -296,52 +301,6 @@ where
         operation: &TreeTransformOperation,
     ) -> Result<Option<TensorMap<R, Self, S>>, Error> {
         lazy_adjoint_of_transformed_parent(tensor, operation)
-    }
-
-    fn transform<S: TransformExec<R, Self>>(
-        tensor: &TensorMap<R, Self, S>,
-        operation: TreeTransformOperation,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
-        tree_transform_multiplicity_free_owned(tensor, operation)
-    }
-
-    fn transform_into<S: TransformExec<R, Self>>(
-        source: &TensorMap<R, Self, S>,
-        destination: &mut TensorMap<R, Self, S>,
-        alpha: Self,
-        beta: Self,
-        operation: impl FnOnce() -> Result<TreeTransformOperation, Error>,
-        exact_layout_probe: impl FnOnce(&mut dyn FnMut(symtn_tensors::TreeTransformOperationView<'_>)),
-    ) -> Result<(), Error> {
-        tree_transform_into_multiplicity_free(
-            source,
-            destination,
-            alpha,
-            beta,
-            operation,
-            exact_layout_probe,
-        )
-    }
-}
-
-impl<R> MultiplicityFreeTransformExecution<R, num_complex::Complex64> for num_complex::Complex64
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-{
-    fn transform_bond_spectrum(
-        tensor: &TensorMap<R, Self>,
-        spectrum: &[symtn_matrixalgebra::SectorSpectrum<Self>],
-        operation: &TreeTransformOperation,
-        require_representable: bool,
-    ) -> Result<BondTransform<R, Self>, Error> {
-        transform_bond_spectrum_multiplicity_free(
-            tensor,
-            spectrum,
-            operation,
-            require_representable,
-        )
     }
 
     fn transform<S: TransformExec<R, Self>>(

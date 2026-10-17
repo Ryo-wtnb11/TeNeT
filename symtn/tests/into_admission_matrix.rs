@@ -60,9 +60,9 @@
 //! Compile-time capability absences, recorded and not counted as passing
 //! cells: checked Generic and complex-symbol rules × CUDA (the device
 //! transforms are bounded `MultiplicityFreeRigidSymbols<Scalar = f64>`,
-//! #1756), and a complex-symbol rule × lazy adjoint (`TypedAdjointSpace`
-//! needs `Scalar = f64`), and a complex-symbol rule × trace (neither eager
-//! nor `_into` has one). Fibonacci `permute` is anyonic and asserted as the
+//! #1756), and a complex-symbol rule × trace (neither eager nor `_into` has
+//! one). The lazy adjoint of a complex-symbol rule is covered against its
+//! materialized adjoint in `complex_symbol_lazy_adjoint.rs`. Fibonacci `permute` is anyonic and asserted as the
 //! same rejection as eager.
 
 use std::collections::BTreeMap;
@@ -2087,7 +2087,7 @@ fn symmetric_complex_symbol_contraction_equals_the_real_symbol_lane() {
     // What: the complex-symbol lane contracts (eager and `_into`), and on
     // the `Complex64` embedding of U(1) it is the real-symbol lane's value,
     // exactly up to the sign of zero, in every output order and operand
-    // kind both lanes take (complex-symbol rules hold no lazy adjoint).
+    // kind both lanes take.
     let runtime = host_runtime();
     macro_rules! legs {
         ($rule:expr) => {{

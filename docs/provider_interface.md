@@ -245,8 +245,11 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
   bounds; there is no blanket `Scalar = f64` requirement.
 - `TableRule` has `Complex64` categorical coefficients. Its tested typed
   scope is construction, transformations including explicit planar braids,
-  tensor products, and composition. Ordinary arbitrary-axis contraction,
-  factorization, and general network execution are not supported or claimed.
+  tensor products, composition, `axpby`, and the adjoint (eager, lazy, and as a
+  `compose` operand; a transform of a lazy adjoint reads the parent through
+  the dagger operation, as for real coefficients). Ordinary arbitrary-axis
+  contraction, factorization, and general network execution are not
+  supported or claimed.
   A fusion-only table reports `NoBraiding`: every operation that needs an
   R-symbol or a twist is rejected with its typed error before any provider
   call, and `r_symbol_scalar`/`twist_scalar` are defined only for a braided

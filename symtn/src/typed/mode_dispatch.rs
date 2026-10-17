@@ -352,8 +352,7 @@ where
         + SectorCodec,
     <R as MultiplicityFreeFusionSymbols>::Scalar:
         CategoricalScalar + symtn_tensors::DenseRecouplingScalar,
-    D: TensorScalar
-        + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
+    D: TensorScalar + MultiplicityFreeTransformExecution<R>,
 {
     fn transform_bond_spectrum(
         tensor: &TensorMap<R, D>,
@@ -712,9 +711,7 @@ where
         + SectorCodec,
     <R as MultiplicityFreeFusionSymbols>::Scalar:
         CategoricalScalar + symtn_tensors::DenseRecouplingScalar,
-    D: TensorScalar
-        + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>
-        + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
+    D: TensorScalar + MultiplicityFreeContractExecution<R> + MultiplicityFreeTransformExecution<R>,
 {
     fn contract<S: ContractExec<R, D>>(
         lhs: &TensorMap<R, D, S>,

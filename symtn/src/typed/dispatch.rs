@@ -181,7 +181,7 @@ pub enum BondOutput<D> {
     Dense(Vec<D>),
 }
 
-pub(super) trait MultiplicityFreeTransformExecution<R, C>: TensorScalar
+pub(super) trait MultiplicityFreeTransformExecution<R>: TensorScalar
 where
     R: TypedSectorAdmission,
 {
@@ -193,11 +193,9 @@ where
     ) -> Result<BondTransform<R, Self>, Error>;
 
     fn try_lazy_adjoint<S: TransformExec<R, Self>>(
-        _tensor: &TensorMap<R, Self, S>,
-        _operation: &TreeTransformOperation,
-    ) -> Result<Option<TensorMap<R, Self, S>>, Error> {
-        Ok(None)
-    }
+        tensor: &TensorMap<R, Self, S>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Option<TensorMap<R, Self, S>>, Error>;
 
     fn transform<S: TransformExec<R, Self>>(
         tensor: &TensorMap<R, Self, S>,
@@ -214,7 +212,7 @@ where
     ) -> Result<(), Error>;
 }
 
-pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
+pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission>:
     TensorScalar
 {
     fn contract<S: ContractExec<R, Self>>(

@@ -657,41 +657,11 @@ where
     Ok(())
 }
 
-impl<R, D> MultiplicityFreeContractExecution<R, f64> for D
+impl<R, D> MultiplicityFreeContractExecution<R> for D
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    fn contract<S: ContractExec<R, Self>>(
-        lhs: &TensorMap<R, Self, S>,
-        rhs: &TensorMap<R, Self, S>,
-        spec: &ContractSpec<'_>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
-        contract_multiplicity_free(lhs, rhs, spec)
-    }
-
-    fn contract_into<S: ContractExec<R, Self>>(
-        lhs: &TensorMap<R, Self, S>,
-        rhs: &TensorMap<R, Self, S>,
-        spec: &ContractSpec<'_>,
-        destination: &mut TensorMap<R, Self, S>,
-        alpha: Self,
-        beta: Self,
-    ) -> Result<(), Error> {
-        contract_into_multiplicity_free(lhs, rhs, spec, destination, alpha, beta)
-    }
-
-    fn compose<S: ContractExec<R, Self>>(
-        lhs: &TensorMap<R, Self, S>,
-        rhs: &TensorMap<R, Self, S>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, S), Error> {
-        contract_owned_multiplicity_free(lhs, rhs, |_, _| symtn_tensors::ContractRequest::Compose)
-    }
-}
-
-impl<R> MultiplicityFreeContractExecution<R, Complex64> for Complex64
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = Complex64> + CheckedFusionAlgebra + SectorCodec,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    R::Scalar: CategoricalScalar + symtn_tensors::DenseRecouplingScalar,
+    D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
 {
     fn contract<S: ContractExec<R, Self>>(
         lhs: &TensorMap<R, Self, S>,
