@@ -234,10 +234,6 @@ impl FusionRule for CountingFibonacci {
         TableRule::fibonacci().vacuum()
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        TableRule::fibonacci().supports_unitary_braid_dagger()
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         self.layout_calls.fetch_add(1, Ordering::Relaxed);
         TableRule::fibonacci().dual(sector)

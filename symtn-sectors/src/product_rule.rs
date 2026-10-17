@@ -257,10 +257,6 @@ where
         self.encode_component_ids(self.left.vacuum(), self.right.vacuum())
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        self.left.supports_unitary_braid_dagger() && self.right.supports_unitary_braid_dagger()
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         let (left, right) = self.decode_component_ids_or_panic(sector);
         self.encode_component_ids(self.left.dual(left), self.right.dual(right))

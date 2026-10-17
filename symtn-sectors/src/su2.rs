@@ -125,10 +125,6 @@ impl FusionRule for SU2FusionRule {
         SU2Irrep::from_twice_spin(0).into()
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         self.dual_or_panic(sector)
     }

@@ -463,10 +463,6 @@ impl FusionRule for TensorKitZ4Element2Rule {
         SectorId::new(0)
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        true
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         SectorId::new((4 - Self::label(sector)) % 4)
     }

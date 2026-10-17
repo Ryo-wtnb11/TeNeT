@@ -219,10 +219,6 @@ impl FusionRule for TableRule {
         Self::sector_id(self.category.unit())
     }
 
-    // Why not `supports_unitary_braid_dagger() == true`: construction
-    // validates the exact `N` axioms only; R unitarity is a consistency test
-    // of the tables, not a property the constructor proved.
-
     fn dual(&self, sector: SectorId) -> SectorId {
         self.dual_or_panic(sector)
     }

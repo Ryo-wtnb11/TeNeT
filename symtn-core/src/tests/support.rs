@@ -596,10 +596,6 @@ impl FusionRule for FibonacciFAdmissibilityProbe {
         TableRule::fibonacci().vacuum()
     }
 
-    fn supports_unitary_braid_dagger(&self) -> bool {
-        TableRule::fibonacci().supports_unitary_braid_dagger()
-    }
-
     fn dual(&self, sector: SectorId) -> SectorId {
         TableRule::fibonacci().dual(sector)
     }
