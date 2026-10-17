@@ -141,6 +141,9 @@ where
 /// in `Complex64` store it as `Complex64::new(d, 0.0)`. A nonzero imaginary
 /// part (a non-spherical, non-unitary category) is refused rather than
 /// silently weighted by its real part.
+///
+/// Why not a crate-root export: callers bound on
+/// `RigidCoefficientAlgebra<R>`, which this trait only conditions.
 #[doc(hidden)]
 pub trait QuantumDimensionWeight: dimension_weight_sealed::Sealed {
     /// The real quantum dimension, or `None` if `self` is not real.
@@ -168,8 +171,7 @@ impl QuantumDimensionWeight for num_complex::Complex64 {
 }
 
 /// The error of a quantum dimension that is not real.
-#[doc(hidden)]
-pub const NON_REAL_QUANTUM_DIMENSION: &str =
+const NON_REAL_QUANTUM_DIMENSION: &str =
     "quantum dimension is not real: dimension-weighted reductions and truncation \
      require a unitary category";
 

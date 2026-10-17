@@ -70,10 +70,7 @@ pub(crate) use contract::{
 #[doc(hidden)]
 pub use mode::ContractRequest;
 #[doc(hidden)]
-pub use mode::{
-    CoefficientAlgebra, PivotalCoefficientAlgebra, QuantumDimensionWeight, RigidCoefficientAlgebra,
-    NON_REAL_QUANTUM_DIMENSION,
-};
+pub use mode::{CoefficientAlgebra, PivotalCoefficientAlgebra, RigidCoefficientAlgebra};
 pub(crate) use oriented_elementwise::validate_oriented_fusion_layout;
 #[doc(hidden)]
 pub use oriented_elementwise::{

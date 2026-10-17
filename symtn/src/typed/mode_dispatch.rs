@@ -6,7 +6,8 @@ where
         + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
-    <R as MultiplicityFreeFusionSymbols>::Scalar: symtn_tensors::QuantumDimensionWeight,
+    MultiplicityFreeAdmissionMode: symtn_tensors::RigidCoefficientAlgebra<R>
+        + symtn_tensors::CoefficientAlgebra<R, Error = symtn_tensors::OperationError>,
 {
     fn vacuum(provider: &R) -> SectorId {
         provider.vacuum()

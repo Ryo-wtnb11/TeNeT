@@ -356,7 +356,7 @@ fn is_non_real_dimension(error: &symtn::typed::Error) -> bool {
             if matches!(
                 **operation,
                 symtn::typed::OperationError::InvalidArgument { message }
-                    if message == symtn_tensors::NON_REAL_QUANTUM_DIMENSION
+                    if message.starts_with("quantum dimension is not real")
             )
     )
 }
