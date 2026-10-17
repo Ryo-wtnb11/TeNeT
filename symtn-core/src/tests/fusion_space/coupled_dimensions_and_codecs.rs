@@ -163,7 +163,7 @@ fn canonical_coupled_layouts_pass_checked_subset_proof() {
     assert_rule(&FermionParityFusionRule, z2_odd());
     assert_rule(&U1FusionRule, u1(7));
     assert_rule(&SU2FusionRule, su2(3));
-    assert_rule(&FibonacciFusionRule, SectorId::new(1));
+    assert_rule(&TableRule::fibonacci(), SectorId::new(1));
 
     type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
     type Triple = ProductFusionRule<Fz2U1, SU2FusionRule>;

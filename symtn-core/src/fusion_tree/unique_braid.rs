@@ -129,7 +129,7 @@ where
 ///
 /// `permutation(position)` is the source axis at output `position`, for
 /// every position below the tree rank (validated by the caller).
-fn unique_direct_braid<R>(
+pub(crate) fn unique_direct_braid<R>(
     rule: &R,
     tree: &UnhashedFusionTree,
     permutation: impl Fn(usize) -> usize,

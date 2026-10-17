@@ -638,7 +638,7 @@ where
 fn rank5_transpose_with_trailing_bend_matches_per_pair_by_key() {
     assert_rank5_transpose_matches_per_pair_by_key(&SU2FusionRule, &[su2(0), su2(1), su2(2)]);
     assert_rank5_transpose_matches_per_pair_by_key(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         &[SectorId::new(0), SectorId::new(1)],
     );
 }
@@ -719,7 +719,7 @@ where
 fn domainless_block_braid_matches_per_pair() {
     assert_domainless_block_braid_matches_per_pair(&SU2FusionRule, &[su2(0), su2(1), su2(2)]);
     assert_domainless_block_braid_matches_per_pair(
-        &FibonacciFusionRule,
+        &TableRule::fibonacci(),
         &[SectorId::new(0), SectorId::new(1)],
     );
 }

@@ -40,7 +40,7 @@ use symtn::sector::{
 use symtn::sector::{
     CU1FusionRule, CU1Irrep, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId,
 };
-use symtn::sector::{FibonacciFusionRule, FibonacciSector};
+use symtn::sector::{TableRule, TableSector};
 use symtn::typed::FusionAlgebraError;
 use symtn::typed::{Complex32, Complex64, Runtime};
 use symtn::typed::{

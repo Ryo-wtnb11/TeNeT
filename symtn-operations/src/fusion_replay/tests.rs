@@ -5,8 +5,8 @@ use std::ops::{Add, Mul};
 use num_complex::Complex64;
 use num_traits::Zero;
 use symtn_core::{
-    FibonacciFusionRule, FibonacciSector, FusionProductSpace, FusionTreeHomSpace,
-    MultiplicityFreeFusionSymbols, SectorCodec, SectorLeg, Z2FusionRule, Z2Irrep,
+    FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeFusionSymbols, SectorCodec, SectorLeg,
+    TableRule, TableSector, Z2FusionRule, Z2Irrep,
 };
 
 fn direct_group(rows: usize, cols: usize, offset: Option<usize>) -> FusionBlockMatrixGroup {
@@ -149,9 +149,9 @@ fn legacy_coefficient_free_calls_infer_f64() {
 
 #[test]
 fn fibonacci_complex_r_symbol_survives_fusion_block_contraction() {
-    let provider = FibonacciFusionRule;
-    let tau = provider.encode_sector(&FibonacciSector::Tau).unwrap();
-    let vacuum = provider.encode_sector(&FibonacciSector::Vacuum).unwrap();
+    let provider = TableRule::fibonacci();
+    let tau = provider.encode_sector(&TableSector::new(2)).unwrap();
+    let vacuum = provider.encode_sector(&TableSector::new(1)).unwrap();
     let r_tau_tau_vacuum = provider.r_symbol_scalar(tau, tau, vacuum);
     assert!(
         r_tau_tau_vacuum.im.abs() > 0.5,
